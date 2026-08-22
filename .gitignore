@@ -22,3 +22,6 @@ logs
 .env
 .env.*
 !.env.example
+
+# PocketBase runtime data (schema lives in pb_migrations/, which IS committed)
+services/pocketbase/pb_data
