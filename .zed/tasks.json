@@ -1,0 +1,55 @@
+// Zed tasks: `task: spawn` (cmd-shift-P) or bind a key to `task::Spawn`.
+[
+  {
+    "label": "services: up",
+    "command": "docker compose -f docker-compose.dev.yml up -d",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "tags": []
+  },
+  {
+    "label": "services: down",
+    "command": "docker compose -f docker-compose.dev.yml down",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "services: logs",
+    "command": "docker compose -f docker-compose.dev.yml logs -f",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    // Nuxt runs on the host, not in compose. Bring the services up first.
+    "label": "web: dev",
+    "command": "pnpm dev",
+    "cwd": "$ZED_WORKTREE_ROOT/apps/web",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "web: typecheck",
+    "command": "pnpm typecheck",
+    "cwd": "$ZED_WORKTREE_ROOT/apps/web",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    // Point the inspector at http://localhost:3000/mcp/<token> (or /mcp with an
+    // Authorization: Bearer header). See README "Connecting an MCP client".
+    "label": "mcp: inspector",
+    "command": "pnpm dlx @modelcontextprotocol/inspector",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  }
+]

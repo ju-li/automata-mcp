@@ -1,0 +1,64 @@
+// Requires the Zed "Vue" extension (zed: extensions -> Vue), which supplies
+// vue-language-server. TypeScript is handled by vtsls, bundled with Zed.
+{
+  "format_on_save": "on",
+  "formatter": "language_server",
+  "tab_size": 2,
+  "hard_tabs": false,
+  "ensure_final_newline_on_save": true,
+  "remove_trailing_whitespace_on_save": true,
+
+  "file_types": {
+    "Vue.js": ["vue"],
+    "JSONC": [".zed/*.json", "tsconfig.json", "components.json"]
+  },
+
+  "languages": {
+    "Vue.js": {
+      "tab_size": 2,
+      "language_servers": ["vue-language-server", "vtsls", "..."],
+      "formatter": { "language_server": { "name": "vue-language-server" } }
+    },
+    "TypeScript": {
+      "tab_size": 2,
+      "language_servers": ["vtsls", "..."],
+      "formatter": { "language_server": { "name": "vtsls" } }
+    },
+    "JavaScript": {
+      "tab_size": 2,
+      "language_servers": ["vtsls", "..."]
+    },
+    "JSON": { "tab_size": 2 },
+    "JSONC": { "tab_size": 2 },
+    "YAML": { "tab_size": 2 }
+  },
+
+  "lsp": {
+    "vtsls": {
+      "settings": {
+        // pnpm does not hoist, so point vtsls at the workspace copy explicitly.
+        "typescript": {
+          "tsdk": "apps/web/node_modules/typescript/lib",
+          "preferences": { "includePackageJsonAutoImports": "on" },
+          "inlayHints": {
+            "parameterNames": { "enabled": "literals" },
+            "variableTypes": { "enabled": false }
+          }
+        }
+      }
+    },
+    "vue-language-server": {
+      "settings": {
+        "vue": { "hybridMode": false }
+      }
+    }
+  },
+
+  "file_scan_exclusions": [
+    "**/.git",
+    "**/node_modules",
+    "**/.nuxt",
+    "**/.output",
+    "**/services/pocketbase/pb_data"
+  ]
+}
