@@ -37,8 +37,13 @@ RUN cd apps/web && pnpm exec nuxt build
 FROM node:22.23.2-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
-ENV NITRO_PORT=3000
-ENV NITRO_HOST=0.0.0.0
+# NITRO_PORT is deliberately NOT set. Nitro resolves `NITRO_PORT || PORT`, so
+# pinning it here would make the server ignore the port Railway assigns. Unset,
+# it falls back to 3000 for local runs.
+#
+# Binding :: accepts both IPv6 and IPv4. Legacy Railway environments route the
+# private network over IPv6 only, where 0.0.0.0 is unreachable.
+ENV NITRO_HOST=::
 
 # The Nitro output is self-contained; no node_modules needed.
 COPY --from=build /app/apps/web/.output ./.output
