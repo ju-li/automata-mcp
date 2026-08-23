@@ -36,7 +36,7 @@ async function copy(what: 'url' | 'token') {
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="sm:max-w-lg">
+    <DialogContent class="overflow-hidden sm:max-w-lg">
       <DialogHeader>
         <DialogTitle>Your connector token</DialogTitle>
         <DialogDescription>
@@ -53,28 +53,28 @@ async function copy(what: 'url' | 'token') {
         </p>
       </div>
 
-      <div class="space-y-2">
+      <div class="min-w-0 space-y-2">
         <Label>Connector URL — paste this into Claude</Label>
-        <div class="flex items-center gap-2">
-          <code class="min-w-0 flex-1 truncate rounded-md bg-muted px-3 py-2 font-mono text-sm">{{ connectorUrl }}</code>
-          <Button variant="outline" size="icon" aria-label="Copy connector URL" @click="copy('url')">
+        <div class="flex min-w-0 items-center gap-2">
+          <code class="block min-w-0 flex-1 select-all truncate rounded-md bg-muted px-3 py-2 font-mono text-sm">{{ connectorUrl }}</code>
+          <Button variant="outline" size="icon" class="shrink-0" aria-label="Copy connector URL" @click="copy('url')">
             <CheckIcon v-if="copied === 'url'" class="size-4" />
             <CopyIcon v-else class="size-4" />
           </Button>
         </div>
       </div>
 
-      <div class="space-y-2">
+      <div class="min-w-0 space-y-2">
         <Label>Token on its own</Label>
-        <div class="flex items-center gap-2">
-          <code class="min-w-0 flex-1 truncate rounded-md bg-muted px-3 py-2 font-mono text-sm">{{ token }}</code>
-          <Button variant="outline" size="icon" aria-label="Copy token" @click="copy('token')">
+        <div class="flex min-w-0 items-center gap-2">
+          <code class="block min-w-0 flex-1 select-all truncate rounded-md bg-muted px-3 py-2 font-mono text-sm">{{ token }}</code>
+          <Button variant="outline" size="icon" class="shrink-0" aria-label="Copy token" @click="copy('token')">
             <CheckIcon v-if="copied === 'token'" class="size-4" />
             <CopyIcon v-else class="size-4" />
           </Button>
         </div>
-        <p class="text-xs text-muted-foreground">
-          For clients that can send <code class="font-mono">Authorization: Bearer</code>,
+        <p class="text-xs text-balance text-muted-foreground">
+          For clients that can send <code class="font-mono break-all">Authorization: Bearer</code>,
           point them at <code class="font-mono">/mcp</code> and use this instead.
         </p>
       </div>
