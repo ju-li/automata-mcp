@@ -6,14 +6,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 One Nuxt/Nitro server exposing two surfaces over the same [Evolution API](https://doc.evolution-api.com/) (WhatsApp) backend:
 
-1. **Web UI** — users manage their Evolution instances. PocketBase session cookie.
+1. **Web UI** — users pair WhatsApp numbers and mint connector tokens. PocketBase session cookie.
 2. **MCP endpoint** — Claude connects to `/mcp` as a custom connector. App-minted bearer token.
 
-PocketBase is the app's database (users, sessions, per-user Evolution credentials). Evolution API, Postgres and Redis are dependencies you run, not code in this repo.
+PocketBase is the app's database (users, sessions, connected accounts and their Evolution credentials). Evolution API, Postgres and Redis are dependencies you run, not code in this repo.
 
 `README.md` is the operator's manual — first-run setup, networking tables, the Linux firewall rule, Railway deploy, MCP client connection. Read it before doing anything involving Docker or the local stack; this file covers the code.
 
-**Status:** infrastructure is wired and verified (auth, MCP transport, Evolution client, dev stack). There are no pages (`app/app.vue` is still `<NuxtWelcome />`), no instance CRUD, and only two example tools. The webhook route is a stub.
+**Status:** the product loop works end to end — sign up, provision an Evolution instance, pair by QR, per-account dashboard with stats, connector token provisioning. Two example MCP tools. Message browsing and webhook event handling are not built; `/api/webhook/evolution` is a stub.
+
+A user may connect **several** WhatsApp accounts. Each is a row in `instances`, and each MCP token is bound to exactly one of them.
 
 ## Commands
 
@@ -42,10 +44,15 @@ Nuxt only overrides `runtimeConfig` from `NUXT_`-prefixed vars, so a few values 
 
 ```
 apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context = repo root).
+  app/pages/                 login, signup, instances/{index,new,[id]}
+  app/components/            app components + ui/ (shadcn-vue, bare names)
+  app/composables/           useSession, useConnectionState
+  app/middleware/            auth.global.ts — session gate only
   modules/mcp-token-route.ts local Nuxt module — registers /mcp/:token
+  server/api/                auth/, instances/, tokens/
   server/mcp/index.ts        default MCP handler (auth middleware)
   server/mcp/tools/          one file per tool, auto-discovered
-  server/utils/              pocketbase, session, mcp-auth, evolution, redact
+  server/utils/              pocketbase, session, auth-cookie, mcp-auth, instances, tokens, evolution, redact
 services/pocketbase/         pinned PocketBase build + committed schema migrations
 docker-compose.dev.yml       services only, NOT Nuxt
 ```
@@ -58,17 +65,17 @@ The two surfaces have **entirely separate** credential paths, and there is no sh
 
 | | Web UI | MCP |
 |---|---|---|
-| Credential | PocketBase cookie (`pb_auth`) | `Authorization: Bearer` or `/mcp/<token>` |
+| Credential | PocketBase cookie (`pb_auth`, `httpOnly`) | `Authorization: Bearer` or `/mcp/<token>` |
 | Resolved by | `server/middleware/session.ts` → `utils/session.ts` | `server/mcp/index.ts` → `utils/mcp-auth.ts` |
 | Context key | `event.context.user` | `event.context.mcpAuth` |
-| Evolution client | `evolutionClientForUser(user)` | `useEvolutionClient()` |
+| Evolution client | `evolutionClientForInstance(instance)` | `useEvolutionClient()` |
 | On failure | 401 JSON | 401 **+ `WWW-Authenticate`**, JSON-RPC shaped |
 
 Three things enforce it:
 
 - `server/middleware/session.ts` returns early on any `/mcp*` path, so cookies are never parsed there. Without that early return, a browser signed into the app could authenticate an MCP tool call with a cookie.
 - `useEvolutionClient()` reads `event.context.mcpAuth` and has no branch that reaches a session user; it throws 401 if the key is absent.
-- MCP tokens are minted by this app (`wamcp_` + 32 random bytes) and stored **only** as a SHA-256 hash in the superuser-only `mcp_tokens` collection. They are not Evolution's `apikey`, which stays on the user record server-side and is a `hidden` PocketBase field.
+- MCP tokens are minted by this app (`wamcp_` + 32 random bytes) and stored **only** as a SHA-256 hash in the superuser-only `mcp_tokens` collection. A token resolves to one `instances` row, which carries that account's Evolution token.
 
 **Failure-mode semantics matter here:** a PocketBase outage answers **503**, never 401. A 401 tells a client its valid token was revoked and invites it to discard the token. `resolveMcpAuth` only returns `undefined` (→ 401) on a genuine 404; everything else rethrows as 503. Preserve that distinction in any auth code you add.
 
@@ -76,13 +83,25 @@ Three things enforce it:
 
 Built on `@nuxtjs/mcp-toolkit` (**pinned to 0.19.0**). It auto-imports `defineMcpHandler` / `defineMcpTool` and configures the server via the `mcp` key in `nuxt.config.ts`.
 
-**Adding a tool:** drop a file in `apps/web/server/mcp/tools/` — discovery is automatic, no registration. Give every tool a `title` (shown in client UI), a `description` written for the model, and accurate `readOnlyHint` / `destructiveHint`. Copy `list-instances.ts` (read) or `send-text-message.ts` (write). Never accept an Evolution API key as a tool argument.
+**Adding a tool:** drop a file in `apps/web/server/mcp/tools/` — discovery is automatic, no registration. Give every tool a `title` (shown in client UI), a `description` written for the model, and accurate `readOnlyHint` / `destructiveHint`. Copy `get-connection-status.ts` (read) or `send-text-message.ts` (write).
+
+**Tools take no account argument.** The token is bound to one instance, so `useMcpAuth()` and `useEvolutionClient()` already resolve to it. Adding an instance parameter would reintroduce the possibility of addressing the wrong number. Never accept an Evolution API key as a tool argument either.
 
 **`nitro.experimental.asyncContext: true` is required — do not turn it off.** Tool handlers are invoked by the MCP SDK with its `RequestHandlerExtra`, not an H3 event, so `useEvent()` is the only way to reach per-request credentials, and it needs async context.
 
 **`modules/mcp-token-route.ts` is deliberately fragile.** It deep-resolves a file inside `@nuxtjs/mcp-toolkit` that is not in the package's `exports` map, to register `/mcp/:token` against the same handler (Claude and other clients cannot attach an `Authorization` header to a custom connector). A middleware URL rewrite does not work — h3 1.15.x re-assigns `event._path` before every layer. If a toolkit upgrade moves that file the module throws at build with a pointer to the documented fallback. Bumping the toolkit version means re-verifying this module.
 
 **Token redaction:** `server/plugins/redact-mcp.ts` scrubs `event.node.req.originalUrl` (what Nitro's error handler actually reads — scrubbing `event.path` alone is insufficient) and sets `event.context.noLog`. `mcp.logging` is off for the same reason. Route any error reporter or logger you add through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
+
+## Two rules that are easy to break later
+
+**No admin-key fallback in per-instance credentials.** `credentialsForInstance()` returns `undefined` when an instance has no `api_key`, and callers must fail. Falling back to `runtimeConfig.evolutionAdminKey` would hand any MCP token holder access to *every* user's WhatsApp account. The admin key has exactly two callers, both in `server/utils/instances.ts`: create and delete.
+
+**Hidden fields require the admin client.** `instances.api_key` is a `hidden` PocketBase field. It is absent from anything fetched with a session-scoped client, including `getSessionUser()`'s `authRefresh`. Anything that needs it must go through `pocketbaseAdmin()` — `requireOwnedInstance()` already does.
+
+## Ownership checks answer 404
+
+`requireOwnedInstance()` and `revokeToken()` return **404**, not 403, when a record belongs to someone else. A 403 confirms the id exists and turns the route into a probe for other users' data.
 
 ## PocketBase
 
@@ -106,6 +125,14 @@ cd apps/web && pnpx shadcn-vue@latest add <component>
 `components.json` pins the contract (`new-york`, `neutral`, CSS variables, lucide icons, `cn` at `@/lib/utils` — do not move that file).
 
 `app/plugins/ssr-width.ts` calls `provideSSRWidth(1024)` so VueUse viewport composables render deterministically server-side. Change the number only to change the app-wide SSR breakpoint assumption.
+
+**Components must be explicitly closed** in Vue SFC templates — `<Input ... />`, not `<Input ...>`. Only HTML void elements may be left open, and `nuxt typecheck` does **not** catch this; it surfaces as a 500 "Element is missing end tag" the first time the page renders. Load a page after editing a template.
+
+**Routing gate:** `middleware/auth.global.ts` handles authentication only. It deliberately does not check WhatsApp connection state — that would put an Evolution round-trip on every navigation. `/instances` redirects to `/instances/new` when the user has none, and `/instances/[id]` decides between the QR panel and the dashboard.
+
+**Provisioning is click-triggered, not on-mount.** Creating an instance reserves a live socket on the Evolution server, so a page refresh must never create a second account.
+
+**The token list is shown even while an account is disconnected** — otherwise you could not revoke a token for an offline account, which is exactly when you would want to.
 
 ## Things that cost real money or a phone number
 

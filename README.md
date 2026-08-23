@@ -8,17 +8,19 @@ A Nuxt app that serves two surfaces from one Nitro server:
 PocketBase is the backend (users, sessions, per-user Evolution credentials).
 Evolution API, Postgres and Redis are dependencies you run, not code in this repo.
 
-> **Status: scaffold.** Auth, the MCP transport, the shared Evolution client and
-> the local dev stack are wired and verified. There are no pages, no instance
-> CRUD, and only two example tools. The product surface is yours to build.
+> **Status.** Sign-up, WhatsApp pairing, the per-account dashboard and connector
+> token provisioning all work. There are two example MCP tools. Message browsing
+> and webhook event handling are not built; `/api/webhook/evolution` is a stub.
 
 ## Layout
 
 ```
 apps/web/                    Nuxt 4 + TypeScript. Has its own Dockerfile.
+  app/                       pages, layouts, components (shadcn-vue)
   modules/                   local Nuxt modules (registers /mcp/:token)
+  server/api/                auth, instances, tokens
   server/mcp/                MCP handler + tools
-  server/utils/              PocketBase, auth, Evolution client, redaction
+  server/utils/              PocketBase, auth, instances, Evolution client, redaction
 services/pocketbase/         pinned PocketBase image + committed schema
 docker-compose.dev.yml       services only — NOT Nuxt
 .zed/                        tasks + language server config
@@ -146,8 +148,15 @@ and has no code path to the session user.
 
 The MCP token is minted by this app — it is **not** Evolution's `apikey`. Only its
 SHA-256 hash is stored, in the superuser-only `mcp_tokens` collection, alongside
-`last_used_at` and `expires_at`. It resolves to a user record holding the
-Evolution URL + key, which stay server-side.
+`last_used_at` and `expires_at`. It resolves to one row in `instances`, which
+holds that account's Evolution token server-side.
+
+**Evolution's global key never reaches a user record.** It is used only to create
+and delete instances (`server/utils/instances.ts`). Every other call uses the
+per-instance token Evolution issues at create time, which Evolution itself scopes
+to that one instance. There is deliberately no fallback from a missing
+per-instance key to the global one — that would hand any token holder access to
+every user's account.
 
 A PocketBase outage answers **503**, not 401 — a 401 would tell a client its
 valid token had been revoked and invite it to throw the token away.
@@ -157,39 +166,50 @@ Tokens never reach logs or error bodies: `server/plugins/redact-mcp.ts` scrubs
 which is what Nitro's error handler reads). Route any error reporter you add
 through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
 
-### Connecting an MCP client
+### Using it
 
-Mint a token for a user (currently by hand — the UI is yours to build):
+1. Sign up at <http://localhost:3000>.
+2. Name the account and continue — the app provisions an Evolution instance for
+   you and shows a QR code.
+3. Scan it: WhatsApp → Settings → Linked devices → Link a device.
+4. On the account page, create a connector token and copy the URL it shows.
+5. Add that URL to Claude as a custom connector.
 
-```js
-// see server/utils/mcp-auth.ts
-const { token, hash } = mintMcpToken()   // store `hash` in mcp_tokens, show `token` once
-```
+**One WhatsApp account per connector.** A token is bound to the account it was
+created on, so the tools take no account argument and Claude cannot address the
+wrong number. Connect several accounts and give each its own token.
 
-Then either:
+The token is shown exactly once — only its SHA-256 hash is stored. Lost tokens
+are replaced, not recovered. Revoking one takes effect immediately, and revoking
+stays available while an account is disconnected.
 
-- `POST http://localhost:3000/mcp` with `Authorization: Bearer <token>`, or
-- `POST http://localhost:3000/mcp/<token>` — for clients that cannot set headers.
-
-Both routes run the same handler, the same auth middleware and the same tools.
-
-Inspect it with:
+Inspect the endpoint by hand with:
 
 ```bash
 pnpm dlx @modelcontextprotocol/inspector
 ```
 
+Point it at `http://localhost:3000/mcp/<token>`, or at `http://localhost:3000/mcp`
+with an `Authorization: Bearer <token>` header.
+
 ### Adding tools
 
 Drop a file in `apps/web/server/mcp/tools/` — it is discovered automatically.
 Give every tool a `title` and the applicable `readOnlyHint` / `destructiveHint`;
-see `list-instances.ts` (read) and `send-text-message.ts` (write) for the pattern.
+see `get-connection-status.ts` (read) and `send-text-message.ts` (write) for the
+pattern.
 
 Tool handlers get the MCP SDK's `RequestHandlerExtra`, not an H3 event, so
 credentials are reached through `useEvolutionClient()` → `useEvent()`. That is why
 `nitro.experimental.asyncContext` is enabled in `nuxt.config.ts` — do not turn it off.
 
 ## PocketBase schema
+
+`users` holds accounts. `instances` holds one row per connected WhatsApp number,
+including that instance's Evolution token as a `hidden` field. `mcp_tokens` holds
+hashed connector tokens, each bound to one instance and cascade-deleted with it.
+All three collections are superuser-only — the browser never talks to PocketBase,
+so the session cookie is `httpOnly` and every read goes through a Nuxt route.
 
 `services/pocketbase/pb_migrations/` is committed and is the source of truth.
 `pb_migrations/` and `pb_hooks/` are bind-mounted, so schema changes you make in
@@ -234,8 +254,13 @@ Two services, each pointing at its own root directory.
 
 Set the `NUXT_*` variables in each service's dashboard — do not ship a `.env`.
 Point `NUXT_WEBHOOK_URL` at the public HTTPS URL
-(`https://<app>/api/webhook/evolution`) and set `NUXT_POCKETBASE_URL` to the
-PocketBase service's internal address.
+(`https://<app>/api/webhook/evolution`), set `NUXT_PUBLIC_APP_URL` to the same
+origin so the connector URLs shown to users are correct, and set
+`NUXT_POCKETBASE_URL` to the PocketBase service's internal address.
+
+`NUXT_EVOLUTION_ADMIN_KEY` is Evolution's global key. Treat it as the most
+sensitive value in the deployment: it can create, read and delete every user's
+WhatsApp connection.
 
 Evolution API, Postgres and Redis are separate services you provision yourself;
 `docker-compose.dev.yml` is for local development only.
