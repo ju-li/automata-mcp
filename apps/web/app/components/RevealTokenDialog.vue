@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { CheckIcon, CopyIcon, TriangleAlertIcon } from '@lucide/vue'
 
-const props = defineProps<{ token: string | null }>()
+const props = defineProps<{ token: string | null, scope?: TokenScope }>()
 const emit = defineEmits<{ close: [] }>()
 
 const config = useRuntimeConfig()
@@ -52,6 +52,10 @@ async function copy(what: 'url' | 'token') {
           account. Treat it like a password.
         </p>
       </div>
+
+      <p v-if="scope" class="text-sm">
+        <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope) }}
+      </p>
 
       <div class="min-w-0 space-y-2">
         <Label>Connector URL — paste this into Claude</Label>
