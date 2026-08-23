@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
-import type { AppUser } from './pocketbase'
+import type { AppInstance, AppUser } from './pocketbase'
 import type { EvolutionCredentials } from './evolution'
 
 /**
@@ -11,14 +11,17 @@ import type { EvolutionCredentials } from './evolution'
  * "well, there is a PocketBase cookie, use that". See server/utils/session.ts
  * for the other, entirely separate path.
  *
- * Tokens are minted by this app. They are not Evolution's `apikey` — that stays
- * on the user record, server-side.
+ * Tokens are minted by this app. A token is bound to exactly one connected
+ * WhatsApp account, so the instance is implicit at every call site and no tool
+ * takes an instance argument. Evolution's per-instance `apikey` is read from
+ * that instance's record server-side and never leaves this process.
  */
 
 const TOKEN_PREFIX = 'wamcp_'
 
 export interface McpAuth {
   user: AppUser
+  instance: AppInstance
   tokenId: string
   evolution: EvolutionCredentials
 }
@@ -26,6 +29,7 @@ export interface McpAuth {
 interface McpTokenRecord {
   id: string
   user: string
+  instance: string
   token_hash: string
   expires_at: string
   revoked: boolean
@@ -63,8 +67,9 @@ function extractToken(event: H3Event): string | undefined {
 }
 
 /**
- * Resolve a request to a user, or `undefined`. Callers must treat `undefined`
- * as 401 — never as anonymous access.
+ * Resolve a request to a user and the one instance its token is bound to, or
+ * `undefined`. Callers must treat `undefined` as 401 — never as anonymous
+ * access.
  */
 export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefined> {
   const token = extractToken(event)
@@ -84,7 +89,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     // (PocketBase down, network error, 500) is our problem, not the caller's:
     // answering 401 there would tell a client its valid token had been revoked
     // and invite it to throw the token away.
-    if (isNotFound(error)) return undefined
+    if (isPocketBaseNotFound(error)) return undefined
     throw backendUnavailable(error)
   }
 
@@ -101,15 +106,22 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     return undefined
   }
 
+  let instance: AppInstance
   let user: AppUser
   try {
+    // The instance carries the Evolution credentials. `api_key` is a hidden
+    // PocketBase field, so this only works through the admin client.
+    instance = await pb.collection('instances').getOne<AppInstance>(record.instance)
     user = await pb.collection('users').getOne<AppUser>(record.user)
   } catch (error) {
-    if (isNotFound(error)) return undefined
+    if (isPocketBaseNotFound(error)) return undefined
     throw backendUnavailable(error)
   }
 
-  const evolution = evolutionCredentialsFor(user)
+  // A token cannot outlive its instance's owner changing underneath it.
+  if (instance.user !== user.id) return undefined
+
+  const evolution = credentialsForInstance(instance)
   if (!evolution) return undefined
 
   // Best-effort; a write failure must not fail an otherwise valid request.
@@ -117,11 +129,23 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     .update(record.id, { last_used_at: new Date().toISOString() })
     .catch(() => {})
 
-  return { user, tokenId: record.id, evolution }
+  return { user, instance, tokenId: record.id, evolution }
 }
 
-function isNotFound(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && (error as { status?: number }).status === 404
+/**
+ * The authenticated instance, for MCP tool handlers.
+ *
+ * Same async-context mechanism as `useEvolutionClient()`: the MCP SDK calls
+ * handlers without an H3 event, so `useEvent()` recovers it. Fails closed if the
+ * auth middleware was somehow bypassed.
+ */
+export function useMcpAuth(): McpAuth {
+  const event = useEvent()
+  const auth = event.context.mcpAuth as McpAuth | undefined
+  if (!auth) {
+    throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
+  }
+  return auth
 }
 
 function backendUnavailable(cause: unknown) {
