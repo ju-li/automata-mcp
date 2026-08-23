@@ -158,3 +158,5 @@ Every image tag in `docker-compose.dev.yml` is pinned. Do not relax one to `late
 Neither image hardcodes its port. `apps/web/Dockerfile` deliberately does **not** set `NITRO_PORT`, because Nitro resolves `NITRO_PORT || PORT` and pinning it makes the server ignore the port a platform assigns; unset, it defaults to 3000. PocketBase runs through `sh -c` so `${PORT:-8090}` expands, with `exec` so it keeps PID 1 and still receives SIGTERM.
 
 Both bind `::` rather than `0.0.0.0`, which accepts IPv4 and IPv6. Legacy Railway environments route the private network over IPv6 only.
+
+**Do not add a `VOLUME` instruction.** Railway fails the build on it outright (`docker VOLUME at Line N is not supported, use Railway Volumes`). Persistence comes from the compose bind mount locally and an attached volume in the service settings on Railway.

@@ -26,9 +26,15 @@ RUN apk add --no-cache ca-certificates unzip wget \
 COPY pb_migrations/ /pb_migrations/
 COPY pb_hooks/ /pb_hooks/
 
-# Runtime state only. Mount a volume here or you lose every user and token on
-# each deploy.
-VOLUME ["/pb_data"]
+# /pb_data holds all runtime state: the SQLite database, uploaded files, logs.
+#
+# Deliberately NOT declared with `VOLUME`. Railway rejects the instruction
+# outright ("docker VOLUME at Line N is not supported, use Railway Volumes") and
+# it buys nothing here — docker-compose.dev.yml bind-mounts this path, and on
+# Railway you attach a volume with this mount path in the service settings.
+#
+# Attach one. Without it the data lives in the container layer and every deploy
+# wipes all users, connected accounts and tokens.
 
 EXPOSE 8090
 

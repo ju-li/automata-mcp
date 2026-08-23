@@ -290,6 +290,11 @@ directory.
 > **The volumes are not optional.** Without `/evolution/instances`, every deploy
 > unpairs every WhatsApp account and forces a fresh QR scan on each one. Without
 > `/pb_data`, you lose all users, connected accounts and tokens.
+>
+> Attach them in each service's settings. Railway rejects a `VOLUME` instruction
+> in a Dockerfile — *"docker VOLUME at Line N is not supported, use Railway
+> Volumes"* — so neither image declares one, and nothing warns you at deploy
+> time if you forget.
 
 Both images read `$PORT` and fall back to their defaults, so Railway's assigned
 port works either way; set the target port above if you expose a domain.
