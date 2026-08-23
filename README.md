@@ -179,6 +179,29 @@ through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
 created on, so the tools take no account argument and Claude cannot address the
 wrong number. Connect several accounts and give each its own token.
 
+### Scoping a token
+
+A token can be narrowed on two independent axes, both edited from the account page:
+
+- **Actions** — all tools, or a chosen few. Enforced by refusing to register the
+  others for that request, so a tool outside scope is not merely hidden from the
+  tool list: calling it fails.
+- **Chats** — all conversations, or an allowlist. `list-chats` returns only
+  allowed conversations; `read-messages` and `send-text-message` refuse anything
+  else, naming the chat so the assistant can explain why.
+
+The chat picker lists conversations Evolution has recorded, which means only
+those that have exchanged a message since pairing. A number that has not messaged
+you yet can be added directly — it is checked against WhatsApp before it is
+accepted.
+
+Scope is read fresh on every request, so **editing a token's scope takes effect
+immediately and does not reissue it**. The connector already configured in Claude
+keeps working; only what it can reach changes.
+
+A scoped send refuses when it cannot verify the recipient — if the account is
+disconnected, the message is not sent rather than sent unchecked.
+
 The token is shown exactly once — only its SHA-256 hash is stored. Lost tokens
 are replaced, not recovered. Revoking one takes effect immediately, and revoking
 stays available while an account is disconnected.
@@ -198,6 +221,11 @@ Drop a file in `apps/web/server/mcp/tools/` — it is discovered automatically.
 Give every tool a `title` and the applicable `readOnlyHint` / `destructiveHint`;
 see `get-connection-status.ts` (read) and `send-text-message.ts` (write) for the
 pattern.
+
+Also give it an explicit `name` and an `enabled` guard so it participates in
+token scoping, and enforce chat scope in the handler if it touches a
+conversation. Existing scoped tokens will not be granted the new tool — they list
+the tools they were given, so new tools are denied by default.
 
 Tool handlers get the MCP SDK's `RequestHandlerExtra`, not an H3 event, so
 credentials are reached through `useEvolutionClient()` → `useEvent()`. That is why
