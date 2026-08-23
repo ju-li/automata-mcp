@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
 import type { AppInstance, AppUser } from './pocketbase'
+import type { McpScope } from './mcp-scope'
 import type { EvolutionCredentials } from './evolution'
 
 /**
@@ -24,6 +25,8 @@ export interface McpAuth {
   instance: AppInstance
   tokenId: string
   evolution: EvolutionCredentials
+  /** Which chats and tools this token may reach. See server/utils/mcp-scope.ts. */
+  scope: McpScope
 }
 
 interface McpTokenRecord {
@@ -33,6 +36,10 @@ interface McpTokenRecord {
   token_hash: string
   expires_at: string
   revoked: boolean
+  all_chats?: boolean
+  chat_jids?: unknown
+  all_tools?: boolean
+  tool_names?: unknown
 }
 
 /** Mint a new token. The plaintext is returned once and never stored. */
@@ -129,7 +136,8 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     .update(record.id, { last_used_at: new Date().toISOString() })
     .catch(() => {})
 
-  return { user, instance, tokenId: record.id, evolution }
+  // Scope comes off the row already fetched — no extra query.
+  return { user, instance, tokenId: record.id, evolution, scope: scopeFromRecord(record) }
 }
 
 /**

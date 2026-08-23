@@ -18,15 +18,25 @@ RUN apk add --no-cache ca-certificates unzip wget \
     && rm /tmp/pb.zip \
     && apk del unzip wget
 
-# Bind-mounted from the repo by docker-compose.dev.yml. pb_data is gitignored;
-# pb_migrations and pb_hooks are committed, so schema edits made in the admin UI
-# get written back into the working tree as migration files.
+# The schema has to be IN the image. In development these two directories are
+# bind-mounted by docker-compose.dev.yml, which shadows what is baked in here —
+# that is deliberate, so schema edits made in the admin UI land back in the repo.
+# In production nothing is mounted, and without these the container boots with an
+# empty migrations directory and never creates a single collection.
+COPY pb_migrations/ /pb_migrations/
+COPY pb_hooks/ /pb_hooks/
+
+# Runtime state only. Mount a volume here or you lose every user and token on
+# each deploy.
 VOLUME ["/pb_data"]
 
 EXPOSE 8090
 
-CMD ["/pb/pocketbase", "serve", \
-     "--http=0.0.0.0:8090", \
-     "--dir=/pb_data", \
-     "--migrationsDir=/pb_migrations", \
-     "--hooksDir=/pb_hooks"]
+# `sh -c` so ${PORT} expands — platforms like Railway assign a port and expect
+# the process to listen on it. `exec` hands PID 1 to PocketBase so it still
+# receives SIGTERM directly and shuts down cleanly.
+#
+# Binding [::] rather than 0.0.0.0 accepts both IPv6 and IPv4 (dual-stack). New
+# Railway environments resolve internal DNS to both families, but legacy ones are
+# IPv6-only, where 0.0.0.0 would be unreachable over the private network.
+CMD ["sh", "-c", "exec /pb/pocketbase serve --http=[::]:${PORT:-8090} --dir=/pb_data --migrationsDir=/pb_migrations --hooksDir=/pb_hooks"]

@@ -1,4 +1,6 @@
 import type { AppMcpToken } from './pocketbase'
+import type { McpScope } from './mcp-scope'
+import type { ScopeInput } from './scope-schema'
 
 /**
  * MCP token CRUD, always scoped to one instance and one owner.
@@ -18,6 +20,8 @@ export interface PublicToken {
   expires_at?: string
   revoked: boolean
   expired: boolean
+  /** Wire shape, identical to what create and patch accept. */
+  scope: ScopeInput
 }
 
 export function toPublicToken(token: AppMcpToken): PublicToken {
@@ -30,6 +34,7 @@ export function toPublicToken(token: AppMcpToken): PublicToken {
     expires_at: token.expires_at || undefined,
     revoked: Boolean(token.revoked),
     expired,
+    scope: scopeToInput(scopeFromRecord(token)),
   }
 }
 
@@ -52,6 +57,22 @@ export function expiryFromPreset(preset: ExpiryPreset): string {
 }
 
 /**
+ * The scope columns, as PocketBase wants them.
+ *
+ * Always writes all four. PocketBase stores an unset boolean as `false`, so
+ * omitting `all_tools` here would mint a token that can call nothing — a silent,
+ * confusing failure rather than a loud one.
+ */
+function scopeFields(scope: McpScope) {
+  return {
+    all_chats: scope.allChats,
+    chat_jids: scope.allChats ? [] : scope.chatJids,
+    all_tools: scope.allTools,
+    tool_names: scope.allTools ? [] : scope.toolNames,
+  }
+}
+
+/**
  * Mint a token. The plaintext is returned to the caller once, here, and is not
  * recoverable afterwards — only its SHA-256 hash is stored.
  */
@@ -60,6 +81,7 @@ export async function createToken(
   instanceId: string,
   label: string,
   preset: ExpiryPreset,
+  scope: McpScope,
 ): Promise<{ token: string, record: PublicToken }> {
   const { token, hash } = mintMcpToken()
   const pb = await pocketbaseAdmin()
@@ -71,9 +93,27 @@ export async function createToken(
     label: label.trim() || 'Untitled token',
     expires_at: expiryFromPreset(preset),
     revoked: false,
+    ...scopeFields(scope),
   })
 
   return { token, record: toPublicToken(record) }
+}
+
+/**
+ * Change a token's scope without reissuing it.
+ *
+ * The connector already configured in Claude keeps working; only what it may
+ * reach changes, from the next request onward. Scope is read fresh on every MCP
+ * request, so there is nothing to invalidate.
+ */
+export async function updateTokenScope(userId: string, tokenId: string, scope: McpScope): Promise<PublicToken | undefined> {
+  const pb = await pocketbaseAdmin()
+
+  const existing = await findOwnedToken(pb, userId, tokenId)
+  if (!existing) return undefined
+
+  const record = await pb.collection('mcp_tokens').update<AppMcpToken>(existing.id, scopeFields(scope))
+  return toPublicToken(record)
 }
 
 /**
@@ -86,16 +126,20 @@ export async function createToken(
 export async function revokeToken(userId: string, tokenId: string): Promise<boolean> {
   const pb = await pocketbaseAdmin()
 
-  let record: AppMcpToken
-  try {
-    record = await pb.collection('mcp_tokens').getFirstListItem<AppMcpToken>(
-      pb.filter('id = {:id} && user = {:uid}', { id: tokenId, uid: userId }),
-    )
-  } catch (error) {
-    if (isPocketBaseNotFound(error)) return false
-    throw error
-  }
+  const record = await findOwnedToken(pb, userId, tokenId)
+  if (!record) return false
 
   await pb.collection('mcp_tokens').update(record.id, { revoked: true })
   return true
+}
+
+async function findOwnedToken(pb: Awaited<ReturnType<typeof pocketbaseAdmin>>, userId: string, tokenId: string) {
+  try {
+    return await pb.collection('mcp_tokens').getFirstListItem<AppMcpToken>(
+      pb.filter('id = {:id} && user = {:uid}', { id: tokenId, uid: userId }),
+    )
+  } catch (error) {
+    if (isPocketBaseNotFound(error)) return undefined
+    throw error
+  }
 }

@@ -99,6 +99,12 @@ Built on `@nuxtjs/mcp-toolkit` (**pinned to 0.19.0**). It auto-imports `defineMc
 
 **Hidden fields require the admin client.** `instances.api_key` is a `hidden` PocketBase field. It is absent from anything fetched with a session-scoped client, including `getSessionUser()`'s `authRefresh`. Anything that needs it must go through `pocketbaseAdmin()` — `requireOwnedInstance()` already does.
 
+**Never normalise JIDs locally.** Evolution's `createJid` carries country-specific rules (Brazil's ninth digit, Mexico and Argentina prefixes). A JID stored by our rules but matched by theirs is a token scope that silently reaches the wrong chat, or refuses the right one. `resolveNumberToJid` in `server/utils/mcp-scope.ts` asks Evolution; both storing a scope and checking one go through it.
+
+**`enabled` guards cannot see tool arguments.** They receive only the event, so they can gate a whole tool but not "this tool, for this chat". Anything argument-dependent — every chat check — belongs in the handler. See the table in `mcp-scope.ts`.
+
+**PocketBase materialises an unset boolean as `false`, not absent.** A write path that forgets `all_tools` mints a token that can call nothing. `scopeFields()` in `tokens.ts` always writes all four scope columns for this reason.
+
 ## Ownership checks answer 404
 
 `requireOwnedInstance()` and `revokeToken()` return **404**, not 403, when a record belongs to someone else. A 403 confirms the id exists and turns the route into a probe for other users' data.
@@ -109,6 +115,8 @@ Two clients in `server/utils/pocketbase.ts`, and the distinction is a security b
 
 - `pocketbaseAdmin()` — memoized superuser client, re-auths on expiry, concurrent callers share one in-flight request. Reads hidden fields and `mcp_tokens`. **Never build a filter for it from user input** (use `pb.filter()` with bindings, as `mcp-auth.ts` does).
 - `pocketbaseForRequest()` — fresh unauthenticated client per request, loaded with the caller's own cookie. Its auth store must never be shared across requests, and must never overwrite the admin store's.
+
+`pb_migrations/` and `pb_hooks/` are **COPYed into the PocketBase image**, and also bind-mounted in development. The mount shadows the baked copy, which is what lets schema edits made in the admin UI land back in the repo — but the baked copy is the only one that exists in production. A change that removes the COPY ships a deployment with no collections at all.
 
 `services/pocketbase/pb_migrations/` is committed and is the schema source of truth. The directory is bind-mounted, so schema edits made in the admin UI are written straight back into the working tree as new migration files — **commit them**. `pb_data/` is gitignored runtime state; the container runs as root, so on Linux remove it through a container (see README).
 
@@ -134,6 +142,8 @@ cd apps/web && pnpx shadcn-vue@latest add <component>
 
 **The token list is shown even while an account is disconnected** — otherwise you could not revoke a token for an offline account, which is exactly when you would want to.
 
+**Restart the dev server after adding shadcn components.** The component manifest is built at startup; a component added while it runs renders as a literal unknown element (`<radiogroupitem>`) and SSR still returns 200. A page that loads is not proof that it works.
+
 ## Things that cost real money or a phone number
 
 - **`docker compose down -v` forces a full WhatsApp QR re-scan.** `-v` deletes the `evolution_instances` volume holding every paired session. Use `down` without `-v` for routine restarts.
@@ -142,3 +152,9 @@ cd apps/web && pnpx shadcn-vue@latest add <component>
 - **On a Linux host with ufw, the inbound webhook silently times out** until you allow container→host traffic. The compose subnet is pinned to `172.31.250.0/24` so one rule covers it; the rule and the round-trip test are in README "Linux firewall". Reachable by ping but not TCP is the signature.
 
 Every image tag in `docker-compose.dev.yml` is pinned. Do not relax one to `latest`.
+
+## Container ports
+
+Neither image hardcodes its port. `apps/web/Dockerfile` deliberately does **not** set `NITRO_PORT`, because Nitro resolves `NITRO_PORT || PORT` and pinning it makes the server ignore the port a platform assigns; unset, it defaults to 3000. PocketBase runs through `sh -c` so `${PORT:-8090}` expands, with `exec` so it keeps PID 1 and still receives SIGTERM.
+
+Both bind `::` rather than `0.0.0.0`, which accepts IPv4 and IPv6. Legacy Railway environments route the private network over IPv6 only.

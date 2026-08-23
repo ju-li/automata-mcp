@@ -12,6 +12,7 @@ interface TokenRow {
   expires_at?: string
   revoked: boolean
   expired: boolean
+  scope: TokenScope
 }
 
 const { data, refresh, status } = await useFetch<{ tokens: TokenRow[] }>(
@@ -21,24 +22,56 @@ const { data, refresh, status } = await useFetch<{ tokens: TokenRow[] }>(
 const createOpen = ref(false)
 const newLabel = ref('')
 const newExpiry = ref<'30d' | '90d' | '1y' | 'never'>('90d')
+const newScope = ref<TokenScope>(openScope())
 const creating = ref(false)
 const revealed = ref<string | null>(null)
+const revealedScope = ref<TokenScope>(openScope())
 const revoking = ref<string | null>(null)
+
+const editing = ref<TokenRow | null>(null)
+const editScope = ref<TokenScope>(openScope())
+const savingScope = ref(false)
+
+function startEdit(token: TokenRow) {
+  editing.value = token
+  // Copied, not referenced — cancelling must not leave the table showing edits
+  // that were never saved.
+  editScope.value = { ...token.scope, tool_names: [...token.scope.tool_names], chat_jids: [...token.scope.chat_jids] }
+}
+
+async function saveScope() {
+  if (!editing.value) return
+  savingScope.value = true
+  try {
+    await $fetch(`/api/tokens/${editing.value.id}`, { method: 'PATCH', body: editScope.value })
+    toast.success('Scope updated. The connector keeps working with its existing token.')
+    editing.value = null
+    await refresh()
+  }
+  catch (err: any) {
+    toast.error(err?.data?.message || 'Could not update the scope')
+  }
+  finally {
+    savingScope.value = false
+  }
+}
 
 async function create() {
   creating.value = true
   try {
     const result = await $fetch<{ token: string }>(`/api/instances/${props.instanceId}/tokens`, {
       method: 'POST',
-      body: { label: newLabel.value, expiry: newExpiry.value },
+      body: { label: newLabel.value, expiry: newExpiry.value, ...newScope.value },
     })
     revealed.value = result.token
+    revealedScope.value = newScope.value
     createOpen.value = false
     newLabel.value = ''
+    newScope.value = openScope()
     await refresh()
   }
-  catch {
-    toast.error('Could not create the token')
+  catch (err: any) {
+    toast.error(err?.data?.message || 'Could not create the token')
   }
   finally {
     creating.value = false
@@ -112,6 +145,7 @@ function statusOf(token: TokenRow) {
               <TableHead>Created</TableHead>
               <TableHead>Last used</TableHead>
               <TableHead>Expires</TableHead>
+              <TableHead>Scope</TableHead>
               <TableHead>Status</TableHead>
               <TableHead class="w-0" />
             </TableRow>
@@ -131,11 +165,22 @@ function statusOf(token: TokenRow) {
                 {{ token.expires_at ? formatDate(token.expires_at) : 'Never' }}
               </TableCell>
               <TableCell>
+                <span class="text-sm text-muted-foreground">{{ describeScope(token.scope) }}</span>
+              </TableCell>
+              <TableCell>
                 <Badge :variant="statusOf(token).variant">
                   {{ statusOf(token).label }}
                 </Badge>
               </TableCell>
-              <TableCell>
+              <TableCell class="whitespace-nowrap">
+                <Button
+                  v-if="!token.revoked"
+                  variant="ghost"
+                  size="sm"
+                  @click="startEdit(token)"
+                >
+                  Edit
+                </Button>
                 <AlertDialog v-if="!token.revoked">
                   <AlertDialogTrigger as-child>
                     <Button variant="ghost" size="sm" :disabled="revoking === token.id">
@@ -166,7 +211,7 @@ function statusOf(token: TokenRow) {
     </Card>
 
     <Dialog v-model:open="createOpen">
-      <DialogContent class="sm:max-w-md">
+      <DialogContent class="max-h-[85vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>New connector token</DialogTitle>
           <DialogDescription>
@@ -202,6 +247,10 @@ function statusOf(token: TokenRow) {
               </SelectContent>
             </Select>
           </div>
+
+          <Separator />
+
+          <TokenScopeFields v-model="newScope" :instance-id="instanceId" />
         </div>
 
         <DialogFooter>
@@ -215,6 +264,29 @@ function statusOf(token: TokenRow) {
       </DialogContent>
     </Dialog>
 
-    <RevealTokenDialog :token="revealed" @close="revealed = null" />
+    <Dialog :open="Boolean(editing)" @update:open="value => { if (!value) editing = null }">
+      <DialogContent class="max-h-[85vh] overflow-y-auto sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Edit “{{ editing?.label }}”</DialogTitle>
+          <DialogDescription>
+            Changes apply from the next request. The connector already set up in
+            Claude keeps working — the token itself does not change.
+          </DialogDescription>
+        </DialogHeader>
+
+        <TokenScopeFields v-model="editScope" :instance-id="instanceId" />
+
+        <DialogFooter>
+          <Button variant="ghost" @click="editing = null">
+            Cancel
+          </Button>
+          <Button :disabled="savingScope" @click="saveScope">
+            {{ savingScope ? 'Saving…' : 'Save scope' }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+
+    <RevealTokenDialog :token="revealed" :scope="revealedScope" @close="revealed = null" />
   </section>
 </template>

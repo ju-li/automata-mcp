@@ -135,4 +135,10 @@ export interface AppMcpToken {
   expires_at?: string
   revoked?: boolean
   created?: string
+  // Scope. See server/utils/mcp-scope.ts — PocketBase materialises an unset
+  // boolean as `false`, so these must always be written explicitly.
+  all_chats?: boolean
+  chat_jids?: unknown
+  all_tools?: boolean
+  tool_names?: unknown
 }

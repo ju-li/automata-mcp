@@ -179,6 +179,29 @@ through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
 created on, so the tools take no account argument and Claude cannot address the
 wrong number. Connect several accounts and give each its own token.
 
+### Scoping a token
+
+A token can be narrowed on two independent axes, both edited from the account page:
+
+- **Actions** — all tools, or a chosen few. Enforced by refusing to register the
+  others for that request, so a tool outside scope is not merely hidden from the
+  tool list: calling it fails.
+- **Chats** — all conversations, or an allowlist. `list-chats` returns only
+  allowed conversations; `read-messages` and `send-text-message` refuse anything
+  else, naming the chat so the assistant can explain why.
+
+The chat picker lists conversations Evolution has recorded, which means only
+those that have exchanged a message since pairing. A number that has not messaged
+you yet can be added directly — it is checked against WhatsApp before it is
+accepted.
+
+Scope is read fresh on every request, so **editing a token's scope takes effect
+immediately and does not reissue it**. The connector already configured in Claude
+keeps working; only what it can reach changes.
+
+A scoped send refuses when it cannot verify the recipient — if the account is
+disconnected, the message is not sent rather than sent unchecked.
+
 The token is shown exactly once — only its SHA-256 hash is stored. Lost tokens
 are replaced, not recovered. Revoking one takes effect immediately, and revoking
 stays available while an account is disconnected.
@@ -198,6 +221,11 @@ Drop a file in `apps/web/server/mcp/tools/` — it is discovered automatically.
 Give every tool a `title` and the applicable `readOnlyHint` / `destructiveHint`;
 see `get-connection-status.ts` (read) and `send-text-message.ts` (write) for the
 pattern.
+
+Also give it an explicit `name` and an `enabled` guard so it participates in
+token scoping, and enforce chat scope in the handler if it touches a
+conversation. Existing scoped tokens will not be granted the new tool — they list
+the tools they were given, so new tools are denied by default.
 
 Tool handlers get the MCP SDK's `RequestHandlerExtra`, not an H3 event, so
 credentials are reached through `useEvolutionClient()` → `useEvent()`. That is why
@@ -245,25 +273,105 @@ docker compose -f docker-compose.dev.yml down     # no -v
 
 ## Deploying to Railway
 
-Two services, each pointing at its own root directory.
+Five services. Two are built from this repo, three you provision.
 
-| Service | Root directory | Dockerfile | Notes |
+| Service | Source | Target port | Volume |
 |---|---|---|---|
-| web | repo root | `apps/web/Dockerfile` | needs the lockfile, so the context is the root |
-| pocketbase | `services/pocketbase` | `Dockerfile` | attach a persistent volume at `/pb_data` |
+| **Postgres** | Railway template | — | managed |
+| **Redis** | Railway template | — | managed |
+| **evolution** | image `evoapicloud/evolution-api:v2.3.7` | 8080 | `/evolution/instances` |
+| **pocketbase** | this repo, root directory `services/pocketbase` | 8090 | `/pb_data` |
+| **web** | this repo, root directory `/`, Dockerfile path `apps/web/Dockerfile` | 3000 | — |
 
-Set the `NUXT_*` variables in each service's dashboard — do not ship a `.env`.
-Point `NUXT_WEBHOOK_URL` at the public HTTPS URL
-(`https://<app>/api/webhook/evolution`), set `NUXT_PUBLIC_APP_URL` to the same
-origin so the connector URLs shown to users are correct, and set
-`NUXT_POCKETBASE_URL` to the PocketBase service's internal address.
+The web service builds from the **repo root**, not `apps/web` — the lockfile and
+workspace manifest live there. Set its Dockerfile path rather than its root
+directory.
 
-`NUXT_EVOLUTION_ADMIN_KEY` is Evolution's global key. Treat it as the most
-sensitive value in the deployment: it can create, read and delete every user's
-WhatsApp connection.
+> **The volumes are not optional.** Without `/evolution/instances`, every deploy
+> unpairs every WhatsApp account and forces a fresh QR scan on each one. Without
+> `/pb_data`, you lose all users, connected accounts and tokens.
 
-Evolution API, Postgres and Redis are separate services you provision yourself;
-`docker-compose.dev.yml` is for local development only.
+Both images read `$PORT` and fall back to their defaults, so Railway's assigned
+port works either way; set the target port above if you expose a domain.
+
+### Environment
+
+Use Railway's variable references (`${{Service.VAR}}`) so a rotated secret
+propagates instead of drifting out of sync.
+
+**evolution**
+
+```
+SERVER_PORT=8080
+SERVER_URL=https://<evolution-domain>
+AUTHENTICATION_API_KEY=<openssl rand -hex 16>
+DATABASE_PROVIDER=postgresql
+DATABASE_CONNECTION_URI=${{Postgres.DATABASE_URL}}?schema=public
+DATABASE_CONNECTION_CLIENT_NAME=evolution_exchange
+DATABASE_SAVE_DATA_INSTANCE=true
+DATABASE_SAVE_DATA_NEW_MESSAGE=true
+DATABASE_SAVE_MESSAGE_UPDATE=true
+DATABASE_SAVE_DATA_CONTACTS=true
+DATABASE_SAVE_DATA_CHATS=true
+CACHE_REDIS_ENABLED=true
+CACHE_REDIS_URI=${{Redis.REDIS_URL}}/6
+CACHE_REDIS_PREFIX_KEY=evolution
+CACHE_LOCAL_ENABLED=false
+WEBHOOK_GLOBAL_ENABLED=true
+WEBHOOK_GLOBAL_URL=https://<web-domain>/api/webhook/evolution
+WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS=false
+TELEMETRY_ENABLED=false
+```
+
+The `DATABASE_SAVE_DATA_*` flags are what populate the dashboard counts and make
+`list-chats` and `read-messages` return anything. Turn them off and those tools
+go quiet.
+
+**web** — internal addresses for the backends, public URLs for anything a user sees:
+
+```
+NUXT_POCKETBASE_URL=http://pocketbase.railway.internal:8090
+NUXT_POCKETBASE_ADMIN_EMAIL=<you>
+NUXT_POCKETBASE_ADMIN_PASSWORD=<generate>
+NUXT_EVOLUTION_URL=http://evolution.railway.internal:8080
+NUXT_EVOLUTION_ADMIN_KEY=${{evolution.AUTHENTICATION_API_KEY}}
+NUXT_WEBHOOK_URL=https://<web-domain>/api/webhook/evolution
+NUXT_WEBHOOK_SECRET=<openssl rand -hex 32>
+NUXT_PUBLIC_APP_URL=https://<web-domain>
+```
+
+`NUXT_PUBLIC_APP_URL` is what connector URLs are built from. Get it wrong and
+every token you hand out points at the wrong host.
+
+`NUXT_EVOLUTION_ADMIN_KEY` is the most sensitive value in the deployment: it can
+create, read and delete every user's WhatsApp connection.
+
+### First run
+
+Create the PocketBase superuser using the same credentials you gave the web
+service. There is no `docker compose exec` here, so use the pocketbase service's
+shell in the Railway dashboard:
+
+```bash
+/pb/pocketbase superuser upsert "$EMAIL" "$PASSWORD" --dir=/pb_data
+```
+
+The schema itself needs no action — `pb_migrations/` is baked into the image and
+applied on boot.
+
+Then open the web service's domain and sign up.
+
+### Notes
+
+- **Do not ship a `.env`.** It is gitignored, and Railway variables replace it.
+- **`host.docker.internal` does not exist here.** The webhook uses the public
+  HTTPS URL instead, which is the only thing that differs between dev and prod —
+  and it differs by configuration, not code.
+- Both containers bind `::`, which accepts IPv4 and IPv6. Railway environments
+  created before 16 October 2025 route the private network over IPv6 only, where
+  binding `0.0.0.0` is unreachable internally.
+- `docker-compose.dev.yml` is for local development only. Nothing in it is used
+  by Railway.
 
 ## Editor
 

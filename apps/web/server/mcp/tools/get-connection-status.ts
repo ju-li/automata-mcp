@@ -10,6 +10,10 @@
  *     an account identifier or an API key as a tool argument.
  */
 export default defineMcpTool({
+  // Declared explicitly rather than derived from the filename, so renaming the
+  // file cannot silently detach it from the token scopes that reference it.
+  name: 'get-connection-status',
+  enabled: event => isToolAllowed(event, 'get-connection-status'),
   title: 'Check WhatsApp connection',
   description:
     'Report whether the connected WhatsApp account is currently online, along with '

@@ -7,7 +7,7 @@ const body = z.object({
 /** Provision a new Evolution instance for the signed-in user. */
 export default defineEventHandler(async (event) => {
   const user = await requireSessionUser(event)
-  const parsed = body.parse(await readBody(event).catch(() => ({})))
+  const parsed = await parseBody(event, body)
 
   const instance = await provisionInstance(user, parsed?.label)
   return { instance: toPublicInstance(instance) }

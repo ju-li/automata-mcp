@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { CheckIcon, CopyIcon, TriangleAlertIcon } from '@lucide/vue'
 
-const props = defineProps<{ token: string | null }>()
+const props = defineProps<{ token: string | null, scope?: TokenScope }>()
 const emit = defineEmits<{ close: [] }>()
 
 const config = useRuntimeConfig()
@@ -53,6 +53,10 @@ async function copy(what: 'url' | 'token') {
         </p>
       </div>
 
+      <p v-if="scope" class="text-sm">
+        <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope) }}
+      </p>
+
       <div class="min-w-0 space-y-2">
         <Label>Connector URL — paste this into Claude</Label>
         <div class="flex min-w-0 items-center gap-2">
@@ -73,9 +77,8 @@ async function copy(what: 'url' | 'token') {
             <CopyIcon v-else class="size-4" />
           </Button>
         </div>
-        <p class="text-xs text-balance text-muted-foreground">
-          For clients that can send <code class="font-mono break-all">Authorization: Bearer</code>,
-          point them at <code class="font-mono">/mcp</code> and use this instead.
+        <p class="text-xs text-muted-foreground">
+          For clients that can send <code class="font-mono break-all">Authorization: Bearer</code>, point them at <code class="font-mono">/mcp</code> and use this instead.
         </p>
       </div>
 
