@@ -11,6 +11,8 @@ import { z } from 'zod'
  * sends two messages.
  */
 export default defineMcpTool({
+  name: 'send-text-message',
+  enabled: event => isToolAllowed(event, 'send-text-message'),
   title: 'Send WhatsApp message',
   description:
     'Send a plain-text WhatsApp message from the connected account. The account '
@@ -27,7 +29,13 @@ export default defineMcpTool({
     text: z.string().min(1).describe('Message body'),
   },
   handler: async ({ number, text }) => {
-    const { instance } = useMcpAuth()
+    const { instance, scope } = useMcpAuth()
+
+    // Resolves the number through Evolution and compares exact JIDs. Fails
+    // closed — an unverifiable recipient is refused, not sent to. No-op when
+    // the token is not chat-scoped.
+    await assertNumberAllowed(instance, scope, number)
+
     const evolution = useEvolutionClient()
     return await evolution(`/message/sendText/${encodeURIComponent(instance.name)}`, {
       method: 'POST',
