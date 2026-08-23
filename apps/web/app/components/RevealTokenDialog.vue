@@ -73,9 +73,8 @@ async function copy(what: 'url' | 'token') {
             <CopyIcon v-else class="size-4" />
           </Button>
         </div>
-        <p class="text-xs text-balance text-muted-foreground">
-          For clients that can send <code class="font-mono break-all">Authorization: Bearer</code>,
-          point them at <code class="font-mono">/mcp</code> and use this instead.
+        <p class="text-xs text-muted-foreground">
+          For clients that can send <code class="font-mono break-all">Authorization: Bearer</code>, point them at <code class="font-mono">/mcp</code> and use this instead.
         </p>
       </div>
 
