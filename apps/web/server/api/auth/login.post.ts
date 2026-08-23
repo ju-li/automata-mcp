@@ -6,7 +6,7 @@ const body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const { email, password } = body.parse(await readBody(event))
+  const { email, password } = await parseBody(event, body)
 
   // A per-request client: the memoized admin client's auth store must never be
   // overwritten with a visitor's token.

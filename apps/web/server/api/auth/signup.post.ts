@@ -9,7 +9,7 @@ const body = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const { email, password, name } = body.parse(await readBody(event))
+  const { email, password, name } = await parseBody(event, body)
 
   const pb = pocketbaseForRequest()
 
