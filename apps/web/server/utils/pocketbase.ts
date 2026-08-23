@@ -85,10 +85,54 @@ export function pocketbaseAdmin(): Promise<PocketBase> {
   return adminAuth
 }
 
-/** Shape of the fields this app adds to the built-in `users` collection. */
+/**
+ * PocketBase answers 404 when a record genuinely does not exist. Every other
+ * failure — unreachable, 500, network — means the backend is broken, not that
+ * the caller asked for something absent. Callers must keep those apart: see the
+ * 503 handling in mcp-auth.ts for why.
+ */
+export function isPocketBaseNotFound(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { status?: number }).status === 404
+}
+
+/**
+ * Shapes of our PocketBase records. Kept here so both `evolution.ts` and
+ * `instances.ts` can refer to them without importing each other.
+ */
+
 export interface AppUser {
   id: string
   email: string
-  evolution_url?: string
-  evolution_api_key?: string
+  name?: string
+}
+
+/**
+ * One connected WhatsApp account.
+ *
+ * `api_key` is Evolution's per-instance token, not the global admin key, and is
+ * a `hidden` PocketBase field — it is only ever populated on records fetched
+ * through `pocketbaseAdmin()`. A record that came from a session-scoped client
+ * will have it undefined.
+ */
+export interface AppInstance {
+  id: string
+  user: string
+  name: string
+  instance_id?: string
+  api_key?: string
+  base_url?: string
+  label?: string
+  created?: string
+}
+
+export interface AppMcpToken {
+  id: string
+  user: string
+  instance: string
+  token_hash: string
+  label?: string
+  last_used_at?: string
+  expires_at?: string
+  revoked?: boolean
+  created?: string
 }

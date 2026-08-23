@@ -28,10 +28,10 @@ export default defineNuxtConfig({
     version: '0.1.0',
     route: '/mcp',
     instructions: [
-      'This server exposes one user\'s WhatsApp account via the Evolution API.',
-      'Call `list-instances` first to discover which instance names exist and which are connected;',
-      'every other tool takes an `instance` name from that list.',
-      'Only instances in the `open` state can send or receive messages.',
+      'This server is bound to exactly one WhatsApp account — the one the connector token was issued for.',
+      'There is no account to choose and no tool takes an instance argument.',
+      'Call `get-connection-status` to check that the account is connected (state `open`) before sending;',
+      'in any other state, messages cannot be sent and the user needs to re-pair in the web app.',
     ].join(' '),
     // Opt out of evlog wide-events on the MCP route. Request bodies and headers on
     // /mcp carry bearer tokens; see server/utils/redact.ts.
@@ -43,10 +43,12 @@ export default defineNuxtConfig({
     pocketbaseAdminEmail: '',
     pocketbaseAdminPassword: '',
 
-    // Dev fallback only. Real credentials are per-user and live on the PocketBase
-    // user record; these are used when a user has none set.
+    // Where every provisioned instance lives. Required.
     evolutionUrl: '',
-    evolutionApiKey: '',
+    // Evolution's global key. Used ONLY to create and delete instances, by
+    // server/utils/instances.ts. Never stored on a record and never used to
+    // serve a request on behalf of a user — see server/utils/evolution.ts.
+    evolutionAdminKey: '',
 
     webhookUrl: '',
     webhookSecret: '',

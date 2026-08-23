@@ -1,16 +1,17 @@
-import type { AppUser } from './pocketbase'
+import type { AppInstance } from './pocketbase'
 import type { McpAuth } from './mcp-auth'
 
 /**
- * The one Evolution API client. Both surfaces go through `createEvolutionClient`,
- * so the base URL and the `apikey` header are defined in exactly one place.
+ * The one Evolution API client. Everything funnels through
+ * `createEvolutionClient`, so the base URL and the `apikey` header are defined
+ * in exactly one place.
  *
- *   MCP tools      -> useEvolutionClient()        (credentials from the bearer token)
- *   UI API routes  -> evolutionClientForUser()    (credentials from the session user)
+ * Two kinds of credential, and the distinction is a security boundary:
  *
- * The two accessors do not share a resolution path. `useEvolutionClient()` reads
- * `event.context.mcpAuth` and nothing else — there is no branch in it that can
- * reach a browser session.
+ *   admin     the global key from runtimeConfig. Creates and deletes instances.
+ *             Two callers, both in instances.ts. Never stored on a record.
+ *   instance  the per-instance token Evolution returns from /instance/create.
+ *             Everything else. Evolution scopes it to that one instance itself.
  */
 
 export interface EvolutionCredentials {
@@ -29,15 +30,55 @@ export function createEvolutionClient(creds: EvolutionCredentials) {
 }
 
 /**
- * Per-user Evolution credentials, falling back to the dev-only instance-wide
- * values from runtimeConfig. Returns `undefined` when neither is configured.
+ * Global-key client. Only `POST /instance/create` and `DELETE /instance/delete`
+ * require it — Evolution's auth guard accepts an instance's own token for every
+ * other route.
+ *
+ * Do not reach for this anywhere else. A request authenticated with this key
+ * can see and act on every user's instance.
  */
-export function evolutionCredentialsFor(user: Pick<AppUser, 'evolution_url' | 'evolution_api_key'>): EvolutionCredentials | undefined {
+export function evolutionAdminClient(): EvolutionClient {
   const config = useRuntimeConfig()
-  const baseUrl = user.evolution_url || config.evolutionUrl
-  const apiKey = user.evolution_api_key || config.evolutionApiKey
-  if (!baseUrl || !apiKey) return undefined
-  return { baseUrl, apiKey }
+
+  if (!config.evolutionUrl || !config.evolutionAdminKey) {
+    throw createError({
+      statusCode: 500,
+      statusMessage: 'NUXT_EVOLUTION_URL / NUXT_EVOLUTION_ADMIN_KEY are not set',
+    })
+  }
+
+  return createEvolutionClient({
+    baseUrl: config.evolutionUrl,
+    apiKey: config.evolutionAdminKey,
+  })
+}
+
+/**
+ * Credentials for one connected account.
+ *
+ * There is deliberately NO fallback to the admin key. If `api_key` is missing
+ * the caller gets `undefined` and must fail. Falling back would silently give
+ * an MCP token holder global Evolution access across every user's instance.
+ *
+ * The base URL may fall back to config: it is not a secret, and it lets an
+ * existing instance keep working if the deployment URL changes.
+ */
+export function credentialsForInstance(instance: Pick<AppInstance, 'base_url' | 'api_key'>): EvolutionCredentials | undefined {
+  const baseUrl = instance.base_url || useRuntimeConfig().evolutionUrl
+  if (!baseUrl || !instance.api_key) return undefined
+  return { baseUrl, apiKey: instance.api_key }
+}
+
+/** For UI API routes, where the instance came from `pocketbaseAdmin()`. */
+export function evolutionClientForInstance(instance: AppInstance): EvolutionClient {
+  const creds = credentialsForInstance(instance)
+  if (!creds) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: 'This WhatsApp account is not fully provisioned',
+    })
+  }
+  return createEvolutionClient(creds)
 }
 
 /**
@@ -47,6 +88,9 @@ export function evolutionCredentialsFor(user: Pick<AppUser, 'evolution_url' | 'e
  * there is no H3 event in scope. `useEvent()` recovers it from Nitro's async
  * context, which is why `nitro.experimental.asyncContext` is enabled in
  * nuxt.config.ts.
+ *
+ * Reads `event.context.mcpAuth` and nothing else. There is no branch here that
+ * can reach a browser session; that separation is the point.
  */
 export function useEvolutionClient(): EvolutionClient {
   const event = useEvent()
@@ -60,16 +104,4 @@ export function useEvolutionClient(): EvolutionClient {
   }
 
   return createEvolutionClient(auth.evolution)
-}
-
-/** For UI API routes, where the caller is a PocketBase session user. */
-export function evolutionClientForUser(user: AppUser): EvolutionClient {
-  const creds = evolutionCredentialsFor(user)
-  if (!creds) {
-    throw createError({
-      statusCode: 400,
-      statusMessage: 'No Evolution API credentials configured for this account',
-    })
-  }
-  return createEvolutionClient(creds)
 }

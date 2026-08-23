@@ -13,8 +13,8 @@ import { z } from 'zod'
 export default defineMcpTool({
   title: 'Send WhatsApp message',
   description:
-    'Send a plain-text WhatsApp message from one of the user\'s instances. The '
-    + 'instance must be in the `open` state — check with list-instances first. '
+    'Send a plain-text WhatsApp message from the connected account. The account '
+    + 'must be in the `open` state — check with get-connection-status first. '
     + 'Messages cannot be unsent once delivered.',
   annotations: {
     readOnlyHint: false,
@@ -23,13 +23,13 @@ export default defineMcpTool({
     openWorldHint: true,
   },
   inputSchema: {
-    instance: z.string().min(1).describe('Instance name, as returned by list-instances'),
     number: z.string().min(1).describe('Recipient in international format without "+", e.g. 5511999999999'),
     text: z.string().min(1).describe('Message body'),
   },
-  handler: async ({ instance, number, text }) => {
+  handler: async ({ number, text }) => {
+    const { instance } = useMcpAuth()
     const evolution = useEvolutionClient()
-    return await evolution(`/message/sendText/${encodeURIComponent(instance)}`, {
+    return await evolution(`/message/sendText/${encodeURIComponent(instance.name)}`, {
       method: 'POST',
       body: { number, text },
     })
