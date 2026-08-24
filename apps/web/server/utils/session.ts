@@ -31,8 +31,24 @@ export async function getSessionUser(event: H3Event): Promise<AppUser | undefine
     // Note: `evolution_api_key` is a hidden field and is NOT present here. Use
     // the admin client when you need it server-side.
     return record
-  } catch {
-    return undefined
+  } catch (error) {
+    const status = (error as { status?: number })?.status
+
+    // The cookie really is no longer good: expired, revoked, user deleted.
+    if (status === 401 || status === 403 || status === 404) return undefined
+
+    // Anything else — PocketBase unreachable, 500, timeout — is our problem,
+    // not the visitor's. Returning undefined here would answer 401, which the
+    // client reads as "signed out": during an outage every signed-in user gets
+    // silently bounced to /login instead of being told the backend is down.
+    // Same distinction resolveMcpAuth makes for tokens; keep both surfaces
+    // honest about the difference.
+    console.error(`[pocketbase] could not validate a session against ${useRuntimeConfig().pocketbaseUrl}`, error)
+    throw createError({
+      statusCode: 503,
+      statusMessage: 'Auth backend unavailable',
+      cause: error,
+    })
   }
 }
 

@@ -68,9 +68,20 @@ export function pocketbaseAdmin(): Promise<PocketBase> {
       .authWithPassword(email, password)
       .then(() => pb)
       .catch((cause) => {
-        // PocketBase unreachable or the superuser credentials are wrong. Callers
-        // must not translate this into "your credential is bad" — see the 404
-        // handling in server/utils/mcp-auth.ts.
+        // The response stays deliberately vague — an unauthenticated caller
+        // should not learn whether our backend is down or misconfigured. But it
+        // has to be logged, and loudly: this throws a *handled* error, so Nitro
+        // does not log it at all, and the operator would otherwise see a 503
+        // with nothing whatsoever in the server logs to explain it.
+        //
+        // The two causes need different fixes, so name which one it is.
+        const status = (cause as { status?: number })?.status
+        const detail = status === 400
+          ? `PocketBase rejected the superuser credentials. Check NUXT_POCKETBASE_ADMIN_EMAIL / NUXT_POCKETBASE_ADMIN_PASSWORD, and that the account exists: pocketbase superuser upsert <email> <password> --dir=/pb_data`
+          : `Could not reach PocketBase at ${baseUrl()}. Check NUXT_POCKETBASE_URL, including its port — a service that follows $PORT may not be on the port you expect.`
+
+        console.error(`[pocketbase] superuser auth failed. ${detail}`, cause)
+
         throw createError({
           statusCode: 503,
           statusMessage: 'Auth backend unavailable',

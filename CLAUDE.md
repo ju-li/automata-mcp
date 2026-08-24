@@ -77,7 +77,9 @@ Three things enforce it:
 - `useEvolutionClient()` reads `event.context.mcpAuth` and has no branch that reaches a session user; it throws 401 if the key is absent.
 - MCP tokens are minted by this app (`wamcp_` + 32 random bytes) and stored **only** as a SHA-256 hash in the superuser-only `mcp_tokens` collection. A token resolves to one `instances` row, which carries that account's Evolution token.
 
-**Failure-mode semantics matter here:** a PocketBase outage answers **503**, never 401. A 401 tells a client its valid token was revoked and invites it to discard the token. `resolveMcpAuth` only returns `undefined` (→ 401) on a genuine 404; everything else rethrows as 503. Preserve that distinction in any auth code you add.
+**Failure-mode semantics matter here:** a PocketBase outage answers **503**, never 401. A 401 tells a client its credential is bad — an MCP client discards a token it should keep, and a browser user gets silently signed out mid-outage. Both surfaces make the distinction: `resolveMcpAuth` returns `undefined` (→ 401) only on a genuine 404, and `getSessionUser` only on 401/403/404 from `authRefresh`. Everything else rethrows as 503. Preserve that in any auth code you add.
+
+**A handled `createError` is not logged by Nitro.** Only unhandled/fatal errors reach its error handler, so a deliberate 503 produces a response with *nothing whatsoever* in the server logs — which is how an outage turns into guesswork. Both admin-auth and session failures log the underlying cause themselves, and say which of the two fixes applies. Do the same for any handled error an operator would need to diagnose.
 
 ## MCP wiring
 
