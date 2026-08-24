@@ -17,8 +17,15 @@ WORKDIR /app
 FROM base AS deps
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/web/package.json ./apps/web/
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
-    pnpm install --frozen-lockfile --filter web...
+# No BuildKit cache mount here on purpose. Railway rejects one unless its id is
+# prefixed with that service's own id (`id=s/<service-id>-<target>`), which would
+# hardcode a single Railway service into this Dockerfile and break every other
+# build context.
+#
+# Little is lost: the layer above is keyed on the lockfile, so an unchanged
+# lockfile skips this step entirely, and Railway's builders are ephemeral so a
+# store cache would rarely survive between builds anyway.
+RUN pnpm install --frozen-lockfile --filter web...
 
 
 # ── build ────────────────────────────────────────────────────────────────────
