@@ -100,6 +100,12 @@ services:
     build:
       context: ./services/pocketbase
     restart: unless-stopped
+    environment:
+      # The entrypoint upserts this superuser on every boot, so a fresh clone
+      # needs no manual step. Same variables the Nuxt server signs in with —
+      # they have to match, so they are read from the one .env.
+      NUXT_POCKETBASE_ADMIN_EMAIL: ${NUXT_POCKETBASE_ADMIN_EMAIL:?set NUXT_POCKETBASE_ADMIN_EMAIL in .env}
+      NUXT_POCKETBASE_ADMIN_PASSWORD: ${NUXT_POCKETBASE_ADMIN_PASSWORD:?set NUXT_POCKETBASE_ADMIN_PASSWORD in .env}
     ports:
       - '8090:8090'
     volumes:

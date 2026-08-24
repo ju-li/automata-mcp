@@ -37,12 +37,10 @@ pnpm install
 pnpm services:up              # postgres, redis, evolution, pocketbase
 ```
 
-Create the PocketBase superuser using the same credentials you put in `.env`:
-
-```bash
-docker compose -f docker-compose.dev.yml exec pocketbase \
-  /pb/pocketbase superuser upsert "$NUXT_POCKETBASE_ADMIN_EMAIL" "$NUXT_POCKETBASE_ADMIN_PASSWORD" --dir=/pb_data
-```
+The PocketBase superuser is created for you from `NUXT_POCKETBASE_ADMIN_EMAIL`
+and `NUXT_POCKETBASE_ADMIN_PASSWORD` — the container upserts it on every boot, so
+there is no manual step and changing the password is just editing `.env` and
+restarting.
 
 Then start Nuxt **on the host** (it is deliberately not in compose, so you keep HMR):
 
@@ -368,16 +366,23 @@ create, read and delete every user's WhatsApp connection.
 
 ### First run
 
-Create the PocketBase superuser using the same credentials you gave the web
-service. There is no `docker compose exec` here, so use the pocketbase service's
-shell in the Railway dashboard:
+Nothing to do. Set `NUXT_POCKETBASE_ADMIN_EMAIL` and
+`NUXT_POCKETBASE_ADMIN_PASSWORD` on the **pocketbase** service as well as the web
+service — to the same values — and its entrypoint upserts the superuser on every
+boot. The schema needs no action either; `pb_migrations/` is baked into the image
+and applied at startup.
 
-```bash
-/pb/pocketbase superuser upsert "$EMAIL" "$PASSWORD" --dir=/pb_data
-```
+Both variables must match across the two services: the web server signs in with
+them to read hidden fields and the admin-only collections. A Railway variable
+reference (`${{pocketbase.NUXT_POCKETBASE_ADMIN_EMAIL}}`) keeps them in step.
 
-The schema itself needs no action — `pb_migrations/` is baked into the image and
-applied on boot.
+Because the upsert runs every boot, rotating the password is editing the variable
+on both services and redeploying. Look for `[entrypoint] superuser ready:` in the
+pocketbase logs to confirm.
+
+That account can read every user's Evolution API key. Give it a long password —
+PocketBase's CLI will accept a short one without complaint, though the entrypoint
+warns.
 
 Then open the web service's domain and sign up.
 

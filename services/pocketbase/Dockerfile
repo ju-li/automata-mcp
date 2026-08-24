@@ -36,13 +36,11 @@ COPY pb_hooks/ /pb_hooks/
 # Attach one. Without it the data lives in the container layer and every deploy
 # wipes all users, connected accounts and tokens.
 
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 EXPOSE 8090
 
-# `sh -c` so ${PORT} expands — platforms like Railway assign a port and expect
-# the process to listen on it. `exec` hands PID 1 to PocketBase so it still
-# receives SIGTERM directly and shuts down cleanly.
-#
-# Binding [::] rather than 0.0.0.0 accepts both IPv6 and IPv4 (dual-stack). New
-# Railway environments resolve internal DNS to both families, but legacy ones are
-# IPv6-only, where 0.0.0.0 would be unreachable over the private network.
-CMD ["sh", "-c", "exec /pb/pocketbase serve --http=[::]:${PORT:-8090} --dir=/pb_data --migrationsDir=/pb_migrations --hooksDir=/pb_hooks"]
+# The entrypoint upserts the superuser from the environment, then execs into
+# `serve`. See entrypoint.sh for why ${PORT} and [::] rather than the defaults.
+CMD ["/entrypoint.sh"]
