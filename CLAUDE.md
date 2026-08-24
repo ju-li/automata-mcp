@@ -159,6 +159,8 @@ Neither image hardcodes its port. `apps/web/Dockerfile` deliberately does **not*
 
 Both bind `::` rather than `0.0.0.0`, which accepts IPv4 and IPv6. Legacy Railway environments route the private network over IPv6 only.
 
+**Following `$PORT` means the listen port is not the Dockerfile default.** Railway injects `PORT=8080` into every service, so PocketBase listens on 8080 there, not 8090, and anything pointing at 8090 gets `ECONNREFUSED` from a hostname that resolves fine. Pin `PORT=8090` on that service. Evolution is unaffected — it reads `SERVER_PORT`, which the README pins.
+
 **Do not add a `VOLUME` instruction.** Railway fails the build on it outright (`docker VOLUME at Line N is not supported, use Railway Volumes`). Persistence comes from the compose bind mount locally and an attached volume in the service settings on Railway.
 
 **Do not add a BuildKit cache mount either.** Railway rejects any `--mount=type=cache` whose `id` is not prefixed with that service's own id (`id=s/<service-id>-<target>`), which would hardcode one Railway service into the Dockerfile. `apps/web/Dockerfile` installs without one; the install layer is keyed on the lockfile, so an unchanged lockfile skips it anyway.

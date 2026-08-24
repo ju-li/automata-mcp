@@ -296,8 +296,23 @@ directory.
 > Volumes"* — so neither image declares one, and nothing warns you at deploy
 > time if you forget.
 
-Both images read `$PORT` and fall back to their defaults, so Railway's assigned
-port works either way; set the target port above if you expose a domain.
+### Pin the ports
+
+**Railway injects `PORT` (8080 by default) into every service, and both images
+follow it.** So a service listens on Railway's port, not on the default in its
+Dockerfile — point another service at the wrong one and you get `ECONNREFUSED`
+from a hostname that resolves perfectly well.
+
+Set these explicitly so nothing depends on Railway's default:
+
+| Service | Variable |
+|---|---|
+| pocketbase | `PORT=8090` |
+| evolution | `SERVER_PORT=8080` (Evolution reads this, not `PORT`) |
+| web | nothing — it is the public service, let Railway assign it |
+
+Then the internal URLs below match, and each service's target port matches the
+table above.
 
 ### Environment
 
@@ -335,10 +350,10 @@ go quiet.
 **web** — internal addresses for the backends, public URLs for anything a user sees:
 
 ```
-NUXT_POCKETBASE_URL=http://pocketbase.railway.internal:8090
+NUXT_POCKETBASE_URL=http://pocketbase.railway.internal:8090   # matches PORT=8090 above
 NUXT_POCKETBASE_ADMIN_EMAIL=<you>
 NUXT_POCKETBASE_ADMIN_PASSWORD=<generate>
-NUXT_EVOLUTION_URL=http://evolution.railway.internal:8080
+NUXT_EVOLUTION_URL=http://evolution.railway.internal:8080    # matches SERVER_PORT above
 NUXT_EVOLUTION_ADMIN_KEY=${{evolution.AUTHENTICATION_API_KEY}}
 NUXT_WEBHOOK_URL=https://<web-domain>/api/webhook/evolution
 NUXT_WEBHOOK_SECRET=<openssl rand -hex 32>
