@@ -80,6 +80,10 @@ services:
       DATABASE_SAVE_MESSAGE_UPDATE: 'true'
       DATABASE_SAVE_DATA_CONTACTS: 'true'
       DATABASE_SAVE_DATA_CHATS: 'true'
+      # The other DATABASE_SAVE_DATA_* flags cover live traffic. This one covers
+      # the one-shot history payload WhatsApp pushes at pairing: the handler
+      # checks it once and drops the whole payload if it is false.
+      DATABASE_SAVE_DATA_HISTORIC: 'true'
 
       CACHE_REDIS_ENABLED: 'true'
       CACHE_REDIS_URI: redis://redis:6379/6
@@ -92,6 +96,11 @@ services:
       WEBHOOK_GLOBAL_ENABLED: 'true'
       WEBHOOK_GLOBAL_URL: ${WEBHOOK_URL:?set WEBHOOK_URL in .env}
       WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: 'false'
+      # WEBHOOK_GLOBAL_ENABLED alone delivers nothing: Evolution gates every
+      # global delivery on the matching WEBHOOK_EVENTS_* flag, and each defaults
+      # to false. An event not listed here never reaches the handler.
+      WEBHOOK_EVENTS_CONNECTION_UPDATE: 'true'
+      WEBHOOK_EVENTS_MESSAGES_UPSERT: 'true'
     volumes:
       - evolution_instances:/evolution/instances
     networks: [app]

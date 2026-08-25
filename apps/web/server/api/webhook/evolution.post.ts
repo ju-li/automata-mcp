@@ -7,8 +7,21 @@
  *   prod https://<app>/api/webhook/evolution
  *
  * Stub. Evolution v2 does not sign webhook payloads, so this checks a shared
- * secret header that you attach when registering per-instance webhooks. Event
- * handling is yours to build.
+ * secret header. Event handling is yours to build.
+ *
+ * Two things about that secret, both load-bearing:
+ *
+ * - Only Evolution's **per-instance** webhook sends custom headers. The global
+ *   webhook — which is what we configure, via WEBHOOK_GLOBAL_URL — sends none, so
+ *   setting NUXT_WEBHOOK_SECRET today makes every delivery fail this check.
+ * - Evolution treats 401 as non-retryable (alongside 400/403/404/422), so a
+ *   rejected delivery is dropped for good rather than retried. Leaving the secret
+ *   unset leaves this route unauthenticated; setting it silently discards
+ *   everything. Register per-instance webhooks with the header before you set it.
+ *
+ * Delivery is also gated upstream: Evolution only sends an event whose
+ * WEBHOOK_EVENTS_<EVENT> flag is true, each of which defaults to false. See the
+ * evolution service in docker-compose.dev.yml.
  */
 export default defineEventHandler(async (event) => {
   const { webhookSecret } = useRuntimeConfig()
