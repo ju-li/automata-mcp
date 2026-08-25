@@ -50,6 +50,21 @@ function toggleTool(name: string, on: boolean) {
   scope.value = { ...scope.value, tool_names: [...next] }
 }
 
+/**
+ * The muted line under a chat's name: a number for a person, a size for a group.
+ * Two chats can share a display name, and this is what tells them apart.
+ *
+ * Digits only, deliberately. Formatting a number for reading needs
+ * country-specific rules, and this app never applies those locally.
+ */
+function secondaryLine(chat: ScopedChat): string {
+  if (chat.isGroup) {
+    if (!chat.participantCount) return ''
+    return chat.participantCount === 1 ? '1 member' : `${chat.participantCount} members`
+  }
+  return chat.number ? `+${chat.number}` : ''
+}
+
 function toggleChat(jid: string, on: boolean) {
   const next = new Set(scope.value.chat_jids)
   on ? next.add(jid) : next.delete(jid)
@@ -68,7 +83,15 @@ async function addByNumber() {
       { method: 'POST', body: { number } },
     )
     if (!knownChats.value.some(c => c.jid === result.jid)) {
-      extraChats.value.push({ jid: result.jid, name: result.name || number })
+      // The number under the name comes off the resolved JID, not what was typed:
+      // Evolution's rules may have rewritten it, and the JID is what scope matches.
+      const resolvedNumber = result.jid.split('@')[0]!
+      extraChats.value.push({
+        jid: result.jid,
+        name: result.name?.trim() || resolvedNumber,
+        isGroup: false,
+        number: resolvedNumber,
+      })
     }
     toggleChat(result.jid, true)
     manualNumber.value = ''
@@ -204,11 +227,17 @@ async function addByNumber() {
               :model-value="scope.chat_jids.includes(chat.jid)"
               @update:model-value="toggleChat(chat.jid, $event === true)"
             />
-            <img v-if="chat.profilePicUrl" :src="chat.profilePicUrl" alt="" class="size-6 rounded-full object-cover">
-            <span v-else class="flex size-6 items-center justify-center rounded-full bg-muted">
-              <UsersIcon v-if="chat.isGroup" class="size-3" />
+            <img v-if="chat.profilePicUrl" :src="chat.profilePicUrl" alt="" class="size-8 rounded-full object-cover">
+            <span v-else class="flex size-8 items-center justify-center rounded-full bg-muted">
+              <UsersIcon v-if="chat.isGroup" class="size-3.5" />
             </span>
-            <span class="min-w-0 flex-1 truncate text-sm">{{ chat.name }}</span>
+            <span class="min-w-0 flex-1">
+              <span class="block truncate text-sm">{{ chat.name }}</span>
+              <span
+                v-if="secondaryLine(chat)"
+                class="block truncate text-xs text-muted-foreground tabular-nums"
+              >{{ secondaryLine(chat) }}</span>
+            </span>
             <Badge v-if="chat.isGroup" variant="outline" class="text-[10px]">
               group
             </Badge>

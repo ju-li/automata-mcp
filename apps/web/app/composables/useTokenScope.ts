@@ -9,6 +9,10 @@ export interface ScopedChat {
   jid: string
   name: string
   isGroup?: boolean
+  /** Bare phone number of a 1:1 chat. Groups do not have one. */
+  number?: string
+  /** Members in a group. Absent when the group lookup was skipped as unnecessary. */
+  participantCount?: number
   profilePicUrl?: string
 }
 
