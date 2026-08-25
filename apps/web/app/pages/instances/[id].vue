@@ -119,6 +119,28 @@ async function disconnect() {
   }
 }
 
+/**
+ * Arm a full-history import. Signs the device out — WhatsApp only hands history
+ * over when a device is linked, so the import rides in on the next QR scan.
+ */
+async function importHistory() {
+  busy.value = true
+  try {
+    await $fetch(`/api/instances/${id.value}/resync`, { method: 'POST' })
+    qr.value = null
+    polledState.value = null
+    restartPairing()
+    await refresh()
+    toast.success('Scan the new QR code — your history imports as it connects.')
+  }
+  catch {
+    toast.error('Could not start the history import')
+  }
+  finally {
+    busy.value = false
+  }
+}
+
 async function destroy() {
   busy.value = true
   try {
@@ -212,8 +234,9 @@ async function destroy() {
       </div>
 
       <p class="text-xs text-muted-foreground">
-        Counts cover what has been recorded since this account was connected —
-        existing WhatsApp history is not imported.
+        WhatsApp hands over its history only at the moment a device is linked, so
+        these counts are the import from pairing plus everything since. If an old
+        conversation is missing, re-import it under Manage.
       </p>
     </template>
 
@@ -254,6 +277,32 @@ async function destroy() {
               <AlertDialogCancel>Cancel</AlertDialogCancel>
               <AlertDialogAction @click="disconnect">
                 Disconnect
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
+        <AlertDialog>
+          <AlertDialogTrigger as-child>
+            <Button variant="outline" :disabled="busy">
+              Import full history
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Import this account's full history?</AlertDialogTitle>
+              <AlertDialogDescription>
+                WhatsApp only hands over past conversations while a device is being
+                linked, so this signs the device out and imports as you scan a new
+                QR code with the same phone. Nothing already stored is lost, and
+                nothing can send or receive until the scan completes. Repeatedly
+                linking and unlinking a number risks it being banned by WhatsApp.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction @click="importHistory">
+                Disconnect and import
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

@@ -125,6 +125,12 @@ export async function provisionInstance(user: AppUser, label?: string): Promise<
         // Creating without a QR returns immediately; Evolution otherwise blocks
         // ~5s waiting for one. The pairing page asks for the QR separately.
         qrcode: false,
+        // WhatsApp hands over history exactly once, during the initial login, so
+        // this has to be true *before* the QR is scanned — there is no endpoint
+        // that fetches history later. Side effect worth knowing: Evolution's
+        // `shouldIgnoreJid` stops filtering `@g.us` when this is on, so group
+        // chats sync too, regardless of `groupsIgnore`.
+        syncFullHistory: true,
       },
     },
   )
@@ -250,6 +256,44 @@ export async function logoutInstance(instance: AppInstance): Promise<void> {
 }
 
 /**
+ * Turn on full-history sync, then drop the WhatsApp session so the next pairing
+ * imports it.
+ *
+ * WhatsApp hands history over exactly once, during the initial login. An account
+ * paired while `syncFullHistory` was off cannot be backfilled in place — Evolution
+ * exposes no endpoint that fetches history after the fact. The only way in is to
+ * log out and re-scan, which is why the setting and the logout are one call: the
+ * setting alone does nothing, and the logout alone costs a QR scan on a real phone
+ * for no gain.
+ *
+ * Callers must confirm with the user first. This disconnects the account.
+ */
+export async function enableFullHistorySync(instance: AppInstance): Promise<void> {
+  const evolution = evolutionClientForInstance(instance)
+  const name = encodeURIComponent(instance.name)
+
+  // Read-modify-write, never a partial write. Evolution's `setSettings` copies
+  // every field of the body onto the live instance's in-memory settings, so a key
+  // left out of the request becomes `undefined` there until the process restarts
+  // — omitting `groupsIgnore` silently un-sets it on a running socket. Its schema
+  // also *requires* all six booleans, so a partial body is a 400 anyway.
+  // Not caught: `find` answers `null` when the instance has no settings row yet,
+  // so anything thrown here is a real failure. Swallowing it would mean writing
+  // defaults over settings we simply failed to read.
+  const current = await evolution<EvolutionSettings | null>(`/settings/find/${name}`)
+
+  await evolution(`/settings/set/${name}`, {
+    method: 'POST',
+    body: settingsBody(current, { syncFullHistory: true }),
+  })
+
+  // The new setting only reaches Baileys when the socket is next constructed, and
+  // that only counts as a fresh device link — the thing that triggers a history
+  // sync — if the stored credentials are gone. Logging out removes them.
+  await logoutInstance(instance)
+}
+
+/**
  * Destroy the instance: the Evolution instance and everything it stored, plus
  * the PocketBase row. `mcp_tokens` rows cascade away with it, so every token
  * for this account stops authenticating.
@@ -284,6 +328,43 @@ interface EvolutionInstanceRow {
   number?: string
   disconnectionAt?: string
   _count?: { Message?: number, Chat?: number, Contact?: number }
+}
+
+interface EvolutionSettings {
+  rejectCall?: boolean
+  msgCall?: string | null
+  groupsIgnore?: boolean
+  alwaysOnline?: boolean
+  readMessages?: boolean
+  readStatus?: boolean
+  syncFullHistory?: boolean
+  wavoipToken?: string | null
+}
+
+/**
+ * A settings body Evolution will accept.
+ *
+ * Its schema marks all six booleans `required`, and types `msgCall`/`wavoipToken`
+ * as `string` — so a missing boolean is a 400, and a `null` string (which is what
+ * `settings/find` returns for an unset one) is also a 400. Default the booleans,
+ * drop the empty strings.
+ */
+function settingsBody(current: EvolutionSettings | null, overrides: Partial<EvolutionSettings>): Record<string, unknown> {
+  const merged = { ...current, ...overrides }
+
+  const body: Record<string, unknown> = {
+    rejectCall: merged.rejectCall ?? false,
+    groupsIgnore: merged.groupsIgnore ?? false,
+    alwaysOnline: merged.alwaysOnline ?? false,
+    readMessages: merged.readMessages ?? false,
+    readStatus: merged.readStatus ?? false,
+    syncFullHistory: merged.syncFullHistory ?? false,
+  }
+
+  if (merged.msgCall) body.msgCall = merged.msgCall
+  if (merged.wavoipToken) body.wavoipToken = merged.wavoipToken
+
+  return body
 }
 
 function emptyStatus(): InstanceStatus {

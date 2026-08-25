@@ -9,9 +9,9 @@ export default defineMcpTool({
   title: 'List WhatsApp chats',
   description:
     'List recent WhatsApp conversations, most recently active first, with the '
-    + '`jid` needed by read-messages. Only conversations that have exchanged a '
-    + 'message since the account was connected appear here. If this connector is '
-    + 'scoped to specific chats, only those are listed.',
+    + '`jid` needed by read-messages. Includes conversations imported from the '
+    + 'phone when the account was paired, not only ones active since. If this '
+    + 'connector is scoped to specific chats, only those are listed.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
