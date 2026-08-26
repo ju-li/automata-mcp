@@ -8,9 +8,18 @@ import { PlusIcon, SearchIcon, UsersIcon, XIcon } from '@lucide/vue'
 const props = defineProps<{ instanceId: string }>()
 const scope = defineModel<TokenScope>({ required: true })
 
-const { data: toolData } = await useFetch<{ tools: McpToolInfo[] }>('/api/mcp/tools')
-const { data: chatData, status: chatStatus } = await useFetch<{ chats: ScopedChat[] }>(
+// Deliberately not awaited. A top-level await makes setup() async, and Vue then
+// withholds the entire component until every fetch settles — so the chats call,
+// which can spend eight seconds inside Evolution's group lookup, would keep the
+// Actions section (whose data is in-process and instant) off the screen with it.
+// The dialog mounts on click, so that stall reads as a click that did nothing.
+const { data: toolData, status: toolStatus } = useFetch<{ tools: McpToolInfo[] }>(
+  '/api/mcp/tools',
+  { lazy: true },
+)
+const { data: chatData, status: chatStatus } = useFetch<{ chats: ScopedChat[] }>(
   () => `/api/instances/${props.instanceId}/chats`,
+  { lazy: true },
 )
 
 // Chats picked by JID may not be in the fetched list — a number added by hand,
@@ -21,6 +30,11 @@ const search = ref('')
 const manualNumber = ref('')
 const resolving = ref(false)
 const manualError = ref('')
+
+// 'idle' counts as loading: it is what status reads for the tick before the
+// request is dispatched, and treating it as settled flashes the empty state.
+const toolsLoading = computed(() => toolStatus.value === 'idle' || toolStatus.value === 'pending')
+const chatsLoading = computed(() => chatStatus.value === 'idle' || chatStatus.value === 'pending')
 
 const knownChats = computed<ScopedChat[]>(() => {
   const seen = new Map<string, ScopedChat>()
@@ -133,29 +147,42 @@ async function addByNumber() {
       </RadioGroup>
 
       <div v-if="!scope.all_tools" class="space-y-2 rounded-md border p-3">
-        <div
-          v-for="tool in toolData?.tools ?? []"
-          :key="tool.name"
-          class="flex items-start gap-3"
-        >
-          <Checkbox
-            :id="`tool-${tool.name}`"
-            :model-value="scope.tool_names.includes(tool.name)"
-            class="mt-0.5"
-            @update:model-value="toggleTool(tool.name, $event === true)"
-          />
-          <div class="min-w-0">
-            <Label :for="`tool-${tool.name}`" class="flex items-center gap-2 font-normal">
-              {{ tool.title }}
-              <Badge :variant="tool.readOnly ? 'secondary' : 'outline'" class="text-[10px]">
-                {{ tool.readOnly ? 'read' : 'write' }}
-              </Badge>
-            </Label>
-            <p class="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-              {{ tool.description }}
-            </p>
+        <div v-if="toolsLoading" class="space-y-3" aria-busy="true">
+          <span class="sr-only">Loading actions…</span>
+          <div v-for="n in 3" :key="n" class="flex items-start gap-3">
+            <Skeleton class="mt-0.5 size-4 rounded-sm" />
+            <div class="min-w-0 flex-1 space-y-1.5">
+              <Skeleton class="h-4 w-40" />
+              <Skeleton class="h-3 w-full" />
+            </div>
           </div>
         </div>
+
+        <template v-else>
+          <div
+            v-for="tool in toolData?.tools ?? []"
+            :key="tool.name"
+            class="flex items-start gap-3"
+          >
+            <Checkbox
+              :id="`tool-${tool.name}`"
+              :model-value="scope.tool_names.includes(tool.name)"
+              class="mt-0.5"
+              @update:model-value="toggleTool(tool.name, $event === true)"
+            />
+            <div class="min-w-0">
+              <Label :for="`tool-${tool.name}`" class="flex items-center gap-2 font-normal">
+                {{ tool.title }}
+                <Badge :variant="tool.readOnly ? 'secondary' : 'outline'" class="text-[10px]">
+                  {{ tool.readOnly ? 'read' : 'write' }}
+                </Badge>
+              </Label>
+              <p class="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                {{ tool.description }}
+              </p>
+            </div>
+          </div>
+        </template>
       </div>
     </section>
 
@@ -207,7 +234,17 @@ async function addByNumber() {
         </div>
 
         <div class="max-h-52 space-y-1 overflow-y-auto">
-          <Skeleton v-if="chatStatus === 'pending'" class="h-16 w-full" />
+          <div v-if="chatsLoading" class="space-y-1" aria-busy="true" aria-live="polite">
+            <span class="sr-only">Loading conversations…</span>
+            <div v-for="n in 4" :key="n" class="flex items-center gap-3 px-2 py-1.5">
+              <Skeleton class="size-4 rounded-sm" />
+              <Skeleton class="size-8 rounded-full" />
+              <div class="min-w-0 flex-1 space-y-1">
+                <Skeleton class="h-3.5 w-32" />
+                <Skeleton class="h-3 w-20" />
+              </div>
+            </div>
+          </div>
 
           <p v-else-if="!knownChats.length" class="py-2 text-xs text-muted-foreground">
             No conversations recorded yet — they appear here once messages are
