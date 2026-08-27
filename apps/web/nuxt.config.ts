@@ -32,9 +32,9 @@ export default defineNuxtConfig({
       'There is no account to choose and no tool takes an instance argument.',
       'Call `get-connection-status` to check that the account is connected (state `open`) before sending;',
       'in any other state, messages cannot be sent and the user needs to re-pair in the web app.',
-      'Reading and searching only cover messages recorded since the account was connected;',
-      'WhatsApp history from before pairing was never imported, so an empty result means',
-      'nothing was recorded, not that the conversation did not happen.',
+      'Reading and searching cover the history imported when the account was paired as well as',
+      'everything since, so older conversations are reachable. An account paired before history',
+      'import was added has only what arrived since.',
     ].join(' '),
     // Opt out of evlog wide-events on the MCP route. Request bodies and headers on
     // /mcp carry bearer tokens; see server/utils/redact.ts.

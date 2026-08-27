@@ -13,7 +13,7 @@ PocketBase is the app's database (users, sessions, connected accounts and their 
 
 `README.md` is the operator's manual — first-run setup, networking tables, the Linux firewall rule, Railway deploy, MCP client connection. Read it before doing anything involving Docker or the local stack; this file covers the code.
 
-**Status:** the product loop works end to end — sign up, provision an Evolution instance, pair by QR, per-account dashboard with stats, connector token provisioning. Five MCP tools: `get-connection-status`, `list-chats`, `read-messages`, `search-messages` (opt-in, see below), `send-text-message`. Webhook event handling is not built; `/api/webhook/evolution` is a stub.
+**Status:** the product loop works end to end — sign up, provision an Evolution instance, pair by QR (importing that number's WhatsApp history as it connects), per-account dashboard with stats, connector token provisioning. Five MCP tools: `get-connection-status`, `list-chats`, `read-messages`, `search-messages` (opt-in, see below), `send-text-message`. Webhook event handling is not built; `/api/webhook/evolution` is a stub that logs and acks.
 
 A user may connect **several** WhatsApp accounts. Each is a row in `instances`, and each MCP token is bound to exactly one of them.
 
@@ -108,6 +108,32 @@ Built on `@nuxtjs/mcp-toolkit` (**pinned to 0.19.0**). It auto-imports `defineMc
 **`enabled` guards cannot see tool arguments.** They receive only the event, so they can gate a whole tool but not "this tool, for this chat". Anything argument-dependent — every chat check — belongs in the handler. See the table in `mcp-scope.ts`.
 
 **PocketBase materialises an unset boolean as `false`, not absent.** A write path that forgets `all_tools` mints a token that can call nothing. `scopeFields()` in `tokens.ts` always writes all four scope columns for this reason.
+
+## History arrives once, at pairing
+
+WhatsApp pushes a burst of past conversations while a device is being linked, and never again. **No endpoint fetches history after the fact** — not in this app, not in Evolution, not in Baileys in any form that works for a linked device. `/chat/findMessages` reads Evolution's own Postgres, not WhatsApp. Do not go looking for a date-range import; the upstream request for one was closed unimplemented, and `fetchMessageHistory` appears in Evolution only behind a debug easter-egg whose result is `console.log`ed and discarded.
+
+Three preconditions, two of which must hold **before** the QR is scanned:
+
+- `DATABASE_SAVE_DATA_HISTORIC=true` on the evolution service. Evolution checks it once, inside the `messaging-history.set` handler, and drops the whole payload if it is false. It is not one of the flags that covers live traffic.
+- `syncFullHistory: true` in the `POST /instance/create` body (`provisionInstance` in `server/utils/instances.ts`). It reaches Baileys' socket config, so it only takes effect when a socket is constructed.
+- A genuinely fresh device link. Reconnecting an existing session sends nothing.
+
+`enableFullHistorySync()` is what backfills an account paired before this existed: it writes the setting, then logs the instance out so the next connect is a new device link. It is exposed at `POST /api/instances/:id/resync` and behind a confirm dialog, because the cost is a QR scan on a real phone — see the pairing warning below. Re-importing is safe: Evolution skips messages whose `key.id` it already holds, so it merges rather than duplicates.
+
+**Writing a settings change is read-modify-write, never partial.** Evolution's `setSettings` copies every field of the request body onto the live instance's in-memory settings, so a key you leave out becomes `undefined` on a running socket. Its schema also marks all six booleans required and types `msgCall`/`wavoipToken` as `string`, so a partial body — or one echoing back the `null` that `settings/find` returns for an unset string — is a 400. `settingsBody()` in `instances.ts` handles both; go through it.
+
+**`syncFullHistory: true` also turns off Evolution's group filter.** Its `shouldIgnoreJid` stops excluding `@g.us` regardless of `groupsIgnore`, so group chats sync and show up in `list-chats` and the token scope picker. Per-token chat scoping contains that, but it is a wider default surface than before.
+
+**Bumping the pinned Evolution tag means re-verifying this.** Specifically: that `messaging-history.set` still gates on `SAVE_DATA.HISTORIC`, that the settings schema still requires those six booleans, and that `syncFullHistory` still reaches the socket config.
+
+Reading it back: `listMessages()` takes `{ limit, page, since, until }`. Evolution applies its timestamp filter only when **both** bounds are present and silently ignores a one-sided range, so `chats.ts` widens the missing side rather than passing it through. There is no text search upstream — do not offer one.
+
+## Webhook delivery is gated twice
+
+`WEBHOOK_GLOBAL_ENABLED` + `WEBHOOK_GLOBAL_URL` deliver **nothing** on their own. Evolution checks the matching `WEBHOOK_EVENTS_<EVENT>` flag for every global delivery, and every one of them defaults to false. An event not listed on the evolution service in `docker-compose.dev.yml` never reaches the handler.
+
+The other half of the trap: only the *per-instance* webhook sends custom headers. The global webhook sends none, so setting `NUXT_WEBHOOK_SECRET` while relying on the global URL makes every delivery 401 — and Evolution treats 401 as non-retryable, so it is dropped rather than retried. Leave the secret empty until per-instance webhooks are registered with the header.
 
 ## Ownership checks answer 404
 

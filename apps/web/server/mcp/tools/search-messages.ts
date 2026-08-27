@@ -18,9 +18,9 @@ export default defineMcpTool({
   description:
     'Find WhatsApp messages containing given words, newest first, across every '
     + 'chat unless a `jid` narrows it to one. Matching is case-insensitive and '
-    + 'every word must appear in the same message. Only messages recorded since '
-    + 'the account was connected are searchable — existing WhatsApp history is '
-    + 'not imported.',
+    + 'every word must appear in the same message. Covers the history imported '
+    + 'when the account was paired as well as everything since. Use this instead '
+    + 'of paging read-messages when you are looking for something by what it says.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -30,12 +30,12 @@ export default defineMcpTool({
   inputSchema: {
     query: z.string().min(2).describe('Words to look for. All of them must appear in the message.'),
     jid: z.string().optional().describe('Restrict to one chat, using a `jid` from list-chats. Omit to search every chat.'),
-    after: z.string().optional().describe('ISO-8601 date; only messages sent at or after it, e.g. 2026-08-01'),
-    before: z.string().optional().describe('ISO-8601 date; only messages sent at or before it'),
+    since: z.string().optional().describe('Only messages at or after this date, e.g. 2024-03-01 or 2024-03-01T12:00:00Z'),
+    until: z.string().optional().describe('Only messages at or before this date'),
     fromMe: z.boolean().optional().describe('true for only messages you sent, false for only messages you received'),
     limit: z.number().int().min(1).max(100).default(20).describe('How many matches to return'),
   },
-  handler: async ({ query, jid, after, before, fromMe, limit }) => {
+  handler: async ({ query, jid, since, until, fromMe, limit }) => {
     const { instance, scope } = useMcpAuth()
 
     const terms = query.split(/\s+/).filter(Boolean)
@@ -51,8 +51,8 @@ export default defineMcpTool({
       // A named chat is already checked above. Otherwise a scoped token gets its
       // allowlist pushed into the query, so out-of-scope messages are never read.
       allowedJids: jid || scope.allChats ? undefined : scope.chatJids,
-      after,
-      before,
+      since,
+      until,
       fromMe,
       limit,
     })

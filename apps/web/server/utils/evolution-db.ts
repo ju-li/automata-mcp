@@ -129,8 +129,8 @@ export interface MessageSearchOptions {
   jid?: string
   /** The only chats this token may see. Omit for an all-chats token. */
   allowedJids?: string[]
-  after?: string
-  before?: string
+  since?: string
+  until?: string
   fromMe?: boolean
   limit: number
 }
@@ -153,8 +153,8 @@ export async function searchMessages(
   const sql = evolutionDb()
 
   const patterns = options.terms.map(term => `%${escapeLike(term)}%`)
-  const after = toUnixSeconds(options.after, 'after')
-  const before = toUnixSeconds(options.before, 'before')
+  const since = toUnixSeconds(options.since, 'since')
+  const until = toUnixSeconds(options.until, 'until')
 
   // One extra row tells us there were more matches than we returned, for a
   // fraction of the cost of a second COUNT(*) over the same scan.
@@ -181,8 +181,8 @@ export async function searchMessages(
         AND t.body ILIKE ALL (${patterns}::text[])
         ${options.jid ? sql`AND m.key->>'remoteJid' = ${options.jid}` : sql``}
         ${options.allowedJids ? sql`AND m.key->>'remoteJid' = ANY(${options.allowedJids}::text[])` : sql``}
-        ${after === undefined ? sql`` : sql`AND m."messageTimestamp" >= ${after}`}
-        ${before === undefined ? sql`` : sql`AND m."messageTimestamp" <= ${before}`}
+        ${since === undefined ? sql`` : sql`AND m."messageTimestamp" >= ${since}`}
+        ${until === undefined ? sql`` : sql`AND m."messageTimestamp" <= ${until}`}
         ${options.fromMe === undefined ? sql`` : sql`AND (m.key->>'fromMe')::boolean = ${options.fromMe}`}
       ORDER BY m."messageTimestamp" DESC
       LIMIT ${take}
@@ -241,7 +241,7 @@ function toUnixSeconds(value: string | undefined, field: string): number | undef
   if (Number.isNaN(parsed)) {
     throw createError({
       statusCode: 400,
-      message: `\`${field}\` is not a date I can read. Use an ISO-8601 date like 2026-08-01 or 2026-08-01T12:00:00Z.`,
+      message: `\`${field}\` is not a date I can read: ${value}. Use a format like 2024-03-01 or 2024-03-01T12:00:00Z.`,
     })
   }
 

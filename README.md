@@ -8,10 +8,11 @@ A Nuxt app that serves two surfaces from one Nitro server:
 PocketBase is the backend (users, sessions, per-user Evolution credentials).
 Evolution API, Postgres and Redis are dependencies you run, not code in this repo.
 
-> **Status.** Sign-up, WhatsApp pairing, the per-account dashboard and connector
-> token provisioning all work. Five MCP tools: check the connection, list chats,
-> read a conversation, search messages (opt-in — see "Message search"), send a
-> text. Webhook event handling is not built; `/api/webhook/evolution` is a stub.
+> **Status.** Sign-up, WhatsApp pairing, the per-account dashboard, connector
+> token provisioning and history import all work. Five MCP tools: connection
+> status, chat listing, message reading, message search (opt-in — see "Message
+> search") and text sending. Webhook event handling is not built;
+> `/api/webhook/evolution` is a stub that logs and acks.
 
 ## Layout
 
@@ -192,10 +193,11 @@ A token can be narrowed on two independent axes, both edited from the account pa
   search is narrowed to the allowed chats — out-of-scope messages are excluded by
   the query itself, not filtered out after being read.
 
-The chat picker lists conversations Evolution has recorded, which means only
-those that have exchanged a message since pairing. A number that has not messaged
-you yet can be added directly — it is checked against WhatsApp before it is
-accepted.
+The chat picker lists conversations Evolution has recorded — the history imported
+at pairing, plus everything since. An account paired before full-history sync was
+switched on shows only the latter until it is re-imported. Either way a number
+that has never messaged you can be added directly; it is checked against WhatsApp
+before it is accepted.
 
 Scope is read fresh on every request, so **editing a token's scope takes effect
 immediately and does not reissue it**. The connector already configured in Claude
@@ -250,10 +252,12 @@ In development you can point it at `POSTGRES_USER` instead; in production do not
 
 Evolution ships `@@index([instanceId])` and nothing else — no index on
 `messageTimestamp`, none on the `key` JSONB — so search is a sequential scan
-within one account. That is fine for a personal number and gets slow on a busy
-one. The queries carry a 10-second `statement_timeout` so a slow scan surfaces as
-an error instead of a hung MCP call. For a large corpus, add (as a Postgres
-superuser, not as the app):
+within one account. History import makes that corpus much larger than it would
+otherwise be: a number with years of conversations arrives all at once at
+pairing, rather than accumulating. The queries carry a 10-second
+`statement_timeout` so a slow scan surfaces as an error instead of a hung MCP
+call. Once a scan starts timing out, add (as a Postgres superuser, not as the
+app):
 
 ```sql
 CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
@@ -262,9 +266,9 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
 
 Two caveats worth knowing before you go looking for a bug:
 
-- Only messages recorded **since pairing** are searchable. WhatsApp history is
-  never imported, so an empty result means nothing was recorded, not that the
-  conversation did not happen.
+- Search covers whatever Evolution holds: the history imported at pairing plus
+  everything since. An account paired before full-history sync was turned on has
+  only what arrived after — see "Importing existing history".
 - The scope editor lists `search-messages` whether or not the database URL is
   set, because it reads the tool registry rather than the live per-request tool
   list. Granting it to a token is harmless while search is unconfigured.
@@ -311,6 +315,48 @@ docker compose -f docker-compose.dev.yml up -d pocketbase
 ```
 
 That resets everything, including the superuser, and re-applies every migration.
+
+## Importing existing history
+
+WhatsApp hands over past conversations **once**, in a burst it pushes while a
+device is being linked. There is no endpoint — here or upstream — that fetches
+history afterwards. Evolution exposes `/chat/findMessages`, but that reads
+Evolution's own Postgres, not WhatsApp.
+
+Three things have to line up, and two of them have to be true *before* the QR is
+scanned:
+
+| | Where | Effect if wrong |
+|---|---|---|
+| `DATABASE_SAVE_DATA_HISTORIC=true` | evolution service env | Evolution receives the burst and drops it |
+| `syncFullHistory: true` | sent at `POST /instance/create`, in `server/utils/instances.ts` | Only recent messages arrive, and groups are skipped |
+| A fresh device link | scanning the QR | Reconnecting an existing session sends no history |
+
+New accounts get all three automatically. An account paired before this was
+turned on cannot be backfilled in place — **Import full history** on the account
+page sets the flag, signs the device out and puts the QR back up; the import
+rides in on the re-scan. Nothing already stored is lost: Evolution skips messages
+whose `key.id` it already has, so re-importing merges rather than duplicates.
+
+Watch it land with `pnpm services:logs` while scanning:
+
+```
+recv 412 chats, 1180 contacts, 39204 msgs (is latest: false, progress: 34%), type: 2
+```
+
+`type: 2` is a full sync, `type: 3` is the recent-only one. Anything but `2` means
+`syncFullHistory` never reached the socket.
+
+Caveats worth knowing before you rely on it:
+
+- **Media is not downloaded.** History gives message records; the bytes still need
+  `getBase64FromMediaMessage` per message.
+- **Depth is whatever the phone volunteers.** `syncFullHistory` asks for
+  everything; it is not a guarantee of everything.
+- **Groups come too.** `syncFullHistory` overrides Evolution's group filter, so
+  group chats appear in `list-chats` and in the token scope picker.
+- **Reads get slower as it grows.** Evolution indexes its `Message` table on
+  `instanceId` only; `remoteJid` lives inside a JSONB column with no index.
 
 ## ⚠️ WhatsApp pairing burns a real phone number
 
@@ -391,6 +437,7 @@ DATABASE_SAVE_DATA_NEW_MESSAGE=true
 DATABASE_SAVE_MESSAGE_UPDATE=true
 DATABASE_SAVE_DATA_CONTACTS=true
 DATABASE_SAVE_DATA_CHATS=true
+DATABASE_SAVE_DATA_HISTORIC=true
 CACHE_REDIS_ENABLED=true
 CACHE_REDIS_URI=${{Redis.REDIS_URL}}/6
 CACHE_REDIS_PREFIX_KEY=evolution
@@ -398,12 +445,20 @@ CACHE_LOCAL_ENABLED=false
 WEBHOOK_GLOBAL_ENABLED=true
 WEBHOOK_GLOBAL_URL=https://<web-domain>/api/webhook/evolution
 WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS=false
+WEBHOOK_EVENTS_CONNECTION_UPDATE=true
+WEBHOOK_EVENTS_MESSAGES_UPSERT=true
 TELEMETRY_ENABLED=false
 ```
 
 The `DATABASE_SAVE_DATA_*` flags are what populate the dashboard counts and make
 `list-chats` and `read-messages` return anything. Turn them off and those tools
 go quiet.
+
+`DATABASE_SAVE_DATA_HISTORIC` is the odd one out: the others cover live traffic,
+that one covers the history WhatsApp hands over *once*, when a number is paired.
+Evolution checks it in the `messaging-history.set` handler and silently drops the
+whole payload if it is false — with no way to ask for the history again short of
+disconnecting and re-scanning the QR. See "Importing existing history" below.
 
 **web** — internal addresses for the backends, public URLs for anything a user sees:
 

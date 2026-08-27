@@ -34,10 +34,11 @@ export interface ChatMessage {
 /**
  * Recent conversations, newest activity first.
  *
- * Evolution builds this listing from its Message table, so **a chat only exists
- * here once it has exchanged a message since pairing**. A freshly paired account
- * returns nothing, which is not an error — it is why the UI also lets a number
- * be added by hand.
+ * Evolution builds this listing from its own tables, which are seeded by the
+ * history WhatsApp hands over at pairing and then kept current by live traffic.
+ * An account paired before `syncFullHistory` was switched on has no seed and so
+ * shows only conversations active since — which is one reason the UI also lets a
+ * number be added by hand. Returning nothing is never an error.
  *
  * The listing alone cannot name a chat (see `EvolutionChatRow`), so names are
  * enriched from Evolution's contact table and, when a group would otherwise
@@ -104,13 +105,49 @@ export async function listChats(instance: AppInstance, take = 200): Promise<Chat
   })
 }
 
-/** Message history for one chat, newest first. */
-export async function listMessages(instance: AppInstance, remoteJid: string, limit = 50): Promise<ChatMessage[]> {
+export interface MessageQuery {
+  /** Page size. Evolution calls this `offset`, confusingly. */
+  limit?: number
+  /** 1-based. Paging is how you reach anything older than `limit` messages. */
+  page?: number
+  /** Inclusive lower bound, ISO 8601. */
+  since?: string
+  /** Inclusive upper bound, ISO 8601. */
+  until?: string
+}
+
+/**
+ * Message history for one chat, newest first.
+ *
+ * Evolution only applies its timestamp filter when **both** bounds are present
+ * (`baileys.svc.ts` checks `gte && lte` and ignores the filter otherwise), so a
+ * one-sided range is widened here rather than passed through and silently dropped.
+ *
+ * There is no text search upstream: Evolution's `findMessages` accepts a
+ * `where.message` and never reads it, so a content filter passed here comes back
+ * as an unfiltered page. Do not offer one from this function — `searchMessages`
+ * in `evolution-db.ts` reads Evolution's database directly for that.
+ */
+export async function listMessages(
+  instance: AppInstance,
+  remoteJid: string,
+  query: MessageQuery = {},
+): Promise<ChatMessage[]> {
   const evolution = evolutionClientForInstance(instance)
+
+  const { limit = 50, page = 1, since, until } = query
+
+  const where: Record<string, unknown> = { key: { remoteJid } }
+  if (since || until) {
+    where.messageTimestamp = {
+      gte: since ?? EPOCH_ISO,
+      lte: until ?? new Date().toISOString(),
+    }
+  }
 
   const result = await evolution<{ messages?: { records?: EvolutionMessageRow[] } } | EvolutionMessageRow[]>(
     `/chat/findMessages/${encodeURIComponent(instance.name)}`,
-    { method: 'POST', body: { where: { key: { remoteJid } }, page: 1, offset: limit } },
+    { method: 'POST', body: { where, page, offset: limit } },
   )
 
   const records = Array.isArray(result)
@@ -234,6 +271,12 @@ function meaningfulName(value: string | undefined | null, localPart: string): st
 }
 
 // ── internals ──────────────────────────────────────────────────────────────
+
+/**
+ * Lower bound for a one-sided range. Has to be truthy: Evolution tests the raw
+ * input value before parsing it, so a `0` here would disable the filter entirely.
+ */
+const EPOCH_ISO = '1970-01-01T00:00:00.000Z'
 
 /**
  * What `POST /chat/findChats` actually returns.
