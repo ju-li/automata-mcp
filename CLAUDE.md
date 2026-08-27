@@ -13,7 +13,7 @@ PocketBase is the app's database (users, sessions, connected accounts and their 
 
 `README.md` is the operator's manual — first-run setup, networking tables, the Linux firewall rule, Railway deploy, MCP client connection. Read it before doing anything involving Docker or the local stack; this file covers the code.
 
-**Status:** the product loop works end to end — sign up, provision an Evolution instance, pair by QR (importing that number's WhatsApp history as it connects), per-account dashboard with stats, connector token provisioning. Four MCP tools: `get-connection-status`, `list-chats`, `read-messages`, `send-text-message`. Webhook event handling is not built; `/api/webhook/evolution` is a stub that logs and acks.
+**Status:** the product loop works end to end — sign up, provision an Evolution instance, pair by QR (importing that number's WhatsApp history as it connects), per-account dashboard with stats, connector token provisioning. Five MCP tools: `get-connection-status`, `list-chats`, `read-messages`, `search-messages` (opt-in, see below), `send-text-message`. Webhook event handling is not built; `/api/webhook/evolution` is a stub that logs and acks.
 
 A user may connect **several** WhatsApp accounts. Each is a row in `instances`, and each MCP token is bound to exactly one of them.
 
@@ -52,7 +52,7 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
   server/api/                auth/, instances/, tokens/
   server/mcp/index.ts        default MCP handler (auth middleware)
   server/mcp/tools/          one file per tool, auto-discovered
-  server/utils/              pocketbase, session, auth-cookie, mcp-auth, instances, tokens, evolution, redact
+  server/utils/              pocketbase, session, auth-cookie, mcp-auth, instances, tokens, evolution, evolution-db, redact
 services/pocketbase/         pinned PocketBase build + committed schema migrations
 docker-compose.dev.yml       services only, NOT Nuxt
 ```
@@ -98,6 +98,8 @@ Built on `@nuxtjs/mcp-toolkit` (**pinned to 0.19.0**). It auto-imports `defineMc
 ## Two rules that are easy to break later
 
 **No admin-key fallback in per-instance credentials.** `credentialsForInstance()` returns `undefined` when an instance has no `api_key`, and callers must fail. Falling back to `runtimeConfig.evolutionAdminKey` would hand any MCP token holder access to *every* user's WhatsApp account. The admin key has exactly two callers, both in `server/utils/instances.ts`: create and delete.
+
+**The Evolution database connection is read-only and search-only.** `server/utils/evolution-db.ts` is the one file that talks to Evolution's Postgres, and it exists because Evolution 2.3.7 has no message-content search: `POST /chat/findMessages` accepts a `where.message` and never reads it, so a content search returns an unfiltered page that reads as a result set. Do not try to search over the HTTP API — that field is a trap. The connection is far wider than anything else the app holds (every user's messages, every instance), so three things are load-bearing: the role is `SELECT`-only on `"Message"` and the app never writes or runs DDL; every query carries `"instanceId" = <this account>`, which `searchMessages()` cannot be called without; and chat scope is a **predicate in the SQL**, not a filter applied to rows after they are read. `resolveEvolutionInstanceId()` throws rather than querying without an id — `createInstance()` can store `''`, and an empty id would mean a query with no account predicate at all. Search is optional: with no `NUXT_EVOLUTION_DATABASE_URL` the tool's `enabled` guard is false and it is never registered.
 
 **Hidden fields require the admin client.** `instances.api_key` is a `hidden` PocketBase field. It is absent from anything fetched with a session-scoped client, including `getSessionUser()`'s `authRefresh`. Anything that needs it must go through `pocketbaseAdmin()` — `requireOwnedInstance()` already does.
 

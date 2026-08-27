@@ -123,7 +123,10 @@ export interface MessageQuery {
  * (`baileys.svc.ts` checks `gte && lte` and ignores the filter otherwise), so a
  * one-sided range is widened here rather than passed through and silently dropped.
  *
- * There is no text search upstream — do not offer one.
+ * There is no text search upstream: Evolution's `findMessages` accepts a
+ * `where.message` and never reads it, so a content filter passed here comes back
+ * as an unfiltered page. Do not offer one from this function — `searchMessages`
+ * in `evolution-db.ts` reads Evolution's database directly for that.
  */
 export async function listMessages(
   instance: AppInstance,

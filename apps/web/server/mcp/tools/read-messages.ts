@@ -14,7 +14,8 @@ export default defineMcpTool({
     + 'returned by list-chats. Covers the history imported when the account was '
     + 'paired as well as everything since, so older conversations are reachable — '
     + 'use `page` to walk back beyond `limit`, or `since`/`until` to target a date '
-    + 'range. There is no text search; filter the results yourself.',
+    + 'range. To find a message by what it says, prefer search-messages when this '
+    + 'connector offers it.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
