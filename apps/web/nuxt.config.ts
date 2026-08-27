@@ -32,6 +32,9 @@ export default defineNuxtConfig({
       'There is no account to choose and no tool takes an instance argument.',
       'Call `get-connection-status` to check that the account is connected (state `open`) before sending;',
       'in any other state, messages cannot be sent and the user needs to re-pair in the web app.',
+      'Reading and searching only cover messages recorded since the account was connected;',
+      'WhatsApp history from before pairing was never imported, so an empty result means',
+      'nothing was recorded, not that the conversation did not happen.',
     ].join(' '),
     // Opt out of evlog wide-events on the MCP route. Request bodies and headers on
     // /mcp carry bearer tokens; see server/utils/redact.ts.
@@ -49,6 +52,11 @@ export default defineNuxtConfig({
     // server/utils/instances.ts. Never stored on a record and never used to
     // serve a request on behalf of a user — see server/utils/evolution.ts.
     evolutionAdminKey: '',
+    // Read-only connection to Evolution's own Postgres, for message search only.
+    // Optional: unset, the search tool is not registered. This reaches every
+    // user's messages, so the role behind it must be SELECT-only — see
+    // server/utils/evolution-db.ts and README "Message search".
+    evolutionDatabaseUrl: '',
 
     webhookUrl: '',
     webhookSecret: '',

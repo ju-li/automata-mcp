@@ -9,8 +9,9 @@ PocketBase is the backend (users, sessions, per-user Evolution credentials).
 Evolution API, Postgres and Redis are dependencies you run, not code in this repo.
 
 > **Status.** Sign-up, WhatsApp pairing, the per-account dashboard and connector
-> token provisioning all work. There are two example MCP tools. Message browsing
-> and webhook event handling are not built; `/api/webhook/evolution` is a stub.
+> token provisioning all work. Five MCP tools: check the connection, list chats,
+> read a conversation, search messages (opt-in — see "Message search"), send a
+> text. Webhook event handling is not built; `/api/webhook/evolution` is a stub.
 
 ## Layout
 
@@ -186,7 +187,10 @@ A token can be narrowed on two independent axes, both edited from the account pa
   tool list: calling it fails.
 - **Chats** — all conversations, or an allowlist. `list-chats` returns only
   allowed conversations; `read-messages` and `send-text-message` refuse anything
-  else, naming the chat so the assistant can explain why.
+  else, naming the chat so the assistant can explain why. `search-messages` does
+  both: asked for a chat outside scope it refuses by name, while an unrestricted
+  search is narrowed to the allowed chats — out-of-scope messages are excluded by
+  the query itself, not filtered out after being read.
 
 The chat picker lists conversations Evolution has recorded, which means only
 those that have exchanged a message since pairing. A number that has not messaged
@@ -212,6 +216,62 @@ pnpm dlx @modelcontextprotocol/inspector
 
 Point it at `http://localhost:3000/mcp/<token>`, or at `http://localhost:3000/mcp`
 with an `Authorization: Bearer <token>` header.
+
+### Message search
+
+`search-messages` is **off unless you configure it**, and it is the one feature
+that does not go through the Evolution API.
+
+Evolution 2.3.7 cannot search message content. `POST /chat/findMessages` accepts a
+`where.message` — its request schema even documents the field — and then never
+reads it, so a content search comes back as an unfiltered page that looks like a
+result set. The only filters it honours are `id`, `source`, `messageType`, a
+`messageTimestamp` range, and `key.{id,remoteJid,fromMe,participant}`. Searching
+therefore means reading Evolution's Postgres directly, via
+`NUXT_EVOLUTION_DATABASE_URL`. Leave it empty and the tool is not registered at
+all — clients never see it — rather than failing when called.
+
+**Give it a role that can do nothing else.** Every other credential in this app is
+scoped to a single account; this connection can reach every user's messages in
+every instance. The app never writes and never runs DDL, so:
+
+```sql
+CREATE ROLE wamcp_search LOGIN PASSWORD 'change-me';
+GRANT CONNECT ON DATABASE evolution TO wamcp_search;
+GRANT USAGE ON SCHEMA public TO wamcp_search;
+GRANT SELECT ON "Message" TO wamcp_search;
+```
+
+```bash
+NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:change-me@localhost:5432/evolution
+```
+
+In development you can point it at `POSTGRES_USER` instead; in production do not.
+
+Evolution ships `@@index([instanceId])` and nothing else — no index on
+`messageTimestamp`, none on the `key` JSONB — so search is a sequential scan
+within one account. That is fine for a personal number and gets slow on a busy
+one. The queries carry a 10-second `statement_timeout` so a slow scan surfaces as
+an error instead of a hung MCP call. For a large corpus, add (as a Postgres
+superuser, not as the app):
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
+  ON "Message" ("instanceId", "messageTimestamp" DESC);
+```
+
+Two caveats worth knowing before you go looking for a bug:
+
+- Only messages recorded **since pairing** are searchable. WhatsApp history is
+  never imported, so an empty result means nothing was recorded, not that the
+  conversation did not happen.
+- The scope editor lists `search-messages` whether or not the database URL is
+  set, because it reads the tool registry rather than the live per-request tool
+  list. Granting it to a token is harmless while search is unconfigured.
+
+On Railway, Evolution's Postgres is its own service — use its private URL, and
+note the port there is whatever that service actually listens on (see "Pin the
+ports").
 
 ### Adding tools
 
