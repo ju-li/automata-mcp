@@ -32,6 +32,17 @@ const editing = ref<TokenRow | null>(null)
 const editScope = ref<TokenScope>(openScope())
 const savingScope = ref(false)
 
+const howTo = ref<TokenRow | null>(null)
+
+/**
+ * The how-to can only show a masked URL — the plaintext is gone after minting.
+ * Hand off to the create flow, which is the one path that reveals a real one.
+ */
+function createFromHowTo() {
+  howTo.value = null
+  createOpen.value = true
+}
+
 function startEdit(token: TokenRow) {
   editing.value = token
   // Copied, not referenced — cancelling must not leave the table showing edits
@@ -177,6 +188,14 @@ function statusOf(token: TokenRow) {
                   v-if="!token.revoked"
                   variant="ghost"
                   size="sm"
+                  @click="howTo = token"
+                >
+                  How to
+                </Button>
+                <Button
+                  v-if="!token.revoked"
+                  variant="ghost"
+                  size="sm"
                   @click="startEdit(token)"
                 >
                   Edit
@@ -286,6 +305,14 @@ function statusOf(token: TokenRow) {
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <HowToConnectDialog
+      :open="Boolean(howTo)"
+      :label="howTo?.label"
+      :scope="howTo?.scope"
+      @update:open="value => { if (!value) howTo = null }"
+      @create="createFromHowTo"
+    />
 
     <RevealTokenDialog :token="revealed" :scope="revealedScope" @close="revealed = null" />
   </section>
