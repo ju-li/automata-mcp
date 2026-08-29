@@ -24,7 +24,7 @@ export default defineMcpTool({
 
     // Fetches a page and filters. A scoped token with chats far down a very long
     // list could miss some; raise the page size here if that becomes real.
-    const chats = await listChats(instance)
+    const { chats } = await listChats(instance)
     const visible = filterChatsToScope(scope, chats)
 
     return { chats: visible, count: visible.length }

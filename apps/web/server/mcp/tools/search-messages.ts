@@ -85,7 +85,7 @@ async function chatNames(instance: AppInstance, hits: MessageSearchHit[]): Promi
   if (!wanted.size) return new Map()
 
   try {
-    const chats = await listChats(instance)
+    const { chats } = await listChats(instance)
     return new Map(chats.filter(chat => wanted.has(chat.jid)).map(chat => [chat.jid, chat.name]))
   }
   catch (error) {
