@@ -18,6 +18,14 @@ export interface ChatSummary {
   participantCount?: number
   profilePicUrl?: string
   updatedAt?: string
+  /**
+   * When the last message in the chat was sent, ISO 8601.
+   *
+   * Preferred over `updatedAt`, which is the Chat row's mtime and so also moves
+   * for a read receipt or an unread-count change. Absent if Evolution's chat row
+   * carries no last message — fall back to `updatedAt` for display.
+   */
+  lastMessageAt?: string
   unreadCount: number
   lastMessagePreview?: string
 }
@@ -66,6 +74,7 @@ export async function listChats(instance: AppInstance, take = 200): Promise<Chat
         chatName: meaningfulName(row.pushName, localPart),
         profilePicUrl: row.profilePicUrl ?? undefined,
         updatedAt: row.updatedAt ?? undefined,
+        lastMessageAt: isoFromEpochSeconds(row.lastMessage?.messageTimestamp),
         unreadCount: Number(row.unreadCount ?? 0),
         lastMessagePreview: previewOf(row.lastMessage?.message),
       }
@@ -99,6 +108,7 @@ export async function listChats(instance: AppInstance, take = 200): Promise<Chat
       participantCount: group?.size,
       profilePicUrl: draft.profilePicUrl ?? contact?.profilePicUrl ?? group?.pictureUrl,
       updatedAt: draft.updatedAt,
+      lastMessageAt: draft.lastMessageAt,
       unreadCount: draft.unreadCount,
       lastMessagePreview: draft.lastMessagePreview,
     }
@@ -198,7 +208,7 @@ export async function listMessages(
       id: row.key?.id,
       fromMe: Boolean(row.key?.fromMe),
       author: row.pushName ?? undefined,
-      timestamp: row.messageTimestamp ? new Date(Number(row.messageTimestamp) * 1000).toISOString() : undefined,
+      timestamp: isoFromEpochSeconds(row.messageTimestamp),
       type: row.messageType ?? undefined,
       text: previewOf(row.message),
     })),
@@ -340,7 +350,7 @@ interface EvolutionChatRow {
   profilePicUrl?: string
   updatedAt?: string
   unreadCount?: number
-  lastMessage?: { message?: unknown }
+  lastMessage?: { message?: unknown, messageTimestamp?: number | string }
 }
 
 interface EvolutionContactRow {
@@ -385,6 +395,19 @@ interface EvolutionMessageRow {
   messageTimestamp?: number | string
   messageType?: string
   message?: unknown
+}
+
+/**
+ * WhatsApp timestamps are epoch **seconds**, and arrive as a number or a string
+ * depending on where in Evolution's response they sit. Returns undefined rather
+ * than an "Invalid Date" for anything that does not parse — the callers all treat
+ * a missing timestamp as a thing to render as a dash, not as an error.
+ */
+function isoFromEpochSeconds(value: number | string | undefined | null): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined
+  const seconds = Number(value)
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined
+  return new Date(seconds * 1000).toISOString()
 }
 
 /**
