@@ -117,11 +117,48 @@ export interface MessageQuery {
 }
 
 /**
+ * One page of a chat's history.
+ *
+ * The envelope matters as much as the rows. Evolution answers newest-first and
+ * caps the response at the page size, so truncating a `since`-bounded window
+ * drops the *old* end — precisely the part a caller who named a date range asked
+ * for, while keeping the part they would have got without asking. A page that
+ * does not say it is a page reads as a complete answer, and a summary written
+ * from it has a hole in it. `searchMessages` in `evolution-db.ts` carries a
+ * `truncated` flag for the same reason.
+ */
+export interface MessagePage {
+  messages: ChatMessage[]
+  /**
+   * There may be another page behind this one.
+   *
+   * Derived from "the page came back full", never from `total`: a count that is
+   * wrong upstream must not be able to drive a caller into paging forever. Being
+   * wrong this way is wrong in the safe direction — an exactly-full final page
+   * costs one extra call that returns nothing, and a page with more behind it is
+   * never reported as complete.
+   */
+  hasMore: boolean
+  /**
+   * Rows matching the filter, when Evolution's envelope carries a usable count.
+   *
+   * In 2.3.7 this is a `prisma.message.count` over the same where clause as the
+   * page itself, timestamp range included, so it counts the range and not the
+   * chat. Reported to the caller all the same as a number, never as a decision:
+   * `hasMore` does not read it.
+   */
+  total?: number
+}
+
+/**
  * Message history for one chat, newest first.
  *
  * Evolution only applies its timestamp filter when **both** bounds are present
  * (`baileys.svc.ts` checks `gte && lte` and ignores the filter otherwise), so a
  * one-sided range is widened here rather than passed through and silently dropped.
+ * Note that widening `until` means *now*, which moves between calls: a caller
+ * paging through a window has to pin both bounds itself, as `read-messages` does,
+ * or page 2 is taken from a different range than page 1.
  *
  * There is no text search upstream: Evolution's `findMessages` accepts a
  * `where.message` and never reads it, so a content filter passed here comes back
@@ -132,7 +169,7 @@ export async function listMessages(
   instance: AppInstance,
   remoteJid: string,
   query: MessageQuery = {},
-): Promise<ChatMessage[]> {
+): Promise<MessagePage> {
   const evolution = evolutionClientForInstance(instance)
 
   const { limit = 50, page = 1, since, until } = query
@@ -145,7 +182,7 @@ export async function listMessages(
     }
   }
 
-  const result = await evolution<{ messages?: { records?: EvolutionMessageRow[] } } | EvolutionMessageRow[]>(
+  const result = await evolution<EvolutionMessagePage | EvolutionMessageRow[]>(
     `/chat/findMessages/${encodeURIComponent(instance.name)}`,
     { method: 'POST', body: { where, page, offset: limit } },
   )
@@ -154,14 +191,22 @@ export async function listMessages(
     ? result
     : result?.messages?.records ?? []
 
-  return records.map(row => ({
-    id: row.key?.id,
-    fromMe: Boolean(row.key?.fromMe),
-    author: row.pushName ?? undefined,
-    timestamp: row.messageTimestamp ? new Date(Number(row.messageTimestamp) * 1000).toISOString() : undefined,
-    type: row.messageType ?? undefined,
-    text: previewOf(row.message),
-  }))
+  const total = Array.isArray(result) ? undefined : result?.messages?.total
+
+  return {
+    messages: records.map(row => ({
+      id: row.key?.id,
+      fromMe: Boolean(row.key?.fromMe),
+      author: row.pushName ?? undefined,
+      timestamp: row.messageTimestamp ? new Date(Number(row.messageTimestamp) * 1000).toISOString() : undefined,
+      type: row.messageType ?? undefined,
+      text: previewOf(row.message),
+    })),
+    // A page short of `limit` is the end of the range; a full one may have more
+    // behind it. Deliberately not computed from `total` — see `MessagePage`.
+    hasMore: records.length >= limit,
+    total: typeof total === 'number' && Number.isFinite(total) ? total : undefined,
+  }
 }
 
 // ── naming ─────────────────────────────────────────────────────────────────
@@ -320,6 +365,18 @@ interface GroupInfo {
   subject?: string
   size?: number
   pictureUrl?: string
+}
+
+/**
+ * Evolution's paginated envelope. Older shapes answered with a bare array, which
+ * is why `listMessages` still handles one — and why `total` is optional here
+ * rather than assumed.
+ */
+interface EvolutionMessagePage {
+  messages?: {
+    total?: number
+    records?: EvolutionMessageRow[]
+  }
 }
 
 interface EvolutionMessageRow {

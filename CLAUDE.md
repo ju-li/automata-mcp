@@ -125,9 +125,17 @@ Three preconditions, two of which must hold **before** the QR is scanned:
 
 **`syncFullHistory: true` also turns off Evolution's group filter.** Its `shouldIgnoreJid` stops excluding `@g.us` regardless of `groupsIgnore`, so group chats sync and show up in `list-chats` and the token scope picker. Per-token chat scoping contains that, but it is a wider default surface than before.
 
-**Bumping the pinned Evolution tag means re-verifying this.** Specifically: that `messaging-history.set` still gates on `SAVE_DATA.HISTORIC`, that the settings schema still requires those six booleans, and that `syncFullHistory` still reaches the socket config.
+**Bumping the pinned Evolution tag means re-verifying this.** Specifically: that `messaging-history.set` still gates on `SAVE_DATA.HISTORIC`, that the settings schema still requires those six booleans, and that `syncFullHistory` still reaches the socket config. The paging facts below — `fetchMessages`' envelope, its `count`, its ordering and its skip/take — come from the same source and need the same re-check.
 
 Reading it back: `listMessages()` takes `{ limit, page, since, until }`. Evolution applies its timestamp filter only when **both** bounds are present and silently ignores a one-sided range, so `chats.ts` widens the missing side rather than passing it through. There is no text search upstream — do not offer one.
+
+**A page must say it is a page.** `listMessages()` returns `MessagePage` — `{ messages, hasMore, total? }` — not a bare array, and `read-messages` surfaces `hasMore`, `nextPage`, `covered` and a `note` in words. It reads newest-first, so truncating a `since`-bounded window drops the **old** end: precisely the part a caller who named a date range asked for, keeping the part they would have got without asking. Returned bare it reads as the complete window, and the summary written from it has a hole in it — which is the bug this replaced.
+
+Two rules hold that up. `hasMore` is `records.length >= limit` and is **never** derived from `total`: a count that is wrong upstream would otherwise drive a caller into paging forever, whereas a full final page merely costs one extra call that returns nothing. And `read-messages` pins `until` itself as soon as `since` is given, because `listMessages` widens a missing upper bound to *now* — a value that moves between calls, so an unpinned page 2 comes from a different range than page 1. The pinned window is echoed back as `window` for the caller to pass to the next page. No range is added when there is no `since`; `Message` is indexed by `instanceId` and nothing else.
+
+`total` comes from Evolution's envelope, which 2.3.7's `fetchMessages` builds as `{ messages: { total, pages, currentPage, records } }`. `total` is a `prisma.message.count` over the **same** where clause as the `findMany`, `timestampFilter` included, so it is the count of the range asked for and not of the chat — verified against the pinned tag. It is surfaced as `totalMatching`, with `totalPages` alongside it. Still read defensively (finite number or dropped): a tag bump that made the count stop tracking the `where` would turn it into a confident wrong number, which is the same class of bug as the missing `hasMore`. Check that it shrinks with a narrowed `messageTimestamp` before trusting a new tag.
+
+Also confirmed there, and depended on: `orderBy: { messageTimestamp: 'desc' }`, `skip = offset * (page - 1)` with `take = offset`, so pages are 1-based, non-overlapping and newest-first — and the timestamp filter really is applied only when both `gte` and `lte` are set.
 
 ## Webhook delivery is gated twice
 

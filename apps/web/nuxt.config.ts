@@ -35,6 +35,10 @@ export default defineNuxtConfig({
       'Reading and searching cover the history imported when the account was paired as well as',
       'everything since, so older conversations are reachable. An account paired before history',
       'import was added has only what arrived since.',
+      '`read-messages` answers with one page, newest first, and says so: when its `hasMore` is true',
+      'there are older messages you have not seen, including inside a `since`/`until` range you asked',
+      'for. Page with `nextPage` until `hasMore` is false before summarising or reporting on a range,',
+      'and treat `covered` — not the range you requested — as what you have actually read.',
     ].join(' '),
     // Opt out of evlog wide-events on the MCP route. Request bodies and headers on
     // /mcp carry bearer tokens; see server/utils/redact.ts.
