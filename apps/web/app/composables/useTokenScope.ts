@@ -14,6 +14,10 @@ export interface ScopedChat {
   /** Members in a group. Absent when the group lookup was skipped as unnecessary. */
   participantCount?: number
   profilePicUrl?: string
+  /** Evolution's Chat row mtime, ISO 8601. A fallback when lastMessageAt is absent. */
+  updatedAt?: string
+  /** When the last message was sent, ISO 8601, when Evolution's row carries one. */
+  lastMessageAt?: string
 }
 
 export interface TokenScope {
