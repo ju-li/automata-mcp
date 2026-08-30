@@ -4,36 +4,115 @@ import { ArrowUpDownIcon, ChevronDownIcon, ChevronUpIcon, SearchIcon, UserIcon, 
 /**
  * Every conversation on the account, as a table.
  *
- * Opened from the dashboard's "Chats" stat card. The count on that card is
- * Evolution's own `_count.Chat` and is unbounded, while this list is one page —
- * hence the truncation line under the table when the two disagree.
+ * Opened from the dashboard's "Chats" stat card. The two numbers do not measure
+ * the same thing and must not be subtracted from one another: the card is
+ * Evolution's `_count.Chat`, rows in its `Chat` table, while this list is
+ * `DISTINCT ON (remoteJid)` over `"Message"`. History sync records a chat for
+ * every conversation the phone lists but keeps only the messages it was actually
+ * sent, so a shortfall here is usually conversations with nothing stored to show
+ * — not a page boundary. `hasMore` from the endpoint is the only thing that says
+ * whether another page exists.
  */
 const props = defineProps<{
   instanceId: string
   open: boolean
-  /** The dashboard's chat count, used only to tell the reader when this list is short. */
+  /** The dashboard's chat count. Explains a shortfall; never decides whether to fetch. */
   total?: number
 }>()
 
 const emit = defineEmits<{ 'update:open': [boolean] }>()
 
 /**
+ * One page, big. Each request re-reads Evolution's whole contact table to name
+ * the rows, so the cost is per page rather than per row and a second page is a
+ * genuine expense — hence a large `take` and an explicit button rather than
+ * paging on scroll.
+ */
+const TAKE = 2000
+
+interface ChatPageResponse {
+  chats: ScopedChat[]
+  hasMore: boolean
+}
+
+/**
+ * Pages accumulate here rather than in a `useFetch` binding: a reactive URL
+ * *replaces* `data`, and appending is the whole point. Same accumulator shape the
+ * scope picker uses for hand-added numbers.
+ */
+const rows = ref<ScopedChat[]>([])
+const hasMore = ref(false)
+/**
+ * Offset for the next request: rows Evolution has handed over, not rows kept.
+ * The dedupe below can drop one, and paging from the kept count would walk
+ * backwards over ground already covered.
+ */
+const nextSkip = ref(0)
+/**
+ * Which open the in-flight request belongs to. Closing and reopening resets the
+ * accumulator, and a page still in flight from the previous open would otherwise
+ * land in it and set `hasMore` and `nextSkip` from a run that no longer exists.
+ */
+const generation = ref(0)
+const loadingFirst = ref(true)
+const loadingMore = ref(false)
+const loadFailed = ref(false)
+
+/**
  * Deliberately deferred, for the same reason as the token scope picker: this call
  * can spend eight seconds inside Evolution's group lookup, and awaiting it in
  * setup would hold the whole dialog off the screen — which reads as a click that
- * did nothing. `immediate: false` also keeps the request off the dashboard's own
- * page load; it is only paid when the dialog is actually opened.
+ * did nothing. Nothing is fetched until the dialog is actually opened.
  */
-const { data, status, execute } = useFetch<{ chats: ScopedChat[] }>(
-  () => `/api/instances/${props.instanceId}/chats?take=2000`,
-  { lazy: true, immediate: false },
-)
+async function loadPage(skip: number) {
+  const mine = generation.value
+  loadFailed.value = false
+  if (skip === 0) loadingFirst.value = true
+  else loadingMore.value = true
 
-// 'idle' counts as loading: it is what status reads before the request is
-// dispatched, and treating it as settled flashes the empty state.
-const loading = computed(() => status.value === 'idle' || status.value === 'pending')
-const chats = computed(() => data.value?.chats ?? [])
-const truncated = computed(() => Boolean(props.total && chats.value.length < props.total))
+  try {
+    const page = await $fetch<ChatPageResponse>(
+      `/api/instances/${props.instanceId}/chats`,
+      { query: { take: TAKE, skip } },
+    )
+
+    if (mine !== generation.value) return
+
+    // Deduped by JID: Evolution orders this listing by last activity, so a
+    // message arriving between two requests shifts a row across the offset and
+    // the same chat comes back twice.
+    const byJid = new Map(rows.value.map(chat => [chat.jid, chat]))
+    for (const chat of page.chats) byJid.set(chat.jid, chat)
+
+    rows.value = [...byJid.values()]
+    hasMore.value = page.hasMore
+    nextSkip.value = skip + page.chats.length
+  }
+  catch (error) {
+    if (mine !== generation.value) return
+    console.error('[chats] could not load page:', error)
+    // Leave `hasMore` alone. A failed page that clears it would read as the end
+    // of the list, which is the one thing this must never claim wrongly.
+    loadFailed.value = true
+  }
+  finally {
+    if (mine === generation.value) {
+      loadingFirst.value = false
+      loadingMore.value = false
+    }
+  }
+}
+
+const loading = computed(() => loadingFirst.value)
+const chats = computed(() => rows.value)
+
+/**
+ * The list is short and there is no next page — so the missing conversations are
+ * ones Evolution cannot list, not ones behind an offset.
+ */
+const unlistable = computed(() =>
+  !hasMore.value && chats.value.length < (props.total ?? 0),
+)
 
 // ── search ─────────────────────────────────────────────────────────────────
 const search = ref('')
@@ -41,7 +120,12 @@ const search = ref('')
 watch(() => props.open, (open) => {
   if (!open) return
   search.value = ''
-  execute()
+  generation.value++
+  rows.value = []
+  hasMore.value = false
+  nextSkip.value = 0
+  loadFailed.value = false
+  loadPage(0)
 })
 
 const filtered = computed(() => {
@@ -256,21 +340,48 @@ function formatLastActivity(chat: ScopedChat): string {
         </Table>
       </div>
 
-      <p class="text-xs text-muted-foreground">
-        <template v-if="loading">
-          Loading conversations…
-        </template>
-        <template v-else-if="truncated">
-          Showing {{ count.format(chats.length) }} of {{ count.format(total ?? 0) }} chats.
-          The rest are beyond the page this account returns in one request.
-        </template>
-        <template v-else-if="search.trim()">
-          {{ count.format(sorted.length) }} of {{ count.format(chats.length) }} chats match.
-        </template>
-        <template v-else>
-          {{ count.format(chats.length) }} {{ chats.length === 1 ? 'chat' : 'chats' }}.
-        </template>
-      </p>
+      <!--
+        The button sits out here rather than in a TableFooter: the scrolling
+        element is the table's own container, so a footer row would scroll out of
+        sight exactly when it is needed.
+      -->
+      <div class="flex items-center justify-between gap-3">
+        <p class="text-xs text-muted-foreground">
+          <template v-if="loading">
+            Loading conversations…
+          </template>
+          <!-- Search first: the shortfall line below is true permanently on most
+               accounts, and would otherwise mask the match count for good. -->
+          <template v-else-if="search.trim()">
+            {{ count.format(sorted.length) }} of {{ count.format(chats.length) }} chats match.
+          </template>
+          <template v-else-if="hasMore">
+            Showing {{ count.format(chats.length) }}<template v-if="total"> of {{ count.format(total) }}</template> chats.
+          </template>
+          <template v-else-if="unlistable">
+            Showing {{ count.format(chats.length) }} conversations with recorded
+            messages. The Chats card counts {{ count.format(total ?? 0) }} chat
+            records; the rest have no messages stored, so there is nothing to list.
+          </template>
+          <template v-else>
+            {{ count.format(chats.length) }} {{ chats.length === 1 ? 'chat' : 'chats' }}.
+          </template>
+          <span v-if="loadFailed" class="text-destructive">
+            That page could not be loaded. Try again.
+          </span>
+        </p>
+
+        <Button
+          v-if="hasMore && !loading"
+          variant="outline"
+          size="sm"
+          class="shrink-0"
+          :disabled="loadingMore"
+          @click="loadPage(nextSkip)"
+        >
+          {{ loadingMore ? 'Loading…' : 'Load more' }}
+        </Button>
+      </div>
     </DialogContent>
   </Dialog>
 </template>
