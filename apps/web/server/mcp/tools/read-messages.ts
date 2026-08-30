@@ -14,7 +14,8 @@ export default defineMcpTool({
     + 'returned by list-chats. Covers the history imported when the account was '
     + 'paired as well as everything since, so older conversations are reachable — '
     + 'use `page` to walk back beyond `limit`, or `since`/`until` to target a date '
-    + 'range. To find a message by what it says, prefer search-messages when this '
+    + 'range. Reaction messages are left out unless `includeReactions` is set. '
+    + 'To find a message by what it says, prefer search-messages when this '
     + 'connector offers it.',
   annotations: {
     readOnlyHint: true,
@@ -28,8 +29,15 @@ export default defineMcpTool({
     page: z.number().int().min(1).default(1).describe('1-based page of `limit` messages, counting back from the newest'),
     since: z.string().optional().describe('Only messages at or after this date, e.g. 2024-03-01 or 2024-03-01T12:00:00Z'),
     until: z.string().optional().describe('Only messages at or before this date'),
+    includeReactions: z.boolean().default(false).describe(
+      'Include reaction messages. Each reaction is its own record — an id, an '
+      + 'author, a timestamp and an emoji — so in an active group they are a '
+      + 'large share of a page while rarely mattering for reconstructing the '
+      + 'conversation. Off by default for that reason; turn it on when who '
+      + 'reacted is the question.',
+    ),
   },
-  handler: async ({ jid, limit, page, since, until }) => {
+  handler: async ({ jid, limit, page, since, until, includeReactions }) => {
     const { instance, scope } = useMcpAuth()
 
     assertChatAllowed(scope, jid)
@@ -39,9 +47,19 @@ export default defineMcpTool({
       page,
       since: toIsoDate(since, 'since'),
       until: toIsoDate(until, 'until'),
+      includeReactions,
     })
 
-    return { jid, page, messages, count: messages.length }
+    return {
+      jid,
+      page,
+      messages,
+      count: messages.length,
+      // Said out loud rather than left to be inferred. A whole class of message
+      // is missing from this page, and a caller that does not know it was
+      // dropped reads the silence as "nobody reacted".
+      ...(!includeReactions && { reactionsExcluded: true }),
+    }
   },
 })
 

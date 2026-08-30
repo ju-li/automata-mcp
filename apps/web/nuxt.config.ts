@@ -35,6 +35,10 @@ export default defineNuxtConfig({
       'Reading and searching cover the history imported when the account was paired as well as',
       'everything since, so older conversations are reachable. An account paired before history',
       'import was added has only what arrived since.',
+      'Reactions are stored as ordinary messages, one record per emoji, and are left out of both',
+      'reads and searches unless you pass `includeReactions: true` — a response that omitted them',
+      'says so with `reactionsExcluded`. Ask for them when who reacted is the question, not to',
+      'reconstruct what was said.',
     ].join(' '),
     // Opt out of evlog wide-events on the MCP route. Request bodies and headers on
     // /mcp carry bearer tokens; see server/utils/redact.ts.

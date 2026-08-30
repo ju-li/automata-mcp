@@ -87,6 +87,8 @@ Built on `@nuxtjs/mcp-toolkit` (**pinned to 0.19.0**). It auto-imports `defineMc
 
 **Adding a tool:** drop a file in `apps/web/server/mcp/tools/` — discovery is automatic, no registration. Give every tool a `title` (shown in client UI), a `description` written for the model, and accurate `readOnlyHint` / `destructiveHint`. Copy `get-connection-status.ts` (read) or `send-text-message.ts` (write).
 
+**Reactions are excluded from reads and searches by default.** Evolution stores every 👍 as an ordinary `Message` row — its own id, author, timestamp and type, to carry one emoji — so in an active group they are a large share of a page and almost never help reconstruct a conversation. `read-messages` and `search-messages` both take `includeReactions`, default `false`, and both say `reactionsExcluded: true` in the response when they left them out; a page that silently drops a message class reads as "nobody reacted". Two layers do the excluding and both are needed: `listMessages` sends `where.messageType = { not: 'reactionMessage' }` so Evolution builds a full page rather than one this app then guts, and `isReaction()` in `chats.ts` re-checks the payload because `messageType` is Baileys' `getContentType()` verbatim — it returns the *first* `conversation`/`*Message` key, so a reaction arriving with a `messageContextInfo` can be typed as that instead. `searchMessages()` filters on the payload alone for the same reason, and its `COALESCE` gained a `reactionMessage->>'text'` arm — before it, a reaction had no `body` and `body IS NOT NULL` dropped it, silently rather than by decision.
+
 **Tools take no account argument.** The token is bound to one instance, so `useMcpAuth()` and `useEvolutionClient()` already resolve to it. Adding an instance parameter would reintroduce the possibility of addressing the wrong number. Never accept an Evolution API key as a tool argument either.
 
 **`nitro.experimental.asyncContext: true` is required — do not turn it off.** Tool handlers are invoked by the MCP SDK with its `RequestHandlerExtra`, not an H3 event, so `useEvent()` is the only way to reach per-request credentials, and it needs async context.
@@ -125,9 +127,9 @@ Three preconditions, two of which must hold **before** the QR is scanned:
 
 **`syncFullHistory: true` also turns off Evolution's group filter.** Its `shouldIgnoreJid` stops excluding `@g.us` regardless of `groupsIgnore`, so group chats sync and show up in `list-chats` and the token scope picker. Per-token chat scoping contains that, but it is a wider default surface than before.
 
-**Bumping the pinned Evolution tag means re-verifying this.** Specifically: that `messaging-history.set` still gates on `SAVE_DATA.HISTORIC`, that the settings schema still requires those six booleans, and that `syncFullHistory` still reaches the socket config.
+**Bumping the pinned Evolution tag means re-verifying this.** Specifically: that `messaging-history.set` still gates on `SAVE_DATA.HISTORIC`, that the settings schema still requires those six booleans, that `syncFullHistory` still reaches the socket config, and that `fetchMessages` still passes `where.messageType` through to Prisma unmangled (the reaction filter rides on it; an operator Prisma rejects answers 500, so a regression is loud).
 
-Reading it back: `listMessages()` takes `{ limit, page, since, until }`. Evolution applies its timestamp filter only when **both** bounds are present and silently ignores a one-sided range, so `chats.ts` widens the missing side rather than passing it through. There is no text search upstream — do not offer one.
+Reading it back: `listMessages()` takes `{ limit, page, since, until, includeReactions }`. Evolution applies its timestamp filter only when **both** bounds are present and silently ignores a one-sided range, so `chats.ts` widens the missing side rather than passing it through. There is no text search upstream — do not offer one.
 
 ## Webhook delivery is gated twice
 

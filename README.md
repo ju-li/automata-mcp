@@ -228,8 +228,10 @@ Evolution 2.3.7 cannot search message content. `POST /chat/findMessages` accepts
 `where.message` — its request schema even documents the field — and then never
 reads it, so a content search comes back as an unfiltered page that looks like a
 result set. The only filters it honours are `id`, `source`, `messageType`, a
-`messageTimestamp` range, and `key.{id,remoteJid,fromMe,participant}`. Searching
-therefore means reading Evolution's Postgres directly, via
+`messageTimestamp` range, and `key.{id,remoteJid,fromMe,participant}`. One of
+those does earn its keep: `read-messages` passes `messageType: { not:
+'reactionMessage' }` to drop reactions before the page is built. Content search,
+though, means reading Evolution's Postgres directly, via
 `NUXT_EVOLUTION_DATABASE_URL`. Leave it empty and the tool is not registered at
 all — clients never see it — rather than failing when called.
 
