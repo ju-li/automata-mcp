@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useIntervalFn } from '@vueuse/core'
-import { ArrowLeftIcon, SmartphoneIcon } from '@lucide/vue'
+import { ArrowLeftIcon, MessagesSquareIcon, SmartphoneIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
 interface StatusResponse {
@@ -38,6 +38,7 @@ const pairingTimedOut = ref(false)
 const pairingStartedAt = ref(Date.now())
 const busy = ref(false)
 const deleteConfirm = ref('')
+const chatsOpen = ref(false)
 
 // ── pairing ────────────────────────────────────────────────────────────────
 // Polling the QR endpoint is what drives pairing: Evolution starts the
@@ -229,9 +230,21 @@ async function destroy() {
 
       <div class="grid gap-4 sm:grid-cols-3">
         <StatCard label="Messages" :value="data?.stats.messages ?? 0" />
-        <StatCard label="Chats" :value="data?.stats.chats ?? 0" />
+        <StatCard
+          label="Chats"
+          :value="data?.stats.chats ?? 0"
+          :icon="MessagesSquareIcon"
+          clickable
+          @click="chatsOpen = true"
+        />
         <StatCard label="Contacts" :value="data?.stats.contacts ?? 0" />
       </div>
+
+      <ChatsDialog
+        v-model:open="chatsOpen"
+        :instance-id="id"
+        :total="data?.stats.chats ?? 0"
+      />
 
       <p class="text-xs text-muted-foreground">
         WhatsApp hands over its history only at the moment a device is linked, so
