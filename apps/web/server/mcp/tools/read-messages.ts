@@ -30,8 +30,10 @@ export default defineMcpTool({
     + '`hasMore` is false before treating the range as fully read. `covered` '
     + 'reports the span this page actually covers, which for a truncated range is '
     + 'narrower than the one you asked for, and `totalMatching`/`totalPages` say '
-    + 'how much the range holds in full. To find a message by what it says, '
-    + 'prefer search-messages when this connector offers it.',
+    + 'how much the range holds in full. @-mentions in the text are shown as '
+    + 'names where the account knows them, and left as raw numeric ids where it '
+    + 'does not — an id is not a name to guess at. To find a message by what it '
+    + 'says, prefer search-messages when this connector offers it.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,

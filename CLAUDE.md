@@ -52,7 +52,7 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
   server/api/                auth/, instances/, tokens/
   server/mcp/index.ts        default MCP handler (auth middleware)
   server/mcp/tools/          one file per tool, auto-discovered
-  server/utils/              pocketbase, session, auth-cookie, mcp-auth, instances, tokens, evolution, evolution-db, redact
+  server/utils/              pocketbase, session, auth-cookie, mcp-auth, instances, tokens, evolution, evolution-db, mentions, redact
 services/pocketbase/         pinned PocketBase build + committed schema migrations
 docker-compose.dev.yml       services only, NOT Nuxt
 ```
@@ -139,7 +139,52 @@ Also confirmed there, and depended on: `orderBy: { messageTimestamp: 'desc' }`, 
 
 **`_count.Chat` and `findChats` count different tables.** The dashboard's chat stat is `_count.Chat` — rows in Evolution's `Chat` table. `listChats()` reads `findChats`, whose raw query is `DISTINCT ON (remoteJid)` over `"Message"`. `messaging-history.set` takes `chats` and `messages` as separate arrays and writes a `Chat` row for every conversation the phone lists while persisting only the message slice WhatsApp actually delivered, so the listing is routinely and permanently the shorter of the two. The gap is not a page boundary and no offset closes it: a "load more" driven off that subtraction fetches nothing, forever. `listChats()` therefore returns `ChatPage` — `{ chats, hasMore }` — and `hasMore` is `rows.length >= take`, the same "the page came back full" rule as `MessagePage`. Nothing may treat the two counts as comparable.
 
-Paging chats is real, though: 2.3.7 maps `take` to `LIMIT` and `skip` to `OFFSET`, and `contactValidateSchema` sets no `additionalProperties: false`, so both survive the route validator — re-verify that on a tag bump. Two consequences for callers. The order is `updatedAt DESC`, which live traffic reshuffles, so an accumulating client dedupes by JID and pages from rows *received* rather than rows *kept*. And every call re-reads Evolution's whole contact table to name the rows (the endpoint filters to one JID, not to a set), so the cost is per page: raise `take` before walking `skip`. `listChats` still swallows a failed **first** page — an empty list is the honest answer for a fresh account and must not break the scope picker — but rethrows on `skip > 0`, because a swallowed later page reads as the end of the list.
+Paging chats is real, though: 2.3.7 maps `take` to `LIMIT` and `skip` to `OFFSET`, and `contactValidateSchema` sets no `additionalProperties: false`, so both survive the route validator — re-verify that on a tag bump. Two consequences for callers. The order is `updatedAt DESC`, which live traffic reshuffles, so an accumulating client dedupes by JID and pages from rows *received* rather than rows *kept*. And naming the rows costs Evolution's whole contact table (the endpoint filters to one JID, not to a set), so it goes through `contactDirectory()` — `fetchContacts` behind a 5-minute per-account cache — rather than being re-read on every page and again for every mention lookup. Only *successes* are cached: unlike the group and participant lookups this is a plain database read that answers while the account is disconnected, so a failure is a real fault to retry, not an offline state to back off from. `listChats` still swallows a failed **first** page — an empty list is the honest answer for a fresh account and must not break the scope picker — but rethrows on `skip > 0`, because a swallowed later page reads as the end of the list.
+
+## Mentions are resolved from `contextInfo`, never from the text
+
+WhatsApp writes an @-mention as the bare local part of the mentioned JID, and in a
+group that JID is a **LID** (`@lid`) — a per-user identity, not a phone number and
+not something a country code can be read off. Left raw it reads as an opaque
+number, and a model summarising a thread guesses who was addressed. That guess is
+the whole bug: it produces confident misattribution.
+
+`server/utils/mentions.ts` rewrites them inline (`@79972425314508` → `@Ju`) on both
+read paths. Three things hold it up.
+
+**Replacement is driven off `contextInfo.mentionedJid`, never off a `@\d+` scan.**
+Only strings WhatsApp itself marked as mentions are ever rewritten, so an order id,
+a price or a typed-out phone number is left alone. `applyMentions` does one pass
+over a single alternation of every resolved local part, longest first with a
+`(?!\d)` guard — without that, a short LID silently eats the front of a longer one,
+and without the single pass a substituted name can be rewritten again by the next
+mention.
+
+**Read it from the `contextInfo` column, not from `message`.** 2.3.7's
+`prepareMessage` rewrites `extendedTextMessage` into `message.conversation` and
+`delete`s the original, so a mentioning text message stores *nothing* under
+`message->extendedTextMessage->contextInfo` — which is also why such a message
+arrives with `messageType: "conversation"`. The mentions survive in the dedicated
+`Message.contextInfo` column. `fetchMessages` already selects it, so the HTTP path
+needs no extra round trip; `evolution-db.ts` selects `contextInfo->'mentionedJid'`,
+still a column of `"Message"` and so inside the existing read-only grant.
+
+**Names come from group participants first, contacts second.** Evolution's
+`Contact` rows are written keyed on `key.remoteJid`, which for a group message is
+the *group's* JID — a good source for 1:1 chats and a poor one for group members.
+`GET /group/participants` is the authority on who is in a group, and a participant
+is indexed under every identity it carries (`id`, `lid`, `phoneNumber`, `jid`)
+because which form appears in `mentionedJid` is WhatsApp's choice. The directory is
+keyed on the **local part** so either form resolves, and the lookup is display-only
+— no JID is constructed and nothing addresses a chat by one, so the "never
+normalise JIDs locally" rule below is not in play.
+
+All of it is best-effort and degrades to the raw id: participants need a live
+socket, so a disconnected account resolves nothing and must still return its
+messages. `read-messages` is one chat and so one lookup; `search-messages` spans
+many, so it resolves from contacts first and only pays for group membership where
+something is still unresolved, capped busiest-group-first. A raw id is honest; a
+wrong name is the failure the whole module exists to prevent.
 
 ## Webhook delivery is gated twice
 

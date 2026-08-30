@@ -1,5 +1,6 @@
 import type { AppInstance } from './pocketbase'
 import type { EvolutionClient } from './evolution'
+import { applyMentions, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
 
 /**
  * Reading conversations out of Evolution.
@@ -137,7 +138,7 @@ export async function listChats(instance: AppInstance, query: ChatQuery = {}): P
   const needsGroups = drafts.some(draft => draft.isGroup && !draft.chatName)
 
   const [contacts, groups] = await Promise.all([
-    fetchContacts(instance, evolution),
+    contactDirectory(instance, evolution),
     needsGroups ? fetchGroups(instance, evolution) : Promise.resolve(emptyGroups),
   ])
 
@@ -257,14 +258,29 @@ export async function listMessages(
 
   const total = Array.isArray(result) ? undefined : result?.messages?.total
 
+  const drafts = records.map(row => ({
+    id: row.key?.id,
+    fromMe: Boolean(row.key?.fromMe),
+    author: row.pushName ?? undefined,
+    timestamp: isoFromEpochSeconds(row.messageTimestamp),
+    type: row.messageType ?? undefined,
+    text: previewOf(row.message),
+    mentioned: mentionedJidsOf(row.contextInfo),
+  }))
+
+  const directory = drafts.some(draft => draft.mentioned.length)
+    ? await mentionDirectory({
+        instance,
+        evolution,
+        chatJids: [remoteJid],
+        contacts: await contactDirectory(instance, evolution),
+      })
+    : undefined
+
   return {
-    messages: records.map(row => ({
-      id: row.key?.id,
-      fromMe: Boolean(row.key?.fromMe),
-      author: row.pushName ?? undefined,
-      timestamp: isoFromEpochSeconds(row.messageTimestamp),
-      type: row.messageType ?? undefined,
-      text: previewOf(row.message),
+    messages: drafts.map(({ mentioned, ...message }) => ({
+      ...message,
+      text: directory ? applyMentions(message.text, mentioned, directory) : message.text,
     })),
     // A page short of `limit` is the end of the range; a full one may have more
     // behind it. Deliberately not computed from `total` — see `MessagePage`.
@@ -274,6 +290,50 @@ export async function listMessages(
 }
 
 // ── naming ─────────────────────────────────────────────────────────────────
+
+/**
+ * `fetchContacts`, memoised per account.
+ *
+ * The endpoint has no JID-list filter, so naming anything costs the whole contact
+ * table — and it was previously paid again on every `listChats` call, i.e. once
+ * per page while walking `skip`, plus once more for every mention lookup. Contact
+ * names change on a human timescale, so a short TTL removes almost all of that
+ * without anyone noticing a stale name.
+ *
+ * Failures are deliberately **not** cached here: unlike the group and participant
+ * lookups this is a plain database read on Evolution's side that answers even
+ * while the account is disconnected, so a failure is a real fault worth retrying
+ * rather than an expected offline state to back off from.
+ */
+const CONTACT_CACHE_TTL_MS = 5 * 60_000
+const contactCache = new Map<string, { expiresAt: number, contacts: Map<string, ContactInfo> }>()
+const contactFetches = new Map<string, Promise<Map<string, ContactInfo>>>()
+
+export async function contactDirectory(
+  instance: AppInstance,
+  evolution: EvolutionClient,
+): Promise<Map<string, ContactInfo>> {
+  const cached = contactCache.get(instance.id)
+  if (cached && Date.now() < cached.expiresAt) return cached.contacts
+
+  // Concurrent callers share one fetch, as `pocketbaseAdmin()` does. A search
+  // labels its chats and resolves its mentions at the same time, so a cold cache
+  // would otherwise pull the entire contact table twice for one request.
+  const inFlight = contactFetches.get(instance.id)
+  if (inFlight) return inFlight
+
+  const fetching = fetchContacts(instance, evolution)
+    .then((contacts) => {
+      if (contacts.size) {
+        contactCache.set(instance.id, { expiresAt: Date.now() + CONTACT_CACHE_TTL_MS, contacts })
+      }
+      return contacts
+    })
+    .finally(() => contactFetches.delete(instance.id))
+
+  contactFetches.set(instance.id, fetching)
+  return fetching
+}
 
 /**
  * Evolution's contact table, keyed by JID.
@@ -365,20 +425,6 @@ async function fetchGroups(instance: AppInstance, evolution: EvolutionClient): P
   return byJid
 }
 
-/**
- * A name worth showing, or nothing.
- *
- * Evolution falls back to the bare number when it has no real name — in
- * `Contact.pushName` and on a chat row alike — so a "name" equal to the JID's
- * local part carries no information. Returning undefined lets the next candidate
- * be tried instead of ending the search on a number dressed up as a name.
- */
-function meaningfulName(value: string | undefined | null, localPart: string): string | undefined {
-  const trimmed = value?.trim()
-  if (!trimmed || trimmed === localPart) return undefined
-  return trimmed
-}
-
 // ── internals ──────────────────────────────────────────────────────────────
 
 /**
@@ -449,6 +495,16 @@ interface EvolutionMessageRow {
   messageTimestamp?: number | string
   messageType?: string
   message?: unknown
+  /**
+   * Where the mentions actually are.
+   *
+   * 2.3.7's `prepareMessage` rewrites `extendedTextMessage` into
+   * `message.conversation` and deletes the original, so a mentioning text message
+   * stores nothing under `message->extendedTextMessage->contextInfo`. Evolution
+   * keeps the content message's `contextInfo` in its own column instead, and
+   * `fetchMessages` selects it — which is why this needs no extra round trip.
+   */
+  contextInfo?: unknown
 }
 
 /**
