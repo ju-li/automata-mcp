@@ -178,6 +178,14 @@ export interface MessageQuery {
   since?: string
   /** Inclusive upper bound, ISO 8601. */
   until?: string
+  /**
+   * Keep reaction messages in the result.
+   *
+   * Defaults to true, which is what this helper has always done — nothing
+   * changes without an explicit argument. The MCP tool is the thing that opts
+   * out; see `read-messages`.
+   */
+  includeReactions?: boolean
 }
 
 /**
@@ -236,7 +244,7 @@ export async function listMessages(
 ): Promise<MessagePage> {
   const evolution = evolutionClientForInstance(instance)
 
-  const { limit = 50, page = 1, since, until } = query
+  const { limit = 50, page = 1, since, until, includeReactions = true } = query
 
   const where: Record<string, unknown> = { key: { remoteJid } }
   if (since || until) {
@@ -244,6 +252,17 @@ export async function listMessages(
       gte: since ?? EPOCH_ISO,
       lte: until ?? new Date().toISOString(),
     }
+  }
+  if (!includeReactions) {
+    // Excluded server-side, not just dropped on arrival, so the page still comes
+    // back `limit` long — in an active group a post-fetch filter can turn a page
+    // of 50 into a dozen. Evolution hands `where.messageType` straight to Prisma
+    // (`messageType: query?.where?.messageType` in `fetchMessages`) and its
+    // request schema does not seal `where`, so a `not` filter reaches the query
+    // builder untouched, including the `message.count()` behind the envelope's
+    // total. Verified against 2.3.7 — an operator Prisma does not know answers
+    // 500 there, so this breaking would be loud rather than silent.
+    where.messageType = { not: 'reactionMessage' }
   }
 
   const result = await evolution<EvolutionMessagePage | EvolutionMessageRow[]>(
@@ -257,8 +276,11 @@ export async function listMessages(
 
   const total = Array.isArray(result) ? undefined : result?.messages?.total
 
+  // Second layer, and not redundant: see `isReaction`.
+  const visible = includeReactions ? records : records.filter(row => !isReaction(row))
+
   return {
-    messages: records.map(row => ({
+    messages: visible.map(row => ({
       id: row.key?.id,
       fromMe: Boolean(row.key?.fromMe),
       author: row.pushName ?? undefined,
@@ -268,6 +290,13 @@ export async function listMessages(
     })),
     // A page short of `limit` is the end of the range; a full one may have more
     // behind it. Deliberately not computed from `total` — see `MessagePage`.
+    //
+    // Counted on `records`, never on `visible`. What Evolution returned is what
+    // says whether a page was full; measuring the list after reactions were
+    // dropped would report a mostly-reaction page as the end of the
+    // conversation. The two agree anyway whenever the server-side
+    // `where.messageType` filter is doing its job — `visible` only differs when
+    // the local check catches something the filter could not.
     hasMore: records.length >= limit,
     total: typeof total === 'number' && Number.isFinite(total) ? total : undefined,
   }
@@ -449,6 +478,22 @@ interface EvolutionMessageRow {
   messageTimestamp?: number | string
   messageType?: string
   message?: unknown
+}
+
+/**
+ * A reaction, whatever Evolution happened to label it.
+ *
+ * `messageType` is Baileys' `getContentType()` verbatim, and that returns the
+ * *first* key of the decoded payload that is `conversation` or ends in
+ * `Message`. A reaction delivered alongside a `messageContextInfo` can therefore
+ * be stored under that type while `message.reactionMessage` sits right there in
+ * the payload. So the payload is the authority and `messageType` is only a hint
+ * — which is why the server-side `where` filter in `listMessages` cannot be the
+ * only layer, however well it works.
+ */
+function isReaction(row: EvolutionMessageRow): boolean {
+  return row.messageType === 'reactionMessage'
+    || Boolean((row.message as Record<string, unknown> | undefined)?.reactionMessage)
 }
 
 /**
