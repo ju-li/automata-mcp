@@ -10,8 +10,9 @@ Evolution API, Postgres and Redis are dependencies you run, not code in this rep
 
 > **Status.** Sign-up, WhatsApp pairing, the per-account dashboard, connector
 > token provisioning and history import all work. Five MCP tools: connection
-> status, chat listing, message reading, message search (opt-in — see "Message
-> search") and text sending. Webhook event handling is not built;
+> status, chat listing, message reading, message search and text sending. Reading
+> and searching both need `NUXT_EVOLUTION_DATABASE_URL` — see "Reading and
+> searching messages". Webhook event handling is not built;
 > `/api/webhook/evolution` is a stub that logs and acks.
 
 ## Layout
@@ -219,32 +220,48 @@ pnpm dlx @modelcontextprotocol/inspector
 Point it at `http://localhost:3000/mcp/<token>`, or at `http://localhost:3000/mcp`
 with an `Authorization: Bearer <token>` header.
 
-### Message search
+### Reading and searching messages
 
-`search-messages` is **off unless you configure it**, and it is the one feature
-that does not go through the Evolution API.
+`NUXT_EVOLUTION_DATABASE_URL` is **required**. Both `read-messages` and
+`search-messages` read Evolution's Postgres directly, and neither can answer
+without it — pairing, `list-chats` and `send-text-message` still work, and the app
+says so once at startup. It is the one part of this app that does not go through
+the Evolution API, for two separate reasons.
 
-Evolution 2.3.7 cannot search message content. `POST /chat/findMessages` accepts a
-`where.message` — its request schema even documents the field — and then never
-reads it, so a content search comes back as an unfiltered page that looks like a
-result set. The only filters it honours are `id`, `source`, `messageType`, a
-`messageTimestamp` range, and `key.{id,remoteJid,fromMe,participant}`. One of
-those does earn its keep: `read-messages` passes `messageType: { not:
-'reactionMessage' }` to drop reactions before the page is built. WhatsApp's own
-control records cannot ride that same trick — `messageType` carries no subtype,
-and excluding `protocolMessage` wholesale would delete every message edit along
-with the bookkeeping — so those are dropped locally and counted back to the
-caller as `protocolMessagesExcluded`. Content search,
-though, means reading Evolution's Postgres directly, via
-`NUXT_EVOLUTION_DATABASE_URL`. That query also reaches text WhatsApp stores a
-level or two down — an album item's caption under `associatedChildMessage`, an
-edit's new wording under `protocolMessage.editedMessage` — which no top-level
-extractor could see. Leave it empty and the tool is not registered at
-all — clients never see it — rather than failing when called.
+**Searching.** Evolution 2.3.7 cannot search message content. `POST
+/chat/findMessages` accepts a `where.message` — its request schema even documents
+the field — and then never reads it, so a content search comes back as an
+unfiltered page that looks like a result set. The only filters it honours are
+`id`, `source`, `messageType`, a `messageTimestamp` range, and
+`key.{id,remoteJid,fromMe,participant}`. Reading the database instead also reaches
+text WhatsApp stores a level or two down — an album item's caption under
+`associatedChildMessage`, an edit's new wording under
+`protocolMessage.editedMessage` — which no top-level extractor could see.
+
+**Reading.** Evolution stores a message more than once. Its history import
+deduplicates against an in-memory set of message ids rebuilt at the start of each
+batch, and the `createMany` behind it asks to skip duplicates — which does
+nothing, because the only unique constraint on `Message` is a generated primary
+key that cannot collide. So two batches in flight together, or an import racing
+live traffic, both insert; re-pairing an account is what puts them in flight. The
+copies disagree about who sent the message, because each carries whatever push
+name was on the wire at the time — a real name, a bare LID, or the sender's own
+device-locale word for themselves. Left alone, one message is three, a five-day
+range reports triple the messages it holds, and pages come back ragged. The
+endpoint cannot fix it: it pages with `skip`/`take` over the duplicate rows, so
+the page boundaries are already wrong by the time anything could collapse them.
+`DISTINCT ON (key->>'id')` before `LIMIT` is the fix, and that means SQL.
+
+Reactions are dropped in the same query, on the payload rather than on
+`messageType`. WhatsApp's own control records cannot be — `messageType` carries no
+subtype, and excluding `protocolMessage` wholesale would delete every message edit
+along with the bookkeeping — so those are dropped after the rows are read and
+counted back to the caller as `protocolMessagesExcluded`.
 
 **Give it a role that can do nothing else.** Every other credential in this app is
 scoped to a single account; this connection can reach every user's messages in
-every instance. The app never writes and never runs DDL, so:
+every instance. The app never writes and never runs DDL, so the one grant below
+serves both reading and searching:
 
 ```sql
 CREATE ROLE wamcp_search LOGIN PASSWORD 'change-me';
@@ -260,8 +277,8 @@ NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:change-me@localhost:5432/evo
 In development you can point it at `POSTGRES_USER` instead; in production do not.
 
 Evolution ships `@@index([instanceId])` and nothing else — no index on
-`messageTimestamp`, none on the `key` JSONB — so search is a sequential scan
-within one account. History import makes that corpus much larger than it would
+`messageTimestamp`, none on the `key` JSONB — so reading and searching are both a
+sequential scan within one account. History import makes that corpus much larger than it would
 otherwise be: a number with years of conversations arrives all at once at
 pairing, rather than accumulating. The queries carry a 10-second
 `statement_timeout` so a slow scan surfaces as an error instead of a hung MCP
@@ -275,12 +292,13 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
 
 Two caveats worth knowing before you go looking for a bug:
 
-- Search covers whatever Evolution holds: the history imported at pairing plus
+- Both cover whatever Evolution holds: the history imported at pairing plus
   everything since. An account paired before full-history sync was turned on has
   only what arrived after — see "Importing existing history".
-- The scope editor lists `search-messages` whether or not the database URL is
-  set, because it reads the tool registry rather than the live per-request tool
-  list. Granting it to a token is harmless while search is unconfigured.
+- Reads are deduplicated by message id, so `totalMatching` counts distinct
+  messages and can be quoted as an answer. It will often be smaller than the row
+  count Evolution's own API reports for the same range. The two are not
+  comparable, and the smaller one is the true one.
 
 On Railway, Evolution's Postgres is its own service — use its private URL, and
 note the port there is whatever that service actually listens on (see "Pin the
