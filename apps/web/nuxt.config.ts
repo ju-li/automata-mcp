@@ -43,6 +43,16 @@ export default defineNuxtConfig({
       'reads and searches unless you pass `includeReactions: true` — a response that omitted them',
       'says so with `reactionsExcluded`. Ask for them when who reacted is the question, not to',
       'reconstruct what was said.',
+      'WhatsApp delivers an edit as a separate record and never rewrites the original, so an edited',
+      'message appears twice: once as it was first sent, and once with the new text and `editOf`',
+      'naming the record it replaces. Read that pair as one message that changed. Some edits arrive',
+      'encrypted for the chat\'s participants only — those come back with no text and',
+      '`unreadable: \'encrypted-edit\'`, which means the current wording of that message is unknown to',
+      'this connector and is not searchable; say so plainly rather than presenting the earlier version',
+      'as final or calling it a missing message. WhatsApp\'s own control records — deletions,',
+      'disappearing-message timer changes, key exchanges — carry nothing readable and are left out of',
+      'reads; when any were, `protocolMessagesExcluded` says how many, and `totalMatching` still',
+      'counts them.',
     ].join(' '),
     // Opt out of evlog wide-events on the MCP route. Request bodies and headers on
     // /mcp carry bearer tokens; see server/utils/redact.ts.

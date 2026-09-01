@@ -161,6 +161,14 @@ export interface MessageSearchHit {
    * much of that to pay — see `search-messages.ts`.
    */
   mentioned: string[]
+  /**
+   * The `id` of the message this hit edits, when it is an edit.
+   *
+   * WhatsApp delivers an edit as its own record and never rewrites the original,
+   * so the message it replaces may be a separate hit in the same result set,
+   * still carrying its old text. Prefer this one when the two disagree.
+   */
+  editOf?: string
 }
 
 export async function searchMessages(
@@ -190,7 +198,16 @@ export async function searchMessages(
     // chat this token already reaches.
     rows = await sql<MessageRow[]>`
       SELECT m.id, m.key, m."pushName", m."messageType", m."messageTimestamp", t.body,
-             m."contextInfo"->'mentionedJid' AS mentioned
+             m."contextInfo"->'mentionedJid' AS mentioned,
+             -- Which message this one edits, when it is an edit. Not decoration:
+             -- without it a search can return both the stale original and its
+             -- edit, with different text and no way to tell which is current.
+             -- The alias quoting is load-bearing — unquoted, postgres.js folds it
+             -- to editof and the field is silently always undefined.
+             COALESCE(
+               m.message->'protocolMessage'->'key'->>'id',
+               m.message->'associatedChildMessage'->'message'->'protocolMessage'->'key'->>'id'
+             ) AS "editOf"
       FROM "Message" m
       CROSS JOIN LATERAL (
         SELECT COALESCE(
@@ -201,7 +218,39 @@ export async function searchMessages(
           m.message->'documentMessage'->>'caption',
           m.message->'documentWithCaptionMessage'->'message'->'documentMessage'->>'caption',
           m.message->>'speechToText',
-          m.message->'reactionMessage'->>'text'
+          m.message->'reactionMessage'->>'text',
+          -- Album media and captioned video from an official WhatsApp client
+          -- arrive wrapped: associatedChildMessage is a FutureProofMessage,
+          -- a transparent { message: Message }, which the rc.9 Baileys that
+          -- 2.3.7 pins does not unwrap. Explicit paths only — a $.** recursive
+          -- jsonb path would also match contextInfo.quotedMessage.conversation
+          -- and make a reply findable by the text it quoted, which is
+          -- misattribution by construction.
+          m.message->'associatedChildMessage'->'message'->>'conversation',
+          m.message->'associatedChildMessage'->'message'->'extendedTextMessage'->>'text',
+          m.message->'associatedChildMessage'->'message'->'imageMessage'->>'caption',
+          m.message->'associatedChildMessage'->'message'->'videoMessage'->>'caption',
+          m.message->'associatedChildMessage'->'message'->'documentMessage'->>'caption',
+          -- A plaintext edit (protocolMessage.type = 14). In history-synced
+          -- data this row is the ONLY copy of the edited text — nothing patches
+          -- the original — so without these arms the new wording is unfindable.
+          m.message->'protocolMessage'->'editedMessage'->>'conversation',
+          m.message->'protocolMessage'->'editedMessage'->'extendedTextMessage'->>'text',
+          m.message->'protocolMessage'->'editedMessage'->'imageMessage'->>'caption',
+          m.message->'protocolMessage'->'editedMessage'->'videoMessage'->>'caption',
+          m.message->'protocolMessage'->'editedMessage'->'documentMessage'->>'caption',
+          -- Both at once: a caption edit on an album item.
+          m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->>'conversation',
+          m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'extendedTextMessage'->>'text',
+          m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'imageMessage'->>'caption',
+          m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'videoMessage'->>'caption',
+          m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'documentMessage'->>'caption'
+          -- speechToText and reactionMessage are not repeated in the nested
+          -- groups: Evolution writes the first at top level only, and a reaction
+          -- is never an album child or an edit target. COALESCE short-circuits,
+          -- so an ordinary text row still stops at the first arm — the extra
+          -- lookups are paid only by rows that produce no body at all, which
+          -- this scan already touches and discards.
         ) AS body
       ) t
       WHERE m."instanceId" = ${instanceId}
@@ -213,6 +262,16 @@ export async function searchMessages(
         ${until === undefined ? sql`` : sql`AND m."messageTimestamp" <= ${until}`}
         ${options.fromMe === undefined ? sql`` : sql`AND (m.key->>'fromMe')::boolean = ${options.fromMe}`}
         ${options.includeReactions ? sql`` : sql`AND m.message->'reactionMessage' IS NULL`}
+        -- Control records are excluded by intent, not only by accident. Today
+        -- this is a no-op: no arm above reads anything out of a non-edit
+        -- protocolMessage, so such a row has no body and body IS NOT NULL
+        -- already dropped it. It is here so a future arm cannot quietly start
+        -- surfacing bookkeeping. It cannot drop an unwrapped edit — any row
+        -- whose body came from the edit arms has editedMessage non-null. Never
+        -- let this grow into something that inspects where the body came from;
+        -- that is where it would start dropping real edits.
+        AND (m.message->'protocolMessage' IS NULL
+             OR m.message->'protocolMessage'->'editedMessage' IS NOT NULL)
       ORDER BY m."messageTimestamp" DESC
       LIMIT ${take}
     `
@@ -240,6 +299,7 @@ export async function searchMessages(
       type: row.messageType ?? undefined,
       text: row.body,
       mentioned: mentionedJidsOf(row.mentioned),
+      ...(row.editOf && { editOf: row.editOf }),
     })),
     truncated,
   }
@@ -263,6 +323,8 @@ interface MessageRow {
    * so this needs no grant change.
    */
   mentioned: string[] | null
+  /** `protocolMessage.key.id`, or null where the row is not an edit. */
+  editOf: string | null
 }
 
 /**
