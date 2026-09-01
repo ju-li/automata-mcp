@@ -30,9 +30,10 @@ export default defineMcpTool({
     + '`hasMore` is false before treating the range as fully read. `covered` '
     + 'reports the span this page actually covers, which for a truncated range is '
     + 'narrower than the one you asked for, and `totalMatching`/`totalPages` say '
-    + 'how much the range holds in full. @-mentions in the text are shown as '
-    + 'names where the account knows them, and left as raw numeric ids where it '
-    + 'does not — an id is not a name to guess at. To find a message by what it '
+    + 'how much the range holds in full. Reaction messages are left out unless '
+    + '`includeReactions` is set. @-mentions in the text are shown as names '
+    + 'where the account knows them, and left as raw numeric ids where it does '
+    + 'not — an id is not a name to guess at. To find a message by what it '
     + 'says, prefer search-messages when this connector offers it.',
   annotations: {
     readOnlyHint: true,
@@ -46,8 +47,15 @@ export default defineMcpTool({
     page: z.number().int().min(1).default(1).describe('1-based page of `limit` messages, counting back from the newest. Walk this up while `hasMore` is true.'),
     since: z.string().optional().describe('Only messages at or after this date, e.g. 2024-03-01 or 2024-03-01T12:00:00Z'),
     until: z.string().optional().describe('Only messages at or before this date. Pass back the `window.until` from a previous page when paging a range.'),
+    includeReactions: z.boolean().default(false).describe(
+      'Include reaction messages. Each reaction is its own record — an id, an '
+      + 'author, a timestamp and an emoji — so in an active group they are a '
+      + 'large share of a page while rarely mattering for reconstructing the '
+      + 'conversation. Off by default for that reason; turn it on when who '
+      + 'reacted is the question.',
+    ),
   },
-  handler: async ({ jid, limit, page, since, until }) => {
+  handler: async ({ jid, limit, page, since, until, includeReactions }) => {
     const { instance, scope } = useMcpAuth()
 
     assertChatAllowed(scope, jid)
@@ -67,7 +75,10 @@ export default defineMcpTool({
       until: toIsoDate(until, 'until') ?? (since ? new Date().toISOString() : undefined),
     }
 
-    const { messages, hasMore, total } = await listMessages(instance, jid, { limit, page, ...range })
+    // `includeReactions` is passed alongside `range` rather than folded into it:
+    // `range` is echoed back to the caller as `window`, and it should describe
+    // the time bounds and nothing else.
+    const { messages, hasMore, total } = await listMessages(instance, jid, { limit, page, ...range, includeReactions })
 
     const covered = coveredSpan(messages)
     const bounded = Boolean(range.since || range.until)
@@ -92,6 +103,10 @@ export default defineMcpTool({
       // between `window.since` and `covered.from` is still unread.
       ...(covered && { covered }),
       ...(hasMore && { note: incompleteNote({ page, limit, count: messages.length, range }) }),
+      // Same principle as `hasMore`, for a different kind of gap: a whole class
+      // of message is missing, and a caller that does not know it was dropped
+      // reads the silence as "nobody reacted".
+      ...(!includeReactions && { reactionsExcluded: true }),
       messages,
     }
   },

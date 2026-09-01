@@ -39,6 +39,10 @@ export default defineNuxtConfig({
       'there are older messages you have not seen, including inside a `since`/`until` range you asked',
       'for. Page with `nextPage` until `hasMore` is false before summarising or reporting on a range,',
       'and treat `covered` — not the range you requested — as what you have actually read.',
+      'Reactions are stored as ordinary messages, one record per emoji, and are left out of both',
+      'reads and searches unless you pass `includeReactions: true` — a response that omitted them',
+      'says so with `reactionsExcluded`. Ask for them when who reacted is the question, not to',
+      'reconstruct what was said.',
     ].join(' '),
     // Opt out of evlog wide-events on the MCP route. Request bodies and headers on
     // /mcp carry bearer tokens; see server/utils/redact.ts.

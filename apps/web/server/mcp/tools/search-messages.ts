@@ -20,10 +20,12 @@ export default defineMcpTool({
     'Find WhatsApp messages containing given words, newest first, across every '
     + 'chat unless a `jid` narrows it to one. Matching is case-insensitive and '
     + 'every word must appear in the same message. Covers the history imported '
-    + 'when the account was paired as well as everything since. Use this instead '
-    + 'of paging read-messages when you are looking for something by what it says. '
-    + '@-mentions in the text are shown as names where the account knows them, and '
-    + 'left as raw numeric ids where it does not — an id is not a name to guess at.',
+    + 'when the account was paired as well as everything since. Reaction messages '
+    + 'are not searched unless `includeReactions` is set, which also makes a bare '
+    + 'emoji findable. @-mentions in the text are shown as names where the account '
+    + 'knows them, and left as raw numeric ids where it does not — an id is not a '
+    + 'name to guess at. Use this instead of paging read-messages when you are '
+    + 'looking for something by what it says.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -37,8 +39,13 @@ export default defineMcpTool({
     until: z.string().optional().describe('Only messages at or before this date'),
     fromMe: z.boolean().optional().describe('true for only messages you sent, false for only messages you received'),
     limit: z.number().int().min(1).max(100).default(20).describe('How many matches to return'),
+    includeReactions: z.boolean().default(false).describe(
+      'Search reaction messages too, matching against the emoji itself. Off by '
+      + 'default: a reaction carries an id, an author and a timestamp to say one '
+      + 'character, and it rarely answers a question about what was said.',
+    ),
   },
-  handler: async ({ query, jid, since, until, fromMe, limit }) => {
+  handler: async ({ query, jid, since, until, fromMe, limit, includeReactions }) => {
     const { instance, scope } = useMcpAuth()
 
     const terms = query.split(/\s+/).filter(Boolean)
@@ -57,6 +64,7 @@ export default defineMcpTool({
       since,
       until,
       fromMe,
+      includeReactions,
       limit,
     })
 
@@ -75,6 +83,8 @@ export default defineMcpTool({
       count: hits.length,
       // Say so rather than presenting a capped page as the whole answer.
       truncated,
+      // Same principle: a whole message class this search never looked at.
+      ...(!includeReactions && { reactionsExcluded: true }),
     }
   },
 })

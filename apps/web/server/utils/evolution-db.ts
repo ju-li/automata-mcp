@@ -133,6 +133,15 @@ export interface MessageSearchOptions {
   since?: string
   until?: string
   fromMe?: boolean
+  /**
+   * Match reaction messages too.
+   *
+   * Defaults to false, which is what this query has always done — before the
+   * `reactionMessage` arm below existed a reaction row produced no `body` at all
+   * and `body IS NOT NULL` dropped it. Silently, rather than by decision. The
+   * default keeps that outcome and makes it a choice.
+   */
+  includeReactions?: boolean
   limit: number
 }
 
@@ -171,6 +180,14 @@ export async function searchMessages(
 
   let rows: MessageRow[]
   try {
+    // The `reactionMessage` arm in the COALESCE is what makes an emoji findable
+    // at all; the predicate near the bottom is what keeps reactions out by
+    // default. That predicate reads the payload rather than `messageType`, for
+    // the reason given in `isReaction` in `chats.ts`, and costs nothing next to
+    // the scan already happening — `@@index([instanceId])` is the only index on
+    // `Message`. None of it touches scope: `instanceId`, `jid` and `allowedJids`
+    // still bound the query, so an included reaction is only ever one from a
+    // chat this token already reaches.
     rows = await sql<MessageRow[]>`
       SELECT m.id, m.key, m."pushName", m."messageType", m."messageTimestamp", t.body,
              m."contextInfo"->'mentionedJid' AS mentioned
@@ -183,7 +200,8 @@ export async function searchMessages(
           m.message->'videoMessage'->>'caption',
           m.message->'documentMessage'->>'caption',
           m.message->'documentWithCaptionMessage'->'message'->'documentMessage'->>'caption',
-          m.message->>'speechToText'
+          m.message->>'speechToText',
+          m.message->'reactionMessage'->>'text'
         ) AS body
       ) t
       WHERE m."instanceId" = ${instanceId}
@@ -194,6 +212,7 @@ export async function searchMessages(
         ${since === undefined ? sql`` : sql`AND m."messageTimestamp" >= ${since}`}
         ${until === undefined ? sql`` : sql`AND m."messageTimestamp" <= ${until}`}
         ${options.fromMe === undefined ? sql`` : sql`AND (m.key->>'fromMe')::boolean = ${options.fromMe}`}
+        ${options.includeReactions ? sql`` : sql`AND m.message->'reactionMessage' IS NULL`}
       ORDER BY m."messageTimestamp" DESC
       LIMIT ${take}
     `
