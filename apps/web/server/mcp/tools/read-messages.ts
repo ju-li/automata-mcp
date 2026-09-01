@@ -6,8 +6,8 @@ import type { ChatMessage } from '~~/server/utils/chats'
  * of scope: returning an empty history would read as "this conversation is
  * empty", which is a different and wrong statement.
  *
- * The same principle governs the response envelope. Evolution answers
- * newest-first and caps at `limit`, so a page of a `since`-bounded window is
+ * The same principle governs the response envelope. Pages are newest-first and
+ * capped at `limit`, so a page of a `since`-bounded window is
  * missing the *old* end — the part the caller named. Returned bare, it reads as
  * the whole window, and a model summarising it writes a confident summary with a
  * hole in the middle. So every response says whether it is complete
@@ -30,7 +30,10 @@ export default defineMcpTool({
     + '`hasMore` is false before treating the range as fully read. `covered` '
     + 'reports the span this page actually covers, which for a truncated range is '
     + 'narrower than the one you asked for, and `totalMatching`/`totalPages` say '
-    + 'how much the range holds in full. Reaction messages are left out unless '
+    + 'how much the range holds in full — a count of distinct messages, safe to '
+    + 'quote. A message you sent is marked `fromMe` and carries no `author`; on '
+    + 'one you received, `author` is the sender\'s name where the account knows '
+    + 'it, and absent where it does not. Reaction messages are left out unless '
     + '`includeReactions` is set. @-mentions in the text are shown as names '
     + 'where the account knows them, and left as raw numeric ids where it does '
     + 'not — an id is not a name to guess at. To find a message by what it '

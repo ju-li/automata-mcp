@@ -9,12 +9,12 @@ import type { MentionDirectory } from '~~/server/utils/mentions'
  * loudly, as there), while an unscoped search is narrowed to the token's chats
  * *in the SQL* rather than by filtering what comes back.
  *
- * Not registered at all when search is unconfigured — see `evolution-db.ts` for
- * why this reaches Evolution's database instead of its API.
+ * Reaches Evolution's database rather than its API, as both read paths now do —
+ * see `evolution-db.ts` for why.
  */
 export default defineMcpTool({
   name: 'search-messages',
-  enabled: event => isToolAllowed(event, 'search-messages') && messageSearchConfigured(),
+  enabled: event => isToolAllowed(event, 'search-messages'),
   title: 'Search WhatsApp messages',
   description:
     'Find WhatsApp messages containing given words, newest first, across every '
@@ -22,7 +22,9 @@ export default defineMcpTool({
     + 'every word must appear in the same message. Covers the history imported '
     + 'when the account was paired as well as everything since. Reaction messages '
     + 'are not searched unless `includeReactions` is set, which also makes a bare '
-    + 'emoji findable. @-mentions in the text are shown as names where the account '
+    + 'emoji findable. A match you sent is marked `fromMe` and carries no '
+    + '`author`; on one you received, `author` is the sender\'s name where the '
+    + 'account knows it, and absent where it does not. @-mentions in the text are shown as names where the account '
     + 'knows them, and left as raw numeric ids where it does not — an id is not a '
     + 'name to guess at. Use this instead of paging read-messages when you are '
     + 'looking for something by what it says.',
@@ -68,16 +70,21 @@ export default defineMcpTool({
       limit,
     })
 
-    const [names, mentions] = await Promise.all([
+    const [names, directory] = await Promise.all([
       chatNames(instance, hits),
-      resolveMentions(instance, hits),
+      resolveNames(instance, hits),
     ])
 
     return {
       query,
-      matches: hits.map(({ mentioned, ...hit }) => ({
-        ...hit,
-        text: applyMentions(hit.text, mentioned, mentions) ?? hit.text,
+      matches: hits.map(hit => ({
+        jid: hit.jid,
+        id: hit.id,
+        fromMe: hit.fromMe,
+        author: authorName({ fromMe: hit.fromMe, ...hit.sender }, directory),
+        timestamp: hit.timestamp,
+        type: hit.type,
+        text: applyMentions(hit.text, hit.mentioned, directory) ?? hit.text,
         chatName: names.get(hit.jid),
       })),
       count: hits.length,
@@ -115,7 +122,11 @@ async function chatNames(instance: AppInstance, hits: MessageSearchHit[]): Promi
 }
 
 /**
- * Names for the people the hits mention.
+ * Names for everyone the hits refer to — the people they mention, and the people
+ * who sent them.
+ *
+ * Both come from the same directory, so they are resolved together: a group's
+ * membership is one lookup whether it answers a mention or an author.
  *
  * Two passes, because the two sources cost wildly different amounts. Contacts are
  * one cached read that covers every chat at once, so they run first; group
@@ -123,17 +134,24 @@ async function chatNames(instance: AppInstance, hits: MessageSearchHit[]): Promi
  * still have something unresolved after that.
  *
  * A hit set can span more groups than it is worth waking the socket for, so the
- * second pass is capped, busiest group first — the cap trades a few raw ids in the
- * tail for a bounded response time. `read-messages` needs none of this: it is one
- * chat, so it is always exactly one lookup.
+ * second pass is capped, busiest group first — the cap trades a few unnamed
+ * senders in the tail for a bounded response time. `read-messages` needs none of
+ * this: it is one chat, so it is always exactly one lookup.
  *
- * Best effort throughout, like `chatNames`: unresolved mentions stay as raw ids,
- * and a search still answers.
+ * Best effort throughout, like `chatNames`: an unresolved mention stays a raw id,
+ * an unresolved author falls back to the stored push name or to nothing, and a
+ * search still answers.
  */
 const MENTION_GROUP_LOOKUPS = 8
 
-async function resolveMentions(instance: AppInstance, hits: MessageSearchHit[]): Promise<MentionDirectory> {
-  if (!hits.some(hit => hit.mentioned.length)) return new Map()
+/** Every identity a hit needs a name for: who it mentions, and who sent it. */
+function identitiesOf(hit: MessageSearchHit): string[] {
+  const identity = hit.fromMe ? undefined : hit.sender.identity
+  return identity ? [...hit.mentioned, identity] : hit.mentioned
+}
+
+async function resolveNames(instance: AppInstance, hits: MessageSearchHit[]): Promise<MentionDirectory> {
+  if (!hits.some(hit => identitiesOf(hit).length)) return new Map()
 
   try {
     const evolution = evolutionClientForInstance(instance)
@@ -144,7 +162,7 @@ async function resolveMentions(instance: AppInstance, hits: MessageSearchHit[]):
     const unresolvedByGroup = new Map<string, number>()
     for (const hit of hits) {
       if (!hit.jid.endsWith('@g.us')) continue
-      const missing = hit.mentioned.filter(jid => !fromContacts.has(localPartOf(jid))).length
+      const missing = identitiesOf(hit).filter(jid => !fromContacts.has(localPartOf(jid))).length
       if (missing) unresolvedByGroup.set(hit.jid, (unresolvedByGroup.get(hit.jid) ?? 0) + missing)
     }
 
@@ -158,7 +176,7 @@ async function resolveMentions(instance: AppInstance, hits: MessageSearchHit[]):
     return await mentionDirectory({ instance, evolution, chatJids, contacts })
   }
   catch (error) {
-    console.error('[search] could not resolve mentions:', error)
+    console.error('[search] could not resolve names:', error)
     return new Map()
   }
 }

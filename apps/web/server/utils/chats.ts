@@ -1,6 +1,8 @@
 import type { AppInstance } from './pocketbase'
 import type { EvolutionClient } from './evolution'
-import { applyMentions, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
+import type { MentionDirectory } from './mentions'
+import { applyMentions, authorName, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
+import { listMessagesPage, senderOf } from './evolution-db'
 
 /**
  * Reading conversations out of Evolution.
@@ -213,12 +215,12 @@ export interface MessagePage {
    */
   hasMore: boolean
   /**
-   * Rows matching the filter, when Evolution's envelope carries a usable count.
+   * Distinct messages in the range, counted over the same deduplicated set the
+   * page was cut from — so it counts the range asked for, not the chat, and not
+   * the rows Evolution happens to hold for it.
    *
-   * In 2.3.7 this is a `prisma.message.count` over the same where clause as the
-   * page itself, timestamp range included, so it counts the range and not the
-   * chat. Reported to the caller all the same as a number, never as a decision:
-   * `hasMore` does not read it.
+   * Reported as a number, never as a decision: `hasMore` does not read it. Absent
+   * for a page past the end of the range, where there was nothing to count from.
    */
   total?: number
 }
@@ -226,95 +228,89 @@ export interface MessagePage {
 /**
  * Message history for one chat, newest first.
  *
- * Evolution only applies its timestamp filter when **both** bounds are present
- * (`baileys.svc.ts` checks `gte && lte` and ignores the filter otherwise), so a
- * one-sided range is widened here rather than passed through and silently dropped.
- * Note that widening `until` means *now*, which moves between calls: a caller
- * paging through a window has to pin both bounds itself, as `read-messages` does,
- * or page 2 is taken from a different range than page 1.
+ * Reads Evolution's database rather than its API, which is not a preference: one
+ * message is stored two or three times over a re-pair, and only SQL can collapse
+ * those before the page is cut. `listMessagesPage` in `evolution-db.ts` explains
+ * the duplicates and what the query does about them.
  *
- * There is no text search upstream: Evolution's `findMessages` accepts a
- * `where.message` and never reads it, so a content filter passed here comes back
- * as an unfiltered page. Do not offer one from this function — `searchMessages`
- * in `evolution-db.ts` reads Evolution's database directly for that.
+ * What is left here is the shaping: a payload becomes a line of text, a sender
+ * becomes a name. Both need the same name directory, so it is built once and used
+ * for the authors and the @-mentions alike.
+ *
+ * There is no text search on this path — `searchMessages` is that — and no
+ * `where` to widen: the range bounds are ordinary SQL predicates, so a one-sided
+ * range means one predicate, and `read-messages` pins its own `until` only so
+ * that paging a window is repeatable, not because a missing bound is ignored.
  */
 export async function listMessages(
   instance: AppInstance,
   remoteJid: string,
   query: MessageQuery = {},
 ): Promise<MessagePage> {
-  const evolution = evolutionClientForInstance(instance)
-
   const { limit = 50, page = 1, since, until, includeReactions = true } = query
 
-  const where: Record<string, unknown> = { key: { remoteJid } }
-  if (since || until) {
-    where.messageTimestamp = {
-      gte: since ?? EPOCH_ISO,
-      lte: until ?? new Date().toISOString(),
-    }
-  }
-  if (!includeReactions) {
-    // Excluded server-side, not just dropped on arrival, so the page still comes
-    // back `limit` long — in an active group a post-fetch filter can turn a page
-    // of 50 into a dozen. Evolution hands `where.messageType` straight to Prisma
-    // (`messageType: query?.where?.messageType` in `fetchMessages`) and its
-    // request schema does not seal `where`, so a `not` filter reaches the query
-    // builder untouched, including the `message.count()` behind the envelope's
-    // total. Verified against 2.3.7 — an operator Prisma does not know answers
-    // 500 there, so this breaking would be loud rather than silent.
-    where.messageType = { not: 'reactionMessage' }
-  }
+  const { records, hasMore, total } = await listMessagesPage(instance, {
+    jid: remoteJid,
+    limit,
+    page,
+    since,
+    until,
+    includeReactions,
+  })
 
-  const result = await evolution<EvolutionMessagePage | EvolutionMessageRow[]>(
-    `/chat/findMessages/${encodeURIComponent(instance.name)}`,
-    { method: 'POST', body: { where, page, offset: limit } },
-  )
-
-  const records = Array.isArray(result)
-    ? result
-    : result?.messages?.records ?? []
-
-  const total = Array.isArray(result) ? undefined : result?.messages?.total
-
-  // Second layer, and not redundant: see `isReaction`.
-  const visible = includeReactions ? records : records.filter(row => !isReaction(row))
-
-  const drafts = visible.map(row => ({
+  const drafts = records.map(row => ({
     id: row.key?.id,
     fromMe: Boolean(row.key?.fromMe),
-    author: row.pushName ?? undefined,
+    sender: senderOf(row),
     timestamp: isoFromEpochSeconds(row.messageTimestamp),
     type: row.messageType ?? undefined,
     text: previewOf(row.message),
-    mentioned: mentionedJidsOf(row.contextInfo),
+    mentioned: mentionedJidsOf(row.mentioned),
   }))
 
-  const directory = drafts.some(draft => draft.mentioned.length)
-    ? await mentionDirectory({
-        instance,
-        evolution,
-        chatJids: [remoteJid],
-        contacts: await contactDirectory(instance, evolution),
-      })
-    : undefined
+  const directory = await nameDirectory(instance, remoteJid, drafts)
 
   return {
-    messages: drafts.map(({ mentioned, ...message }) => ({
-      ...message,
-      text: directory ? applyMentions(message.text, mentioned, directory) : message.text,
+    messages: drafts.map(draft => ({
+      id: draft.id,
+      fromMe: draft.fromMe,
+      author: authorName({ fromMe: draft.fromMe, ...draft.sender }, directory),
+      timestamp: draft.timestamp,
+      type: draft.type,
+      text: directory ? applyMentions(draft.text, draft.mentioned, directory) : draft.text,
     })),
-    // A page short of `limit` is the end of the range; a full one may have more
-    // behind it. Deliberately not computed from `total` — see `MessagePage`.
-    //
-    // Counted on `records`, never on `visible`. What Evolution returned is what
-    // says whether a page was full; measuring the list after reactions were
-    // dropped would report a mostly-reaction page as the end of the
-    // conversation. The two agree anyway whenever the server-side
-    // `where.messageType` filter is doing its job — `visible` only differs when
-    // the local check catches something the filter could not.
-    hasMore: records.length >= limit,
-    total: typeof total === 'number' && Number.isFinite(total) ? total : undefined,
+    hasMore,
+    total,
+  }
+}
+
+/**
+ * Names for everyone a page refers to — senders and mentions together.
+ *
+ * One chat means one participant lookup, so unlike `search-messages` there is
+ * nothing to ration here. It is skipped entirely when the page needs no names at
+ * all: a 1:1 chat of your own messages resolves nobody.
+ *
+ * Best effort by design. Group membership needs a live socket, so a disconnected
+ * account resolves nothing — and must still return its messages, with authors
+ * falling back to whatever `pushName` was stored.
+ */
+async function nameDirectory(
+  instance: AppInstance,
+  remoteJid: string,
+  drafts: Array<{ fromMe: boolean, sender: { identity?: string }, mentioned: string[] }>,
+): Promise<MentionDirectory | undefined> {
+  const needed = drafts.some(draft => draft.mentioned.length || (!draft.fromMe && draft.sender.identity))
+  if (!needed) return undefined
+
+  try {
+    const evolution = evolutionClientForInstance(instance)
+    const contacts = await contactDirectory(instance, evolution)
+    return await mentionDirectory({ instance, evolution, chatJids: [remoteJid], contacts })
+  }
+  catch (error) {
+    console.error('[read] could not resolve names:', error)
+    return undefined
   }
 }
 
@@ -457,12 +453,6 @@ async function fetchGroups(instance: AppInstance, evolution: EvolutionClient): P
 // ── internals ──────────────────────────────────────────────────────────────
 
 /**
- * Lower bound for a one-sided range. Has to be truthy: Evolution tests the raw
- * input value before parsing it, so a `0` here would disable the filter entirely.
- */
-const EPOCH_ISO = '1970-01-01T00:00:00.000Z'
-
-/**
  * What `POST /chat/findChats` actually returns.
  *
  * `pushName` is **not** the sender's push name, despite the key. Evolution 2.3.7
@@ -504,52 +494,6 @@ interface GroupInfo {
   subject?: string
   size?: number
   pictureUrl?: string
-}
-
-/**
- * Evolution's paginated envelope. Older shapes answered with a bare array, which
- * is why `listMessages` still handles one — and why `total` is optional here
- * rather than assumed.
- */
-interface EvolutionMessagePage {
-  messages?: {
-    total?: number
-    records?: EvolutionMessageRow[]
-  }
-}
-
-interface EvolutionMessageRow {
-  key?: { id?: string, fromMe?: boolean, remoteJid?: string }
-  pushName?: string
-  messageTimestamp?: number | string
-  messageType?: string
-  message?: unknown
-  /**
-   * Where the mentions actually are.
-   *
-   * 2.3.7's `prepareMessage` rewrites `extendedTextMessage` into
-   * `message.conversation` and deletes the original, so a mentioning text message
-   * stores nothing under `message->extendedTextMessage->contextInfo`. Evolution
-   * keeps the content message's `contextInfo` in its own column instead, and
-   * `fetchMessages` selects it — which is why this needs no extra round trip.
-   */
-  contextInfo?: unknown
-}
-
-/**
- * A reaction, whatever Evolution happened to label it.
- *
- * `messageType` is Baileys' `getContentType()` verbatim, and that returns the
- * *first* key of the decoded payload that is `conversation` or ends in
- * `Message`. A reaction delivered alongside a `messageContextInfo` can therefore
- * be stored under that type while `message.reactionMessage` sits right there in
- * the payload. So the payload is the authority and `messageType` is only a hint
- * — which is why the server-side `where` filter in `listMessages` cannot be the
- * only layer, however well it works.
- */
-function isReaction(row: EvolutionMessageRow): boolean {
-  return row.messageType === 'reactionMessage'
-    || Boolean((row.message as Record<string, unknown> | undefined)?.reactionMessage)
 }
 
 /**
