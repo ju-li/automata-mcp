@@ -38,7 +38,40 @@ export interface ChatMessage {
   timestamp?: string
   type?: string
   text?: string
+  /**
+   * The `id` of the message this one edits, when it is an edit.
+   *
+   * WhatsApp delivers an edit as its own record and never rewrites the original,
+   * so history holds both: this row with the new text, and an earlier row that
+   * still reads as it did before. Nothing merges the pair — read them as one
+   * message that changed, not as two. The target may not be on this page.
+   */
+  editOf?: string
+  /**
+   * Content that exists and this server cannot render, named rather than left
+   * blank. `text` is absent whenever this is set.
+   */
+  unreadable?: UnreadableReason
 }
+
+/**
+ * Why a message came back with no text.
+ *
+ * Both values describe a `secretEncryptedMessage`, which is an *encrypted
+ * message edit* — WhatsApp's newer replacement for a plaintext
+ * `protocolMessage{type:14}`. Not a view-once, not a disappearing message: a
+ * caller told only "encrypted" reports the wrong gap. The payload is AES-GCM
+ * under a key derived from the *original* message's
+ * `messageContextInfo.messageSecret`, which this row does not carry, so it is
+ * unrecoverable from storage. Neither Baileys 7.0.0-rc.9 nor Evolution 2.3.7
+ * decrypts it and neither does this app.
+ *
+ * Two values rather than one because proto3 omits a zero: an absent
+ * `secretEncType` means `UNKNOWN = 0`, not `MESSAGE_EDIT`. Reporting an
+ * unlabelled row as an edit would be a guess, in the one field whose whole
+ * purpose is not to guess.
+ */
+export type UnreadableReason = 'encrypted-edit' | 'encrypted-content'
 
 export interface ChatQuery {
   /** Page size. */
@@ -129,7 +162,10 @@ export async function listChats(instance: AppInstance, query: ChatQuery = {}): P
         updatedAt: row.updatedAt ?? undefined,
         lastMessageAt: isoFromEpochSeconds(row.lastMessage?.messageTimestamp),
         unreadCount: Number(row.unreadCount ?? 0),
-        lastMessagePreview: previewOf(row.lastMessage?.message),
+        // Unwrapped for the same reason the read path is: an album item or an
+        // edited caption previews as blank otherwise. A control record has no
+        // payload once classified, so it previews blank either way.
+        lastMessagePreview: previewOf(classifyContent(row.lastMessage?.message).payload),
       }
     })
 
@@ -219,8 +255,21 @@ export interface MessagePage {
    * page itself, timestamp range included, so it counts the range and not the
    * chat. Reported to the caller all the same as a number, never as a decision:
    * `hasMore` does not read it.
+   *
+   * It does **not** exclude the control records dropped below, which Evolution
+   * has no way to know this app discards — so across a range it can exceed the
+   * number of messages actually handed back.
    */
   total?: number
+  /**
+   * Control records dropped from this page — see `classifyContent`.
+   *
+   * Reported rather than silently subtracted, for the same reason `hasMore`
+   * exists: a page that quietly loses a class of row reads as a complete one.
+   * Required, not optional, so a new caller has to decide what to do with it
+   * instead of reaching for `?? 0`.
+   */
+  protocolMessagesExcluded: number
 }
 
 /**
@@ -280,15 +329,32 @@ export async function listMessages(
   // Second layer, and not redundant: see `isReaction`.
   const visible = includeReactions ? records : records.filter(row => !isReaction(row))
 
-  const drafts = visible.map(row => ({
-    id: row.key?.id,
-    fromMe: Boolean(row.key?.fromMe),
-    author: row.pushName ?? undefined,
-    timestamp: isoFromEpochSeconds(row.messageTimestamp),
-    type: row.messageType ?? undefined,
-    text: previewOf(row.message),
-    mentioned: mentionedJidsOf(row.contextInfo),
-  }))
+  // Third layer, and a different question from the reaction one: what is in the
+  // payload at all. See `classifyContent`.
+  const classified = visible.map(row => ({ row, content: classifyContent(row.message, row.messageType) }))
+  const protocolMessagesExcluded = classified.filter(({ content }) => content.noise).length
+
+  const drafts = classified
+    .filter(({ content }) => !content.noise)
+    .map(({ row, content }) => ({
+      id: row.key?.id,
+      fromMe: Boolean(row.key?.fromMe),
+      author: row.pushName ?? undefined,
+      timestamp: isoFromEpochSeconds(row.messageTimestamp),
+      type: content.type ?? undefined,
+      text: previewOf(content.payload),
+      ...(content.editOf && { editOf: content.editOf }),
+      ...(content.unreadable && { unreadable: content.unreadable }),
+      // The column stays authoritative — see `EvolutionMessageRow.contextInfo`.
+      // But 2.3.7's `extendedTextMessage` rewrite only touches the *top level*,
+      // so a message nested inside an edit or a wrapper keeps its own
+      // `contextInfo` while the column may hold nothing. Those are exactly the
+      // rows this classifier just surfaced for the first time, and without the
+      // fallback their @-mentions read as raw LIDs.
+      mentioned: mentionedJidsOf(row.contextInfo).length
+        ? mentionedJidsOf(row.contextInfo)
+        : mentionedJidsOf(nestedContextInfo(content.payload)),
+    }))
 
   const directory = drafts.some(draft => draft.mentioned.length)
     ? await mentionDirectory({
@@ -307,14 +373,15 @@ export async function listMessages(
     // A page short of `limit` is the end of the range; a full one may have more
     // behind it. Deliberately not computed from `total` — see `MessagePage`.
     //
-    // Counted on `records`, never on `visible`. What Evolution returned is what
-    // says whether a page was full; measuring the list after reactions were
-    // dropped would report a mostly-reaction page as the end of the
-    // conversation. The two agree anyway whenever the server-side
-    // `where.messageType` filter is doing its job — `visible` only differs when
-    // the local check catches something the filter could not.
+    // Counted on `records`, never on `visible` or `drafts`. What Evolution
+    // returned is what says whether a page was full; measuring the list after
+    // reactions were dropped would report a mostly-reaction page as the end of
+    // the conversation, and the control-record drop below is a second, larger
+    // reason the two can disagree — that one cannot be pushed server-side at
+    // all, so on a bookkeeping-heavy page `drafts` is much the shorter list.
     hasMore: records.length >= limit,
     total: typeof total === 'number' && Number.isFinite(total) ? total : undefined,
+    protocolMessagesExcluded,
   }
 }
 
@@ -552,6 +619,198 @@ function isReaction(row: EvolutionMessageRow): boolean {
     || Boolean((row.message as Record<string, unknown> | undefined)?.reactionMessage)
 }
 
+/** `ProtocolMessage.Type.MESSAGE_EDIT` — the only subtype carrying readable content. */
+const PROTOCOL_MESSAGE_EDIT = 14
+
+/**
+ * Transparent `FutureProofMessage` wrappers: `{ message: Message }` and nothing
+ * else.
+ *
+ * Baileys' `normalizeMessageContent` unwraps this shape, but the rc.9 Evolution
+ * 2.3.7 pins does not know `associatedChildMessage` (added upstream later, PR
+ * #1874) — and `prepareMessage` types a row with `getContentType()` on the
+ * *raw*, un-normalized payload regardless, so the wrapper name is what reaches
+ * us as `messageType`. Official WhatsApp clients produce these for album media
+ * and for a caption edit; Baileys' own album sender does not, which is why they
+ * went unnoticed until a caller reported empty rows.
+ *
+ * `ephemeralMessage` and the `viewOnceMessage*` family are deliberately absent.
+ * They are transparent wrappers too, but unwrapping a view-once photo to a bare
+ * `[image]` presents it as an ordinary photo, which it is not — doing that
+ * honestly needs its own marker, and that is a separate decision.
+ */
+const WRAPPER_KEYS = ['associatedChildMessage', 'editedMessage', 'documentWithCaptionMessage'] as const
+
+/**
+ * Bounded rather than recursive. The payload is always JSON-derived, so a cycle
+ * is not reachable and no visited-set is needed; this only caps an absurdly
+ * nested one. Falling out of the loop still wrapped leaves the row reading
+ * exactly as it did before this existed: wrapper type, no text.
+ */
+const MAX_UNWRAP_DEPTH = 4
+
+interface NormalizedMessage {
+  /** WhatsApp control plane. Drop the row and count it. */
+  noise: boolean
+  payload?: Record<string, any>
+  type?: string
+  editOf?: string
+  unreadable?: UnreadableReason
+}
+
+/**
+ * What is actually in a message payload, once the wrappers are off.
+ *
+ * Three types arrive with nothing readable at the level the extractors look at,
+ * and they need three different answers:
+ *
+ * - `protocolMessage` is the control plane — a deletion, a disappearing-message
+ *   timer, a key exchange, a history-sync notification. No body, nothing a
+ *   caller can act on, so it is dropped and counted. The exception is
+ *   `type: 14` (MESSAGE_EDIT), which nests the whole edited message. That one
+ *   must survive: Evolution's live path skips top-level protocol messages
+ *   entirely, so these rows come only from history sync, where nothing patches
+ *   the original — the edit row is the *only* copy of the new text.
+ * - `associatedChildMessage` wraps a real message (see `WRAPPER_KEYS`). Unwrap
+ *   it; filtering it would delete album media and captioned video outright.
+ * - `secretEncryptedMessage` is an encrypted edit and stays, labelled — see
+ *   `UnreadableReason`.
+ *
+ * Takes the payload *and* the type hint, the same two-layer shape as
+ * `isReaction` and for the same reason: `messageType` is `getContentType()`
+ * verbatim and describes the outermost key, so it names the wrapper rather than
+ * the content. The payload is the authority.
+ *
+ * None of this can move into the server-side `where.messageType` filter:
+ * `messageType` carries no subtype, so excluding `protocolMessage` there would
+ * delete every edit along with the bookkeeping, and `associatedChildMessage`
+ * must be kept. Hence the drop is local, `total` overcounts, and the count is
+ * reported — see `MessagePage`.
+ */
+function classifyContent(message: unknown, messageType?: string): NormalizedMessage {
+  let payload = asRecord(message)
+
+  // Nothing to read: the type hint is all there is, and the only hint meaning
+  // "control record" is this one.
+  if (!payload) return { noise: messageType === 'protocolMessage', type: messageType }
+
+  let unwrapped = false
+  let editOf: string | undefined
+
+  for (let depth = 0; depth < MAX_UNWRAP_DEPTH; depth++) {
+    const protocol = asRecord(payload.protocolMessage)
+    if (protocol) {
+      const edited = protocolSubtype(protocol) === PROTOCOL_MESSAGE_EDIT
+        ? asRecord(protocol.editedMessage)
+        : undefined
+      if (!edited) return { noise: true }
+      editOf = idOf(protocol.key) ?? editOf
+      payload = edited
+      unwrapped = true
+      continue
+    }
+
+    const wrapped = firstWrapped(payload)
+    if (!wrapped) break
+    payload = wrapped
+    unwrapped = true
+  }
+
+  const secret = asRecord(payload.secretEncryptedMessage)
+
+  return {
+    noise: false,
+    payload,
+    // Recomputed only when something was unwrapped. For an ordinary row the
+    // stored `messageType` is Evolution's own answer and is what the server-side
+    // `where.messageType` filter matches on; recomputing it locally would risk
+    // disagreeing with that over key ordering, for no gain.
+    type: unwrapped ? contentTypeOf(payload) ?? messageType : messageType,
+    ...(secret
+      ? { editOf: idOf(secret.targetMessageKey) ?? editOf, unreadable: secretEncReason(secret.secretEncType) }
+      : { editOf }),
+  }
+}
+
+function asRecord(value: unknown): Record<string, any> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, any>
+    : undefined
+}
+
+function idOf(key: unknown): string | undefined {
+  const id = asRecord(key)?.id
+  return typeof id === 'string' && id ? id : undefined
+}
+
+function firstWrapped(payload: Record<string, any>): Record<string, any> | undefined {
+  for (const key of WRAPPER_KEYS) {
+    const inner = asRecord(asRecord(payload[key])?.message)
+    if (inner) return inner
+  }
+  return undefined
+}
+
+/**
+ * Baileys' `getContentType`, for an already-decoded payload: the first own key
+ * that is `conversation` or *contains* `Message`, minus the one it excludes.
+ * `messageContextInfo` deliberately does not match — no capital `M` — which is
+ * why a sibling context never shadows real content.
+ */
+function contentTypeOf(payload: Record<string, any>): string | undefined {
+  return Object.keys(payload).find(key =>
+    (key === 'conversation' || key.includes('Message')) && key !== 'senderKeyDistributionMessage')
+}
+
+/**
+ * `protocolMessage.type`, as a number.
+ *
+ * An absent value means **REVOKE**, not "keep": proto3 omits a zero on the wire,
+ * so a deletion arrives carrying no `type` at all. Reading that as "unknown, so
+ * keep it" would surface every deletion as an empty message — the bug this
+ * exists to fix, restored.
+ *
+ * It is an integer because Evolution's `deserializeMessageBuffers` rebuilds
+ * every nested object as a plain object and so discards protobufjs' name-
+ * emitting `toJSON`. The string branch is defensive: a tag bump that restored it
+ * would otherwise silently reclassify every edit as noise.
+ */
+function protocolSubtype(protocol: Record<string, any>): number {
+  const raw = protocol.type
+  if (raw === undefined || raw === null) return 0
+  if (typeof raw === 'number') return raw
+  if (typeof raw === 'string') {
+    if (/^\d+$/.test(raw)) return Number(raw)
+    return raw === 'MESSAGE_EDIT' ? PROTOCOL_MESSAGE_EDIT : -1
+  }
+  return -1
+}
+
+/**
+ * `SecretEncType`: 1 EVENT_EDIT, 2 MESSAGE_EDIT, 0 or absent UNKNOWN. Absent is
+ * UNKNOWN and not MESSAGE_EDIT — proto3 omits a zero here too — so an unlabelled
+ * one is reported as encrypted content rather than as an edit we cannot show it
+ * is.
+ */
+function secretEncReason(raw: unknown): UnreadableReason {
+  const value = typeof raw === 'string'
+    ? ({ EVENT_EDIT: 1, MESSAGE_EDIT: 2 } as Record<string, number>)[raw] ?? Number(raw)
+    : raw
+  return value === 1 || value === 2 ? 'encrypted-edit' : 'encrypted-content'
+}
+
+/**
+ * The `contextInfo` of an unwrapped payload, for the mention fallback in
+ * `listMessages`. Display-only, like everything in `mentions.ts` — no JID is
+ * constructed from it.
+ */
+function nestedContextInfo(payload: Record<string, any> | undefined): unknown {
+  if (!payload) return undefined
+  const key = contentTypeOf(payload)
+  return asRecord(payload.extendedTextMessage)?.contextInfo
+    ?? (key ? asRecord(payload[key])?.contextInfo : undefined)
+}
+
 /**
  * WhatsApp timestamps are epoch **seconds**, and arrive as a number or a string
  * depending on where in Evolution's response they sit. Returns undefined rather
@@ -577,9 +836,14 @@ function previewOf(message: unknown): string | undefined {
   if (typeof m.extendedTextMessage?.text === 'string') return m.extendedTextMessage.text
   if (typeof m.imageMessage?.caption === 'string') return `[image] ${m.imageMessage.caption}`
   if (m.imageMessage) return '[image]'
+  // Captions on video and on a document were readable by `searchMessages` long
+  // before they were readable here, so a message could be found by text this
+  // function then rendered as a bare `[video]`. Unwrapping album items made that
+  // the common case rather than an oddity.
+  if (typeof m.videoMessage?.caption === 'string') return `[video] ${m.videoMessage.caption}`
   if (m.videoMessage) return '[video]'
   if (m.audioMessage) return '[voice message]'
-  if (m.documentMessage) return `[document] ${m.documentMessage.fileName ?? ''}`.trim()
+  if (m.documentMessage) return `[document] ${m.documentMessage.fileName ?? m.documentMessage.caption ?? ''}`.trim()
   if (m.stickerMessage) return '[sticker]'
   if (typeof m.reactionMessage?.text === 'string') return `[reaction] ${m.reactionMessage.text}`
 

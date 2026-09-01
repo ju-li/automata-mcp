@@ -230,9 +230,16 @@ reads it, so a content search comes back as an unfiltered page that looks like a
 result set. The only filters it honours are `id`, `source`, `messageType`, a
 `messageTimestamp` range, and `key.{id,remoteJid,fromMe,participant}`. One of
 those does earn its keep: `read-messages` passes `messageType: { not:
-'reactionMessage' }` to drop reactions before the page is built. Content search,
+'reactionMessage' }` to drop reactions before the page is built. WhatsApp's own
+control records cannot ride that same trick — `messageType` carries no subtype,
+and excluding `protocolMessage` wholesale would delete every message edit along
+with the bookkeeping — so those are dropped locally and counted back to the
+caller as `protocolMessagesExcluded`. Content search,
 though, means reading Evolution's Postgres directly, via
-`NUXT_EVOLUTION_DATABASE_URL`. Leave it empty and the tool is not registered at
+`NUXT_EVOLUTION_DATABASE_URL`. That query also reaches text WhatsApp stores a
+level or two down — an album item's caption under `associatedChildMessage`, an
+edit's new wording under `protocolMessage.editedMessage` — which no top-level
+extractor could see. Leave it empty and the tool is not registered at
 all — clients never see it — rather than failing when called.
 
 **Give it a role that can do nothing else.** Every other credential in this app is
