@@ -36,8 +36,19 @@ export default defineMcpTool({
     + 'it, and absent where it does not. Reaction messages are left out unless '
     + '`includeReactions` is set. @-mentions in the text are shown as names '
     + 'where the account knows them, and left as raw numeric ids where it does '
-    + 'not — an id is not a name to guess at. To find a message by what it '
-    + 'says, prefer search-messages when this connector offers it.',
+    + 'not — an id is not a name to guess at. An edited message arrives as its '
+    + 'own record carrying the new text, with `editOf` naming the message it '
+    + 'replaces; that earlier record is still in the history with the text it '
+    + 'had before, so read the pair as one message that changed rather than as '
+    + 'two. WhatsApp\'s own control records — deletions, disappearing-message '
+    + 'timer changes, key exchanges — carry nothing to read and are left out, '
+    + 'counted by `protocolMessagesExcluded` when any were, and still included '
+    + 'in `totalMatching`. An edit that WhatsApp encrypted for the chat\'s '
+    + 'participants comes back with no text and `unreadable: '
+    + '\'encrypted-edit\'`: the current wording of that message is unknown '
+    + 'here, so report it as unknown rather than treating the earlier version '
+    + 'as final. To find a message by what it says, prefer search-messages when '
+    + 'this connector offers it.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -81,10 +92,22 @@ export default defineMcpTool({
     // `includeReactions` is passed alongside `range` rather than folded into it:
     // `range` is echoed back to the caller as `window`, and it should describe
     // the time bounds and nothing else.
-    const { messages, hasMore, total } = await listMessages(instance, jid, { limit, page, ...range, includeReactions })
+    const { messages, hasMore, total, protocolMessagesExcluded } = await listMessages(
+      instance, jid, { limit, page, ...range, includeReactions },
+    )
 
     const covered = coveredSpan(messages)
     const bounded = Boolean(range.since || range.until)
+
+    // One `note` key, assembled from whichever gaps are real — a second
+    // note-shaped key would just be a second thing to miss. Byte-identical to
+    // what it always said when nothing was dropped.
+    const notes = [
+      hasMore
+        ? incompleteNote({ page, limit, count: messages.length, excluded: protocolMessagesExcluded, range })
+        : undefined,
+      protocolMessagesExcluded > 0 ? droppedNote(protocolMessagesExcluded) : undefined,
+    ].filter((note): note is string => Boolean(note))
 
     return {
       jid,
@@ -105,7 +128,12 @@ export default defineMcpTool({
       // what truncation took: with `since` set and `hasMore` true, everything
       // between `window.since` and `covered.from` is still unread.
       ...(covered && { covered }),
-      ...(hasMore && { note: incompleteNote({ page, limit, count: messages.length, range }) }),
+      // Omitted at zero, so its presence always means something really was
+      // dropped. Deliberately not subtracted from `totalMatching`: that count is
+      // taken over the whole range, while this describes one page — patching it
+      // here would produce a confidently wrong number across pages.
+      ...(protocolMessagesExcluded > 0 && { protocolMessagesExcluded }),
+      ...(notes.length > 0 && { note: notes.join(' ') }),
       // Same principle as `hasMore`, for a different kind of gap: a whole class
       // of message is missing, and a caller that does not know it was dropped
       // reads the silence as "nobody reacted".
@@ -121,18 +149,37 @@ export default defineMcpTool({
  * held exactly 200 messages.
  */
 function incompleteNote(
-  { page, limit, count, range }:
-  { page: number, limit: number, count: number, range: { since?: string, until?: string } },
+  { page, limit, count, excluded, range }:
+  { page: number, limit: number, count: number, excluded: number, range: { since?: string, until?: string } },
 ): string {
   const scope = range.since ? 'inside the requested window' : 'in this conversation'
   const first = (page - 1) * limit + 1
-  const last = (page - 1) * limit + count
+  // Measured against what Evolution returned, not against what survived
+  // filtering: paging walks its rows, so the ordinal of the last message on this
+  // page has to count the ones dropped from it.
+  const last = (page - 1) * limit + count + excluded
 
   return `Incomplete: this is page ${page} — messages ${first}-${last} ${scope}, counting back from the `
     + `newest, and not all of them. Older messages ${scope} were NOT returned. Call read-messages again `
     + `with page: ${page + 1}, the same jid and limit`
     + `${range.since || range.until ? ', and the same window bounds' : ''}, and keep going until hasMore `
     + 'is false. Do not summarise this range until then.'
+}
+
+/**
+ * The count alone reads as "something is missing here". It is the opposite:
+ * these rows had nothing in them. Said in words so a caller neither ignores the
+ * number nor reports a hole that is not there.
+ */
+function droppedNote(count: number): string {
+  const records = count === 1
+    ? '1 WhatsApp control record was'
+    : `${count} WhatsApp control records were`
+
+  return `${records} left out of this page — deletions, disappearing-message timer changes, key `
+    + 'exchanges and similar bookkeeping, which carry no readable content. Nothing readable was '
+    + 'dropped: an edited message is returned as its new text, with editOf naming the message it '
+    + 'replaces. totalMatching still counts these records, so it can exceed the messages you receive.'
 }
 
 /**

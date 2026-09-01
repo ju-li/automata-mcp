@@ -24,10 +24,19 @@ export default defineMcpTool({
     + 'are not searched unless `includeReactions` is set, which also makes a bare '
     + 'emoji findable. A match you sent is marked `fromMe` and carries no '
     + '`author`; on one you received, `author` is the sender\'s name where the '
-    + 'account knows it, and absent where it does not. @-mentions in the text are shown as names where the account '
-    + 'knows them, and left as raw numeric ids where it does not — an id is not a '
-    + 'name to guess at. Use this instead of paging read-messages when you are '
-    + 'looking for something by what it says.',
+    + 'account knows it, and absent where it does not. @-mentions in the text are '
+    + 'shown as names where the account knows them, and left as raw numeric ids '
+    + 'where it does not — an id is not a name to guess at. An edited message is matched on its new text and comes '
+    + 'back with `editOf`, the id of the message it replaces — which may be a '
+    + 'separate hit here still carrying its old wording, so prefer the edit when '
+    + 'the two disagree. A hit\'s `type` names the record as WhatsApp stored it, '
+    + 'so an edit reads as `protocolMessage` and an album item as '
+    + '`associatedChildMessage`; the `text` is the real content either way. An '
+    + 'edit WhatsApp encrypted for the chat\'s participants '
+    + 'is not searchable at all: its text is unknown to this connector, so a '
+    + 'search finding nothing is not proof a message does not exist. Use this '
+    + 'instead of paging read-messages when you are looking for something by '
+    + 'what it says.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -85,6 +94,7 @@ export default defineMcpTool({
         timestamp: hit.timestamp,
         type: hit.type,
         text: applyMentions(hit.text, hit.mentioned, directory) ?? hit.text,
+        ...(hit.editOf && { editOf: hit.editOf }),
         chatName: names.get(hit.jid),
       })),
       count: hits.length,

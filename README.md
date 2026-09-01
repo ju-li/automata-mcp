@@ -233,7 +233,10 @@ the Evolution API, for two separate reasons.
 the field — and then never reads it, so a content search comes back as an
 unfiltered page that looks like a result set. The only filters it honours are
 `id`, `source`, `messageType`, a `messageTimestamp` range, and
-`key.{id,remoteJid,fromMe,participant}`.
+`key.{id,remoteJid,fromMe,participant}`. Reading the database instead also reaches
+text WhatsApp stores a level or two down — an album item's caption under
+`associatedChildMessage`, an edit's new wording under
+`protocolMessage.editedMessage` — which no top-level extractor could see.
 
 **Reading.** Evolution stores a message more than once. Its history import
 deduplicates against an in-memory set of message ids rebuilt at the start of each
@@ -248,6 +251,12 @@ range reports triple the messages it holds, and pages come back ragged. The
 endpoint cannot fix it: it pages with `skip`/`take` over the duplicate rows, so
 the page boundaries are already wrong by the time anything could collapse them.
 `DISTINCT ON (key->>'id')` before `LIMIT` is the fix, and that means SQL.
+
+Reactions are dropped in the same query, on the payload rather than on
+`messageType`. WhatsApp's own control records cannot be — `messageType` carries no
+subtype, and excluding `protocolMessage` wholesale would delete every message edit
+along with the bookkeeping — so those are dropped after the rows are read and
+counted back to the caller as `protocolMessagesExcluded`.
 
 **Give it a role that can do nothing else.** Every other credential in this app is
 scoped to a single account; this connection can reach every user's messages in
