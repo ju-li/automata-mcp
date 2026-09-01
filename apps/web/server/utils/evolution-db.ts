@@ -1,6 +1,7 @@
 import type { Sql } from 'postgres'
 import postgres from 'postgres'
 import type { AppInstance } from './pocketbase'
+import { mentionedJidsOf } from './mentions'
 
 /**
  * Read-only access to Evolution's own Postgres, for message search and nothing
@@ -152,6 +153,14 @@ export interface MessageSearchHit {
   timestamp?: string
   type?: string
   text: string
+  /**
+   * JIDs this message mentions, for the caller to resolve to names.
+   *
+   * Left unresolved here on purpose: a hit set spans arbitrarily many chats, and
+   * naming a group's members is a live round trip per group. The tool decides how
+   * much of that to pay — see `search-messages.ts`.
+   */
+  mentioned: string[]
 }
 
 export async function searchMessages(
@@ -180,7 +189,8 @@ export async function searchMessages(
     // still bound the query, so an included reaction is only ever one from a
     // chat this token already reaches.
     rows = await sql<MessageRow[]>`
-      SELECT m.id, m.key, m."pushName", m."messageType", m."messageTimestamp", t.body
+      SELECT m.id, m.key, m."pushName", m."messageType", m."messageTimestamp", t.body,
+             m."contextInfo"->'mentionedJid' AS mentioned
       FROM "Message" m
       CROSS JOIN LATERAL (
         SELECT COALESCE(
@@ -229,6 +239,7 @@ export async function searchMessages(
         : undefined,
       type: row.messageType ?? undefined,
       text: row.body,
+      mentioned: mentionedJidsOf(row.mentioned),
     })),
     truncated,
   }
@@ -242,6 +253,16 @@ interface MessageRow {
   /** Unix seconds, not milliseconds — the column is an Int. */
   messageTimestamp: number | null
   body: string
+  /**
+   * `contextInfo.mentionedJid`, or null where the message mentions nobody.
+   *
+   * Taken from the `contextInfo` **column** rather than from `message`, because
+   * 2.3.7 rewrites `extendedTextMessage` into `conversation` and deletes it on
+   * the way in — so the copy nested under `message` is not there to be read. It
+   * is a column of `"Message"`, which the read-only search role already selects,
+   * so this needs no grant change.
+   */
+  mentioned: string[] | null
 }
 
 /**

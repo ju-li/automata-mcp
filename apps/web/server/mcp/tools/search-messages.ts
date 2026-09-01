@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { AppInstance } from '~~/server/utils/pocketbase'
 import type { MessageSearchHit } from '~~/server/utils/evolution-db'
+import type { MentionDirectory } from '~~/server/utils/mentions'
 
 /**
  * Search tool. Unlike `read-messages` it defaults to every chat the token can
@@ -21,7 +22,9 @@ export default defineMcpTool({
     + 'every word must appear in the same message. Covers the history imported '
     + 'when the account was paired as well as everything since. Reaction messages '
     + 'are not searched unless `includeReactions` is set, which also makes a bare '
-    + 'emoji findable. Use this instead of paging read-messages when you are '
+    + 'emoji findable. @-mentions in the text are shown as names where the account '
+    + 'knows them, and left as raw numeric ids where it does not — an id is not a '
+    + 'name to guess at. Use this instead of paging read-messages when you are '
     + 'looking for something by what it says.',
   annotations: {
     readOnlyHint: true,
@@ -65,11 +68,18 @@ export default defineMcpTool({
       limit,
     })
 
-    const names = await chatNames(instance, hits)
+    const [names, mentions] = await Promise.all([
+      chatNames(instance, hits),
+      resolveMentions(instance, hits),
+    ])
 
     return {
       query,
-      matches: hits.map(hit => ({ ...hit, chatName: names.get(hit.jid) })),
+      matches: hits.map(({ mentioned, ...hit }) => ({
+        ...hit,
+        text: applyMentions(hit.text, mentioned, mentions) ?? hit.text,
+        chatName: names.get(hit.jid),
+      })),
       count: hits.length,
       // Say so rather than presenting a capped page as the whole answer.
       truncated,
@@ -100,6 +110,55 @@ async function chatNames(instance: AppInstance, hits: MessageSearchHit[]): Promi
   }
   catch (error) {
     console.error('[search] could not label chats:', error)
+    return new Map()
+  }
+}
+
+/**
+ * Names for the people the hits mention.
+ *
+ * Two passes, because the two sources cost wildly different amounts. Contacts are
+ * one cached read that covers every chat at once, so they run first; group
+ * membership is a live round trip *per group* and only runs for the groups that
+ * still have something unresolved after that.
+ *
+ * A hit set can span more groups than it is worth waking the socket for, so the
+ * second pass is capped, busiest group first — the cap trades a few raw ids in the
+ * tail for a bounded response time. `read-messages` needs none of this: it is one
+ * chat, so it is always exactly one lookup.
+ *
+ * Best effort throughout, like `chatNames`: unresolved mentions stay as raw ids,
+ * and a search still answers.
+ */
+const MENTION_GROUP_LOOKUPS = 8
+
+async function resolveMentions(instance: AppInstance, hits: MessageSearchHit[]): Promise<MentionDirectory> {
+  if (!hits.some(hit => hit.mentioned.length)) return new Map()
+
+  try {
+    const evolution = evolutionClientForInstance(instance)
+    const contacts = await contactDirectory(instance, evolution)
+
+    const fromContacts = await mentionDirectory({ instance, evolution, chatJids: [], contacts })
+
+    const unresolvedByGroup = new Map<string, number>()
+    for (const hit of hits) {
+      if (!hit.jid.endsWith('@g.us')) continue
+      const missing = hit.mentioned.filter(jid => !fromContacts.has(localPartOf(jid))).length
+      if (missing) unresolvedByGroup.set(hit.jid, (unresolvedByGroup.get(hit.jid) ?? 0) + missing)
+    }
+
+    if (!unresolvedByGroup.size) return fromContacts
+
+    const chatJids = [...unresolvedByGroup.entries()]
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, MENTION_GROUP_LOOKUPS)
+      .map(([jid]) => jid)
+
+    return await mentionDirectory({ instance, evolution, chatJids, contacts })
+  }
+  catch (error) {
+    console.error('[search] could not resolve mentions:', error)
     return new Map()
   }
 }
