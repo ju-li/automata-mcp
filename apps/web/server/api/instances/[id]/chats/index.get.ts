@@ -19,7 +19,7 @@
 const MAX_TAKE = 2000
 
 export default defineEventHandler(async (event) => {
-  const instance = await requireOwnedInstance(event, getRouterParam(event, 'id'))
+  const instance = await requireOwnedInstanceOfKind(event, getRouterParam(event, 'id'), 'whatsapp')
 
   const query = getQuery(event)
 

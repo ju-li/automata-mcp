@@ -32,7 +32,7 @@ async function submit() {
       Sign in
     </h1>
     <p class="mt-1 text-sm text-muted-foreground">
-      Connect WhatsApp to Claude.
+      Connect WhatsApp and databases to Claude.
     </p>
 
     <form class="mt-8 space-y-4" @submit.prevent="submit">

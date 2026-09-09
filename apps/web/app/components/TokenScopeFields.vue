@@ -5,8 +5,10 @@ import { PlusIcon, SearchIcon, UsersIcon, XIcon } from '@lucide/vue'
  * The scope editor, shared by the create and edit dialogs so the two cannot
  * drift into disagreeing about what a scope is.
  */
-const props = defineProps<{ instanceId: string }>()
+const props = defineProps<{ instanceId: string, kind: InstanceKind }>()
 const scope = defineModel<TokenScope>({ required: true })
+
+const isPostgres = computed(() => props.kind === 'postgres')
 
 // Deliberately not awaited. A top-level await makes setup() async, and Vue then
 // withholds the entire component until every fetch settles — so the chats call,
@@ -14,12 +16,19 @@ const scope = defineModel<TokenScope>({ required: true })
 // Actions section (whose data is in-process and instant) off the screen with it.
 // The dialog mounts on click, so that stall reads as a click that did nothing.
 const { data: toolData, status: toolStatus } = useFetch<{ tools: McpToolInfo[] }>(
-  '/api/mcp/tools',
+  () => `/api/instances/${props.instanceId}/mcp-tools`,
   { lazy: true },
 )
+// Only the axis this kind actually has is fetched. `immediate: false` on the
+// other one matters: asking a WhatsApp connection for its tables answers 404,
+// and a 404 in the console on every open reads as a bug.
 const { data: chatData, status: chatStatus } = useFetch<{ chats: ScopedChat[] }>(
   () => `/api/instances/${props.instanceId}/chats`,
-  { lazy: true },
+  { lazy: true, immediate: !isPostgres.value },
+)
+const { data: tableData, status: tableStatus } = useFetch<{ tables: ScopedTable[], hasMore: boolean }>(
+  () => `/api/instances/${props.instanceId}/tables`,
+  { lazy: true, immediate: isPostgres.value, query: { limit: 500 } },
 )
 
 // Chats picked by JID may not be in the fetched list — a number added by hand,
@@ -27,6 +36,7 @@ const { data: chatData, status: chatStatus } = useFetch<{ chats: ScopedChat[] }>
 // the selection can always be rendered with a name.
 const extraChats = ref<ScopedChat[]>([])
 const search = ref('')
+const tableSearch = ref('')
 const manualNumber = ref('')
 const resolving = ref(false)
 const manualError = ref('')
@@ -35,6 +45,20 @@ const manualError = ref('')
 // request is dispatched, and treating it as settled flashes the empty state.
 const toolsLoading = computed(() => toolStatus.value === 'idle' || toolStatus.value === 'pending')
 const chatsLoading = computed(() => chatStatus.value === 'idle' || chatStatus.value === 'pending')
+const tablesLoading = computed(() => tableStatus.value === 'idle' || tableStatus.value === 'pending')
+
+const visibleTables = computed(() => {
+  const rows = tableData.value?.tables ?? []
+  const q = tableSearch.value.trim().toLowerCase()
+  if (!q) return rows
+  return rows.filter(t => t.qname.toLowerCase().includes(q))
+})
+
+function toggleTable(qname: string, on: boolean) {
+  const next = new Set(scope.value.table_names)
+  on ? next.add(qname) : next.delete(qname)
+  scope.value = { ...scope.value, table_names: [...next] }
+}
 
 const knownChats = computed<ScopedChat[]>(() => {
   const seen = new Map<string, ScopedChat>()
@@ -188,8 +212,90 @@ async function addByNumber() {
 
     <Separator />
 
-    <!-- ── chats ───────────────────────────────────────────────────────── -->
-    <section class="space-y-3">
+    <!-- ── tables (databases only) ─────────────────────────────────────── -->
+    <section v-if="isPostgres" class="space-y-3">
+      <div>
+        <h3 class="text-sm font-medium">
+          Tables
+        </h3>
+        <p class="text-xs text-muted-foreground">
+          Which tables this token can reach. Checked against the query plan before
+          any row is read, so a query that joins outside this list is refused
+          rather than silently returning less.
+        </p>
+      </div>
+
+      <RadioGroup
+        :model-value="scope.all_tables ? 'all' : 'some'"
+        @update:model-value="scope = { ...scope, all_tables: $event === 'all' }"
+      >
+        <div class="flex items-center gap-2">
+          <RadioGroupItem id="tables-all" value="all" />
+          <Label for="tables-all" class="font-normal">All tables the connection can read</Label>
+        </div>
+        <div class="flex items-center gap-2">
+          <RadioGroupItem id="tables-some" value="some" />
+          <Label for="tables-some" class="font-normal">Only selected tables</Label>
+        </div>
+      </RadioGroup>
+
+      <div v-if="!scope.all_tables" class="space-y-3 rounded-md border p-3">
+        <div v-if="scope.table_names.length" class="flex flex-wrap gap-1.5">
+          <Badge
+            v-for="qname in scope.table_names"
+            :key="qname"
+            variant="secondary"
+            class="gap-1 font-mono text-[10px]"
+          >
+            {{ qname }}
+            <button type="button" aria-label="Remove table" @click="toggleTable(qname, false)">
+              <XIcon class="size-3" />
+            </button>
+          </Badge>
+        </div>
+
+        <div class="relative">
+          <SearchIcon class="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
+          <Input v-model="tableSearch" placeholder="Search tables" class="pl-8" />
+        </div>
+
+        <div v-if="tablesLoading" class="space-y-2" aria-busy="true">
+          <span class="sr-only">Loading tables…</span>
+          <Skeleton v-for="n in 4" :key="n" class="h-8 w-full" />
+        </div>
+
+        <p v-else-if="!visibleTables.length" class="py-2 text-xs text-muted-foreground">
+          No tables to show. If this database is reachable but empty here, the role
+          it connects as has no SELECT grant on anything.
+        </p>
+
+        <div v-else class="max-h-64 space-y-1 overflow-y-auto">
+          <div
+            v-for="table in visibleTables"
+            :key="table.qname"
+            class="flex items-start gap-3 rounded-sm px-1 py-1.5 hover:bg-accent"
+          >
+            <Checkbox
+              :id="`table-${table.qname}`"
+              :model-value="scope.table_names.includes(table.qname)"
+              class="mt-0.5"
+              @update:model-value="toggleTable(table.qname, $event === true)"
+            />
+            <Label :for="`table-${table.qname}`" class="min-w-0 font-normal">
+              <span class="block truncate font-mono text-xs">{{ table.qname }}</span>
+              <span class="block text-xs text-muted-foreground">{{ table.kind }}</span>
+            </Label>
+          </div>
+        </div>
+
+        <p v-if="tableData?.hasMore" class="text-xs text-muted-foreground">
+          More tables exist than are listed. Search to narrow the list.
+        </p>
+      </div>
+    </section>
+
+    <!-- ── chats (WhatsApp only) ───────────────────────────────────────── -->
+    <section v-else class="space-y-3">
       <div>
         <h3 class="text-sm font-medium">
           Chats

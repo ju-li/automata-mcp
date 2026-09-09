@@ -3,8 +3,11 @@ import { PlusIcon } from '@lucide/vue'
 
 interface InstanceRow {
   id: string
+  kind: InstanceKind
   label: string
   state: ConnectionState
+  target?: string
+  detail?: string
   profileName?: string
   number?: string
   stats: { messages: number, chats: number, contacts: number }
@@ -12,8 +15,8 @@ interface InstanceRow {
 
 const { data, status } = await useFetch<{ instances: InstanceRow[] }>('/api/instances')
 
-// A fresh account has nothing to list, so send it straight to pairing — that is
-// what makes signup land on a QR code.
+// A fresh account has nothing to list, so send it straight to the create flow —
+// that is what makes signup land somewhere useful rather than on an empty page.
 if (status.value !== 'pending' && !data.value?.instances?.length) {
   await navigateTo('/instances/new', { replace: true })
 }
@@ -24,17 +27,17 @@ if (status.value !== 'pending' && !data.value?.instances?.length) {
     <div class="flex items-end justify-between gap-4">
       <div>
         <h1 class="font-heading text-2xl font-semibold">
-          WhatsApp accounts
+          Connections
         </h1>
         <p class="text-sm text-muted-foreground">
-          Each connected account gets its own Claude connector.
+          Each connection gets its own Claude connector.
         </p>
       </div>
 
       <Button as-child size="sm">
         <NuxtLink to="/instances/new">
           <PlusIcon class="size-4" />
-          Connect a number
+          Add a connection
         </NuxtLink>
       </Button>
     </div>

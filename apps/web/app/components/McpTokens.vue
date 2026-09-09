@@ -2,7 +2,35 @@
 import { PlusIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
-const props = defineProps<{ instanceId: string, connected?: boolean }>()
+const props = defineProps<{
+  instanceId: string
+  kind: InstanceKind
+  connected?: boolean
+}>()
+
+/**
+ * A new token's starting scope depends on the kind.
+ *
+ * A WhatsApp token starts open, as it always has. A Postgres token starts
+ * read-only — every read tool, no write tool — because the two mistakes do not
+ * cost the same: a token that turns out to need writes is one edit away, and one
+ * that turns out not to have needed them may already have made some.
+ *
+ * The read tools come from the server, since only it knows which exist.
+ */
+const { data: toolCatalogue } = await useFetch<{ tools: McpToolInfo[] }>(
+  () => `/api/instances/${props.instanceId}/mcp-tools`,
+  { lazy: true },
+)
+
+function initialScope(): TokenScope {
+  if (props.kind !== 'postgres') return openScope()
+  const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly).map(t => t.name)
+  // Before the catalogue arrives there is nothing to pre-check; an open scope
+  // would be the wrong default here, so leave the list empty and let the dialog
+  // fill it in when the fetch lands.
+  return readOnlyScope(readTools)
+}
 
 interface TokenRow {
   id: string
@@ -40,6 +68,17 @@ const howTo = ref<TokenRow | null>(null)
  */
 function createFromHowTo() {
   howTo.value = null
+  openCreate()
+}
+
+/**
+ * Reset the form every time the dialog opens. Without this, a scope abandoned on
+ * a previous open is what the next token is minted with.
+ */
+function openCreate() {
+  newLabel.value = ''
+  newExpiry.value = '90d'
+  newScope.value = initialScope()
   createOpen.value = true
 }
 
@@ -47,7 +86,12 @@ function startEdit(token: TokenRow) {
   editing.value = token
   // Copied, not referenced — cancelling must not leave the table showing edits
   // that were never saved.
-  editScope.value = { ...token.scope, tool_names: [...token.scope.tool_names], chat_jids: [...token.scope.chat_jids] }
+  editScope.value = {
+    ...token.scope,
+    tool_names: [...token.scope.tool_names],
+    chat_jids: [...token.scope.chat_jids],
+    table_names: [...token.scope.table_names],
+  }
 }
 
 async function saveScope() {
@@ -124,15 +168,21 @@ function statusOf(token: TokenRow) {
           Connector tokens
         </h2>
         <p class="text-sm text-muted-foreground">
-          Each token gives Claude access to this WhatsApp account and no other.
+          Each token gives Claude access to this {{ describeKind(kind) }} and no other.
         </p>
         <p v-if="connected === false" class="mt-1 text-sm text-muted-foreground">
-          This account is not connected, so tokens cannot send or read anything
-          until you pair it again. You can still revoke them.
+          <template v-if="kind === 'postgres'">
+            This database is not reachable, so tokens cannot read or write
+            anything until it is. You can still revoke them.
+          </template>
+          <template v-else>
+            This account is not connected, so tokens cannot send or read anything
+            until you pair it again. You can still revoke them.
+          </template>
         </p>
       </div>
 
-      <Button size="sm" @click="createOpen = true">
+      <Button size="sm" @click="openCreate()">
         <PlusIcon class="size-4" />
         New token
       </Button>
@@ -176,7 +226,7 @@ function statusOf(token: TokenRow) {
                 {{ token.expires_at ? formatDate(token.expires_at) : 'Never' }}
               </TableCell>
               <TableCell>
-                <span class="text-sm text-muted-foreground">{{ describeScope(token.scope) }}</span>
+                <span class="text-sm text-muted-foreground">{{ describeScope(token.scope, kind) }}</span>
               </TableCell>
               <TableCell>
                 <Badge :variant="statusOf(token).variant">
@@ -269,7 +319,7 @@ function statusOf(token: TokenRow) {
 
           <Separator />
 
-          <TokenScopeFields v-model="newScope" :instance-id="instanceId" />
+          <TokenScopeFields v-model="newScope" :instance-id="instanceId" :kind="kind" />
         </div>
 
         <DialogFooter>
@@ -293,7 +343,7 @@ function statusOf(token: TokenRow) {
           </DialogDescription>
         </DialogHeader>
 
-        <TokenScopeFields v-model="editScope" :instance-id="instanceId" />
+        <TokenScopeFields v-model="editScope" :instance-id="instanceId" :kind="kind" />
 
         <DialogFooter>
           <Button variant="ghost" @click="editing = null">
@@ -308,12 +358,13 @@ function statusOf(token: TokenRow) {
 
     <HowToConnectDialog
       :open="Boolean(howTo)"
+      :kind="kind"
       :label="howTo?.label"
       :scope="howTo?.scope"
       @update:open="value => { if (!value) howTo = null }"
       @create="createFromHowTo"
     />
 
-    <RevealTokenDialog :token="revealed" :scope="revealedScope" @close="revealed = null" />
+    <RevealTokenDialog :token="revealed" :kind="kind" :scope="revealedScope" @close="revealed = null" />
   </section>
 </template>

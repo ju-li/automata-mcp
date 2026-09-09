@@ -3,10 +3,10 @@ const PUBLIC_ROUTES = new Set(['/login', '/signup'])
 /**
  * Session gate. Authentication only.
  *
- * It deliberately does not look at WhatsApp connection state — that would put an
- * Evolution round-trip on every navigation. `/instances` sends you to
- * `/instances/new` when you have no accounts, and the per-account page decides
- * between showing a QR and showing the dashboard.
+ * It deliberately does not look at a connection's live state — that would put an
+ * Evolution round-trip, or a database connection, on every navigation.
+ * `/instances` sends you to `/instances/new` when you have none, and the
+ * per-connection page picks its panel from the connection's kind.
  */
 export default defineNuxtRouteMiddleware(async (to) => {
   const { user, ensureLoaded } = useSession()

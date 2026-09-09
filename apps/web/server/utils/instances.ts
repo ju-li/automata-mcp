@@ -215,6 +215,70 @@ export async function provisionWhatsappInstance(
 }
 
 /**
+ * Ownership *and* kind, for a route that only makes sense for one kind.
+ *
+ * 404 for the wrong kind, matching `requireOwnedInstance`'s reason for
+ * answering 404 rather than 403: the route genuinely does not exist for this
+ * connection, and a distinguishable error would confirm which id is which kind.
+ */
+export async function requireOwnedInstanceOfKind(
+  event: H3Event,
+  instanceId: string | undefined,
+  kind: InstanceKind,
+): Promise<AppInstance> {
+  const instance = await requireOwnedInstance(event, instanceId)
+  if (instanceKind(instance) !== kind) {
+    throw createError({ statusCode: 404, statusMessage: 'Not found' })
+  }
+  return instance
+}
+
+/**
+ * Health of one connection, whatever kind it is.
+ *
+ * `state` uses the same four values for both kinds so the listing can render a
+ * badge without branching: a database that answers is `open`, one that does not
+ * is `close`, and a row with no DSN at all is `unknown` — the same shape as a
+ * WhatsApp account that Evolution cannot be asked about.
+ *
+ * A type alias, not an interface, for the reason `InstanceStatus` gives.
+ */
+export type ConnectionHealth = {
+  state: ConnectionState
+  /** Human-readable line for the card: profile name, or database and version. */
+  detail?: string
+  error?: string
+}
+
+export async function getPostgresHealth(instance: AppInstance): Promise<ConnectionHealth> {
+  if (!instance.dsn) return { state: 'unknown', error: 'No connection string is stored for this database.' }
+
+  try {
+    const sql = await pgFor(instance)
+    const [row] = await sql<Array<{ version: string, database: string }>>`
+      SELECT current_setting('server_version') AS version, current_database() AS database`
+    return {
+      state: 'open',
+      detail: row ? `PostgreSQL ${row.version} · ${row.database}` : undefined,
+    }
+  }
+  catch (cause) {
+    // The DSN carries a password and the driver's message can echo connection
+    // parameters, so only the code is surfaced. Logged here because a handled
+    // error is invisible to Nitro and "it just says disconnected" is not a
+    // diagnosis.
+    console.error(`[pg] health check failed for instance ${instance.id}`, cause)
+    const detail = (cause as { statusCode?: number, message?: string })
+    return {
+      state: 'close',
+      error: detail?.statusCode === 422
+        ? detail.message
+        : `Could not reach the database (${(cause as { code?: string })?.code ?? 'connection failed'}).`,
+    }
+  }
+}
+
+/**
  * Record a Postgres connection.
  *
  * Nothing is provisioned: the database already exists and belongs to the user.

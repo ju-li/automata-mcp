@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { TriangleAlertIcon } from '@lucide/vue'
 
-const props = defineProps<{ token: string | null, scope?: TokenScope }>()
+const props = defineProps<{ token: string | null, kind: InstanceKind, scope?: TokenScope }>()
 const emit = defineEmits<{ close: [] }>()
 
 const { connectorUrl } = useConnectorUrl()
@@ -30,14 +30,18 @@ const open = computed({
 
       <div class="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
         <TriangleAlertIcon class="mt-0.5 size-4 shrink-0 text-destructive" />
-        <p>
+        <p v-if="kind === 'postgres'">
+          Anyone with this token can query this database — and write to it, if you
+          granted the write action. Treat it like a password.
+        </p>
+        <p v-else>
           Anyone with this token can read and send WhatsApp messages from this
           account. Treat it like a password.
         </p>
       </div>
 
       <p v-if="scope" class="text-sm">
-        <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope) }}
+        <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope, kind) }}
       </p>
 
       <div class="min-w-0 space-y-2">

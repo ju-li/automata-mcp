@@ -10,7 +10,7 @@ const { user, logout } = useSession()
       <div class="mx-auto flex h-14 max-w-5xl items-center justify-between gap-4 px-6">
         <NuxtLink to="/instances" class="flex items-center gap-2 font-heading font-semibold">
           <MessageCircleIcon class="size-5" />
-          <span>WhatsApp MCP</span>
+          <span>MCP Controller</span>
         </NuxtLink>
 
         <div class="flex items-center gap-3">
