@@ -59,14 +59,17 @@ export function expiryFromPreset(preset: ExpiryPreset): string {
 /**
  * The scope columns, as PocketBase wants them.
  *
- * Always writes all four. PocketBase stores an unset boolean as `false`, so
+ * Always writes all six. PocketBase stores an unset boolean as `false`, so
  * omitting `all_tools` here would mint a token that can call nothing — a silent,
- * confusing failure rather than a loud one.
+ * confusing failure rather than a loud one. The same is true of every axis that
+ * gets added: write them all, every time, whatever kind the connection is.
  */
 function scopeFields(scope: McpScope) {
   return {
     all_chats: scope.allChats,
     chat_jids: scope.allChats ? [] : scope.chatJids,
+    all_tables: scope.allTables,
+    table_names: scope.allTables ? [] : scope.tableNames,
     all_tools: scope.allTools,
     tool_names: scope.allTools ? [] : scope.toolNames,
   }

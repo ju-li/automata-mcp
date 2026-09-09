@@ -14,6 +14,8 @@ export const scopeSchema = z.object({
   tool_names: z.array(z.string().min(1)).default([]),
   all_chats: z.boolean().default(true),
   chat_jids: z.array(z.string().min(1)).default([]),
+  all_tables: z.boolean().default(true),
+  table_names: z.array(z.string().min(1)).default([]),
 })
   .refine(v => v.all_tools || v.tool_names.length > 0, {
     message: 'Select at least one action, or allow all actions',
@@ -22,6 +24,10 @@ export const scopeSchema = z.object({
   .refine(v => v.all_chats || v.chat_jids.length > 0, {
     message: 'Select at least one chat, or allow all chats',
     path: ['chat_jids'],
+  })
+  .refine(v => v.all_tables || v.table_names.length > 0, {
+    message: 'Select at least one table, or allow all tables',
+    path: ['table_names'],
   })
 
 export type ScopeInput = z.infer<typeof scopeSchema>
@@ -32,6 +38,8 @@ export function scopeFromInput(input: ScopeInput): McpScope {
     toolNames: input.all_tools ? [] : dedupe(input.tool_names),
     allChats: input.all_chats,
     chatJids: input.all_chats ? [] : dedupe(input.chat_jids),
+    allTables: input.all_tables,
+    tableNames: input.all_tables ? [] : dedupe(input.table_names),
   }
 }
 
@@ -48,6 +56,8 @@ export function scopeToInput(scope: McpScope): ScopeInput {
     tool_names: scope.toolNames,
     all_chats: scope.allChats,
     chat_jids: scope.chatJids,
+    all_tables: scope.allTables,
+    table_names: scope.tableNames,
   }
 }
 
