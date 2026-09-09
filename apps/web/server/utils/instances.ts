@@ -33,20 +33,36 @@ export interface InstanceQr {
   count?: number
 }
 
-/** What the UI is allowed to see. Never includes `api_key`. */
+/** What the UI is allowed to see. Never includes a secret field. */
 export interface PublicInstance {
   id: string
+  kind: InstanceKind
   name: string
   label: string
   created?: string
+  /**
+   * Where this connection points, for display. The Evolution base URL is not a
+   * secret; the Postgres DSN is, so only its host, port and database name are
+   * surfaced and never the credentials in it.
+   */
+  target?: string
+  /** True when this WhatsApp connection uses a server the user supplied. */
+  ownServer?: boolean
 }
 
 export function toPublicInstance(instance: AppInstance): PublicInstance {
+  const kind = instanceKind(instance)
   return {
     id: instance.id,
+    kind,
     name: instance.name,
-    label: instance.label || 'WhatsApp account',
+    label: instance.label || (kind === 'postgres' ? 'Database' : 'WhatsApp account'),
     created: instance.created,
+    target: kind === 'postgres'
+      ? [instance.pg_host, instance.pg_port].filter(Boolean).join(':')
+        + (instance.pg_database ? `/${instance.pg_database}` : '')
+      : instance.base_url,
+    ...(kind === 'whatsapp' && { ownServer: Boolean(instance.admin_key) }),
   }
 }
 
@@ -110,9 +126,36 @@ export async function requireOwnedInstance(event: H3Event, instanceId: string | 
  *
  * This is also the single place an instances-per-user cap would go.
  */
-export async function provisionInstance(user: AppUser, label?: string): Promise<AppInstance> {
-  const config = useRuntimeConfig()
-  const admin = evolutionAdminClient()
+export interface WhatsappProvisionInput {
+  label?: string
+  /** A bring-your-own Evolution server. Both halves, or neither. */
+  server?: { baseUrl: string, adminKey: string }
+}
+
+export async function provisionWhatsappInstance(
+  user: AppUser,
+  input: WhatsappProvisionInput = {},
+): Promise<AppInstance> {
+  const { label, server } = input
+
+  // Guarded before the first request rather than only inside the client, so a
+  // bad URL fails the create with a message about the URL instead of surfacing
+  // as a failed Evolution call.
+  if (server) await assertPublicUrl(server.baseUrl, 'Evolution server URL')
+
+  const creds = evolutionAdminCredentials(
+    server ? { base_url: server.baseUrl, admin_key: server.adminKey } : undefined,
+  )
+  if (!creds) {
+    throw createError({
+      statusCode: 422,
+      statusMessage: 'No Evolution server is available. Set NUXT_EVOLUTION_URL and '
+        + 'NUXT_EVOLUTION_ADMIN_KEY to provide a default, or supply your own server '
+        + 'URL and admin key.',
+    })
+  }
+
+  const admin = createEvolutionClient(creds)
   const name = generateInstanceName()
 
   const created = await admin<{ instance?: { instanceId?: string }, hash?: string | { apikey?: string } }>(
@@ -152,16 +195,67 @@ export async function provisionInstance(user: AppUser, label?: string): Promise<
     const pb = await pocketbaseAdmin()
     return await pb.collection('instances').create<AppInstance>({
       user: user.id,
+      kind: 'whatsapp',
       name,
       instance_id: created?.instance?.instanceId ?? '',
       api_key: apiKey,
-      base_url: config.evolutionUrl,
+      // The URL actually used, never runtimeConfig — otherwise a BYO instance
+      // would be recorded as living on our server and every later call would go
+      // to the wrong one.
+      base_url: creds.baseUrl,
+      // Stored only for a server the user supplied. A connection on the
+      // deployment default keeps following that default, including if it moves.
+      admin_key: server ? server.adminKey : '',
       label: label?.trim() || 'WhatsApp account',
     })
   } catch (error) {
     await admin(`/instance/delete/${encodeURIComponent(name)}`, { method: 'DELETE' }).catch(() => {})
     throw error
   }
+}
+
+/**
+ * Record a Postgres connection.
+ *
+ * Nothing is provisioned: the database already exists and belongs to the user.
+ * But the DSN is proved to work *before* the row is written, so a typo is a
+ * failed create with a message about the connection string rather than a row
+ * that looks connected and fails every later tool call. That is the same
+ * ordering rule as the WhatsApp path, arrived at from the other direction —
+ * there, the remote thing is made first because it is the part that can leak.
+ *
+ * `name` is generated for a Postgres row too. It reaches no external system
+ * here, but `instances.name` is required and uniquely indexed, and leaving one
+ * kind out of that would make every query that touches `name` conditional.
+ */
+export interface PostgresProvisionInput {
+  label?: string
+  dsn: string
+}
+
+export async function provisionPostgresInstance(
+  user: AppUser,
+  input: PostgresProvisionInput,
+): Promise<AppInstance> {
+  const dsn = input.dsn.trim()
+
+  // Parses, runs the host guard, connects, and reports the role's privileges.
+  const probe = await probePgConnection(dsn)
+  const target = describeDsn(dsn)
+
+  const pb = await pocketbaseAdmin()
+  return await pb.collection('instances').create<AppInstance>({
+    user: user.id,
+    kind: 'postgres',
+    name: generateInstanceName(),
+    dsn,
+    // Display-only mirrors, so the dashboard can say where this points without
+    // reading the secret back out.
+    pg_host: target.host,
+    pg_port: target.port,
+    pg_database: probe.database,
+    label: input.label?.trim() || probe.database || 'Database',
+  })
 }
 
 /**
@@ -301,9 +395,21 @@ export async function enableFullHistorySync(instance: AppInstance): Promise<void
  * Evolution is torn down first — if that fails we keep the row, because a row
  * pointing at a live instance is recoverable and a live instance nobody has a
  * record of is not. Evolution logs the instance out itself if it is connected.
+ *
+ * A Postgres connection owns nothing outside this app: there is no remote
+ * resource to release, only a local pool to close.
  */
 export async function deleteInstance(instance: AppInstance): Promise<void> {
-  const admin = evolutionAdminClient()
+  if (instanceKind(instance) === 'postgres') {
+    await closePgPool(instance.id)
+    const pb = await pocketbaseAdmin()
+    await pb.collection('instances').delete(instance.id)
+    return
+  }
+
+  // Uses the same server the instance was created on, with that server's own
+  // global key when it brought one.
+  const admin = evolutionAdminClient(instance)
 
   try {
     await admin(`/instance/delete/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })

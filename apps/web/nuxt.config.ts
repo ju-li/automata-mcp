@@ -64,17 +64,27 @@ export default defineNuxtConfig({
     pocketbaseAdminEmail: '',
     pocketbaseAdminPassword: '',
 
-    // Where every provisioned instance lives. Required.
+    // The *default* Evolution server, used by any WhatsApp connection that did
+    // not bring its own. Optional: with these unset the app still runs, and the
+    // WhatsApp create flow requires the user to supply a server.
     evolutionUrl: '',
-    // Evolution's global key. Used ONLY to create and delete instances, by
-    // server/utils/instances.ts. Never stored on a record and never used to
-    // serve a request on behalf of a user — see server/utils/evolution.ts.
+    // That server's global key. Used ONLY to create and delete instances on it,
+    // by server/utils/instances.ts. Never stored on a record and never used to
+    // serve a request on behalf of a user — see server/utils/evolution.ts. A
+    // user-supplied server carries its own key on the instance row instead; the
+    // two are never cross-paired.
     evolutionAdminKey: '',
     // Read-only connection to Evolution's own Postgres, for message search only.
     // Optional: unset, the search tool is not registered. This reaches every
     // user's messages, so the role behind it must be SELECT-only — see
     // server/utils/evolution-db.ts and README "Message search".
     evolutionDatabaseUrl: '',
+
+    // Let a user-supplied Postgres DSN or Evolution URL point at a private or
+    // loopback address. Correct for a single-tenant, self-hosted deployment;
+    // wrong for anything shared, where it lets one user's connection reach this
+    // deployment's own backends. See server/utils/net-guard.ts.
+    allowPrivateTargets: false,
 
     webhookUrl: '',
     webhookSecret: '',

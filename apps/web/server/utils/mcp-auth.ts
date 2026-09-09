@@ -20,14 +20,29 @@ import type { EvolutionCredentials } from './evolution'
 
 const TOKEN_PREFIX = 'wamcp_'
 
-export interface McpAuth {
+interface McpAuthBase {
   user: AppUser
   instance: AppInstance
   tokenId: string
-  evolution: EvolutionCredentials
-  /** Which chats and tools this token may reach. See server/utils/mcp-scope.ts. */
+  /** Which chats, tables and tools this token may reach. See mcp-scope.ts. */
   scope: McpScope
 }
+
+/**
+ * The resolved credential for one MCP request, discriminated by connection kind.
+ *
+ * A union rather than a bag of optional fields, so a handler that reaches for
+ * `evolution` has to establish it is talking to a WhatsApp connection first —
+ * the type says what the kind gate on every tool's `enabled` also says.
+ *
+ * Postgres carries no separate credential object: the DSN lives on the instance
+ * row and `pgFor(instance)` is the only thing that reads it, so copying it here
+ * would put a second live copy of a user's database password in request context
+ * for no gain.
+ */
+export type McpAuth =
+  | (McpAuthBase & { kind: 'whatsapp', evolution: EvolutionCredentials })
+  | (McpAuthBase & { kind: 'postgres' })
 
 interface McpTokenRecord {
   id: string
@@ -38,6 +53,8 @@ interface McpTokenRecord {
   revoked: boolean
   all_chats?: boolean
   chat_jids?: unknown
+  all_tables?: boolean
+  table_names?: unknown
   all_tools?: boolean
   tool_names?: unknown
 }
@@ -128,16 +145,37 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   // A token cannot outlive its instance's owner changing underneath it.
   if (instance.user !== user.id) return undefined
 
-  const evolution = credentialsForInstance(instance)
-  if (!evolution) return undefined
+  // Per-kind credentials. A missing one means the connection was never finished,
+  // which is a genuine "this credential does not work" and so a 401 — not the
+  // 503 that a backend outage gets. It is also invisible in the logs otherwise,
+  // and "my token stopped working" with nothing in the logs is the failure that
+  // rule exists to prevent, so say which connection and why.
+  const kind = instanceKind(instance)
+  const base = { user, instance, tokenId: record.id, scope: scopeFromRecord(record) }
+
+  let auth: McpAuth
+  if (kind === 'postgres') {
+    if (!instance.dsn) {
+      console.error(`[mcp-auth] instance ${instance.id} is kind=postgres with no dsn; token ${record.id} refused`)
+      return undefined
+    }
+    auth = { ...base, kind: 'postgres' }
+  }
+  else {
+    const evolution = credentialsForInstance(instance)
+    if (!evolution) {
+      console.error(`[mcp-auth] instance ${instance.id} has no Evolution credentials; token ${record.id} refused`)
+      return undefined
+    }
+    auth = { ...base, kind: 'whatsapp', evolution }
+  }
 
   // Best-effort; a write failure must not fail an otherwise valid request.
   void pb.collection('mcp_tokens')
     .update(record.id, { last_used_at: new Date().toISOString() })
     .catch(() => {})
 
-  // Scope comes off the row already fetched — no extra query.
-  return { user, instance, tokenId: record.id, evolution, scope: scopeFromRecord(record) }
+  return auth
 }
 
 /**
