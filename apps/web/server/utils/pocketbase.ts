@@ -1,13 +1,14 @@
 import PocketBase from 'pocketbase'
 
 /**
- * PocketBase is the backend for users, sessions and per-user Evolution
- * credentials. Two distinct clients live here:
+ * PocketBase is the backend for users, sessions, connections and the credentials
+ * those connections carry. Two distinct clients live here:
  *
- *   `pocketbaseAdmin()`   — a long-lived superuser-authed client. Reads hidden
- *                           fields (`users.evolution_api_key`) and the
- *                           admin-only `mcp_tokens` collection. Never hand this
- *                           to anything that takes user input as a filter.
+ *   `pocketbaseAdmin()`   — a long-lived superuser-authed client. Reads the
+ *                           hidden fields on `instances` (`api_key`,
+ *                           `admin_key`, `dsn`) and the admin-only `mcp_tokens`
+ *                           collection. Never hand this to anything that takes
+ *                           user input as a filter.
  *
  *   `pocketbaseForRequest()` — a fresh, unauthenticated client per request, to
  *                           be loaded with the caller's own auth cookie. Its

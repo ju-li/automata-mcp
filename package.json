@@ -10,8 +10,9 @@
     "generate": "pnpm --filter web generate",
     "typecheck": "pnpm --filter web typecheck",
     "services:up": "docker compose -f docker-compose.dev.yml up -d",
-    "services:down": "docker compose -f docker-compose.dev.yml down",
-    "services:logs": "docker compose -f docker-compose.dev.yml logs -f",
-    "services:ps": "docker compose -f docker-compose.dev.yml ps"
+    "services:up:whatsapp": "docker compose -f docker-compose.dev.yml --profile whatsapp up -d",
+    "services:down": "docker compose -f docker-compose.dev.yml --profile whatsapp down",
+    "services:logs": "docker compose -f docker-compose.dev.yml --profile whatsapp logs -f",
+    "services:ps": "docker compose -f docker-compose.dev.yml --profile whatsapp ps"
   }
 }

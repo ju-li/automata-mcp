@@ -4,18 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-One Nuxt/Nitro server exposing two surfaces over the same [Evolution API](https://doc.evolution-api.com/) (WhatsApp) backend:
+One Nuxt/Nitro server exposing two surfaces:
 
-1. **Web UI** — users pair WhatsApp numbers and mint connector tokens. PocketBase session cookie.
+1. **Web UI** — users create *connections* and mint connector tokens for them. PocketBase session cookie.
 2. **MCP endpoint** — Claude connects to `/mcp` as a custom connector. App-minted bearer token.
 
-PocketBase is the app's database (users, sessions, connected accounts and their Evolution credentials). Evolution API, Postgres and Redis are dependencies you run, not code in this repo.
+A connection is a row in `instances` with a `kind`, and a connector token is bound to exactly one row. Two kinds exist:
+
+- **`whatsapp`** — an [Evolution API](https://doc.evolution-api.com/) instance, paired by QR, on the Evolution server this deployment is configured with *or* one the user supplied.
+- **`postgres`** — a user-supplied PostgreSQL DSN.
+
+`kind` is read through `instanceKind()` in `mcp-scope.ts`, never off the record directly: PocketBase materialises an unset SelectField as `''`, and a row written before the field existed is a WhatsApp account. That default lives in exactly one function.
+
+PocketBase is the app's database (users, sessions, connections and their credentials). Evolution API, its Postgres and its Redis are dependencies you run **only for WhatsApp connections** — they sit behind a `whatsapp` compose profile, and the `NUXT_EVOLUTION_*` variables are optional.
 
 `README.md` is the operator's manual — first-run setup, networking tables, the Linux firewall rule, Railway deploy, MCP client connection. Read it before doing anything involving Docker or the local stack; this file covers the code.
 
-**Status:** the product loop works end to end — sign up, provision an Evolution instance, pair by QR (importing that number's WhatsApp history as it connects), per-account dashboard with stats, connector token provisioning. Five MCP tools: `get-connection-status`, `list-chats`, `read-messages`, `search-messages` (opt-in, see below), `send-text-message`. Webhook event handling is not built; `/api/webhook/evolution` is a stub that logs and acks.
+**Status:** the product loop works end to end for both kinds — sign up, create a connection, pair by QR or paste a DSN, per-connection dashboard, connector token provisioning with per-chat or per-table scoping. Nine MCP tools, gated by kind:
 
-A user may connect **several** WhatsApp accounts. Each is a row in `instances`, and each MCP token is bound to exactly one of them.
+- `whatsapp`: `get-connection-status`, `list-chats`, `read-messages`, `search-messages` (opt-in, see below), `send-text-message`
+- `postgres`: `get-database-info`, `list-tables`, `describe-table`, `run-query`, `run-statement` (write)
+
+Webhook event handling is not built; `/api/webhook/evolution` is a stub that logs and acks.
+
+A user may hold **several** connections of either kind. Each is a row in `instances`, and each MCP token is bound to exactly one of them.
 
 ## Commands
 
@@ -25,7 +37,8 @@ Run from the repo root — root scripts delegate with `pnpm --filter web`:
 
 ```bash
 pnpm install          # postinstall runs `nuxt prepare` in apps/web
-pnpm services:up      # postgres, redis, evolution, pocketbase (compose)
+pnpm services:up      # pocketbase only (compose)
+pnpm services:up:whatsapp   # + postgres, redis, evolution
 pnpm dev              # Nuxt on the host, http://localhost:3000
 pnpm typecheck        # nuxt typecheck across app + server
 pnpm build            # production build -> apps/web/.output/
@@ -51,8 +64,11 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
   modules/mcp-token-route.ts local Nuxt module — registers /mcp/:token
   server/api/                auth/, instances/, tokens/
   server/mcp/index.ts        default MCP handler (auth middleware)
-  server/mcp/tools/          one file per tool, auto-discovered
-  server/utils/              pocketbase, session, auth-cookie, mcp-auth, instances, tokens, evolution, evolution-db, mentions, redact
+  server/mcp/tools/<kind>/    one file per tool, auto-discovered; the directory
+                              sets `group`, which is what gates a tool to a kind
+  server/utils/              pocketbase, session, auth-cookie, mcp-auth, instances, tokens,
+                             evolution, evolution-db, mentions, redact,
+                             net-guard, pg-pool, pg-guard, pg-run, pg-catalog
 services/pocketbase/         pinned PocketBase build + committed schema migrations
 docker-compose.dev.yml       services only, NOT Nuxt
 ```
@@ -68,14 +84,16 @@ The two surfaces have **entirely separate** credential paths, and there is no sh
 | Credential | PocketBase cookie (`pb_auth`, `httpOnly`) | `Authorization: Bearer` or `/mcp/<token>` |
 | Resolved by | `server/middleware/session.ts` → `utils/session.ts` | `server/mcp/index.ts` → `utils/mcp-auth.ts` |
 | Context key | `event.context.user` | `event.context.mcpAuth` |
-| Evolution client | `evolutionClientForInstance(instance)` | `useEvolutionClient()` |
+| Backend client | `evolutionClientForInstance(instance)` / `pgFor(instance)` | `useEvolutionClient()` / `pgFor(instance)` |
 | On failure | 401 JSON | 401 **+ `WWW-Authenticate`**, JSON-RPC shaped |
 
 Three things enforce it:
 
 - `server/middleware/session.ts` returns early on any `/mcp*` path, so cookies are never parsed there. Without that early return, a browser signed into the app could authenticate an MCP tool call with a cookie.
-- `useEvolutionClient()` reads `event.context.mcpAuth` and has no branch that reaches a session user; it throws 401 if the key is absent.
+- `useEvolutionClient()` reads `event.context.mcpAuth` and has no branch that reaches a session user; it throws 401 if the key is absent, and again if the connection is not a WhatsApp one.
 - MCP tokens are minted by this app (`wamcp_` + 32 random bytes) and stored **only** as a SHA-256 hash in the superuser-only `mcp_tokens` collection. A token resolves to one `instances` row, which carries that account's Evolution token.
+
+`McpAuth` is a **union discriminated on `kind`** — `{ kind: 'whatsapp', evolution }` or `{ kind: 'postgres' }`. A union rather than optional fields, so a handler reaching for `evolution` must first establish it is talking to WhatsApp. Postgres carries no credential object: the DSN lives on the instance row and `pgFor()` is the only thing that reads it, so copying it into request context would put a second live copy of a user's database password there for nothing.
 
 **Failure-mode semantics matter here:** a PocketBase outage answers **503**, never 401. A 401 tells a client its credential is bad — an MCP client discards a token it should keep, and a browser user gets silently signed out mid-outage. Both surfaces make the distinction: `resolveMcpAuth` returns `undefined` (→ 401) only on a genuine 404, and `getSessionUser` only on 401/403/404 from `authRefresh`. Everything else rethrows as 503. Preserve that in any auth code you add.
 
@@ -85,7 +103,19 @@ Three things enforce it:
 
 Built on `@nuxtjs/mcp-toolkit` (**pinned to 0.19.0**). It auto-imports `defineMcpHandler` / `defineMcpTool` and configures the server via the `mcp` key in `nuxt.config.ts`.
 
-**Adding a tool:** drop a file in `apps/web/server/mcp/tools/` — discovery is automatic, no registration. Give every tool a `title` (shown in client UI), a `description` written for the model, and accurate `readOnlyHint` / `destructiveHint`. Copy `get-connection-status.ts` (read) or `send-text-message.ts` (write).
+**Adding a tool:** drop a file in `apps/web/server/mcp/tools/<kind>/` — discovery is automatic and recursive, no registration. Give every tool an explicit `name`, an explicit `group`, a `title` (shown in client UI), a `description` written for the model, and accurate `readOnlyHint` / `destructiveHint`. Copy `whatsapp/get-connection-status.ts` (read) or `postgres/run-statement.ts` (write).
+
+**Every tool is gated on kind as well as scope.** `isToolAllowed(event, name, kind)` checks both, and both fail closed. The kind half is not decoration: a Postgres token minted with `all_tools` would otherwise register `send-text-message`, whose handler calls `useEvolutionClient()` on a row with no Evolution credentials. Which tools *exist* is a property of the connection; which of those a token may call is a property of the token, and that is the only order that composes.
+
+Three facts about discovery, verified against 0.19.0 and worth not rediscovering:
+
+- **A tool's name comes from the file's basename, never the directory.** `_meta.filename` is set with `path.split('/').pop()` (`loaders/utils.js:94-96`), and the fallback in `definitions/utils.js:13-16` kebab-cases only that. Moving a tool between group directories therefore cannot rename it — which is what made the `tools/` → `tools/whatsapp/` move safe for every `tool_names` row already minted. Every tool sets `name` explicitly anyway.
+- **`group` is exactly the directory segment** (`loaders/utils.js:167-178`), read back as `def.group ?? def._meta?.group`. It is also stated explicitly on each tool, so a future move cannot silently re-gate one.
+- **Basename collisions are global, not per-group.** `loaders/index.js:19-34` only warns, and `McpServer.registerTool` then throws on the duplicate. Keep every basename unique across groups.
+
+**`enabled` is evaluated twice per request per tool** — once in `filterRawDefinitions` via `handler.js:12`, once again in the toolkit's own `filterByEnabled` (`utils.js:17-24`). Keep it a synchronous property read.
+
+**Per-kind `instructions` cannot be a getter, and this is not obvious.** `createMcpHandler` calls `resolveConfig(config, event)` as its *first* statement (`utils.js:195`) and only reaches the auth middleware at `:208`, so anything read off the handler object — including a getter — fires before `event.context.mcpAuth` exists and would serve one kind's prose to the other on every request. The working seam is the `mcp:config:resolved` Nitro hook at `:203`, which fires inside `next()` on the object then handed to `createMcpServer`; `server/plugins/mcp-instructions.ts` uses it. `mcp.name` genuinely cannot vary — it is read in the same too-early pass. `nuxt.config`'s `instructions` stays the WhatsApp text so a regression degrades to today's behaviour, and the toolkit logs a throwing hook rather than swallowing it. The hook's type is declared locally in `server/types/mcp-hooks.d.ts` because the toolkit ships the augmentation outside its `exports` map. **A toolkit bump means re-checking that ordering.**
 
 **Reactions are excluded from reads and searches by default.** Evolution stores every 👍 as an ordinary `Message` row — its own id, author, timestamp and type, to carry one emoji — so in an active group they are a large share of a page and almost never help reconstruct a conversation. `read-messages` and `search-messages` both take `includeReactions`, default `false`, and both say `reactionsExcluded: true` in the response when they left them out; a page that silently drops a message class reads as "nobody reacted". Two layers do the excluding and both are needed: `listMessages` sends `where.messageType = { not: 'reactionMessage' }` so Evolution builds a full page rather than one this app then guts, and `isReaction()` in `chats.ts` re-checks the payload because `messageType` is Baileys' `getContentType()` verbatim — it returns the *first* `conversation`/`*Message` key, so a reaction arriving with a `messageContextInfo` can be typed as that instead. `searchMessages()` filters on the payload alone for the same reason, and its `COALESCE` gained a `reactionMessage->>'text'` arm — before it, a reaction had no `body` and `body IS NOT NULL` dropped it, silently rather than by decision.
 
@@ -95,7 +125,7 @@ Four things about that are easy to get wrong later. **`protocolMessage.type` is 
 
 Deliberate non-goals, so they are not mistaken for oversights: a deletion is dropped like any other control record rather than surfaced as "this was retracted" (the original row stays in history with its text, and nothing marks it); `ephemeralMessage` and the `viewOnceMessage*` family are *not* unwrapped, because flattening a view-once photo to a bare `[image]` presents it as an ordinary photo and doing it honestly needs its own marker; and album items are surfaced individually rather than grouped by `messageContextInfo.messageAssociation.parentMessageKey`.
 
-**Tools take no account argument.** The token is bound to one instance, so `useMcpAuth()` and `useEvolutionClient()` already resolve to it. Adding an instance parameter would reintroduce the possibility of addressing the wrong number. Never accept an Evolution API key as a tool argument either.
+**Tools take no connection argument.** The token is bound to one instance, so `useMcpAuth()`, `useEvolutionClient()` and `pgFor()` already resolve to it. Adding an instance parameter would reintroduce the possibility of addressing the wrong number — and now the wrong database. Never accept an Evolution API key or a DSN as a tool argument either.
 
 **`nitro.experimental.asyncContext: true` is required — do not turn it off.** Tool handlers are invoked by the MCP SDK with its `RequestHandlerExtra`, not an H3 event, so `useEvent()` is the only way to reach per-request credentials, and it needs async context.
 
@@ -103,19 +133,62 @@ Deliberate non-goals, so they are not mistaken for oversights: a deletion is dro
 
 **Token redaction:** `server/plugins/redact-mcp.ts` scrubs `event.node.req.originalUrl` (what Nitro's error handler actually reads — scrubbing `event.path` alone is insufficient) and sets `event.context.noLog`. `mcp.logging` is off for the same reason. Route any error reporter or logger you add through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
 
-## Two rules that are easy to break later
+## Credential rules that are easy to break later
 
-**No admin-key fallback in per-instance credentials.** `credentialsForInstance()` returns `undefined` when an instance has no `api_key`, and callers must fail. Falling back to `runtimeConfig.evolutionAdminKey` would hand any MCP token holder access to *every* user's WhatsApp account. The admin key has exactly two callers, both in `server/utils/instances.ts`: create and delete.
+**No global-key fallback in per-instance credentials.** `credentialsForInstance()` returns `undefined` when an instance has no `api_key`, and callers must fail. Falling back to a global key would hand any MCP token holder access to *every* account on that Evolution server. Global keys have exactly two callers, both in `server/utils/instances.ts`: create and delete.
+
+That rule now has a sharper edge, because a global key can sit **on the instance row itself**: `instances.admin_key` holds the key for a bring-your-own Evolution server. `credentialsForInstance()` must never read it, which is why its parameter is typed `Pick<AppInstance, 'base_url' | 'api_key'>` — the field is not even in scope.
+
+**The global key from config is used only against the URL from config, and a user's key only against their own URL.** `evolutionAdminCredentials()` returns `undefined` for half a bring-your-own configuration rather than completing it from ours. Sending our global key to a server the user chose hands them every account on ours; sending their key to our URL is a probe of ours. Neither is a fallback, and there is no branch that produces either pairing.
+
+**User-supplied hosts go through `server/utils/net-guard.ts`.** A DSN or Evolution URL is an outbound connection to an address a user chose, and `postgres://…@postgres:5432/evolution` pasted into the create form reaches Evolution's own database — every user's messages. Two checks: address class (loopback, RFC1918, CGNAT, link-local, NAT64, `::ffff:` v4-mapped), disableable with `NUXT_ALLOW_PRIVATE_TARGETS` because a single-tenant self-hosted deployment needs it; and this deployment's own backends, resolved from config and matched on `address:port`, which is never disabled and is what still stops `postgres:5432` when the first check is off. The opt-out is deployment-wide and must stay that way — a per-connection checkbox would let any user disable the guard for themselves, which is the whole attack.
+
+Only Postgres **pins** the approved address (`postgres({ host })`, so the driver never resolves the name itself). The Evolution path re-checks before every request but cannot pin, because `$fetch` resolves DNS for itself; closing that window needs an undici `Agent` with a `connect` hook, and `undici` is not a direct dependency. The residual rebinding window is documented at the call site in `evolution.ts` — do not delete that note without closing the hole.
+
+**`hidden` is an API-projection flag, not encryption.** `api_key`, `admin_key` and `dsn` are absent from the REST projection, including to the owning user, and sit in clear in `pb_data` and in every backup.
 
 **The Evolution database connection is read-only and search-only.** `server/utils/evolution-db.ts` is the one file that talks to Evolution's Postgres, and it exists because Evolution 2.3.7 has no message-content search: `POST /chat/findMessages` accepts a `where.message` and never reads it, so a content search returns an unfiltered page that reads as a result set. Do not try to search over the HTTP API — that field is a trap. The connection is far wider than anything else the app holds (every user's messages, every instance), so three things are load-bearing: the role is `SELECT`-only on `"Message"` and the app never writes or runs DDL; every query carries `"instanceId" = <this account>`, which `searchMessages()` cannot be called without; and chat scope is a **predicate in the SQL**, not a filter applied to rows after they are read. `resolveEvolutionInstanceId()` throws rather than querying without an id — `createInstance()` can store `''`, and an empty id would mean a query with no account predicate at all. Search is optional: with no `NUXT_EVOLUTION_DATABASE_URL` the tool's `enabled` guard is false and it is never registered.
+
+## Postgres connections: what the allowlist does and does not close
+
+`pg-pool.ts` connects, `pg-guard.ts` decides what a statement may touch, `pg-run.ts` composes the two, `pg-catalog.ts` introspects. The honest summary, which belongs in front of every change here: **the table allowlist keeps a model inside the tables it was pointed at; the security boundary is the database role on the DSN.** README carries the `GRANT` recipe.
+
+**Four checks, and each closes something the obvious design leaves open.** All verified against Postgres 16.
+
+1. **One statement, enforced by the protocol.** `sql.unsafe(text)` with no parameters defaults to `simple: true` (`postgres/src/index.js:119-126`) — the *simple* query protocol, which runs everything after a semicolon: `SELECT 1; DROP TABLE t` executes both. `unsafeSingle()` forces the extended protocol, where Postgres itself answers 42601 to a second statement. It exists as one function precisely so no call site can write the options inline and be one `simple` away from a bypass. `simple` is honoured at runtime but missing from postgres.js's `UnsafeQueryOptions`, hence the cast.
+2. **`DECLARE CURSOR` is the statement-kind gate for reads,** not a `SELECT * FROM (…) LIMIT n` wrap. Postgres's grammar refuses `INSERT`/`UPDATE`/`DELETE`/`CREATE TABLE AS` outright, refuses `SELECT … INTO` by name, and answers 0A000 to a data-modifying `WITH`. `FETCH FORWARD n+1` is then the row cap. A wrap would have broken on a trailing line comment and on duplicate output column names — and would not have caught the shapes in (3).
+3. **Plan inspection, with four traps.** `EXPLAIN (FORMAT JSON, VERBOSE)`, walking *every* element of the top-level array because the rewriter emits one per rule.
+   - `VERBOSE` is **mandatory**: without it a `ModifyTable` carries `Relation Name` and no `Schema`. A relation with no schema is refused, never assumed `public`.
+   - Key strictly on `Relation Name`. A `Function Scan` node carries a `Schema` and a `Function Name` but no relation, so collecting `Schema` opportunistically fabricates pairs.
+   - **`CREATE TABLE AS` and `SELECT … INTO` plan to a bare `Result` node with no target relation, and `REFRESH MATERIALIZED VIEW` answers the literal string `"Utility Statement"` with no `Plan` key at all.** A relations-only check reads all three as "touches nothing". Hence: every top-level element must be an object with a `Plan`, and a write must have a `ModifyTable` **root** with `Operation ∈ {Insert, Update, Delete, Merge}`.
+   - **A partitioned table never surfaces its parent** — a `SELECT` on `public.t` plans as `Append` over `t_p1`, `t_p2`. The allowlist is expanded *downward* through `pg_inherits`; expanding cannot admit a sibling, mapping the plan upward could. This one is a correctness bug that reads to a user as a security bug.
+4. **Function gate.** `SELECT pg_read_file('/etc/passwd')` plans to a `Result` node with **zero relations**, and so does any call into a plpgsql body — relations alone do not contain a query. Function names are collected from the plan's expression strings (a heuristic that errs toward refusing; names resolving to nothing are ignored), resolved against `pg_proc`, and anything outside `pg_catalog`, anything `prosecdef`, and a denylist of reaching builtins is refused.
+
+**One transaction, not two.** The plan check and the execution share it, so EXPLAIN's `AccessShareLock` is still held when the statement runs — that is what stops a concurrent `CREATE OR REPLACE VIEW` from repointing a view between check and execution — and both run under one `SET LOCAL`, so the same text provably resolves to the same objects. Reads use `sql.begin('read only', …)`; a `CREATE TEMP TABLE` inside that fails 25006, which is the last line of defence beneath the other three.
+
+**`SET LOCAL` goes through `set_config(name, value, true)` as bind parameters.** Its `value` is a plain `text` parameter, so nothing is interpolated into SQL text. A literal `SET LOCAL search_path = …` would be string-built DDL over user-chosen schema names.
+
+**`search_path` is pinned but is not the control.** The plan reports every schema fully resolved by the planner whatever the path was. Pinning buys two other things: the check and the execution agree, and an unqualified name lands inside the allowlist rather than resolving elsewhere and being refused confusingly.
+
+**Never `EXPLAIN ANALYZE`.** It executes everything, triggers included. Plain `EXPLAIN` does not — `EXPLAIN (FORMAT JSON) SELECT pg_sleep(3)` returns in 50 ms.
+
+**Table names are matched case-sensitively, on both halves.** Postgres folds *unquoted* identifiers when parsing but stores what was created — Evolution's own tables are `public.Message` and `public.Chat`. Folding would refuse a legitimately allowlisted table; loosening would let `public.orders` match a different `public.Orders`.
+
+**Scope is a predicate in the SQL, never a post-filter** — `listPgTables` puts the allowlist in the `WHERE`, and `describePgTable` in its anchor CTE. Same rule as chat scope, and it is why `hasMore` means "more tables you can see" rather than "more rows we then hid".
+
+**Deliberate holes, documented rather than papered over.** Triggers are invisible to `EXPLAIN` without `ANALYZE`, so a write to an allowed table can cascade anywhere. `postgres_fdw`/`dblink` name the local foreign table, not the remote object. `pg_catalog` and `information_schema` stay readable, so schema names leak regardless of the allowlist. A superuser DSN makes all of it best-effort — `probePgConnection` detects that so the UI can say so.
+
+**The pool cache is keyed on the connection id, not the DSN.** A DSN-keyed Map holds every user's database password as a live string in something that shows up in a heap snapshot; the id finds the pool and a fingerprint notices a rotation. Eviction runs on acquire, not on a timer — an interval outlives nothing useful in a worker the platform stops and starts. `onnotice` is silenced because a `RAISE NOTICE` in a trigger can carry row data into the process log, which is the one place this must not leak to.
+
+**A DSN change does not invalidate tokens, on purpose.** Tokens name the *connection*, not the credential. Making an owner reissue them because a password rotated would be a reason not to rotate it.
 
 **Hidden fields require the admin client.** `instances.api_key` is a `hidden` PocketBase field. It is absent from anything fetched with a session-scoped client, including `getSessionUser()`'s `authRefresh`. Anything that needs it must go through `pocketbaseAdmin()` — `requireOwnedInstance()` already does.
 
 **Never normalise JIDs locally.** Evolution's `createJid` carries country-specific rules (Brazil's ninth digit, Mexico and Argentina prefixes). A JID stored by our rules but matched by theirs is a token scope that silently reaches the wrong chat, or refuses the right one. `resolveNumberToJid` in `server/utils/mcp-scope.ts` asks Evolution; both storing a scope and checking one go through it.
 
-**`enabled` guards cannot see tool arguments.** They receive only the event, so they can gate a whole tool but not "this tool, for this chat". Anything argument-dependent — every chat check — belongs in the handler. See the table in `mcp-scope.ts`.
+**`enabled` guards cannot see tool arguments.** They receive only the event, so they can gate a whole tool — including by connection kind — but not "this tool, for this chat" or "this tool, for this table". Anything argument-dependent belongs in the handler: every chat check, and the whole Postgres plan walk. See the table in `mcp-scope.ts`.
 
-**PocketBase materialises an unset boolean as `false`, not absent.** A write path that forgets `all_tools` mints a token that can call nothing. `scopeFields()` in `tokens.ts` always writes all four scope columns for this reason.
+**PocketBase materialises an unset boolean as `false`, not absent.** A write path that forgets `all_tools` mints a token that can call nothing. `scopeFields()` in `tokens.ts` always writes all **six** scope columns for this reason — `all_chats`/`chat_jids`, `all_tables`/`table_names`, `all_tools`/`tool_names` — whatever kind the connection is. The same trap applies to a SelectField, which materialises as `''`: it is why the `kind` migration backfills before marking the field required, and why `instanceKind()` exists.
 
 ## History arrives once, at pairing
 
@@ -206,11 +279,13 @@ The other half of the trap: only the *per-instance* webhook sends custom headers
 
 `requireOwnedInstance()` and `revokeToken()` return **404**, not 403, when a record belongs to someone else. A 403 confirms the id exists and turns the route into a probe for other users' data.
 
+`requireOwnedInstanceOfKind()` answers 404 for the *wrong kind* too, for the same reason: the route genuinely does not exist for that connection, and a distinguishable error would confirm which id is which kind. The five WhatsApp-only routes — `qr`, `logout`, `resync`, `chats/*` — go through it.
+
 ## PocketBase
 
 Two clients in `server/utils/pocketbase.ts`, and the distinction is a security boundary:
 
-- `pocketbaseAdmin()` — memoized superuser client, re-auths on expiry, concurrent callers share one in-flight request. Reads hidden fields and `mcp_tokens`. **Never build a filter for it from user input** (use `pb.filter()` with bindings, as `mcp-auth.ts` does).
+- `pocketbaseAdmin()` — memoized superuser client, re-auths on expiry, concurrent callers share one in-flight request. Reads the hidden fields (`api_key`, `admin_key`, `dsn`) and `mcp_tokens`. **Never build a filter for it from user input** (use `pb.filter()` with bindings, as `mcp-auth.ts` does).
 - `pocketbaseForRequest()` — fresh unauthenticated client per request, loaded with the caller's own cookie. Its auth store must never be shared across requests, and must never overwrite the admin store's.
 
 `pb_migrations/` and `pb_hooks/` are **COPYed into the PocketBase image**, and also bind-mounted in development. The mount shadows the baked copy, which is what lets schema edits made in the admin UI land back in the repo — but the baked copy is the only one that exists in production. A change that removes the COPY ships a deployment with no collections at all.
@@ -235,15 +310,20 @@ cd apps/web && pnpx shadcn-vue@latest add <component>
 
 **Routing gate:** `middleware/auth.global.ts` handles authentication only. It deliberately does not check WhatsApp connection state — that would put an Evolution round-trip on every navigation. `/instances` redirects to `/instances/new` when the user has none, and `/instances/[id]` decides between the QR panel and the dashboard.
 
-**Provisioning is click-triggered, not on-mount.** Creating an instance reserves a live socket on the Evolution server, so a page refresh must never create a second account.
+**Provisioning is click-triggered, not on-mount.** Creating a WhatsApp instance reserves a live socket on the Evolution server, so a page refresh must never create a second account. A database connection is proved by actually connecting, which a refresh should not re-do either.
 
-**The token list is shown even while an account is disconnected** — otherwise you could not revoke a token for an offline account, which is exactly when you would want to.
+**The dashboard is two panels, not one with fields hidden.** `pages/instances/[id].vue` picks `InstanceWhatsapp.vue` or `InstancePostgres.vue` from `instance.kind`; a database has no QR, no profile and no message count, and rendering an empty version of any of those suggests a state it can be in. The page decides from `/api/instances/:id/summary` — a PocketBase read with no backend call — because the panel it picks then makes the expensive call itself, and deciding from a full status fetch would mean two.
+
+**Only the axis a kind has is fetched by the scope picker.** `TokenScopeFields.vue` sets `immediate` per kind: asking a WhatsApp connection for its tables answers 404, and a 404 in the console on every dialog open reads as a bug. A new Postgres token starts read-only, with the read tools pre-checked from the server's own catalogue.
+
+**The token list is shown even while a connection is down** — otherwise you could not revoke a token for an offline account or an unreachable database, which is exactly when you would want to.
 
 **Restart the dev server after adding shadcn components.** The component manifest is built at startup; a component added while it runs renders as a literal unknown element (`<radiogroupitem>`) and SSR still returns 200. A page that loads is not proof that it works.
 
 ## Things that cost real money or a phone number
 
 - **`docker compose down -v` forces a full WhatsApp QR re-scan.** `-v` deletes the `evolution_instances` volume holding every paired session. Use `down` without `-v` for routine restarts.
+- **The WhatsApp stack is behind a compose profile.** `pnpm services:up` brings up PocketBase alone; `pnpm services:up:whatsapp` adds Postgres, Redis and Evolution. `services:down`, `:logs` and `:ps` pass `--profile whatsapp` unconditionally so they still cover everything — a profiled service you forgot the flag for looks simply absent, which is the one sharp edge profiles have.
 - **Pairing burns a real phone number.** Scanning the QR binds a real WhatsApp account; repeated pair/unpair or unsolicited sends get numbers banned. Use a spare SIM.
 - **`pnpm dev` runs `nuxt dev --host 0.0.0.0`**, which it must — bound to localhost, Nuxt is unreachable from the Evolution container. That means the socket listens on the LAN interface too.
 - **On a Linux host with ufw, the inbound webhook silently times out** until you allow container→host traffic. The compose subnet is pinned to `172.31.250.0/24` so one rule covers it; the rule and the round-trip test are in README "Linux firewall". Reachable by ping but not TCP is the signature.
