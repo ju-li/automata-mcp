@@ -12,7 +12,10 @@ import { z } from 'zod'
  */
 export default defineMcpTool({
   name: 'send-text-message',
-  enabled: event => isToolAllowed(event, 'send-text-message'),
+  // Inferred from the directory too, but stated so a move cannot silently
+  // change which connections this tool belongs to.
+  group: 'whatsapp',
+  enabled: event => isToolAllowed(event, 'send-text-message', 'whatsapp'),
   title: 'Send WhatsApp message',
   description:
     'Send a plain-text WhatsApp message from the connected account. The account '

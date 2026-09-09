@@ -19,6 +19,21 @@ import type { McpAuth } from './mcp-auth'
  *          call targets is an argument.
  */
 
+/**
+ * What a connection is. One `instances` row is one of these, and a connector
+ * token reaches exactly one row — so this also decides which tools exist for a
+ * given token.
+ */
+export type InstanceKind = 'whatsapp' | 'postgres'
+
+/**
+ * A row written before `kind` existed is a WhatsApp account. PocketBase
+ * materialises an unset SelectField as `''`, so this must not be `??`.
+ */
+export function instanceKind(instance: Pick<AppInstance, 'kind'>): InstanceKind {
+  return instance.kind === 'postgres' ? 'postgres' : 'whatsapp'
+}
+
 export interface McpScope {
   allChats: boolean
   chatJids: string[]
@@ -68,13 +83,23 @@ function toStringArray(value: unknown): string[] {
 /**
  * For the `enabled` guard on a tool definition.
  *
- * Fails closed: no auth context means no tools. That state is unreachable while
- * server/mcp/index.ts returns 401 before any tool is resolved, but if that ever
- * changes, an empty toolset is the safe outcome.
+ * Two independent gates, both fail closed. No auth context means no tools —
+ * unreachable while server/mcp/index.ts returns 401 before any tool is resolved,
+ * but an empty toolset is the safe outcome if that ever changes.
+ *
+ * `kind` is not decoration. Which tools *exist* is a property of the connection;
+ * which of those a token may call is a property of the token. Without the kind
+ * gate, a Postgres token minted with `allTools` would register
+ * `send-text-message`, whose handler calls `useEvolutionClient()` on a row that
+ * has no Evolution credentials at all.
+ *
+ * Keep this synchronous. The toolkit evaluates `enabled` twice per request per
+ * tool — once in `filterRawDefinitions`, once again in its own `filterByEnabled`.
  */
-export function isToolAllowed(event: H3Event, toolName: string): boolean {
+export function isToolAllowed(event: H3Event, toolName: string, kind: InstanceKind): boolean {
   const auth = event.context.mcpAuth as McpAuth | undefined
   if (!auth) return false
+  if (instanceKind(auth.instance) !== kind) return false
 
   const scope = auth.scope
   if (scope.allTools) return true

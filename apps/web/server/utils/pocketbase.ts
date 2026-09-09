@@ -118,20 +118,37 @@ export interface AppUser {
 }
 
 /**
- * One connected WhatsApp account.
+ * One connection. `kind` says what sort — the row's other fields are read
+ * according to it, and it decides which MCP tools a token on this row can see.
  *
- * `api_key` is Evolution's per-instance token, not the global admin key, and is
- * a `hidden` PocketBase field — it is only ever populated on records fetched
- * through `pocketbaseAdmin()`. A record that came from a session-scoped client
- * will have it undefined.
+ * Optional in the type, and absent on any row written before `kind` existed.
+ * Read it through `instanceKind()` in mcp-scope.ts rather than directly, so
+ * "absent means WhatsApp" is decided in exactly one place.
+ *
+ * Three fields are `hidden` PocketBase fields — `api_key`, `admin_key`, `dsn` —
+ * so they are only ever populated on records fetched through `pocketbaseAdmin()`.
+ * A record from a session-scoped client will have them undefined.
+ *
+ * `api_key` is Evolution's per-instance token. `admin_key` is a *global* key for
+ * a user-supplied Evolution server and can create and delete instances on it, so
+ * it is a wider secret than anything else on the row: never let it reach
+ * `credentialsForInstance()`. `dsn` is a user-supplied Postgres connection
+ * string. `hidden` keeps all three out of the REST projection; it is not
+ * encryption, and they sit in clear in `pb_data`.
  */
 export interface AppInstance {
   id: string
   user: string
+  kind?: 'whatsapp' | 'postgres'
   name: string
   instance_id?: string
   api_key?: string
+  admin_key?: string
   base_url?: string
+  dsn?: string
+  pg_host?: string
+  pg_port?: number
+  pg_database?: string
   label?: string
   created?: string
 }

@@ -17,7 +17,10 @@ import type { ChatMessage } from '~~/server/utils/chats'
  */
 export default defineMcpTool({
   name: 'read-messages',
-  enabled: event => isToolAllowed(event, 'read-messages'),
+  // Inferred from the directory too, but stated so a move cannot silently
+  // change which connections this tool belongs to.
+  group: 'whatsapp',
+  enabled: event => isToolAllowed(event, 'read-messages', 'whatsapp'),
   title: 'Read WhatsApp messages',
   description:
     'Read one page of messages from one WhatsApp conversation, newest first. '

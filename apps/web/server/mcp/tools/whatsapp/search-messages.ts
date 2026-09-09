@@ -14,7 +14,10 @@ import type { MentionDirectory } from '~~/server/utils/mentions'
  */
 export default defineMcpTool({
   name: 'search-messages',
-  enabled: event => isToolAllowed(event, 'search-messages') && messageSearchConfigured(),
+  // Inferred from the directory too, but stated so a move cannot silently
+  // change which connections this tool belongs to.
+  group: 'whatsapp',
+  enabled: event => isToolAllowed(event, 'search-messages', 'whatsapp') && messageSearchConfigured(),
   title: 'Search WhatsApp messages',
   description:
     'Find WhatsApp messages containing given words, newest first, across every '

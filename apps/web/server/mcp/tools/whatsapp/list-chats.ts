@@ -5,7 +5,10 @@
  */
 export default defineMcpTool({
   name: 'list-chats',
-  enabled: event => isToolAllowed(event, 'list-chats'),
+  // Inferred from the directory too, but stated so a move cannot silently
+  // change which connections this tool belongs to.
+  group: 'whatsapp',
+  enabled: event => isToolAllowed(event, 'list-chats', 'whatsapp'),
   title: 'List WhatsApp chats',
   description:
     'List recent WhatsApp conversations, most recently active first, with the '
