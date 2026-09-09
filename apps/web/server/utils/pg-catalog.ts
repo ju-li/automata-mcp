@@ -36,6 +36,13 @@ export interface PgTablePage {
 
 const SYSTEM_SCHEMAS = ['pg_catalog', 'information_schema']
 
+/**
+ * Ceiling for one page of tables. The scope picker asks for a big page because
+ * it renders a checkbox list; a database with more relations than this pages,
+ * and the caller is told it did.
+ */
+export const MAX_TABLE_PAGE = 1000
+
 export interface ListTablesOptions {
   schema?: string
   search?: string
@@ -105,7 +112,11 @@ export async function listPgTables(
   }
 }
 
-export interface PgColumn {
+// Type aliases rather than interfaces, for the reason `InstanceStatus` in
+// instances.ts gives: an MCP tool handler may return `Record<string, unknown>`,
+// and an interface has no implicit index signature, so `describe-table` would
+// fail to typecheck on the value it returns.
+export type PgColumn = {
   name: string
   type: string
   nullable: boolean
@@ -114,7 +125,7 @@ export interface PgColumn {
   comment?: string
 }
 
-export interface PgTableDescription {
+export type PgTableDescription = {
   schema: string
   name: string
   qname: string

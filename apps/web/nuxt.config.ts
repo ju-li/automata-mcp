@@ -1,4 +1,5 @@
 import tailwindcss from '@tailwindcss/vite'
+import { WHATSAPP_INSTRUCTIONS } from './server/utils/mcp-instructions'
 
 // https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
@@ -24,36 +25,15 @@ export default defineNuxtConfig({
   },
 
   mcp: {
-    name: 'WhatsApp (Evolution API)',
+    // Static: the toolkit reads it before auth has run, so it cannot vary by
+    // connection. Per-kind `instructions` can, and do.
+    name: 'MCP Controller',
     version: '0.1.0',
     route: '/mcp',
-    instructions: [
-      'This server is bound to exactly one WhatsApp account — the one the connector token was issued for.',
-      'There is no account to choose and no tool takes an instance argument.',
-      'Call `get-connection-status` to check that the account is connected (state `open`) before sending;',
-      'in any other state, messages cannot be sent and the user needs to re-pair in the web app.',
-      'Reading and searching cover the history imported when the account was paired as well as',
-      'everything since, so older conversations are reachable. An account paired before history',
-      'import was added has only what arrived since.',
-      '`read-messages` answers with one page, newest first, and says so: when its `hasMore` is true',
-      'there are older messages you have not seen, including inside a `since`/`until` range you asked',
-      'for. Page with `nextPage` until `hasMore` is false before summarising or reporting on a range,',
-      'and treat `covered` — not the range you requested — as what you have actually read.',
-      'Reactions are stored as ordinary messages, one record per emoji, and are left out of both',
-      'reads and searches unless you pass `includeReactions: true` — a response that omitted them',
-      'says so with `reactionsExcluded`. Ask for them when who reacted is the question, not to',
-      'reconstruct what was said.',
-      'WhatsApp delivers an edit as a separate record and never rewrites the original, so an edited',
-      'message appears twice: once as it was first sent, and once with the new text and `editOf`',
-      'naming the record it replaces. Read that pair as one message that changed. Some edits arrive',
-      'encrypted for the chat\'s participants only — those come back with no text and',
-      '`unreadable: \'encrypted-edit\'`, which means the current wording of that message is unknown to',
-      'this connector and is not searchable; say so plainly rather than presenting the earlier version',
-      'as final or calling it a missing message. WhatsApp\'s own control records — deletions,',
-      'disappearing-message timer changes, key exchanges — carry nothing readable and are left out of',
-      'reads; when any were, `protocolMessagesExcluded` says how many, and `totalMatching` still',
-      'counts them.',
-    ].join(' '),
+    // The fallback, used for an unauthenticated request and if the hook in
+    // server/plugins/mcp-instructions.ts ever stops firing. WhatsApp rather than
+    // something neutral, so a degradation lands on today's behaviour.
+    instructions: WHATSAPP_INSTRUCTIONS,
     // Opt out of evlog wide-events on the MCP route. Request bodies and headers on
     // /mcp carry bearer tokens; see server/utils/redact.ts.
     logging: false,
