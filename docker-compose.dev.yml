@@ -29,7 +29,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
       POSTGRES_DB: ${POSTGRES_DB:-evolution}
     ports:
-      - '5432:5432'
+      # Loopback only: the compose defaults are well-known, and this database
+      # holds every paired account's messages.
+      - '127.0.0.1:5432:5432'
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -45,7 +47,7 @@ services:
     restart: unless-stopped
     command: ['redis-server', '--appendonly', 'yes']
     ports:
-      - '6379:6379'
+      - '127.0.0.1:6379:6379'
     volumes:
       - redis_data:/data
     healthcheck:
@@ -65,7 +67,9 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - '8080:8080'
+      # Loopback only: AUTHENTICATION_API_KEY now has a dev default, and this
+      # API can read and send from every paired account.
+      - '127.0.0.1:8080:8080'
     # Linux does not resolve host.docker.internal by default (macOS/Windows do).
     # Without this, Evolution cannot reach the Nuxt webhook running on the host.
     extra_hosts:

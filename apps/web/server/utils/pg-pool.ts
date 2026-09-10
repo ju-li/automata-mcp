@@ -84,7 +84,10 @@ export function describeDsn(dsn: string): { host: string, port: number, database
   }
 
   return {
-    host: url.hostname,
+    // `URL.hostname` keeps the brackets on an IPv6 literal, and `isIP('[::1]')`
+    // is 0 — so without stripping them the guard tries to resolve the brackets
+    // as a name and refuses every IPv6 address a user could write.
+    host: url.hostname.replace(/^\[|\]$/g, ''),
     port: Number(url.port) || 5432,
     database,
     sslMode: url.searchParams.get('sslmode') ?? undefined,
@@ -126,10 +129,24 @@ function sslFor(target: PgTarget): postgres.Options<Record<string, never>>['ssl'
  * or to `prepare` could silently apply to one and not the other.
  */
 function driverOptions(target: PgTarget, options: { guard: boolean, max: number, statementTimeoutMs: number }) {
+  const ssl = sslFor(target)
+
   return {
-    // The pin. postgres.js prefers this over the URL's hostname. Omitted when
-    // unguarded, so the URL's own host is used.
-    ...(options.guard && { host: target.address, port: target.port, ssl: sslFor(target) }),
+    // The pin. postgres.js prefers this over the URL's hostname.
+    //
+    // Skipped for an IPv6 address, and that is not optional: postgres.js parses
+    // its `host` option with `host.split(':')[0]` and takes the port from
+    // `split(':')[1]`, so pinning `2606:4700::6810:85e5` dials host "2606" on
+    // port 4700 and every IPv6-only provider (Supabase direct connections among
+    // them) fails to connect at all. The guard still ran and still refused a
+    // private address; only the pin is given up, so this host keeps the
+    // check-don't-pin posture the Evolution path documents.
+    ...(options.guard && canPin(target) && { host: target.address, port: target.port }),
+    // Only when there is one: an explicit `ssl: undefined` still counts as
+    // present to postgres.js's `k in o ? o[k] : query[k]`, which would override
+    // a DSN's own `?ssl=true` or `?sslrootcert=…` and silently connect in the
+    // clear.
+    ...(options.guard && ssl !== undefined && { ssl }),
     max: options.max,
     // 5s, not the 30s default. A bad DSN has to fail the MCP call quickly; a
     // tool that hangs for half a minute reads to a client as a hung server.
@@ -146,6 +163,11 @@ function driverOptions(target: PgTarget, options: { guard: boolean, max: number,
       statement_timeout: options.statementTimeoutMs,
     },
   }
+}
+
+/** postgres.js cannot express an IPv6 host in its `host` option. See `driverOptions`. */
+function canPin(target: PgTarget): boolean {
+  return target.address !== '' && !target.address.includes(':')
 }
 
 function hashDsn(dsn: string): string {

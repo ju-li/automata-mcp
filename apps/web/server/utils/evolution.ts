@@ -22,6 +22,26 @@ import type { McpAuth } from './mcp-auth'
  * guard — see `userSupplied` below.
  */
 
+/**
+ * Compare two Evolution base URLs the way a person would.
+ *
+ * A raw string comparison makes a trailing slash, a case change or an added
+ * default port look like a different server — and every pre-existing row stored
+ * `base_url` copied from `config.evolutionUrl`, so one cosmetic edit to that
+ * variable would reclassify all of them as bring-your-own. They would then be
+ * host-guarded, and a compose address such as `http://evolution:8080` is
+ * correctly refused, so status, QR and sending would all start answering 422.
+ */
+export function sameEvolutionServer(a: string | undefined, b: string | undefined): boolean {
+  if (!a || !b) return false
+  try {
+    return new URL(a).origin.toLowerCase() === new URL(b).origin.toLowerCase()
+  }
+  catch {
+    return a.trim().replace(/\/+$/, '') === b.trim().replace(/\/+$/, '')
+  }
+}
+
 export interface EvolutionCredentials {
   baseUrl: string
   apiKey: string
@@ -144,7 +164,7 @@ export function credentialsForInstance(instance: Pick<AppInstance, 'base_url' | 
   // Anything that is not the server we configured is a server a user chose, so
   // it is guarded. Derived rather than stored, so a row that stops matching our
   // configuration starts being guarded rather than quietly staying exempt.
-  return { baseUrl, apiKey: instance.api_key, userSupplied: baseUrl !== configUrl }
+  return { baseUrl, apiKey: instance.api_key, userSupplied: !sameEvolutionServer(baseUrl, configUrl) }
 }
 
 /** For UI API routes, where the instance came from `pocketbaseAdmin()`. */

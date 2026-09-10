@@ -23,8 +23,9 @@ export default defineKindTool({
     + 'NOTHING changes — so set `maxRows` to what you actually intend to change, '
     + 'and read a cap error as "my WHERE clause was wider than I thought" rather '
     + 'than as a limit to raise blindly. An UPDATE or DELETE with no WHERE clause '
-    + 'is refused; write `WHERE true` if changing every row is genuinely what you '
-    + 'mean. Add RETURNING when you need to see what changed. This tool cannot see '
+    + 'is refused unless you pass `allowWholeTable: true`, which is deliberately '
+    + 'a separate decision from the SQL. Add RETURNING when you need to see what '
+    + 'changed. This tool cannot see '
     + 'inside triggers: a write to an allowed table may cascade to tables outside '
     + 'the allowlist, and the allowlist cannot stop that. Confirm destructive '
     + 'changes with the user before calling this.',
@@ -38,11 +39,15 @@ export default defineKindTool({
     sql: z.string().min(1).max(20_000).describe('One INSERT, UPDATE, DELETE or MERGE statement'),
     maxRows: z.number().int().min(1).max(10_000).default(100).describe('Roll the whole statement back if it would affect more rows than this'),
     timeoutMs: z.number().int().min(500).max(60_000).default(15_000).describe('Server-side statement timeout, in milliseconds'),
+    allowWholeTable: z.boolean().default(false).describe(
+      'Permit an UPDATE or DELETE with no WHERE clause. Off by default: a missing '
+      + 'WHERE is far more often a mistake than an intention. `maxRows` still applies.',
+    ),
   },
-  handler: async ({ sql, maxRows, timeoutMs }) => {
+  handler: async ({ sql, maxRows, timeoutMs, allowWholeTable }) => {
     const { instance, scope } = useMcpAuth()
 
-    const result = await runWriteStatement(instance, scope, sql.trim(), { maxRows, timeoutMs })
+    const result = await runWriteStatement(instance, scope, sql.trim(), { maxRows, timeoutMs, allowWholeTable })
 
     return {
       command: result.command,

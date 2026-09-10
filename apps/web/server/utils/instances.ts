@@ -532,14 +532,30 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
 
     // Uses the same server the instance was created on, with that server's own
     // global key when it brought one.
-    const admin = evolutionAdminClient(instance)
+    //
+    // **Credentials missing is not a reason to refuse the delete.** With the
+    // Evolution variables now optional, and with a row's `base_url` able to stop
+    // matching a reconfigured deployment, `evolutionAdminCredentials` can
+    // return undefined for a row that already exists — and gating the row
+    // deletion on that would leave a connection, and its tokens, permanently
+    // undeletable. Better a logged orphan on the Evolution server than a
+    // record the owner cannot get rid of.
+    const creds = evolutionAdminCredentials(instance)
 
-    try {
-      await admin(`/instance/delete/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
-    } catch (error) {
-      // A 404 means Evolution has already lost it; carry on and clean up our row.
-      const status = (error as { status?: number, statusCode?: number })
-      if (status?.status !== 404 && status?.statusCode !== 404) throw error
+    if (!creds) {
+      console.error(
+        `[instances] deleting ${instance.id} (${instance.name}) without tearing down its Evolution `
+        + 'instance: no global key is available for its server. It may need removing there by hand.',
+      )
+    }
+    else {
+      try {
+        await createEvolutionClient(creds)(`/instance/delete/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
+      } catch (error) {
+        // A 404 means Evolution has already lost it; carry on and clean up our row.
+        const status = (error as { status?: number, statusCode?: number })
+        if (status?.status !== 404 && status?.statusCode !== 404) throw error
+      }
     }
   }
 

@@ -182,6 +182,8 @@ async function ownTargets(): Promise<OwnTarget[]> {
   if (config.evolutionDatabaseUrl) sources.push({ raw: config.evolutionDatabaseUrl, what: 'Evolution\'s database', defaultPort: 5432 })
 
   const targets: OwnTarget[] = []
+  let complete = true
+
   for (const source of sources) {
     let url: URL
     try {
@@ -200,12 +202,17 @@ async function ownTargets(): Promise<OwnTarget[]> {
         targets.push({ ...unwrapV4Mapped(a.address, a.family), port, what: source.what })
       }
     }
-    catch {
-      // See the note above.
+    catch (cause) {
+      // A resolver hiccup must not be cached: doing so disabled the one check
+      // that is never meant to be disabled, for a full TTL, on exactly the
+      // deployments that turned the address-class check off. Successes only —
+      // the same rule the contact directory follows.
+      console.error(`[net-guard] could not resolve ${source.what} (${url.hostname}); own-infrastructure check is incomplete this request`, cause)
+      complete = false
     }
   }
 
-  ownCache = { at: now, targets }
+  if (complete) ownCache = { at: now, targets }
   return targets
 }
 
@@ -217,6 +224,7 @@ async function assertNotOwnInfrastructure(
 ): Promise<void> {
   const own = await ownTargets()
   if (own.length === 0) return
+
 
   for (const { address } of resolved) {
     const hit = own.find(t => t.address === address && t.port === port)

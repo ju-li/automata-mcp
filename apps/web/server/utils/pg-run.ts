@@ -101,10 +101,17 @@ export async function runReadQuery(
   return await sql.begin('read only', async (tx) => {
     await applySessionGuards(tx, scope, options.timeoutMs)
 
+    // Before the EXPLAIN, not after: Postgres folds an IMMUTABLE function with
+    // constant arguments *during* planning, so a plan that came back has already
+    // run it and no longer names it. See `functionNamesInText`.
+    await assertFunctionsSafe(tx, functionNamesInText(statement))
+
     const facts = await planFacts(tx, statement)
 
     assertNoWrites(facts)
-    await assertFunctionsSafe(tx, facts)
+    // Again from the plan, which catches what the text cannot — a function
+    // reached through a view.
+    await assertFunctionsSafe(tx, facts.functions)
     await assertRelationsInScope(tx, facts, scope)
 
     // The statement-kind gate, enforced by Postgres's own grammar rather than by
@@ -150,7 +157,7 @@ export async function runWriteStatement(
   instance: Pick<AppInstance, 'id' | 'dsn'>,
   scope: McpScope,
   statement: string,
-  options: { maxRows: number, timeoutMs: number },
+  options: { maxRows: number, timeoutMs: number, allowWholeTable?: boolean },
 ): Promise<WriteStatementResult> {
   const sql = await pgFor(instance)
   const startedAt = Date.now()
@@ -158,14 +165,16 @@ export async function runWriteStatement(
   return await sql.begin(async (tx) => {
     await applySessionGuards(tx, scope, options.timeoutMs)
 
+    await assertFunctionsSafe(tx, functionNamesInText(statement))
+
     const facts = await planFacts(tx, statement)
 
     // The kind gate for writes. CTAS and SELECT INTO plan to a bare Result and
     // REFRESH answers "Utility Statement" — none of them has a ModifyTable root,
     // so requiring one refuses all three as well as a plain SELECT sent here by
     // mistake.
-    assertIsModify(facts)
-    await assertFunctionsSafe(tx, facts)
+    assertIsModify(facts, options.allowWholeTable)
+    await assertFunctionsSafe(tx, facts.functions)
     await assertRelationsInScope(tx, facts, scope)
 
     const result = await unsafeSingle(tx, statement)
@@ -216,9 +225,10 @@ function serialiseCell(value: unknown): { value: unknown, truncated: boolean } {
   }
 
   if (typeof value === 'object') {
-    // Serialised once. Returning the object would have Nitro stringify it a
-    // second time, which on a page of jsonb doubles the cost of the response
-    // for no gain — the field is typed `unknown` either way.
+    // Stringified only to measure it. The object itself is returned so a jsonb
+    // column reaches the caller as JSON rather than as an escaped string, which
+    // does mean Nitro serialises it again on the way out — a deliberate trade,
+    // since a model reading `"{\"a\":1}"` is worse off than one reading `{a:1}`.
     const json = JSON.stringify(value)
     if (json === undefined) return { value: null, truncated: false }
     return json.length > MAX_CELL_CHARS

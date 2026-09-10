@@ -74,7 +74,8 @@ export function messageDatabaseConfigured(): boolean {
 export function onDeploymentServer(instance: Pick<AppInstance, 'admin_key' | 'base_url'>): boolean {
   if (instance.admin_key) return false
   const configUrl = useRuntimeConfig().evolutionUrl
-  return !(instance.base_url && configUrl && instance.base_url !== configUrl)
+  if (!instance.base_url || !configUrl) return true
+  return sameEvolutionServer(instance.base_url, configUrl)
 }
 
 /**

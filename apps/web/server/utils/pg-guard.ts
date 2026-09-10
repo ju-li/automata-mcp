@@ -52,6 +52,17 @@ const EXPRESSION_KEYS = [
 const CALL_RE = /(?:^|[^."\w])([a-z_][a-z0-9_$]*)\s*\(/g
 
 /**
+ * Every `name(` in a piece of SQL, including a schema-qualified one.
+ *
+ * Deliberately more permissive than `CALL_RE`, which skips a name preceded by a
+ * dot because plan output writes `contextInfo.foo(`-shaped noise. Here the
+ * source is the caller's own statement and `zz.peek(1)` must be caught, so the
+ * qualifier is ignored and the trailing identifier is taken. Over-collecting is
+ * free: a name that resolves to nothing in `pg_proc` is dropped.
+ */
+const TEXT_CALL_RE = /([a-z_][a-z0-9_$]*)\s*\(/gi
+
+/**
  * `pg_catalog` functions that read or write outside the query's own relations.
  * Being builtin is not the same as being harmless.
  */
@@ -78,6 +89,29 @@ export interface PlanRelation {
   schema: string
   relation: string
   qname: string
+}
+
+/**
+ * Function names mentioned in a statement's own text.
+ *
+ * **This exists because the plan is not enough.** Postgres constant-folds an
+ * IMMUTABLE function with constant arguments during planning, so
+ * `SELECT zz.peek(1)` plans to a bare `Result` whose `Output` is the *already
+ * computed value* — no relation, no `Function Name`, nothing for
+ * `assertRelationsInScope` or the plan's own function gate to catch. A
+ * pre-existing IMMUTABLE function in the user's database would otherwise read
+ * any table the role can reach, straight past the allowlist.
+ *
+ * It also has to run BEFORE the EXPLAIN, because the fold happens *during*
+ * planning: by the time a plan comes back, the function has already run.
+ */
+export function functionNamesInText(statement: string): string[] {
+  const names = new Set<string>()
+  for (const match of statement.matchAll(TEXT_CALL_RE)) {
+    const name = match[1]!.toLowerCase()
+    if (!NOT_FUNCTIONS.has(name)) names.add(name)
+  }
+  return [...names]
 }
 
 export interface PlanFacts {
@@ -216,11 +250,25 @@ function collectCalls(value: unknown, into: Set<string>): void {
  */
 function isUnfiltered(node: PlanNode): boolean {
   const children = node.Plans
-  if (!Array.isArray(children) || children.length !== 1) return false
-  const child = children[0]
-  if (!isNode(child)) return false
-  if (child['Node Type'] !== 'Seq Scan') return false
-  return !('Filter' in child) && !('Index Cond' in child) && !('Recheck Cond' in child)
+  if (!Array.isArray(children) || children.length === 0) return false
+
+  let scans = 0
+  let qualified = false
+
+  // Recursive, and over every child rather than a single Seq Scan: a DELETE on a
+  // partitioned table plans as a ModifyTable over an Append with one scan per
+  // partition, which the single-child form read as "filtered" — silently
+  // exempting the exact whole-table write this is here to catch.
+  walk(children, (child) => {
+    const type = child['Node Type']
+    if (typeof type !== 'string' || !type.endsWith('Scan')) return
+    scans += 1
+    if ('Filter' in child || 'Index Cond' in child || 'Recheck Cond' in child || 'TID Cond' in child) {
+      qualified = true
+    }
+  })
+
+  return scans > 0 && !qualified
 }
 
 // ── the checks ─────────────────────────────────────────────────────────────
@@ -233,7 +281,7 @@ export function assertNoWrites(facts: PlanFacts): void {
   )
 }
 
-export function assertIsModify(facts: PlanFacts): void {
+export function assertIsModify(facts: PlanFacts, allowWholeTable = false): void {
   // `rootIsModify` is only set for a node `walk` also visits, and every
   // ModifyTable node it visits pushes an operation — so the root flag alone is
   // the whole test.
@@ -244,10 +292,13 @@ export function assertIsModify(facts: PlanFacts): void {
   if (unsupported.length > 0) {
     refuse(`That statement performs an unsupported operation (${unsupported[0]}).`)
   }
-  if (facts.unfilteredWriteTarget) {
+  if (facts.unfilteredWriteTarget && !allowWholeTable) {
+    // Names the argument and not a SQL phrasing: `WHERE true` is folded away by
+    // the planner, so the qualifier never reaches the plan and the advice the
+    // message used to give could not be followed.
     refuse(
       `That statement would ${facts.modifyOperations[0]!.toLowerCase()} every row of ${facts.unfilteredWriteTarget} — it has no WHERE clause. `
-      + 'Add one, or write `WHERE true` if changing the whole table is genuinely what you mean.',
+      + 'Add one, or pass allowWholeTable: true if changing every row is genuinely what you mean.',
     )
   }
 }
@@ -264,13 +315,13 @@ export function assertIsModify(facts: PlanFacts): void {
  * parse, and it errs toward refusing. Names that resolve to nothing — a column,
  * an operator, a cast — are ignored, so the cost of over-collecting is zero.
  */
-export async function assertFunctionsSafe(tx: TransactionSql, facts: PlanFacts): Promise<void> {
-  const denied = facts.functions.find(n => CATALOG_DENYLIST.has(n))
+export async function assertFunctionsSafe(tx: TransactionSql, functions: string[]): Promise<void> {
+  const denied = functions.find(n => CATALOG_DENYLIST.has(n))
   if (denied) {
     refuse(`This connector will not run a query that calls ${denied}(). It reaches outside the tables this token is scoped to.`)
   }
 
-  const names = facts.functions.filter(n => !CATALOG_DENYLIST.has(n))
+  const names = functions.filter(n => !CATALOG_DENYLIST.has(n))
   if (names.length === 0) return
 
   const rows = await tx<Array<{ proname: string, nspname: string, prosecdef: boolean }>>`

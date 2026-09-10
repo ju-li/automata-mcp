@@ -30,11 +30,22 @@ const { data: toolCatalogue } = await useFetch<{ tools: McpToolInfo[] }>(
 function initialScope(): TokenScope {
   if (props.kind !== 'postgres') return openScope()
   const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly).map(t => t.name)
-  // Before the catalogue arrives there is nothing to pre-check; an open scope
-  // would be the wrong default here, so leave the list empty and let the dialog
-  // fill it in when the fetch lands.
   return readOnlyScope(readTools)
 }
+
+/**
+ * Seed the default selection when the catalogue lands.
+ *
+ * Without this, opening the dialog before the fetch settles produced
+ * `{ all_tools: false, tool_names: [] }` — which `scopeSchema` refuses with
+ * "Select at least one action", so Create failed with a validation error the
+ * user did nothing to cause.
+ */
+watch(toolCatalogue, (catalogue) => {
+  if (!createOpen.value || props.kind !== 'postgres' || !catalogue) return
+  if (newScope.value.all_tools || newScope.value.tool_names.length > 0) return
+  newScope.value = initialScope()
+})
 
 interface TokenRow {
   id: string
