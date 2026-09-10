@@ -21,11 +21,10 @@ const query = z.object({
  * has already established that.
  */
 export default defineEventHandler(async (event) => {
-  const instance = await requireOwnedInstance(event, getRouterParam(event, 'id'))
-
-  if (instanceKind(instance) !== 'postgres') {
-    throw createError({ statusCode: 400, statusMessage: 'This connection is not a database.' })
-  }
+  // 404 for the wrong kind, like every other kind-guarded route: this route
+  // genuinely does not exist for a WhatsApp connection, and a distinguishable
+  // error would turn it into a probe for which id is which kind.
+  const instance = await requireOwnedInstanceOfKind(event, getRouterParam(event, 'id'), 'postgres')
 
   const params = await getValidatedQuery(event, q => query.parse(q))
 

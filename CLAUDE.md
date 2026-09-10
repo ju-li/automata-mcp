@@ -20,7 +20,7 @@ PocketBase is the app's database (users, sessions, connections and their credent
 
 `README.md` is the operator's manual — first-run setup, networking tables, the Linux firewall rule, Railway deploy, MCP client connection. Read it before doing anything involving Docker or the local stack; this file covers the code.
 
-**Status:** the product loop works end to end for both kinds — sign up, create a connection, pair by QR or paste a DSN, per-connection dashboard, connector token provisioning with per-chat or per-table scoping. Nine MCP tools, gated by kind:
+**Status:** the product loop works end to end for both kinds — sign up, create a connection, pair by QR or paste a DSN, per-connection dashboard, connector token provisioning with per-chat or per-table scoping. Ten MCP tools, gated by kind:
 
 - `whatsapp`: `get-connection-status`, `list-chats`, `read-messages`, `search-messages` (opt-in, see below), `send-text-message`
 - `postgres`: `get-database-info`, `list-tables`, `describe-table`, `run-query`, `run-statement` (write)

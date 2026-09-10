@@ -80,17 +80,24 @@ export function evolutionAdminCredentials(
   const config = useRuntimeConfig()
 
   // A row that carries its own global key is a bring-your-own server, and both
-  // halves must come from it.
-  if (server?.base_url && server?.admin_key) {
+  // halves come from it.
+  if (server?.admin_key) {
+    if (!server.base_url) return undefined
     return { baseUrl: server.base_url, apiKey: server.admin_key, userSupplied: true }
   }
 
-  // Half a BYO configuration is not a reason to fall back to the other half of
-  // ours. Sending our global key to a server the user chose hands them a
-  // credential that reaches every account on our Evolution; sending their key to
-  // our URL is a probe of our server. Neither is a fallback, both are the bug
-  // this branch exists to prevent.
-  if (server?.base_url || server?.admin_key) return undefined
+  // No key on the row: this connection uses the deployment default. `base_url`
+  // is stored on EVERY row, including these, so its mere presence does not make
+  // a row bring-your-own — reading it that way refuses to delete an ordinary
+  // connection, which is exactly the bug this comment replaced.
+  //
+  // But a row naming a *different* server with no key of its own is genuinely
+  // unusable, and must not be completed from ours: sending our global key to a
+  // server the user chose hands them a credential that reaches every account on
+  // our Evolution. That is the case this returns undefined for.
+  if (server?.base_url && config.evolutionUrl && server.base_url !== config.evolutionUrl) {
+    return undefined
+  }
 
   if (!config.evolutionUrl || !config.evolutionAdminKey) return undefined
   return { baseUrl: config.evolutionUrl, apiKey: config.evolutionAdminKey }

@@ -21,9 +21,9 @@ want WhatsApp connections** — they sit behind a compose profile, and the
 
 > **Status.** Sign-up, WhatsApp pairing, the per-connection dashboard, connector
 > token provisioning with per-chat and per-table scoping, and history import all
-> work. Nine MCP tools — five for WhatsApp (connection status, chat listing,
+> work. Ten MCP tools — five for WhatsApp (connection status, chat listing,
 > message reading, message search (opt-in — see "Message search") and text
-> sending) and four for Postgres (database info, table listing, table
+> sending) and five for Postgres (database info, table listing, table
 > description, read-only query and data-modifying statement). Webhook event
 > handling is not built; `/api/webhook/evolution` is a stub that logs and acks.
 
