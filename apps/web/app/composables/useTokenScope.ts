@@ -77,7 +77,7 @@ export function readOnlyScope(readToolNames: string[]): TokenScope {
  * token leaves `all_chats` at its default `true`, and reporting "All chats" for
  * a database would be noise at best.
  */
-export function describeScope(scope: TokenScope, kind: 'whatsapp' | 'postgres' = 'whatsapp'): string {
+export function describeScope(scope: TokenScope, kind: InstanceKind = 'whatsapp'): string {
   const dataOpen = kind === 'postgres' ? scope.all_tables : scope.all_chats
   if (scope.all_tools && dataOpen) return 'Full access'
 

@@ -10,9 +10,7 @@ import { toast } from 'vue-sonner'
  * not silently create a second one — and a database connection is proved by
  * actually connecting, which is not something a refresh should re-do either.
  */
-type Kind = 'whatsapp' | 'postgres'
-
-const kind = ref<Kind | undefined>()
+const kind = ref<InstanceKind | undefined>()
 const label = ref('')
 const busy = ref(false)
 
@@ -67,7 +65,7 @@ async function create() {
   catch (err: any) {
     // The server's message is the useful part here — it names the bad host, the
     // refused address or the connection error — so show it rather than a generic.
-    toast.error(err?.data?.message || err?.data?.statusMessage || 'Could not create the connection')
+    toast.error(apiErrorMessage(err, 'Could not create the connection'))
     busy.value = false
   }
 }

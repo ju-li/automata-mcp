@@ -5,10 +5,9 @@ import { z } from 'zod'
  * of. Table scope is applied by filtering rather than refusing — a listing is
  * the honest answer to "what can I see", the same call `list-chats` makes.
  */
-export default defineMcpTool({
+export default defineKindTool({
   name: 'list-tables',
-  group: 'postgres',
-  enabled: event => isToolAllowed(event, 'list-tables', 'postgres'),
+  kind: 'postgres',
   title: 'List database tables',
   description:
     'List the tables, views and materialized views this connector can reach, '

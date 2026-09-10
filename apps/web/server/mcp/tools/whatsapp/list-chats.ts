@@ -3,12 +3,9 @@
  * is the honest answer to "what can I see", so a scoped token sees its own
  * conversations and simply does not learn the others exist.
  */
-export default defineMcpTool({
+export default defineKindTool({
   name: 'list-chats',
-  // Inferred from the directory too, but stated so a move cannot silently
-  // change which connections this tool belongs to.
-  group: 'whatsapp',
-  enabled: event => isToolAllowed(event, 'list-chats', 'whatsapp'),
+  kind: 'whatsapp',
   title: 'List WhatsApp chats',
   description:
     'List recent WhatsApp conversations, most recently active first, with the '

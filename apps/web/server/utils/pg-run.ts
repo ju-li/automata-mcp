@@ -21,6 +21,40 @@ import type { McpScope } from './mcp-scope'
 const MAX_CELL_CHARS = 2000
 const MAX_RETURNING_ROWS = 100
 
+/**
+ * EXPLAIN the statement and read the facts the guards need.
+ *
+ * One place, so the awkward cast around the toolkit-shaped response exists once
+ * — both run paths were carrying their own copy of it.
+ */
+async function planFacts(tx: TransactionSql, statement: string): Promise<PlanFacts> {
+  const explained = await unsafeSingle(tx, `EXPLAIN (FORMAT JSON, VERBOSE) ${statement}`)
+  return readPlan((explained as unknown as Array<Record<string, unknown>>)[0]?.['QUERY PLAN'])
+}
+
+/**
+ * Serialise every cell of every row, counting what had to be clipped.
+ *
+ * Shared so the write path reports truncation too: it used to re-implement the
+ * loop without the counter, so a clipped RETURNING value came back silently.
+ */
+function serialiseRows(rows: Array<Record<string, unknown>>): {
+  rows: Array<Record<string, unknown>>
+  truncatedValues: number
+} {
+  let truncatedValues = 0
+  const out = rows.map((row) => {
+    const serialised: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(row)) {
+      const cell = serialiseCell(value)
+      if (cell.truncated) truncatedValues += 1
+      serialised[key] = cell.value
+    }
+    return serialised
+  })
+  return { rows: out, truncatedValues }
+}
+
 export interface ReadQueryOptions {
   maxRows: number
   timeoutMs: number
@@ -67,8 +101,7 @@ export async function runReadQuery(
   return await sql.begin('read only', async (tx) => {
     await applySessionGuards(tx, scope, options.timeoutMs)
 
-    const explained = await unsafeSingle(tx, `EXPLAIN (FORMAT JSON, VERBOSE) ${statement}`)
-    const facts = readPlan((explained as Array<Record<string, unknown>>)[0]?.['QUERY PLAN'])
+    const facts = await planFacts(tx, statement)
 
     assertNoWrites(facts)
     await assertFunctionsSafe(tx, facts)
@@ -90,16 +123,7 @@ export async function runReadQuery(
     const hasMore = raw.length > options.maxRows
     const kept = raw.slice(0, options.maxRows)
 
-    let truncatedValues = 0
-    const rows = kept.map((row) => {
-      const out: Record<string, unknown> = {}
-      for (const [key, value] of Object.entries(row)) {
-        const { value: serialised, truncated } = serialiseCell(value)
-        if (truncated) truncatedValues += 1
-        out[key] = serialised
-      }
-      return out
-    })
+    const { rows, truncatedValues } = serialiseRows(kept)
 
     return {
       columns: raw.columns?.map(c => c.name) ?? Object.keys(kept[0] ?? {}),
@@ -117,6 +141,8 @@ export interface WriteStatementResult {
   rowCount: number
   returning: Array<Record<string, unknown>>
   returningTruncated: boolean
+  /** Cells clipped at the length cap, so a shortened value is never silent. */
+  truncatedValues: number
   elapsedMs: number
 }
 
@@ -132,8 +158,7 @@ export async function runWriteStatement(
   return await sql.begin(async (tx) => {
     await applySessionGuards(tx, scope, options.timeoutMs)
 
-    const explained = await unsafeSingle(tx, `EXPLAIN (FORMAT JSON, VERBOSE) ${statement}`)
-    const facts = readPlan((explained as Array<Record<string, unknown>>)[0]?.['QUERY PLAN'])
+    const facts = await planFacts(tx, statement)
 
     // The kind gate for writes. CTAS and SELECT INTO plan to a bare Result and
     // REFRESH answers "Utility Statement" — none of them has a ModifyTable root,
@@ -158,16 +183,13 @@ export async function runWriteStatement(
       })
     }
 
-    const returning = [...rows].slice(0, MAX_RETURNING_ROWS).map((row) => {
-      const out: Record<string, unknown> = {}
-      for (const [key, value] of Object.entries(row)) out[key] = serialiseCell(value).value
-      return out
-    })
+    const serialised = serialiseRows([...rows].slice(0, MAX_RETURNING_ROWS))
 
     return {
       command: rows.command,
       rowCount: rows.count,
-      returning,
+      returning: serialised.rows,
+      truncatedValues: serialised.truncatedValues,
       returningTruncated: rows.length > MAX_RETURNING_ROWS,
       elapsedMs: Date.now() - startedAt,
     }
@@ -194,11 +216,14 @@ function serialiseCell(value: unknown): { value: unknown, truncated: boolean } {
   }
 
   if (typeof value === 'object') {
+    // Serialised once. Returning the object would have Nitro stringify it a
+    // second time, which on a page of jsonb doubles the cost of the response
+    // for no gain — the field is typed `unknown` either way.
     const json = JSON.stringify(value)
-    if (json !== undefined && json.length > MAX_CELL_CHARS) {
-      return { value: `${json.slice(0, MAX_CELL_CHARS)}…`, truncated: true }
-    }
-    return { value, truncated: false }
+    if (json === undefined) return { value: null, truncated: false }
+    return json.length > MAX_CELL_CHARS
+      ? { value: `${json.slice(0, MAX_CELL_CHARS)}…`, truncated: true }
+      : { value, truncated: false }
   }
 
   return { value, truncated: false }

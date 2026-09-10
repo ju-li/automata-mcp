@@ -10,12 +10,9 @@ import { z } from 'zod'
  * `destructiveHint: true` is for. `idempotentHint` is false: calling this twice
  * sends two messages.
  */
-export default defineMcpTool({
+export default defineKindTool({
   name: 'send-text-message',
-  // Inferred from the directory too, but stated so a move cannot silently
-  // change which connections this tool belongs to.
-  group: 'whatsapp',
-  enabled: event => isToolAllowed(event, 'send-text-message', 'whatsapp'),
+  kind: 'whatsapp',
   title: 'Send WhatsApp message',
   description:
     'Send a plain-text WhatsApp message from the connected account. The account '

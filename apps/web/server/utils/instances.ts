@@ -73,10 +73,9 @@ export function toPublicInstance(instance: AppInstance): PublicInstance {
       : instance.base_url,
     ...(kind === 'whatsapp' && {
       ownServer: Boolean(instance.admin_key),
-      canReadMessages: Boolean(
-        instance.evolution_db_url
-        || (onDeploymentServer(instance) && useRuntimeConfig().evolutionDatabaseUrl),
-      ),
+      // Not recomputed here: `canReadMessages` in evolution-db.ts is the rule,
+      // and the comment there calls itself the only place it lives.
+      canReadMessages: canReadMessages(instance),
     }),
   }
 }
@@ -282,12 +281,10 @@ export async function getPostgresHealth(instance: AppInstance): Promise<Connecti
   if (!instance.dsn) return { state: 'unknown', error: 'No connection string is stored for this database.' }
 
   try {
-    const sql = await pgFor(instance)
-    const [row] = await sql<Array<{ version: string, database: string }>>`
-      SELECT current_setting('server_version') AS version, current_database() AS database`
+    const identity = await pgIdentity(await pgFor(instance))
     return {
       state: 'open',
-      detail: row ? `PostgreSQL ${row.version} · ${row.database}` : undefined,
+      detail: identity ? `PostgreSQL ${identity.serverVersion} · ${identity.database}` : undefined,
     }
   }
   catch (cause) {
@@ -330,24 +327,54 @@ export async function provisionPostgresInstance(
   input: PostgresProvisionInput,
 ): Promise<AppInstance> {
   const dsn = input.dsn.trim()
-
-  // Parses, runs the host guard, connects, and reports the role's privileges.
-  const probe = await probePgConnection(dsn)
-  const target = describeDsn(dsn)
+  const { fields, probe } = await postgresFields(dsn)
 
   const pb = await pocketbaseAdmin()
   return await pb.collection('instances').create<AppInstance>({
     user: user.id,
     kind: 'postgres',
     name: generateInstanceName(),
-    dsn,
-    // Display-only mirrors, so the dashboard can say where this points without
-    // reading the secret back out.
-    pg_host: target.host,
-    pg_port: target.port,
-    pg_database: probe.database,
+    ...fields,
     label: input.label?.trim() || probe.database || 'Database',
   })
+}
+
+/**
+ * Prove a DSN and build the columns that go with it.
+ *
+ * The secret and its display-only mirrors are written together, in one place,
+ * so a new mirror cannot be added to the create path and forgotten on the
+ * update path — a miss there is silent, leaving a row that simply lacks the
+ * field.
+ */
+async function postgresFields(dsn: string) {
+  // Parses, runs the host guard, connects, and reports the role's privileges.
+  const probe = await probePgConnection(dsn)
+  const target = describeDsn(dsn)
+
+  return {
+    probe,
+    fields: {
+      dsn,
+      pg_host: target.host,
+      pg_port: target.port,
+      pg_database: probe.database,
+    },
+  }
+}
+
+/** Rotate a database connection's DSN. Every token on it keeps working. */
+export async function updatePostgresDsn(instance: AppInstance, dsn: string): Promise<AppInstance> {
+  const { fields } = await postgresFields(dsn)
+
+  const pb = await pocketbaseAdmin()
+  const updated = await pb.collection('instances').update<AppInstance>(instance.id, fields)
+
+  // Drop the pool so the change takes effect now rather than at the next
+  // fingerprint check. Belt and braces — `pgFor` would notice on its own.
+  await closePgPool(instance.id)
+
+  return updated
 }
 
 /**
@@ -492,27 +519,28 @@ export async function enableFullHistorySync(instance: AppInstance): Promise<void
  * resource to release, only a local pool to close.
  */
 export async function deleteInstance(instance: AppInstance): Promise<void> {
+  // Release whatever this kind holds, then delete the row — once, for every
+  // kind. The ordering is the rule stated above and it is the same either way:
+  // if releasing throws, the row survives and still points at the thing.
   if (instanceKind(instance) === 'postgres') {
     await closePgPool(instance.id)
-    const pb = await pocketbaseAdmin()
-    await pb.collection('instances').delete(instance.id)
-    return
   }
+  else {
+    // A connection on its own server may hold a pool onto that server's message
+    // database. Keyed on the row, so it outlives the row unless dropped here.
+    await closeKeyedPool(`evo:${instance.id}`)
 
-  // A connection on its own server may hold a pool onto that server's message
-  // database. Keyed on the row, so it outlives the row unless dropped here.
-  await closeKeyedPool(`evo:${instance.id}`)
+    // Uses the same server the instance was created on, with that server's own
+    // global key when it brought one.
+    const admin = evolutionAdminClient(instance)
 
-  // Uses the same server the instance was created on, with that server's own
-  // global key when it brought one.
-  const admin = evolutionAdminClient(instance)
-
-  try {
-    await admin(`/instance/delete/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
-  } catch (error) {
-    // A 404 means Evolution has already lost it; carry on and clean up our row.
-    const status = (error as { status?: number, statusCode?: number })
-    if (status?.status !== 404 && status?.statusCode !== 404) throw error
+    try {
+      await admin(`/instance/delete/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
+    } catch (error) {
+      // A 404 means Evolution has already lost it; carry on and clean up our row.
+      const status = (error as { status?: number, statusCode?: number })
+      if (status?.status !== 404 && status?.statusCode !== 404) throw error
+    }
   }
 
   const pb = await pocketbaseAdmin()

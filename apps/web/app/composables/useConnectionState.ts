@@ -18,7 +18,7 @@ export interface StateDisplay {
  * "close" in particular needs translating — for WhatsApp it means "not paired",
  * not "an error".
  */
-export function describeState(state: ConnectionState, kind: InstanceKind = 'whatsapp'): StateDisplay {
+export function describeState(state: ConnectionState, kind: InstanceKind | undefined = 'whatsapp'): StateDisplay {
   if (kind === 'postgres') {
     switch (state) {
       case 'open':

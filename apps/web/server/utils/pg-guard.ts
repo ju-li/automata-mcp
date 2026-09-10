@@ -234,7 +234,10 @@ export function assertNoWrites(facts: PlanFacts): void {
 }
 
 export function assertIsModify(facts: PlanFacts): void {
-  if (!facts.rootIsModify || facts.modifyOperations.length === 0) {
+  // `rootIsModify` is only set for a node `walk` also visits, and every
+  // ModifyTable node it visits pushes an operation — so the root flag alone is
+  // the whole test.
+  if (!facts.rootIsModify) {
     refuse('run-statement takes exactly one INSERT, UPDATE, DELETE or MERGE. DDL, TRUNCATE, COPY, CREATE TABLE AS and plain queries are not accepted here — use run-query to read.')
   }
   const unsupported = facts.modifyOperations.filter(op => !MODIFY_OPERATIONS.has(op))
@@ -262,12 +265,12 @@ export function assertIsModify(facts: PlanFacts): void {
  * an operator, a cast — are ignored, so the cost of over-collecting is zero.
  */
 export async function assertFunctionsSafe(tx: TransactionSql, facts: PlanFacts): Promise<void> {
-  const names = facts.functions.filter(n => !CATALOG_DENYLIST.has(n))
-  const denied = facts.functions.filter(n => CATALOG_DENYLIST.has(n))
-
-  if (denied.length > 0) {
-    refuse(`This connector will not run a query that calls ${denied[0]}(). It reaches outside the tables this token is scoped to.`)
+  const denied = facts.functions.find(n => CATALOG_DENYLIST.has(n))
+  if (denied) {
+    refuse(`This connector will not run a query that calls ${denied}(). It reaches outside the tables this token is scoped to.`)
   }
+
+  const names = facts.functions.filter(n => !CATALOG_DENYLIST.has(n))
   if (names.length === 0) return
 
   const rows = await tx<Array<{ proname: string, nspname: string, prosecdef: boolean }>>`
@@ -321,14 +324,10 @@ export async function assertRelationsInScope(
     // row data, and that is stated in the docs rather than pretended away.
     if (relation.schema === 'pg_catalog' || relation.schema === 'information_schema') continue
 
-    if (!allowed.has(relation.qname)) {
-      refuse(
-        `This connector token is not scoped to ${relation.qname}. `
-        + `The tables it may reach are: ${scope.tableNames.join(', ') || '(none)'}. `
-        + `Ask the account owner to add ${relation.qname} to the token's allowed tables, `
-        + 'or rewrite the query to use only the tables above.',
-      )
-    }
+    // `allowed` is `scope.tableNames` plus whatever inherits from it, so a name
+    // that misses here also misses `isTableAllowed` — the refusal wording lives
+    // in mcp-scope.ts with the rest of the scope vocabulary, not here.
+    if (!allowed.has(relation.qname)) assertTableAllowed(scope, relation.qname)
   }
 }
 
@@ -372,7 +371,6 @@ async function expandAllowlist(tx: TransactionSql, tableNames: string[]): Promis
 export function searchPathFor(scope: McpScope): string {
   if (scope.allTables) return 'public, pg_catalog'
   const schemas = [...new Set(scope.tableNames.map(t => t.split('.')[0]!).filter(Boolean))]
-  if (schemas.length === 0) return 'pg_catalog'
   return [...schemas.map(quoteIdent), 'pg_catalog'].join(', ')
 }
 

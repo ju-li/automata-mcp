@@ -19,7 +19,8 @@ const props = defineProps<{
     detail?: string
     profileName?: string
     number?: string
-    stats: { messages: number, chats: number, contacts: number }
+    /** WhatsApp only. Absent for kinds with no message counts. */
+    stats?: { messages: number, chats: number, contacts: number }
   }
 }>()
 
@@ -46,7 +47,7 @@ const secondary = computed(() => {
               {{ secondary }}
             </CardDescription>
           </div>
-          <ConnectionBadge :state="instance.state" />
+          <ConnectionBadge :state="instance.state" :kind="instance.kind" />
         </div>
       </CardHeader>
       <CardContent>
@@ -54,7 +55,7 @@ const secondary = computed(() => {
           {{ instance.detail || 'PostgreSQL' }}
         </p>
         <p v-else class="text-sm text-muted-foreground tabular-nums">
-          {{ instance.stats.messages }} messages · {{ instance.stats.chats }} chats
+          {{ instance.stats?.messages ?? 0 }} messages · {{ instance.stats?.chats ?? 0 }} chats
         </p>
       </CardContent>
     </Card>

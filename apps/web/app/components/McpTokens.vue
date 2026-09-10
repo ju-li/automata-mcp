@@ -18,9 +18,13 @@ const props = defineProps<{
  *
  * The read tools come from the server, since only it knows which exist.
  */
+// Only a Postgres token needs this, and only to seed its default scope — a
+// WhatsApp dashboard was fetching it on every load and discarding the answer.
+// The explicit key is shared with TokenScopeFields, which renders the same list:
+// Nuxt keys per call site by default, so the two were fetching it twice.
 const { data: toolCatalogue } = await useFetch<{ tools: McpToolInfo[] }>(
   () => `/api/instances/${props.instanceId}/mcp-tools`,
-  { lazy: true },
+  { key: `mcp-tools-${props.instanceId}`, lazy: true, immediate: props.kind === 'postgres' },
 )
 
 function initialScope(): TokenScope {
@@ -104,7 +108,7 @@ async function saveScope() {
     await refresh()
   }
   catch (err: any) {
-    toast.error(err?.data?.message || 'Could not update the scope')
+    toast.error(apiErrorMessage(err, 'Could not update the scope'))
   }
   finally {
     savingScope.value = false
@@ -126,7 +130,7 @@ async function create() {
     await refresh()
   }
   catch (err: any) {
-    toast.error(err?.data?.message || 'Could not create the token')
+    toast.error(apiErrorMessage(err, 'Could not create the token'))
   }
   finally {
     creating.value = false

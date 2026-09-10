@@ -15,12 +15,9 @@ import type { ChatMessage } from '~~/server/utils/chats'
  * rest (`nextPage`, plus a `note` in words because the flag alone was not
  * enough).
  */
-export default defineMcpTool({
+export default defineKindTool({
   name: 'read-messages',
-  // Inferred from the directory too, but stated so a move cannot silently
-  // change which connections this tool belongs to.
-  group: 'whatsapp',
-  enabled: event => isToolAllowed(event, 'read-messages', 'whatsapp'),
+  kind: 'whatsapp',
   title: 'Read WhatsApp messages',
   description:
     'Read one page of messages from one WhatsApp conversation, newest first. '

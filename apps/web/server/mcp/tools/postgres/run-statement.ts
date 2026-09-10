@@ -10,10 +10,9 @@ import { z } from 'zod'
  *
  * Deliberately not in the default token selection for a new Postgres connection.
  */
-export default defineMcpTool({
+export default defineKindTool({
   name: 'run-statement',
-  group: 'postgres',
-  enabled: event => isToolAllowed(event, 'run-statement', 'postgres'),
+  kind: 'postgres',
   title: 'Run a data-modifying SQL statement',
   description:
     'Run one INSERT, UPDATE, DELETE or MERGE and report how many rows it changed. '
@@ -51,6 +50,10 @@ export default defineMcpTool({
       maxRows,
       elapsedMs: result.elapsedMs,
       ...(result.returning.length > 0 && { returning: result.returning }),
+      ...(result.truncatedValues > 0 && {
+        truncatedValues: result.truncatedValues,
+        truncatedValuesNote: 'Some returned values were too long to include in full and end with an ellipsis.',
+      }),
       ...(result.returningTruncated && {
         returningTruncated: true,
         note: 'More rows were returned than are shown here. `rowCount` is the real number changed.',

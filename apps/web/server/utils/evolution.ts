@@ -95,9 +95,7 @@ export function evolutionAdminCredentials(
   // unusable, and must not be completed from ours: sending our global key to a
   // server the user chose hands them a credential that reaches every account on
   // our Evolution. That is the case this returns undefined for.
-  if (server?.base_url && config.evolutionUrl && server.base_url !== config.evolutionUrl) {
-    return undefined
-  }
+  if (server && !onDeploymentServer(server)) return undefined
 
   if (!config.evolutionUrl || !config.evolutionAdminKey) return undefined
   return { baseUrl: config.evolutionUrl, apiKey: config.evolutionAdminKey }

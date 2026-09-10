@@ -10,10 +10,9 @@ import { z } from 'zod'
  * the allowlist". Two answers would make this an oracle for the names of tables
  * this token was not granted.
  */
-export default defineMcpTool({
+export default defineKindTool({
   name: 'describe-table',
-  group: 'postgres',
-  enabled: event => isToolAllowed(event, 'describe-table', 'postgres'),
+  kind: 'postgres',
   title: 'Describe a database table',
   description:
     'Show one table\'s columns — name, type, nullability, default, identity — plus '

@@ -17,7 +17,7 @@ const isPostgres = computed(() => props.kind === 'postgres')
 // The dialog mounts on click, so that stall reads as a click that did nothing.
 const { data: toolData, status: toolStatus } = useFetch<{ tools: McpToolInfo[] }>(
   () => `/api/instances/${props.instanceId}/mcp-tools`,
-  { lazy: true },
+  { key: `mcp-tools-${props.instanceId}`, lazy: true },
 )
 // Only the axis this kind actually has is fetched. `immediate: false` on the
 // other one matters: asking a WhatsApp connection for its tables answers 404,
@@ -43,9 +43,10 @@ const manualError = ref('')
 
 // 'idle' counts as loading: it is what status reads for the tick before the
 // request is dispatched, and treating it as settled flashes the empty state.
-const toolsLoading = computed(() => toolStatus.value === 'idle' || toolStatus.value === 'pending')
-const chatsLoading = computed(() => chatStatus.value === 'idle' || chatStatus.value === 'pending')
-const tablesLoading = computed(() => tableStatus.value === 'idle' || tableStatus.value === 'pending')
+const loading = (status: Ref<string>) => computed(() => status.value === 'idle' || status.value === 'pending')
+const toolsLoading = loading(toolStatus)
+const chatsLoading = loading(chatStatus)
+const tablesLoading = loading(tableStatus)
 
 const visibleTables = computed(() => {
   const rows = tableData.value?.tables ?? []
@@ -54,11 +55,7 @@ const visibleTables = computed(() => {
   return rows.filter(t => t.qname.toLowerCase().includes(q))
 })
 
-function toggleTable(qname: string, on: boolean) {
-  const next = new Set(scope.value.table_names)
-  on ? next.add(qname) : next.delete(qname)
-  scope.value = { ...scope.value, table_names: [...next] }
-}
+
 
 const knownChats = computed<ScopedChat[]>(() => {
   const seen = new Map<string, ScopedChat>()
@@ -82,10 +79,19 @@ const selectedChats = computed(() =>
   ),
 )
 
-function toggleTool(name: string, on: boolean) {
-  const next = new Set(scope.value.tool_names)
-  on ? next.add(name) : next.delete(name)
-  scope.value = { ...scope.value, tool_names: [...next] }
+/**
+ * Add or remove one id on one axis.
+ *
+ * One function rather than one per axis: the set-dedupe is the only logic here,
+ * and it was being maintained in three copies that differed solely in which key
+ * they rebuilt.
+ */
+type ScopeList = 'tool_names' | 'chat_jids' | 'table_names'
+
+function toggle(key: ScopeList, value: string, on: boolean) {
+  const next = new Set(scope.value[key])
+  on ? next.add(value) : next.delete(value)
+  scope.value = { ...scope.value, [key]: [...next] }
 }
 
 /**
@@ -101,12 +107,6 @@ function secondaryLine(chat: ScopedChat): string {
     return chat.participantCount === 1 ? '1 member' : `${chat.participantCount} members`
   }
   return chat.number ? `+${chat.number}` : ''
-}
-
-function toggleChat(jid: string, on: boolean) {
-  const next = new Set(scope.value.chat_jids)
-  on ? next.add(jid) : next.delete(jid)
-  scope.value = { ...scope.value, chat_jids: [...next] }
 }
 
 async function addByNumber() {
@@ -131,11 +131,11 @@ async function addByNumber() {
         number: resolvedNumber,
       })
     }
-    toggleChat(result.jid, true)
+    toggle('chat_jids', result.jid, true)
     manualNumber.value = ''
   }
   catch (err: any) {
-    manualError.value = err?.data?.statusMessage || err?.data?.message || 'Could not add that number'
+    manualError.value = apiErrorMessage(err, 'Could not add that number')
   }
   finally {
     resolving.value = false
@@ -192,7 +192,7 @@ async function addByNumber() {
               :id="`tool-${tool.name}`"
               :model-value="scope.tool_names.includes(tool.name)"
               class="mt-0.5"
-              @update:model-value="toggleTool(tool.name, $event === true)"
+              @update:model-value="toggle('tool_names', tool.name, $event === true)"
             />
             <div class="min-w-0">
               <Label :for="`tool-${tool.name}`" class="flex items-center gap-2 font-normal">
@@ -248,7 +248,7 @@ async function addByNumber() {
             class="gap-1 font-mono text-[10px]"
           >
             {{ qname }}
-            <button type="button" aria-label="Remove table" @click="toggleTable(qname, false)">
+            <button type="button" aria-label="Remove table" @click="toggle('table_names', qname, false)">
               <XIcon class="size-3" />
             </button>
           </Badge>
@@ -279,7 +279,7 @@ async function addByNumber() {
               :id="`table-${table.qname}`"
               :model-value="scope.table_names.includes(table.qname)"
               class="mt-0.5"
-              @update:model-value="toggleTable(table.qname, $event === true)"
+              @update:model-value="toggle('table_names', table.qname, $event === true)"
             />
             <Label :for="`table-${table.qname}`" class="min-w-0 font-normal">
               <span class="block truncate font-mono text-xs">{{ table.qname }}</span>
@@ -328,7 +328,7 @@ async function addByNumber() {
             class="gap-1"
           >
             {{ chat.name }}
-            <button type="button" :aria-label="`Remove ${chat.name}`" @click="toggleChat(chat.jid, false)">
+            <button type="button" :aria-label="`Remove ${chat.name}`" @click="toggle('chat_jids', chat.jid, false)">
               <XIcon class="size-3" />
             </button>
           </Badge>
@@ -368,7 +368,7 @@ async function addByNumber() {
           >
             <Checkbox
               :model-value="scope.chat_jids.includes(chat.jid)"
-              @update:model-value="toggleChat(chat.jid, $event === true)"
+              @update:model-value="toggle('chat_jids', chat.jid, $event === true)"
             />
             <img v-if="chat.profilePicUrl" :src="chat.profilePicUrl" alt="" class="size-8 rounded-full object-cover">
             <span v-else class="flex size-8 items-center justify-center rounded-full bg-muted">

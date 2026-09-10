@@ -86,6 +86,10 @@ export function onDeploymentServer(instance: Pick<AppInstance, 'admin_key' | 'ba
  * the deployment's variable; otherwise there is no answer, and the caller
  * refuses rather than querying a database that cannot contain the rows.
  */
+export function canReadMessages(instance: AppInstance): boolean {
+  return messageDbUrlFor(instance) !== undefined
+}
+
 function messageDbUrlFor(instance: AppInstance): { url: string, guard: boolean } | undefined {
   if (instance.evolution_db_url) return { url: instance.evolution_db_url, guard: true }
   if (!onDeploymentServer(instance)) return undefined

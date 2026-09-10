@@ -55,10 +55,9 @@ DENY_V6.addSubnet('fe80::', 10, 'ipv6') // link-local
 DENY_V6.addSubnet('ff00::', 8, 'ipv6') // multicast
 DENY_V6.addSubnet('64:ff9b::', 96, 'ipv6') // NAT64 — wraps a v4 address
 
+/** Only the approved address is used by callers; the rest stayed unread. */
 export interface ResolvedTarget {
   address: string
-  family: 4 | 6
-  port: number
 }
 
 /**
@@ -130,8 +129,7 @@ export async function assertPublicTarget(
 
   await assertNotOwnInfrastructure(resolved, port, hostname, label)
 
-  const first = resolved[0]!
-  return { address: first.address, family: first.family, port }
+  return { address: resolved[0]!.address }
 }
 
 /** Parse a URL and check where it points. Returns the approved address. */
@@ -230,9 +228,4 @@ async function assertNotOwnInfrastructure(
       )
     }
   }
-}
-
-/** Test seam. The cache is a 5-minute memo, not state anything depends on. */
-export function resetOwnTargetCache(): void {
-  ownCache = undefined
 }

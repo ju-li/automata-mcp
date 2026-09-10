@@ -68,13 +68,7 @@ export async function listPgTables(
   }>>`
     SELECT n.nspname AS schema,
            c.relname AS name,
-           CASE c.relkind
-             WHEN 'r' THEN 'table'
-             WHEN 'p' THEN 'partitioned table'
-             WHEN 'v' THEN 'view'
-             WHEN 'm' THEN 'materialized view'
-             WHEN 'f' THEN 'foreign table'
-           END AS kind,
+           c.relkind AS kind,
            pg_catalog.obj_description(c.oid, 'pg_class') AS comment,
            CASE WHEN c.reltuples < 0 THEN NULL ELSE c.reltuples::bigint END AS estimated_rows
     FROM pg_catalog.pg_class c
@@ -105,7 +99,7 @@ export async function listPgTables(
       schema: row.schema,
       name: row.name,
       qname: qualifiedName(row.schema, row.name),
-      kind: row.kind as PgTable['kind'],
+      kind: relkindLabel(row.kind) as PgTable['kind'],
       ...(row.comment ? { comment: row.comment } : {}),
       estimatedRows: row.estimated_rows === null ? null : Number(row.estimated_rows),
     })),
@@ -176,7 +170,13 @@ export async function describePgTable(
 
   if (!target) return undefined
 
-  const columns = await sql<Array<{
+  // The three below depend only on `target.oid` and on nothing else, so they go
+  // out together rather than in series. `describe-table` is a tool the
+  // instructions tell the model to call before querying anything it has not
+  // seen, so three sequential round trips to a managed database was the
+  // dominant cost of using it.
+  const [columns, constraints, indexes] = await Promise.all([
+    sql<Array<{
     name: string
     type: string
     nullable: boolean
@@ -195,23 +195,24 @@ export async function describePgTable(
     WHERE a.attrelid = ${target.oid}
       AND a.attnum > 0
       AND NOT a.attisdropped
-    ORDER BY a.attnum`
+    ORDER BY a.attnum`,
 
-  const constraints = await sql<Array<{ name: string, type: string, definition: string }>>`
+    sql<Array<{ name: string, type: string, definition: string }>>`
     SELECT con.conname AS name,
            con.contype::text AS type,
            pg_catalog.pg_get_constraintdef(con.oid) AS definition
     FROM pg_catalog.pg_constraint con
     WHERE con.conrelid = ${target.oid}
       AND con.contype = ANY ('{p,f,u}')
-    ORDER BY con.contype, con.conname`
+    ORDER BY con.contype, con.conname`,
 
-  const indexes = await sql<Array<{ name: string, definition: string }>>`
+    sql<Array<{ name: string, definition: string }>>`
     SELECT c.relname AS name, pg_catalog.pg_get_indexdef(i.indexrelid) AS definition
     FROM pg_catalog.pg_index i
     JOIN pg_catalog.pg_class c ON c.oid = i.indexrelid
     WHERE i.indrelid = ${target.oid}
-    ORDER BY c.relname`
+    ORDER BY c.relname`,
+  ])
 
   const primary = constraints.find(c => c.type === 'p')
 

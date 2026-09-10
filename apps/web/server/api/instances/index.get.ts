@@ -6,9 +6,10 @@
  * have; if that stops being true, cache the state rather than dropping it, since
  * the list is unreadable without it.
  *
- * `stats` stays WhatsApp-shaped and is zeroed for anything else rather than
- * omitted, so the card component has one shape to render. A database's size is
- * not comparable to a message count and is deliberately not squeezed in here.
+ * `stats` is WhatsApp's own vocabulary and is simply absent for other kinds
+ * rather than zeroed. A zeroed block would encode "this database has no
+ * messages" into the payload, and the card does not read it anyway — it renders
+ * `detail` instead.
  */
 export default defineEventHandler(async (event) => {
   const user = await requireSessionUser(event)
@@ -24,7 +25,6 @@ export default defineEventHandler(async (event) => {
         state: health.state,
         detail: health.detail,
         error: health.error,
-        stats: { messages: 0, chats: 0, contacts: 0 },
       }
     }
 

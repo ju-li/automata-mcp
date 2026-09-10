@@ -11,7 +11,7 @@ import { toast } from 'vue-sonner'
 const props = defineProps<{ id: string }>()
 
 interface StatusResponse {
-  instance: { id: string, name: string, label: string, ownServer?: boolean, canReadMessages?: boolean }
+  instance: PublicInstanceRow
   state: ConnectionState
   profileName?: string
   profilePicUrl?: string
@@ -69,7 +69,7 @@ async function saveDbUrl() {
   catch (err: any) {
     // The server's message names the actual failure — wrong database, refused
     // host, missing SELECT — so it is worth more than a generic here.
-    toast.error(err?.data?.message || err?.data?.statusMessage || 'Could not save the database connection string')
+    toast.error(apiErrorMessage(err, 'Could not save the database connection string'))
   }
   finally {
     savingDbUrl.value = false
@@ -210,7 +210,7 @@ async function destroy() {
             {{ display.hint }}
           </p>
         </div>
-        <ConnectionBadge :state="state" />
+        <ConnectionBadge :state="state" kind="whatsapp" />
       </div>
     </div>
 

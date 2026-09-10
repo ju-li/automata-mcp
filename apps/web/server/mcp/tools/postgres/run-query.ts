@@ -8,10 +8,9 @@ import { z } from 'zod'
  * a read-only transaction. `DECLARE CURSOR` does the statement-kind check by
  * Postgres's own grammar, which is also where the row cap comes from.
  */
-export default defineMcpTool({
+export default defineKindTool({
   name: 'run-query',
-  group: 'postgres',
-  enabled: event => isToolAllowed(event, 'run-query', 'postgres'),
+  kind: 'postgres',
   title: 'Run a read-only SQL query',
   description:
     'Run one read-only SQL statement and return its rows. Exactly one statement — '

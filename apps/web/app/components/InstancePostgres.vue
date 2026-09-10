@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useIntervalFn } from '@vueuse/core'
+import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
 import { ArrowLeftIcon, DatabaseIcon, TableIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
@@ -44,8 +44,14 @@ const editingDsn = ref(false)
 
 // A health poll, not a pairing poll: this only reports, it never drives a state
 // change the way asking Evolution for a QR does. Slow on purpose — each tick
-// opens or reuses a real database connection.
-useIntervalFn(() => refresh(), 30_000)
+// opens or reuses a real database connection and runs a query on the user's
+// server, so it also stops while the tab is hidden rather than running forever
+// behind a background tab.
+const visibility = useDocumentVisibility()
+useIntervalFn(() => {
+  if (visibility.value === 'hidden') return
+  refresh()
+}, 30_000)
 
 async function saveDsn() {
   if (!newDsn.value.trim()) return
@@ -62,7 +68,7 @@ async function saveDsn() {
     toast.success('Connection string updated. Existing tokens keep working.')
   }
   catch (err: any) {
-    toast.error(err?.data?.message || err?.data?.statusMessage || 'Could not update the connection string')
+    toast.error(apiErrorMessage(err, 'Could not update the connection string'))
   }
   finally {
     busy.value = false
@@ -100,7 +106,7 @@ async function destroy() {
             {{ data?.instance.target || 'No connection string stored' }}
           </p>
         </div>
-        <ConnectionBadge :state="state" />
+        <ConnectionBadge :state="state" kind="postgres" />
       </div>
     </div>
 

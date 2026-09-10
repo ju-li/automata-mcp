@@ -26,10 +26,15 @@ const POOL_IDLE_MS = 10 * 60_000
 const PER_POOL_MAX = 3
 const CONNECT_TIMEOUT_S = 5
 const DEFAULT_STATEMENT_TIMEOUT_MS = 10_000
+/** How long a host stays approved before the guard is re-run on it. */
+const GUARD_TTL_MS = 60_000
 
 interface Entry {
   sql: Sql
-  fingerprint: string
+  /** Hash of the DSN this pool was opened with. Rotating the DSN rebuilds it. */
+  dsnHash: string
+  /** When the host guard last approved this pool's target. */
+  guardedAt: number
   lastUsed: number
 }
 
@@ -112,12 +117,39 @@ function sslFor(target: PgTarget): postgres.Options<Record<string, never>>['ssl'
   return { servername: target.host, rejectUnauthorized: false }
 }
 
-function fingerprintOf(dsn: string, target: PgTarget): string {
-  return createHash('sha256')
-    .update(dsn).update('\0')
-    .update(target.address).update('\0')
-    .update(String(target.port))
-    .digest('hex')
+/**
+ * Driver options shared by the pool and the throwaway probe.
+ *
+ * The probe is the connection that *decides whether a DSN is accepted*, so it
+ * has to behave exactly like the pool that will then use it. Keeping a second
+ * hand-written copy of these options meant a change to the pin, to `onnotice`
+ * or to `prepare` could silently apply to one and not the other.
+ */
+function driverOptions(target: PgTarget, options: { guard: boolean, max: number, statementTimeoutMs: number }) {
+  return {
+    // The pin. postgres.js prefers this over the URL's hostname. Omitted when
+    // unguarded, so the URL's own host is used.
+    ...(options.guard && { host: target.address, port: target.port, ssl: sslFor(target) }),
+    max: options.max,
+    // 5s, not the 30s default. A bad DSN has to fail the MCP call quickly; a
+    // tool that hangs for half a minute reads to a client as a hung server.
+    connect_timeout: CONNECT_TIMEOUT_S,
+    // Pointing at a transaction-mode pooler (Supabase, Neon, pgbouncer) is the
+    // common case, and a named prepared statement does not survive one.
+    prepare: false,
+    // A NOTICE payload can carry row data — a RAISE NOTICE in a trigger — and
+    // would land in the process log, which is the one place this must not leak
+    // to. `mcp.logging` is off for the same reason.
+    onnotice: () => {},
+    connection: {
+      application_name: 'claude-mcp-connector',
+      statement_timeout: options.statementTimeoutMs,
+    },
+  }
+}
+
+function hashDsn(dsn: string): string {
+  return createHash('sha256').update(dsn).digest('hex')
 }
 
 export interface KeyedPoolOptions {
@@ -150,51 +182,57 @@ export interface KeyedPoolOptions {
 export async function keyedPool(key: string, dsn: string, options: KeyedPoolOptions): Promise<Sql> {
   sweep()
 
+  const dsnHash = hashDsn(dsn)
+  const existing = pools.get(key)
+
+  if (existing && existing.dsnHash === dsnHash) {
+    // Re-approve the host on a timer, not on every call.
+    //
+    // **Not a shortcut — resolving per call would buy nothing.** The pool keeps
+    // established sockets for up to `max_lifetime`, all of them dialled at the
+    // address approved when it was built, so a fresh lookup does not move any
+    // traffic. What re-approving does buy is noticing that a hostname has since
+    // been re-pointed somewhere it may not go, and a minute is soon enough for
+    // that; `assertPublicTarget` throws here if so.
+    //
+    // The address is also deliberately NOT part of the identity. A host with
+    // several A records (Neon, Supabase, any round-robin) returns them in a
+    // different order per query — `verbatim: true` preserves that — so keying on
+    // `resolved[0]` tore down and rebuilt the pool, TLS handshake and all, on
+    // essentially every call to exactly the hosts people point at.
+    if (options.guard && Date.now() - existing.guardedAt > GUARD_TTL_MS) {
+      await resolvePgTarget(dsn)
+      existing.guardedAt = Date.now()
+    }
+    existing.lastUsed = Date.now()
+    return existing.sql
+  }
+
   // Unguarded means unpinned: with no approved address there is nothing to
   // substitute for the hostname, so postgres.js resolves it as usual.
   const target = options.guard
     ? await resolvePgTarget(dsn)
     : { ...describeDsn(dsn), address: '' }
 
-  const fingerprint = fingerprintOf(dsn, target)
-
-  const existing = pools.get(key)
   if (existing) {
-    if (existing.fingerprint === fingerprint) {
-      existing.lastUsed = Date.now()
-      return existing.sql
-    }
-    // The DSN was rotated, or the host now resolves elsewhere. Drain the old
-    // pool in the background: ending it synchronously would kill queries still
-    // in flight on this request and on any concurrent one.
+    // The DSN was rotated. Drain the old pool in the background: ending it
+    // synchronously would kill queries still in flight on this request and on
+    // any concurrent one.
     pools.delete(key)
     void existing.sql.end({ timeout: 5 }).catch(() => {})
   }
 
   const sql = postgres(dsn, {
-    // The pin. postgres.js prefers this over the URL's hostname. Omitted when
-    // unguarded, so the URL's own host is used.
-    ...(options.guard && { host: target.address, port: target.port, ssl: sslFor(target) }),
-    max: options.max ?? PER_POOL_MAX,
+    ...driverOptions(target, {
+      guard: options.guard,
+      max: options.max ?? PER_POOL_MAX,
+      statementTimeoutMs: options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
+    }),
     idle_timeout: 30,
     max_lifetime: 60 * 30,
-    // 5s, not the 30s default. A bad DSN has to fail the MCP call quickly; a
-    // tool that hangs for half a minute reads to a client as a hung server.
-    connect_timeout: CONNECT_TIMEOUT_S,
-    // Pointing at a transaction-mode pooler (Supabase, Neon, pgbouncer) is the
-    // common case, and a named prepared statement does not survive one.
-    prepare: false,
-    // A NOTICE payload can carry row data — a RAISE NOTICE in a trigger — and
-    // would land in the process log, which is the one place this must not leak
-    // to. `mcp.logging` is off for the same reason.
-    onnotice: () => {},
-    connection: {
-      application_name: 'claude-mcp-connector',
-      statement_timeout: options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
-    },
   })
 
-  pools.set(key, { sql, fingerprint, lastUsed: Date.now() })
+  pools.set(key, { sql, dsnHash, guardedAt: Date.now(), lastUsed: Date.now() })
   return sql
 }
 
@@ -252,6 +290,22 @@ function sweep(): void {
  * table allowlist best-effort — a superuser can read anything through a
  * function the planner cannot see into — so the UI has to be able to say so.
  */
+/** What a connection says about itself. One query, three callers. */
+export interface PgIdentity {
+  serverVersion: string
+  currentUser: string
+  database: string
+}
+
+export async function pgIdentity(sql: Sql): Promise<PgIdentity | undefined> {
+  const [row] = await sql<Array<{ version: string, current_user: string, database: string }>>`
+    SELECT current_setting('server_version') AS version,
+           current_user,
+           current_database() AS database`
+  if (!row) return undefined
+  return { serverVersion: row.version, currentUser: row.current_user, database: row.database }
+}
+
 export interface PgProbe {
   serverVersion: string
   currentUser: string
@@ -276,16 +330,9 @@ export async function probePgConnection(dsn: string, options: {
 } = {}): Promise<PgProbe> {
   const target = await resolvePgTarget(dsn)
 
-  const sql = postgres(dsn, {
-    host: target.address,
-    port: target.port,
-    ssl: sslFor(target),
-    max: 1,
-    connect_timeout: CONNECT_TIMEOUT_S,
-    prepare: false,
-    onnotice: () => {},
-    connection: { application_name: 'claude-mcp-connector', statement_timeout: 5000 },
-  })
+  // Same options as the pool that will use this DSN, so acceptance and use
+  // cannot disagree.
+  const sql = postgres(dsn, driverOptions(target, { guard: true, max: 1, statementTimeoutMs: 5000 }))
 
   try {
     const [row] = await sql<Array<{
@@ -296,6 +343,8 @@ export async function probePgConnection(dsn: string, options: {
       bypass_rls: boolean
       can_read_files: boolean
     }>>`
+      -- A superset of pgIdentity's columns: the privilege half is only ever
+      -- needed here, at the moment a DSN is accepted.
       SELECT current_setting('server_version') AS version,
              current_user,
              current_database() AS database,

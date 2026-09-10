@@ -22,19 +22,9 @@ export default defineEventHandler(async (event) => {
   const { dsn: raw } = await parseBody(event, body)
   const dsn = raw.trim()
 
-  // Parses, runs the host guard, connects.
-  const probe = await probePgConnection(dsn)
-  const target = describeDsn(dsn)
-
-  const pb = await pocketbaseAdmin()
-  const updated = await pb.collection('instances').update<AppInstance>(instance.id, {
-    dsn,
-    pg_host: target.host,
-    pg_port: target.port,
-    pg_database: probe.database,
-  })
-
-  await closePgPool(instance.id)
+  // The write itself lives in instances.ts with the create path it mirrors, so
+  // the two cannot drift about which columns a DSN owns.
+  const updated = await updatePostgresDsn(instance, dsn)
 
   return { instance: toPublicInstance(updated) }
 })

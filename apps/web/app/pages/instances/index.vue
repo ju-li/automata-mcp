@@ -10,7 +10,8 @@ interface InstanceRow {
   detail?: string
   profileName?: string
   number?: string
-  stats: { messages: number, chats: number, contacts: number }
+  /** WhatsApp only. Absent for kinds with no message counts. */
+  stats?: { messages: number, chats: number, contacts: number }
 }
 
 const { data, status } = await useFetch<{ instances: InstanceRow[] }>('/api/instances')

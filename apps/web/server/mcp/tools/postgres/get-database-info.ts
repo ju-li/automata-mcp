@@ -3,10 +3,9 @@
  * model to call before it starts guessing. Takes no arguments, because the token
  * is bound to one connection.
  */
-export default defineMcpTool({
+export default defineKindTool({
   name: 'get-database-info',
-  group: 'postgres',
-  enabled: event => isToolAllowed(event, 'get-database-info', 'postgres'),
+  kind: 'postgres',
   title: 'Check the database connection',
   description:
     'Report whether this connector can reach its database, which server version '
@@ -25,17 +24,13 @@ export default defineMcpTool({
   handler: async () => {
     const { instance, scope } = useMcpAuth()
 
-    const sql = await pgFor(instance)
-    const [row] = await sql<Array<{ version: string, current_user: string, database: string }>>`
-      SELECT current_setting('server_version') AS version,
-             current_user,
-             current_database() AS database`
+    const identity = await pgIdentity(await pgFor(instance))
 
     return {
       connected: true,
-      serverVersion: row?.version ?? 'unknown',
-      database: row?.database ?? instance.pg_database ?? 'unknown',
-      role: row?.current_user ?? 'unknown',
+      serverVersion: identity?.serverVersion ?? 'unknown',
+      database: identity?.database ?? instance.pg_database ?? 'unknown',
+      role: identity?.currentUser ?? 'unknown',
       host: instance.pg_host,
       port: instance.pg_port,
       allTables: scope.allTables,

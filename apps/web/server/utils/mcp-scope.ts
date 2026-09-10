@@ -108,7 +108,10 @@ function toStringArray(value: unknown): string[] {
 export function isToolAllowed(event: H3Event, toolName: string, kind: InstanceKind): boolean {
   const auth = event.context.mcpAuth as McpAuth | undefined
   if (!auth) return false
-  if (instanceKind(auth.instance) !== kind) return false
+  // `auth.kind` and not `instanceKind(auth.instance)`: the discriminant is
+  // resolved once in `resolveMcpAuth`, and reading it here is what makes the
+  // union the single post-resolution reader of `instance.kind`.
+  if (auth.kind !== kind) return false
 
   const scope = auth.scope
   if (scope.allTools) return true
