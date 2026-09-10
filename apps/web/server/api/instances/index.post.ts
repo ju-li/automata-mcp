@@ -12,6 +12,10 @@ import { z } from 'zod'
  * override to be completed from configuration — see `evolutionAdminCredentials`
  * for why pairing our key with their URL, or theirs with ours, is the bug this
  * shape prevents.
+ *
+ * `dbUrl` sits inside `server` because it only means anything for a user's own
+ * server, and is optional inside it because reading is the only thing it buys:
+ * pairing, listing chats and sending all work without it.
  */
 const body = z.discriminatedUnion('kind', [
   z.object({
@@ -20,6 +24,7 @@ const body = z.discriminatedUnion('kind', [
     server: z.object({
       baseUrl: z.string().url(),
       adminKey: z.string().min(1),
+      dbUrl: z.string().min(1).max(2000).optional(),
     }).optional(),
   }),
   z.object({

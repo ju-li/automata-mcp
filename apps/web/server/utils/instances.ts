@@ -48,6 +48,15 @@ export interface PublicInstance {
   target?: string
   /** True when this WhatsApp connection uses a server the user supplied. */
   ownServer?: boolean
+  /**
+   * Whether `read-messages` and `search-messages` can answer for this
+   * connection at all.
+   *
+   * Computed here rather than in the client: it depends on the precedence
+   * between a connection's own database URL and the deployment's variable, and
+   * a second implementation of that rule in the UI would drift.
+   */
+  canReadMessages?: boolean
 }
 
 export function toPublicInstance(instance: AppInstance): PublicInstance {
@@ -62,7 +71,13 @@ export function toPublicInstance(instance: AppInstance): PublicInstance {
       ? [instance.pg_host, instance.pg_port].filter(Boolean).join(':')
         + (instance.pg_database ? `/${instance.pg_database}` : '')
       : instance.base_url,
-    ...(kind === 'whatsapp' && { ownServer: Boolean(instance.admin_key) }),
+    ...(kind === 'whatsapp' && {
+      ownServer: Boolean(instance.admin_key),
+      canReadMessages: Boolean(
+        instance.evolution_db_url
+        || (onDeploymentServer(instance) && useRuntimeConfig().evolutionDatabaseUrl),
+      ),
+    }),
   }
 }
 
@@ -128,8 +143,13 @@ export async function requireOwnedInstance(event: H3Event, instanceId: string | 
  */
 export interface WhatsappProvisionInput {
   label?: string
-  /** A bring-your-own Evolution server. Both halves, or neither. */
-  server?: { baseUrl: string, adminKey: string }
+  /**
+   * A bring-your-own Evolution server. `baseUrl` and `adminKey` are both halves
+   * of one thing and must arrive together; `dbUrl` is independently optional —
+   * without it the account pairs and sends but cannot be read, because reads go
+   * to Evolution's database and this app would not know which one.
+   */
+  server?: { baseUrl: string, adminKey: string, dbUrl?: string }
 }
 
 export async function provisionWhatsappInstance(
@@ -142,6 +162,11 @@ export async function provisionWhatsappInstance(
   // bad URL fails the create with a message about the URL instead of surfacing
   // as a failed Evolution call.
   if (server) await assertPublicUrl(server.baseUrl, 'Evolution server URL')
+
+  // Proved before anything is provisioned, so a bad database URL costs nothing
+  // — no Evolution instance to tear down, no row to clean up. `requireTable`
+  // catches the case that matters: a URL that connects to the wrong database.
+  if (server?.dbUrl) await probePgConnection(server.dbUrl, { requireTable: '"Message"' })
 
   const creds = evolutionAdminCredentials(
     server ? { base_url: server.baseUrl, admin_key: server.adminKey } : undefined,
@@ -206,6 +231,9 @@ export async function provisionWhatsappInstance(
       // Stored only for a server the user supplied. A connection on the
       // deployment default keeps following that default, including if it moves.
       admin_key: server ? server.adminKey : '',
+      // Same: only ever set for a user's own server. A default-server connection
+      // reads through NUXT_EVOLUTION_DATABASE_URL and must not carry an override.
+      evolution_db_url: server?.dbUrl ?? '',
       label: label?.trim() || 'WhatsApp account',
     })
   } catch (error) {
@@ -470,6 +498,10 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
     await pb.collection('instances').delete(instance.id)
     return
   }
+
+  // A connection on its own server may hold a pool onto that server's message
+  // database. Keyed on the row, so it outlives the row unless dropped here.
+  await closeKeyedPool(`evo:${instance.id}`)
 
   // Uses the same server the instance was created on, with that server's own
   // global key when it brought one.

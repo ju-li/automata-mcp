@@ -126,16 +126,20 @@ export interface AppUser {
  * Read it through `instanceKind()` in mcp-scope.ts rather than directly, so
  * "absent means WhatsApp" is decided in exactly one place.
  *
- * Three fields are `hidden` PocketBase fields — `api_key`, `admin_key`, `dsn` —
- * so they are only ever populated on records fetched through `pocketbaseAdmin()`.
- * A record from a session-scoped client will have them undefined.
+ * Four fields are `hidden` PocketBase fields — `api_key`, `admin_key`, `dsn` and
+ * `evolution_db_url` — so they are only ever populated on records fetched
+ * through `pocketbaseAdmin()`. A record from a session-scoped client will have
+ * them undefined.
  *
  * `api_key` is Evolution's per-instance token. `admin_key` is a *global* key for
  * a user-supplied Evolution server and can create and delete instances on it, so
  * it is a wider secret than anything else on the row: never let it reach
  * `credentialsForInstance()`. `dsn` is a user-supplied Postgres connection
- * string. `hidden` keeps all three out of the REST projection; it is not
- * encryption, and they sit in clear in `pb_data`.
+ * string, for a connection whose whole purpose is that database.
+ * `evolution_db_url` is a read-only URL for a bring-your-own Evolution server's
+ * own database, and reaches every account on that server rather than only this
+ * one. `hidden` keeps all four out of the REST projection; it is not encryption,
+ * and they sit in clear in `pb_data` and in every backup.
  */
 export interface AppInstance {
   id: string
@@ -146,6 +150,7 @@ export interface AppInstance {
   api_key?: string
   admin_key?: string
   base_url?: string
+  evolution_db_url?: string
   dsn?: string
   pg_host?: string
   pg_port?: number

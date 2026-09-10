@@ -11,7 +11,7 @@ import { toast } from 'vue-sonner'
 const props = defineProps<{ id: string }>()
 
 interface StatusResponse {
-  instance: { id: string, name: string, label: string }
+  instance: { id: string, name: string, label: string, ownServer?: boolean, canReadMessages?: boolean }
   state: ConnectionState
   profileName?: string
   profilePicUrl?: string
@@ -44,6 +44,37 @@ const pairingTimedOut = ref(false)
 const pairingStartedAt = ref(Date.now())
 const busy = ref(false)
 const deleteConfirm = ref('')
+
+// Reading goes to Evolution's own Postgres, so an account on a server the user
+// supplied needs that server's database URL. Surfaced here because otherwise the
+// first sign of it is a tool returning 501 mid-conversation.
+const needsDbUrl = computed(() =>
+  data.value?.instance.ownServer === true && data.value?.instance.canReadMessages === false,
+)
+const dbUrl = ref('')
+const savingDbUrl = ref(false)
+
+async function saveDbUrl() {
+  if (!dbUrl.value.trim()) return
+  savingDbUrl.value = true
+  try {
+    await $fetch(`/api/instances/${id.value}/evolution-db`, {
+      method: 'PATCH',
+      body: { dbUrl: dbUrl.value.trim() },
+    })
+    dbUrl.value = ''
+    await refresh()
+    toast.success('Claude can now read and search this account\'s messages.')
+  }
+  catch (err: any) {
+    // The server's message names the actual failure — wrong database, refused
+    // host, missing SELECT — so it is worth more than a generic here.
+    toast.error(err?.data?.message || err?.data?.statusMessage || 'Could not save the database connection string')
+  }
+  finally {
+    savingDbUrl.value = false
+  }
+}
 const chatsOpen = ref(false)
 
 // ── pairing ────────────────────────────────────────────────────────────────
@@ -266,6 +297,46 @@ async function destroy() {
       cannot revoke a token for an account that is offline — which is exactly
       when you are most likely to want to.
     -->
+    <!--
+      Shown only for an account on the user's own Evolution server that has no
+      database URL yet. Reading is the one capability missing, and it is not
+      obvious why, so the card says what and why rather than just offering a
+      field.
+    -->
+    <div v-if="needsDbUrl" class="space-y-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-4">
+      <div>
+        <p class="text-sm font-medium">
+          Claude cannot read this account's messages yet
+        </p>
+        <p class="mt-1 text-sm text-muted-foreground">
+          Reading and searching go to your Evolution server's own Postgres, because
+          Evolution's API cannot search message content. This app has the server's
+          URL but not its database. Pairing, listing chats and sending already work.
+        </p>
+      </div>
+
+      <div class="space-y-2">
+        <Label for="db-url">Database connection string</Label>
+        <Input
+          id="db-url"
+          v-model="dbUrl"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="postgres://reader:password@host:5432/evolution"
+          @keydown.enter="saveDbUrl"
+        />
+        <p class="text-xs text-muted-foreground">
+          Checked against your database before it is saved. A
+          <span class="font-mono">SELECT</span>-only role is enough — this app never
+          writes to it.
+        </p>
+      </div>
+
+      <Button size="sm" :disabled="savingDbUrl || !dbUrl.trim()" @click="saveDbUrl">
+        {{ savingDbUrl ? 'Checking…' : 'Enable reading' }}
+      </Button>
+    </div>
+
     <McpTokens :instance-id="id" kind="whatsapp" :connected="connected" />
 
     <Separator />

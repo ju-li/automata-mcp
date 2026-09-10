@@ -120,28 +120,45 @@ function fingerprintOf(dsn: string, target: PgTarget): string {
     .digest('hex')
 }
 
+export interface KeyedPoolOptions {
+  /**
+   * Run the host guard and dial the address it approved.
+   *
+   * **True for anything a user typed, false only for a value that came from
+   * runtimeConfig — and the asymmetry is deliberate.** This deployment's own
+   * `NUXT_EVOLUTION_DATABASE_URL` legitimately sits on a private compose
+   * network, and `net-guard.ts` lists it as our own infrastructure, so guarding
+   * it would correctly refuse it. Guarding a user-supplied URL is what stops one
+   * pointing at that same database.
+   */
+  guard: boolean
+  max?: number
+  statementTimeoutMs?: number
+}
+
 /**
- * The pool for one connection row, building it if needed.
+ * The pool for one `key`, building it if needed.
+ *
+ * `key` namespaces the caller (`pg:<id>`, `evo:<id>`, `evo:default`) so two
+ * purposes cannot collide on one instance id, and so a caller can evict its own
+ * pool without knowing about anyone else's.
  *
  * Eviction runs here rather than on a timer: an interval outlives nothing
  * useful in a worker the platform stops and starts, and sweeping on the path
  * that already runs is deterministic and needs no lifecycle hook.
  */
-export async function pgFor(instance: Pick<AppInstance, 'id' | 'dsn'>): Promise<Sql> {
-  const dsn = instance.dsn
-  if (!dsn) {
-    throw createError({
-      statusCode: 409,
-      statusMessage: 'This database connection has no connection string.',
-    })
-  }
-
+export async function keyedPool(key: string, dsn: string, options: KeyedPoolOptions): Promise<Sql> {
   sweep()
 
-  const target = await resolvePgTarget(dsn)
+  // Unguarded means unpinned: with no approved address there is nothing to
+  // substitute for the hostname, so postgres.js resolves it as usual.
+  const target = options.guard
+    ? await resolvePgTarget(dsn)
+    : { ...describeDsn(dsn), address: '' }
+
   const fingerprint = fingerprintOf(dsn, target)
 
-  const existing = pools.get(instance.id)
+  const existing = pools.get(key)
   if (existing) {
     if (existing.fingerprint === fingerprint) {
       existing.lastUsed = Date.now()
@@ -150,16 +167,15 @@ export async function pgFor(instance: Pick<AppInstance, 'id' | 'dsn'>): Promise<
     // The DSN was rotated, or the host now resolves elsewhere. Drain the old
     // pool in the background: ending it synchronously would kill queries still
     // in flight on this request and on any concurrent one.
-    pools.delete(instance.id)
+    pools.delete(key)
     void existing.sql.end({ timeout: 5 }).catch(() => {})
   }
 
   const sql = postgres(dsn, {
-    // The pin. postgres.js prefers this over the URL's hostname.
-    host: target.address,
-    port: target.port,
-    ssl: sslFor(target),
-    max: PER_POOL_MAX,
+    // The pin. postgres.js prefers this over the URL's hostname. Omitted when
+    // unguarded, so the URL's own host is used.
+    ...(options.guard && { host: target.address, port: target.port, ssl: sslFor(target) }),
+    max: options.max ?? PER_POOL_MAX,
     idle_timeout: 30,
     max_lifetime: 60 * 30,
     // 5s, not the 30s default. A bad DSN has to fail the MCP call quickly; a
@@ -174,20 +190,36 @@ export async function pgFor(instance: Pick<AppInstance, 'id' | 'dsn'>): Promise<
     onnotice: () => {},
     connection: {
       application_name: 'claude-mcp-connector',
-      statement_timeout: DEFAULT_STATEMENT_TIMEOUT_MS,
+      statement_timeout: options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
     },
   })
 
-  pools.set(instance.id, { sql, fingerprint, lastUsed: Date.now() })
+  pools.set(key, { sql, fingerprint, lastUsed: Date.now() })
   return sql
 }
 
-/** Drop a connection's pool. Called when the row is deleted. */
-export async function closePgPool(instanceId: string): Promise<void> {
-  const entry = pools.get(instanceId)
+/** Drop one pool by key. */
+export async function closeKeyedPool(key: string): Promise<void> {
+  const entry = pools.get(key)
   if (!entry) return
-  pools.delete(instanceId)
+  pools.delete(key)
   await entry.sql.end({ timeout: 5 }).catch(() => {})
+}
+
+/** The pool for a Postgres *connection* — the kind a user configured as one. */
+export async function pgFor(instance: Pick<AppInstance, 'id' | 'dsn'>): Promise<Sql> {
+  const dsn = instance.dsn
+  if (!dsn) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: 'This database connection has no connection string.',
+    })
+  }
+  return keyedPool(`pg:${instance.id}`, dsn, { guard: true })
+}
+
+export function closePgPool(instanceId: string): Promise<void> {
+  return closeKeyedPool(`pg:${instanceId}`)
 }
 
 function sweep(): void {
@@ -229,7 +261,19 @@ export interface PgProbe {
   canReadServerFiles: boolean
 }
 
-export async function probePgConnection(dsn: string): Promise<PgProbe> {
+export async function probePgConnection(dsn: string, options: {
+  /**
+   * A table that must exist and be readable, as `pg_catalog.has_table_privilege`
+   * spells it — e.g. `"Message"` for an Evolution database.
+   *
+   * Connecting is not the same as pointing at the right database. A URL with the
+   * right host, user and password but the wrong database name connects happily
+   * and then matches no rows, which reads as an account with no messages: the
+   * exact silent-empty failure the caller is trying to remove. Naming the table
+   * turns that into a refusal at save time.
+   */
+  requireTable?: string
+} = {}): Promise<PgProbe> {
   const target = await resolvePgTarget(dsn)
 
   const sql = postgres(dsn, {
@@ -267,6 +311,22 @@ export async function probePgConnection(dsn: string): Promise<PgProbe> {
 
     if (!row) {
       throw createError({ statusCode: 502, message: 'The database did not identify itself.' })
+    }
+
+    if (options.requireTable) {
+      const [check] = await sql<Array<{ readable: boolean | null }>>`
+        SELECT pg_catalog.has_table_privilege(${options.requireTable}, 'SELECT') AS readable`
+        // A missing relation raises 42P01 rather than answering false.
+        .catch(() => [{ readable: null }])
+
+      if (!check?.readable) {
+        throw createError({
+          statusCode: 422,
+          message: `Connected to ${target.host}:${target.port}/${row.database}, but its `
+            + `${options.requireTable} table is not there or not readable by ${row.current_user}. `
+            + 'Check that this is the right database and that the role has SELECT on it.',
+        })
+      }
     }
 
     return {

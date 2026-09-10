@@ -331,12 +331,27 @@ Two caveats worth knowing before you go looking for a bug:
   hide a tool with an unmet prerequisite: both read tools need that URL, so
   hiding one would leave a scope editor that disagrees with the tool list a
   client actually sees. An unset URL is reported at startup instead.
-- **A connection on your own Evolution server cannot read messages.** This URL
-  names one database — the one belonging to the Evolution server this app is
-  configured with — and a bring-your-own connection's messages live in that
-  server's database instead. Reads answer 501 naming the limitation rather than
-  matching nothing and reporting an empty conversation. Pairing, chat listing and
-  sending are unaffected.
+- **A connection on your own Evolution server needs its own database URL.** This
+  variable names one database — the one belonging to the Evolution server this
+  app is configured with — and a bring-your-own connection's messages live in
+  that server's database instead. Supply it when creating the connection, or from
+  its dashboard afterwards; it is stored on the connection, not here. Until then
+  reads answer 501 naming the missing setting rather than matching nothing and
+  reporting an empty conversation. Pairing, chat listing and sending never need
+  it.
+
+  Same shape of role as above, in *your* database:
+
+  ```sql
+  CREATE ROLE evo_reader LOGIN PASSWORD 'change-me';
+  GRANT CONNECT ON DATABASE evolution TO evo_reader;
+  GRANT USAGE ON SCHEMA public TO evo_reader;
+  GRANT SELECT ON "Message" TO evo_reader;
+  ```
+
+  It is checked before it is stored — including that `"Message"` is actually
+  readable, because a URL that connects to the *wrong* database is otherwise
+  indistinguishable from an account with no messages.
 
 On Railway, Evolution's Postgres is its own service — use its private URL, and
 note the port there is whatever that service actually listens on (see "Pin the

@@ -21,6 +21,10 @@ const busy = ref(false)
 const ownServer = ref(false)
 const serverUrl = ref('')
 const serverKey = ref('')
+// Optional even with a server: it only buys reading. Pairing and sending work
+// without it, and asking for a database credential up front would be a poor
+// trade for someone who only wants Claude to send.
+const serverDbUrl = ref('')
 
 // Postgres
 const dsn = ref('')
@@ -45,7 +49,11 @@ async function create() {
         kind: 'whatsapp',
         label: label.value,
         ...(ownServer.value && {
-          server: { baseUrl: serverUrl.value.trim(), adminKey: serverKey.value.trim() },
+          server: {
+            baseUrl: serverUrl.value.trim(),
+            adminKey: serverKey.value.trim(),
+            ...(serverDbUrl.value.trim() && { dbUrl: serverDbUrl.value.trim() }),
+          },
         }),
       }
 
@@ -188,6 +196,24 @@ async function create() {
                   This is your server's <span class="font-mono">AUTHENTICATION_API_KEY</span>.
                   It can create and delete instances on that server, so it is a
                   wider secret than the per-account token this app normally holds.
+                </p>
+              </div>
+
+              <div class="space-y-2">
+                <Label for="server-db">Database connection string <span class="text-muted-foreground">(optional)</span></Label>
+                <Input
+                  id="server-db"
+                  v-model="serverDbUrl"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="postgres://reader:password@host:5432/evolution"
+                />
+                <p class="text-xs text-muted-foreground">
+                  Your Evolution server's own Postgres. Claude needs it to
+                  <span class="font-medium">read and search</span> messages —
+                  Evolution's API cannot search message content. Pairing, listing
+                  chats and sending all work without it, and you can add it later.
+                  A <span class="font-mono">SELECT</span>-only role is enough.
                 </p>
               </div>
             </div>
