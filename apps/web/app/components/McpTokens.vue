@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { PlusIcon } from '@lucide/vue'
-import { toast } from 'vue-sonner'
 
 const props = defineProps<{
   instanceId: string
@@ -66,14 +65,17 @@ const createOpen = ref(false)
 const newLabel = ref('')
 const newExpiry = ref<'30d' | '90d' | '1y' | 'never'>('90d')
 const newScope = ref<TokenScope>(openScope())
-const creating = ref(false)
 const revealed = ref<string | null>(null)
 const revealedScope = ref<TokenScope>(openScope())
+/** Which token is mid-revoke, so only that row's button is disabled. */
 const revoking = ref<string | null>(null)
 
 const editing = ref<TokenRow | null>(null)
 const editScope = ref<TokenScope>(openScope())
-const savingScope = ref(false)
+
+const { busy: creating, run: runCreate } = useApiAction()
+const { busy: savingScope, run: runSaveScope } = useApiAction()
+const { run: runRevoke } = useApiAction()
 
 const howTo = ref<TokenRow | null>(null)
 
@@ -100,67 +102,68 @@ function openCreate() {
 function startEdit(token: TokenRow) {
   editing.value = token
   // Copied, not referenced — cancelling must not leave the table showing edits
-  // that were never saved.
-  editScope.value = {
-    ...token.scope,
-    tool_names: [...token.scope.tool_names],
-    chat_jids: [...token.scope.chat_jids],
-    table_names: [...token.scope.table_names],
-  }
+  // that were never saved. Deep, and without naming the array fields: a fifth
+  // scope axis would otherwise be shared by reference and silently editable.
+  editScope.value = structuredClone(token.scope)
 }
 
 async function saveScope() {
-  if (!editing.value) return
-  savingScope.value = true
-  try {
-    await $fetch(`/api/tokens/${editing.value.id}`, { method: 'PATCH', body: editScope.value })
-    toast.success('Scope updated. The connector keeps working with its existing token.')
-    editing.value = null
-    await refresh()
-  }
-  catch (err: any) {
-    toast.error(apiErrorMessage(err, 'Could not update the scope'))
-  }
-  finally {
-    savingScope.value = false
-  }
+  const token = editing.value
+  if (!token) return
+
+  await runSaveScope(
+    async () => {
+      await $fetch(`/api/tokens/${token.id}`, { method: 'PATCH', body: editScope.value })
+      editing.value = null
+      await refresh()
+    },
+    {
+      success: 'Scope updated. The connector keeps working with its existing token.',
+      // The server rejects an empty allowlist by name — "Select at least one
+      // action" — which is the whole point of showing its message here.
+      failure: 'Could not update the scope',
+    },
+  )
 }
 
 async function create() {
-  creating.value = true
-  try {
-    const result = await $fetch<{ token: string }>(`/api/instances/${props.instanceId}/tokens`, {
+  const scope = newScope.value
+
+  const result = await runCreate(
+    () => $fetch<{ token: string }>(`/api/instances/${props.instanceId}/tokens`, {
       method: 'POST',
-      body: { label: newLabel.value, expiry: newExpiry.value, ...newScope.value },
-    })
-    revealed.value = result.token
-    revealedScope.value = newScope.value
-    createOpen.value = false
-    newLabel.value = ''
-    newScope.value = openScope()
-    await refresh()
-  }
-  catch (err: any) {
-    toast.error(apiErrorMessage(err, 'Could not create the token'))
-  }
-  finally {
-    creating.value = false
-  }
+      body: { label: newLabel.value, expiry: newExpiry.value, ...scope },
+    }),
+    { failure: 'Could not create the token' },
+  )
+  if (!result) return
+
+  // The plaintext exists only in this response, so the reveal dialog is opened
+  // from the value in hand rather than from a refetch.
+  revealed.value = result.token
+  revealedScope.value = scope
+  createOpen.value = false
+  newLabel.value = ''
+  newScope.value = openScope()
+  await refresh()
 }
 
 async function revoke(id: string) {
   revoking.value = id
-  try {
-    await $fetch(`/api/tokens/${id}`, { method: 'DELETE' })
-    toast.success('Token revoked')
-    await refresh()
-  }
-  catch {
-    toast.error('Could not revoke the token')
-  }
-  finally {
-    revoking.value = null
-  }
+  await runRevoke(
+    async () => {
+      await $fetch(`/api/tokens/${id}`, { method: 'DELETE' })
+      await refresh()
+    },
+    {
+      success: 'Token revoked',
+      // A generic: this answers 404 for a token that is already gone, and
+      // "Not found" is not a useful thing to show someone.
+      failure: 'Could not revoke the token',
+      preferServerMessage: false,
+    },
+  )
+  revoking.value = null
 }
 
 function formatDate(value?: string) {

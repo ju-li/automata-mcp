@@ -1,6 +1,7 @@
 import type { H3Event } from 'h3'
 import type { AppInstance } from './pocketbase'
 import type { McpAuth } from './mcp-auth'
+import type { InstanceKind } from '#shared/connection'
 
 /**
  * Connector token scope: which chats a token may touch, and which tools it may
@@ -19,12 +20,9 @@ import type { McpAuth } from './mcp-auth'
  *          call targets is an argument.
  */
 
-/**
- * What a connection is. One `instances` row is one of these, and a connector
- * token reaches exactly one row — so this also decides which tools exist for a
- * given token.
- */
-export type InstanceKind = 'whatsapp' | 'postgres'
+// Declared in `shared/connection.ts` so the UI cannot hold a second copy that
+// drifts. Re-exported here because this module is where the app reaches for it.
+export type { InstanceKind }
 
 /**
  * A row written before `kind` existed is a WhatsApp account. PocketBase
@@ -135,7 +133,7 @@ export function qualifiedName(schema: string, table: string): string {
   return `${schema}.${table}`
 }
 
-export function isTableAllowed(scope: McpScope, qname: string): boolean {
+function isTableAllowed(scope: McpScope, qname: string): boolean {
   if (scope.allTables) return true
   return scope.tableNames.includes(qname)
 }
@@ -165,7 +163,7 @@ export function assertTableAllowed(scope: McpScope, qname: string): void {
 
 // ── chats ──────────────────────────────────────────────────────────────────
 
-export function isChatAllowed(scope: McpScope, jid: string): boolean {
+function isChatAllowed(scope: McpScope, jid: string): boolean {
   if (scope.allChats) return true
   return scope.chatJids.includes(jid)
 }
@@ -253,7 +251,7 @@ export async function assertNumberAllowed(
   try {
     resolved = await resolveNumberToJid(instance, number)
   } catch (error) {
-    if ((error as { statusCode?: number })?.statusCode === 422) throw error
+    if (httpStatusOf(error) === 422) throw error
     throw createError({
       statusCode: 503,
       message: 'Could not verify the recipient against this token\'s allowed chats, so the message was not sent. The WhatsApp account may be disconnected.',

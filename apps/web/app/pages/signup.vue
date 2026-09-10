@@ -18,7 +18,7 @@ async function submit() {
     await navigateTo('/instances')
   }
   catch (err: any) {
-    error.value = err?.data?.statusMessage || 'Could not create the account'
+    error.value = apiErrorMessage(err, 'Could not create the account')
   }
   finally {
     busy.value = false

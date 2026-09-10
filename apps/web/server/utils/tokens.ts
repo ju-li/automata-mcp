@@ -50,7 +50,7 @@ export async function listTokens(instanceId: string): Promise<PublicToken[]> {
 /** Expiry presets offered by the UI. `never` leaves `expires_at` empty. */
 export type ExpiryPreset = '30d' | '90d' | '1y' | 'never'
 
-export function expiryFromPreset(preset: ExpiryPreset): string {
+function expiryFromPreset(preset: ExpiryPreset): string {
   if (preset === 'never') return ''
   const days = preset === '30d' ? 30 : preset === '90d' ? 90 : 365
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString()

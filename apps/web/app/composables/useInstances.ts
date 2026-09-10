@@ -1,9 +1,13 @@
+import type { InstanceKind } from '#shared/connection'
+
 /**
  * The connection shape the UI works with, mirroring `toPublicInstance` on the
  * server. Kept in one place so a card, a listing and a dashboard cannot disagree
  * about what a connection is.
+ *
+ * `InstanceKind` itself is shared with the server — see `shared/connection.ts`.
  */
-export type InstanceKind = 'whatsapp' | 'postgres'
+export type { InstanceKind }
 
 export interface PublicInstanceRow {
   id: string
@@ -17,6 +21,27 @@ export interface PublicInstanceRow {
   ownServer?: boolean
   /** WhatsApp only: whether the read tools can answer for this connection. */
   canReadMessages?: boolean
+}
+
+/**
+ * One connection in the listing, as `/api/instances` returns it: a
+ * `PublicInstanceRow` plus the live state the route resolves per kind.
+ *
+ * Declared once because the page and the card were carrying identical copies,
+ * field for field — and a field added to only one of them is a silent gap
+ * rather than a type error.
+ */
+export interface InstanceListRow {
+  id: string
+  kind: InstanceKind
+  label: string
+  state: ConnectionState
+  target?: string
+  detail?: string
+  profileName?: string
+  number?: string
+  /** WhatsApp only. Absent for kinds with no message counts. */
+  stats?: { messages: number, chats: number, contacts: number }
 }
 
 /** What to call this kind of connection in prose, singular. */

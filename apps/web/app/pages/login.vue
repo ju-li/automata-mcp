@@ -18,7 +18,7 @@ async function submit() {
     await navigateTo('/instances')
   }
   catch (err: any) {
-    error.value = err?.data?.statusMessage || 'Could not sign in'
+    error.value = apiErrorMessage(err, 'Could not sign in')
   }
   finally {
     busy.value = false

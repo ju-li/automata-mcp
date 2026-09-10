@@ -482,51 +482,44 @@ async function fetchContacts(instance: AppInstance, evolution: EvolutionClient):
  *
  *   timeout  a picker that renders ids is better than a modal that hangs. The
  *            account may simply be disconnected, in which case this never returns.
- *   cache    the only in-process cache in this app, and deliberate. Subjects
- *            change rarely, while the picker refetches on every dialog open and
- *            an MCP client may call list-chats repeatedly. A stale map is served
- *            if a later refresh fails, because a name we had a moment ago still
- *            beats a raw id.
- *
- * A failure is cached too, for a shorter window. `findChats` reads Evolution's
- * database and so still returns rows while the account is disconnected — exactly
- * when this call cannot succeed — and without that window every picker open
- * would pay the timeout again.
+ *   cache    `staleWhileFailing` — serve stale on a failed refresh, cache the
+ *            failure for a shorter window, never throw. That file explains why
+ *            each of those matters; `fetchParticipants` in `mentions.ts` is the
+ *            other lookup with the same shape and shares the mechanism.
  */
-const GROUP_CACHE_TTL_MS = 5 * 60_000
-const GROUP_RETRY_TTL_MS = 60_000
 const GROUP_TIMEOUT_MS = 8_000
-const groupCache = new Map<string, { expiresAt: number, groups: Map<string, GroupInfo> }>()
 const emptyGroups: Map<string, GroupInfo> = new Map()
 
+const groupCache = staleWhileFailing<Map<string, GroupInfo>>({
+  ttlMs: 5 * 60_000,
+  retryTtlMs: 60_000,
+  empty: emptyGroups,
+})
+
 async function fetchGroups(instance: AppInstance, evolution: EvolutionClient): Promise<Map<string, GroupInfo>> {
-  const cached = groupCache.get(instance.id)
-  if (cached && Date.now() < cached.expiresAt) return cached.groups
+  return groupCache(instance.id, async () => {
+    // `getParticipants` is required — Evolution answers 400 without it.
+    const rows = await evolution<EvolutionGroupRow[]>(
+      `/group/fetchAllGroups/${encodeURIComponent(instance.name)}?getParticipants=false`,
+      { timeout: GROUP_TIMEOUT_MS },
+    ).catch(() => undefined)
 
-  // `getParticipants` is required — Evolution answers 400 without it.
-  const rows = await evolution<EvolutionGroupRow[]>(
-    `/group/fetchAllGroups/${encodeURIComponent(instance.name)}?getParticipants=false`,
-    { timeout: GROUP_TIMEOUT_MS },
-  ).catch(() => undefined)
+    // `undefined` and not an empty map: an account really can be in no groups,
+    // and that answer should be cached for the full window rather than retried.
+    if (!Array.isArray(rows)) return undefined
 
-  if (!Array.isArray(rows)) {
-    const groups = cached?.groups ?? emptyGroups
-    groupCache.set(instance.id, { expiresAt: Date.now() + GROUP_RETRY_TTL_MS, groups })
-    return groups
-  }
+    const byJid = new Map<string, GroupInfo>()
+    for (const row of rows) {
+      if (typeof row?.id !== 'string') continue
+      byJid.set(row.id, {
+        subject: row.subject?.trim() || undefined,
+        size: typeof row.size === 'number' ? row.size : undefined,
+        pictureUrl: row.pictureUrl ?? undefined,
+      })
+    }
 
-  const byJid = new Map<string, GroupInfo>()
-  for (const row of rows) {
-    if (typeof row?.id !== 'string') continue
-    byJid.set(row.id, {
-      subject: row.subject?.trim() || undefined,
-      size: typeof row.size === 'number' ? row.size : undefined,
-      pictureUrl: row.pictureUrl ?? undefined,
-    })
-  }
-
-  groupCache.set(instance.id, { expiresAt: Date.now() + GROUP_CACHE_TTL_MS, groups: byJid })
-  return byJid
+    return byJid
+  })
 }
 
 // ── internals ──────────────────────────────────────────────────────────────

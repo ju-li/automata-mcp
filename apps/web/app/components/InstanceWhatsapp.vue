@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { useIntervalFn } from '@vueuse/core'
 import { ArrowLeftIcon, MessagesSquareIcon, SmartphoneIcon } from '@lucide/vue'
-import { toast } from 'vue-sonner'
 
 /**
  * The pairing-and-dashboard panel for a WhatsApp connection. Chosen by
@@ -42,8 +41,9 @@ const display = computed(() => describeState(state.value))
 const qr = ref<QrResponse['qr'] | null>(null)
 const pairingTimedOut = ref(false)
 const pairingStartedAt = ref(Date.now())
-const busy = ref(false)
-const deleteConfirm = ref('')
+
+const { busy, run } = useApiAction()
+const { busy: savingDbUrl, run: runSaveDbUrl } = useApiAction()
 
 // Reading goes to Evolution's own Postgres, so an account on a server the user
 // supplied needs that server's database URL. Surfaced here because otherwise the
@@ -52,28 +52,26 @@ const needsDbUrl = computed(() =>
   data.value?.instance.ownServer === true && data.value?.instance.canReadMessages === false,
 )
 const dbUrl = ref('')
-const savingDbUrl = ref(false)
 
 async function saveDbUrl() {
   if (!dbUrl.value.trim()) return
-  savingDbUrl.value = true
-  try {
-    await $fetch(`/api/instances/${id.value}/evolution-db`, {
-      method: 'PATCH',
-      body: { dbUrl: dbUrl.value.trim() },
-    })
-    dbUrl.value = ''
-    await refresh()
-    toast.success('Claude can now read and search this account\'s messages.')
-  }
-  catch (err: any) {
-    // The server's message names the actual failure — wrong database, refused
-    // host, missing SELECT — so it is worth more than a generic here.
-    toast.error(apiErrorMessage(err, 'Could not save the database connection string'))
-  }
-  finally {
-    savingDbUrl.value = false
-  }
+
+  await runSaveDbUrl(
+    async () => {
+      await $fetch(`/api/instances/${id.value}/evolution-db`, {
+        method: 'PATCH',
+        body: { dbUrl: dbUrl.value.trim() },
+      })
+      dbUrl.value = ''
+      await refresh()
+    },
+    {
+      success: 'Claude can now read and search this account\'s messages.',
+      // The server's message names the actual failure — wrong database, refused
+      // host, missing SELECT — so it is worth more than a generic here.
+      failure: 'Could not save the database connection string',
+    },
+  )
 }
 const chatsOpen = ref(false)
 
@@ -139,58 +137,45 @@ function restartPairing() {
 }
 
 // ── actions ────────────────────────────────────────────────────────────────
-async function disconnect() {
-  busy.value = true
-  try {
-    await $fetch(`/api/instances/${id.value}/logout`, { method: 'POST' })
-    qr.value = null
-    polledState.value = null
-    restartPairing()
-    await refresh()
-    toast.success('Disconnected. Scan the new QR code to reconnect.')
-  }
-  catch {
-    toast.error('Could not disconnect')
-  }
-  finally {
-    busy.value = false
-  }
+/**
+ * Both controls here end the WhatsApp session and send the page back to
+ * pairing, and both then need a QR: `logout` because that is all it does, and
+ * `resync` because arming a history import only takes effect on a fresh device
+ * link. So they differ in the endpoint they call and in what to tell the user,
+ * and in nothing else.
+ *
+ * The failure text is a generic on purpose — these answer "Not found" or a bare
+ * Evolution status, which is a worse thing to show someone than the sentence
+ * below.
+ */
+function backToPairing(path: string, success: string, failure: string) {
+  return run(
+    async () => {
+      await $fetch(`/api/instances/${id.value}/${path}`, { method: 'POST' })
+      qr.value = null
+      polledState.value = null
+      restartPairing()
+      await refresh()
+    },
+    { success, failure, preferServerMessage: false },
+  )
 }
+
+const disconnect = () => backToPairing(
+  'logout',
+  'Disconnected. Scan the new QR code to reconnect.',
+  'Could not disconnect',
+)
 
 /**
  * Arm a full-history import. Signs the device out — WhatsApp only hands history
  * over when a device is linked, so the import rides in on the next QR scan.
  */
-async function importHistory() {
-  busy.value = true
-  try {
-    await $fetch(`/api/instances/${id.value}/resync`, { method: 'POST' })
-    qr.value = null
-    polledState.value = null
-    restartPairing()
-    await refresh()
-    toast.success('Scan the new QR code — your history imports as it connects.')
-  }
-  catch {
-    toast.error('Could not start the history import')
-  }
-  finally {
-    busy.value = false
-  }
-}
-
-async function destroy() {
-  busy.value = true
-  try {
-    await $fetch(`/api/instances/${id.value}`, { method: 'DELETE' })
-    toast.success('Account removed')
-    await navigateTo('/instances')
-  }
-  catch {
-    toast.error('Could not remove the account')
-    busy.value = false
-  }
-}
+const importHistory = () => backToPairing(
+  'resync',
+  'Scan the new QR code — your history imports as it connects.',
+  'Could not start the history import',
+)
 </script>
 
 <template>
@@ -293,11 +278,6 @@ async function destroy() {
     <Separator />
 
     <!--
-      Always shown, including while disconnected. Hiding it would mean you
-      cannot revoke a token for an account that is offline — which is exactly
-      when you are most likely to want to.
-    -->
-    <!--
       Shown only for an account on the user's own Evolution server that has no
       database URL yet. Reading is the one capability missing, and it is not
       obvious why, so the card says what and why rather than just offering a
@@ -337,6 +317,11 @@ async function destroy() {
       </Button>
     </div>
 
+    <!--
+      Always shown, including while disconnected. Hiding it would mean you
+      cannot revoke a token for an account that is offline — which is exactly
+      when you are most likely to want to.
+    -->
     <McpTokens :instance-id="id" kind="whatsapp" :connected="connected" />
 
     <Separator />
@@ -398,40 +383,7 @@ async function destroy() {
           </AlertDialogContent>
         </AlertDialog>
 
-        <AlertDialog>
-          <AlertDialogTrigger as-child>
-            <Button variant="destructive" :disabled="busy">
-              Remove account
-            </Button>
-          </AlertDialogTrigger>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Remove “{{ data?.instance.label }}”?</AlertDialogTitle>
-              <AlertDialogDescription>
-                This permanently deletes the connection, every message and chat
-                stored for it, and every connector token issued for it. Claude will
-                immediately lose access. This cannot be undone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-
-            <div class="space-y-2">
-              <Label for="confirm">Type <span class="font-mono">delete</span> to confirm</Label>
-              <Input id="confirm" v-model="deleteConfirm" autocomplete="off" />
-            </div>
-
-            <AlertDialogFooter>
-              <AlertDialogCancel @click="deleteConfirm = ''">
-                Cancel
-              </AlertDialogCancel>
-              <AlertDialogAction
-                :disabled="deleteConfirm !== 'delete' || busy"
-                @click="destroy"
-              >
-                Remove permanently
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+        <DeleteConnectionDialog :id="id" :label="data?.instance.label" kind="whatsapp" />
       </div>
     </section>
   </div>

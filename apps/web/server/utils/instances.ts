@@ -1,13 +1,15 @@
 import { randomBytes } from 'node:crypto'
 import type { H3Event } from 'h3'
 import type { AppInstance, AppUser } from './pocketbase'
+import type { ConnectionState } from '#shared/connection'
 
 /**
  * Evolution instance lifecycle. Every call that touches Evolution's instance
  * endpoints lives here, so the admin-key blast radius is one file.
  */
 
-export type ConnectionState = 'open' | 'connecting' | 'close' | 'unknown'
+// Declared in `shared/connection.ts`; see there for why it is not local.
+export type { ConnectionState }
 
 // A type alias rather than an interface on purpose: MCP tool handlers may return
 // `Record<string, unknown>`, and interfaces have no implicit index signature, so
@@ -460,10 +462,7 @@ export async function logoutInstance(instance: AppInstance): Promise<void> {
   try {
     await evolution(`/instance/logout/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
   } catch (error) {
-    if ((error as { status?: number, statusCode?: number })?.status === 400
-      || (error as { statusCode?: number })?.statusCode === 400) {
-      return
-    }
+    if (httpStatusOf(error) === 400) return
     throw error
   }
 }
@@ -553,8 +552,7 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
         await createEvolutionClient(creds)(`/instance/delete/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
       } catch (error) {
         // A 404 means Evolution has already lost it; carry on and clean up our row.
-        const status = (error as { status?: number, statusCode?: number })
-        if (status?.status !== 404 && status?.statusCode !== 404) throw error
+        if (httpStatusOf(error) !== 404) throw error
       }
     }
   }
@@ -613,8 +611,55 @@ function settingsBody(current: EvolutionSettings | null, overrides: Partial<Evol
   return body
 }
 
+/**
+ * Live state for one connection, whatever kind it is.
+ *
+ * The branch lives here rather than in the routes because both `/api/instances`
+ * and `/api/instances/:id` were carrying their own copy of it, each choosing
+ * between `getPostgresHealth` and `getInstanceStatus` and reshaping the result.
+ * `instanceKind()` is the intended dispatch point for this; a route handler is
+ * not, and two copies of a dispatch are two things to update when a third kind
+ * arrives.
+ *
+ * `tolerant` is the one difference between the two callers, and it is real. A
+ * listing must not lose every row because one is half-provisioned — an
+ * unprovisioned WhatsApp row makes `evolutionClientForInstance` throw 409 —
+ * whereas asking for one connection by id should say so. Note that neither
+ * `getPostgresHealth` nor `getInstanceStatus` throws for a *backend* failure:
+ * both already answer with a `close`/`unknown` state, which is what the
+ * dashboard needs in order to render at all.
+ *
+ * A row that throws reports **`unknown`, not `close`**, and the two are not
+ * interchangeable: `close` reads to a person as "not paired, scan a QR code",
+ * which is a wrong instruction for a connection whose credentials never
+ * existed. `unknown` says the state could not be established, which is the
+ * truth. `emptyStatus()` is deliberately not reused here for that reason.
+ */
+export type ConnectionStateReport =
+  | { state: ConnectionState, detail?: string, error?: string }
+  | InstanceStatus
+
+export async function connectionState(
+  instance: AppInstance,
+  options: { tolerant?: boolean } = {},
+): Promise<ConnectionStateReport> {
+  if (instanceKind(instance) === 'postgres') {
+    const health = await getPostgresHealth(instance)
+    return { state: health.state, detail: health.detail, error: health.error }
+  }
+
+  if (!options.tolerant) return await getInstanceStatus(instance)
+  return await getInstanceStatus(instance).catch(() => unknownStatus())
+}
+
+/** Evolution answered, but not about an account it recognises. */
 function emptyStatus(): InstanceStatus {
   return { state: 'close', stats: { messages: 0, chats: 0, contacts: 0 } }
+}
+
+/** Evolution could not be asked at all — see `connectionState`. */
+function unknownStatus(): InstanceStatus {
+  return { state: 'unknown', stats: { messages: 0, chats: 0, contacts: 0 } }
 }
 
 function normalizeState(state: string | undefined): ConnectionState {
