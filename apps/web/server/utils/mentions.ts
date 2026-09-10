@@ -236,3 +236,55 @@ interface EvolutionParticipantsResponse {
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
+
+// ── authors ────────────────────────────────────────────────────────────────
+
+/**
+ * Who sent a message, as a name a person would recognise — or nothing.
+ *
+ * `pushName` alone cannot answer this. It is whatever the sending device put on
+ * the wire at the time, and Evolution stores it verbatim, so the same message can
+ * carry a real name, a bare LID (`79963868897335`), a full LID JID
+ * (`79963868897335@lid`), or the sender's own device-locale word for themselves —
+ * `"Você"` on a Portuguese phone. Two rows for one message written by two
+ * different history imports routinely disagree, which is how the same sender
+ * appeared under three names in one conversation.
+ *
+ * So the sender's identity is resolved through the directory first, exactly as a
+ * mention is, and `pushName` is only a fallback. Anything that is a number or a
+ * JID rather than a name is refused outright: a raw id in an `author` field reads
+ * as a name and gets quoted as one.
+ *
+ * **A message you sent has no author at all.** `fromMe` already says so, in a
+ * field that cannot disagree with itself, and the alternative is the localised
+ * self-label — which is both noise and, next to the account's real name on the
+ * very same message, a contradiction.
+ */
+export function authorName(
+  sender: { fromMe: boolean, identity?: string, pushName?: string | null },
+  directory?: MentionDirectory,
+): string | undefined {
+  if (sender.fromMe) return undefined
+
+  const localPart = sender.identity ? localPartOf(sender.identity) : undefined
+
+  const known = localPart ? directory?.get(localPart) : undefined
+  if (known) return known
+
+  const pushName = sender.pushName?.trim()
+  if (!pushName || looksLikeIdentifier(pushName)) return undefined
+
+  return localPart ? meaningfulName(pushName, localPart) : pushName
+}
+
+/**
+ * A number, or a JID, dressed up as a name.
+ *
+ * `meaningfulName` only catches the case where the "name" equals the local part
+ * it was going to be shown against, which needs an identity to compare with — and
+ * a history-sync row often has none. This catches the shape instead, so a bare
+ * LID never reaches a caller as an author.
+ */
+function looksLikeIdentifier(value: string): boolean {
+  return /^[+\d][\d\s()+-]*$/.test(value) || value.includes('@')
+}

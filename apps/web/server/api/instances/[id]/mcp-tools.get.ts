@@ -8,13 +8,16 @@ import { tools } from '#nuxt-mcp-toolkit/tools.mjs'
  * options a user sees are exactly the tools that exist. A separate registry
  * would drift the first time someone adds a tool and forgets it.
  *
- * Instance-scoped rather than global, for two reasons. A connection only ever
- * sees the tools of its own kind — granting a Postgres token `send-text-message`
- * grants nothing, because the kind gate in `isToolAllowed` refuses it — so
- * offering the checkbox is an invitation to a misunderstanding. And a tool with
- * an unmet prerequisite is filtered out here too: `search-messages` is not
- * registered at all when `NUXT_EVOLUTION_DATABASE_URL` is unset, and used to be
- * offered anyway.
+ * Instance-scoped rather than global: a connection only ever sees the tools of
+ * its own kind, because the kind gate in `isToolAllowed` refuses the rest — so
+ * offering a Postgres token a `send-text-message` checkbox would grant nothing
+ * and invite a misunderstanding.
+ *
+ * It deliberately does NOT filter on a tool's runtime prerequisites. Both
+ * WhatsApp read tools need `NUXT_EVOLUTION_DATABASE_URL`, and they stay
+ * registered and fail loudly when it is missing rather than disappearing — see
+ * plugins/evolution-db-check.ts. Hiding one of the two here would be the worst
+ * of both: a scope editor that disagrees with the tool list a client sees.
  *
  * `readOnly` drives the default selection for a new Postgres token, so it has to
  * be right — it comes from the tool's own `readOnlyHint`.
@@ -26,7 +29,6 @@ export default defineEventHandler(async (event) => {
   const available = tools
     .filter(tool => typeof tool.name === 'string' && tool.name.length > 0)
     .filter(tool => (tool.group ?? (tool._meta as { group?: string } | undefined)?.group) === kind)
-    .filter(tool => tool.name !== 'search-messages' || messageSearchConfigured())
 
   return {
     tools: available
