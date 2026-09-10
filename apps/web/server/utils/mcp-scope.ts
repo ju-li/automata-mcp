@@ -19,9 +19,27 @@ import type { McpAuth } from './mcp-auth'
  *          call targets is an argument.
  */
 
+/**
+ * What a connection is. One `instances` row is one of these, and a connector
+ * token reaches exactly one row — so this also decides which tools exist for a
+ * given token.
+ */
+export type InstanceKind = 'whatsapp' | 'postgres'
+
+/**
+ * A row written before `kind` existed is a WhatsApp account. PocketBase
+ * materialises an unset SelectField as `''`, so this must not be `??`.
+ */
+export function instanceKind(instance: Pick<AppInstance, 'kind'>): InstanceKind {
+  return instance.kind === 'postgres' ? 'postgres' : 'whatsapp'
+}
+
 export interface McpScope {
   allChats: boolean
   chatJids: string[]
+  /** `schema.table`, exactly as Postgres reports it. Case-sensitive. */
+  allTables: boolean
+  tableNames: string[]
   allTools: boolean
   toolNames: string[]
 }
@@ -29,6 +47,8 @@ export interface McpScope {
 export const OPEN_SCOPE: McpScope = {
   allChats: true,
   chatJids: [],
+  allTables: true,
+  tableNames: [],
   allTools: true,
   toolNames: [],
 }
@@ -47,12 +67,16 @@ export const OPEN_SCOPE: McpScope = {
 export function scopeFromRecord(record: {
   all_chats?: boolean
   chat_jids?: unknown
+  all_tables?: boolean
+  table_names?: unknown
   all_tools?: boolean
   tool_names?: unknown
 }): McpScope {
   return {
     allChats: record.all_chats !== false,
     chatJids: toStringArray(record.chat_jids),
+    allTables: record.all_tables !== false,
+    tableNames: toStringArray(record.table_names),
     allTools: record.all_tools !== false,
     toolNames: toStringArray(record.tool_names),
   }
@@ -68,17 +92,75 @@ function toStringArray(value: unknown): string[] {
 /**
  * For the `enabled` guard on a tool definition.
  *
- * Fails closed: no auth context means no tools. That state is unreachable while
- * server/mcp/index.ts returns 401 before any tool is resolved, but if that ever
- * changes, an empty toolset is the safe outcome.
+ * Two independent gates, both fail closed. No auth context means no tools —
+ * unreachable while server/mcp/index.ts returns 401 before any tool is resolved,
+ * but an empty toolset is the safe outcome if that ever changes.
+ *
+ * `kind` is not decoration. Which tools *exist* is a property of the connection;
+ * which of those a token may call is a property of the token. Without the kind
+ * gate, a Postgres token minted with `allTools` would register
+ * `send-text-message`, whose handler calls `useEvolutionClient()` on a row that
+ * has no Evolution credentials at all.
+ *
+ * Keep this synchronous. The toolkit evaluates `enabled` twice per request per
+ * tool — once in `filterRawDefinitions`, once again in its own `filterByEnabled`.
  */
-export function isToolAllowed(event: H3Event, toolName: string): boolean {
+export function isToolAllowed(event: H3Event, toolName: string, kind: InstanceKind): boolean {
   const auth = event.context.mcpAuth as McpAuth | undefined
   if (!auth) return false
+  // `auth.kind` and not `instanceKind(auth.instance)`: the discriminant is
+  // resolved once in `resolveMcpAuth`, and reading it here is what makes the
+  // union the single post-resolution reader of `instance.kind`.
+  if (auth.kind !== kind) return false
 
   const scope = auth.scope
   if (scope.allTools) return true
   return scope.toolNames.includes(toolName)
+}
+
+// ── tables ─────────────────────────────────────────────────────────────────
+
+/**
+ * Qualified name of a Postgres relation, as this app writes it everywhere:
+ * `schema.table`, both parts exactly as `pg_namespace.nspname` and
+ * `pg_class.relname` report them.
+ *
+ * **Case-sensitive, deliberately.** Postgres folds unquoted identifiers to lower
+ * case at parse time but stores whatever was actually created — Evolution's own
+ * tables are `public.Message` and `public.Chat`. Folding case here would refuse
+ * a legitimately allowlisted table, and loosening the comparison would let
+ * `public.orders` match `public.Orders`, which is a different table.
+ */
+export function qualifiedName(schema: string, table: string): string {
+  return `${schema}.${table}`
+}
+
+export function isTableAllowed(scope: McpScope, qname: string): boolean {
+  if (scope.allTables) return true
+  return scope.tableNames.includes(qname)
+}
+
+/**
+ * Refuse loudly, naming the table and what is reachable instead.
+ *
+ * Same reasoning as `assertChatAllowed`: a model told "no such table" will
+ * report that the table does not exist, which sends the user looking for a
+ * schema bug. A model told which tables it may reach can either rewrite the
+ * query or ask for the grant.
+ *
+ * The list is included because it is not a secret from this caller — the token
+ * holder chose it — and it is the difference between a refusal a model can act
+ * on and one it can only relay.
+ */
+export function assertTableAllowed(scope: McpScope, qname: string): void {
+  if (isTableAllowed(scope, qname)) return
+  throw createError({
+    statusCode: 403,
+    message: `This connector token is not scoped to ${qname}. `
+      + `The tables it may reach are: ${scope.tableNames.join(', ') || '(none)'}. `
+      + `Ask the account owner to add ${qname} to the token's allowed tables, `
+      + `or rewrite the query to use only the tables above.`,
+  })
 }
 
 // ── chats ──────────────────────────────────────────────────────────────────

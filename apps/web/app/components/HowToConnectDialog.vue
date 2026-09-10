@@ -3,6 +3,7 @@ import { KeyRoundIcon } from '@lucide/vue'
 
 const props = defineProps<{
   open: boolean
+  kind: InstanceKind
   /** The token's name, so the dialog says which one it is describing. */
   label?: string
   scope?: TokenScope
@@ -20,7 +21,10 @@ const { connectorUrl, bearerUrl } = useConnectorUrl()
 const known = computed(() => Boolean(props.token))
 const url = computed(() => connectorUrl(props.token))
 const authHeader = computed(() => `Authorization: Bearer ${props.token || MASKED_TOKEN}`)
-const cliCommand = computed(() => `claude mcp add --transport http whatsapp ${url.value}`)
+// The CLI needs a name for the server. Derived from the kind rather than
+// hardcoded, so a database connector is not added to Claude as "whatsapp".
+const serverName = computed(() => (props.kind === 'postgres' ? 'postgres' : 'whatsapp'))
+const cliCommand = computed(() => `claude mcp add --transport http ${serverName.value} ${url.value}`)
 </script>
 
 <template>
@@ -31,12 +35,12 @@ const cliCommand = computed(() => `claude mcp add --transport http whatsapp ${ur
           {{ label ? `How to connect “${label}”` : 'How to connect' }}
         </DialogTitle>
         <DialogDescription>
-          This token adds one WhatsApp account to Claude. The steps differ by client.
+          This token adds one {{ describeKind(kind) }} to Claude. The steps differ by client.
         </DialogDescription>
       </DialogHeader>
 
       <p v-if="scope" class="text-sm">
-        <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope) }}
+        <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope, kind) }}
       </p>
 
       <div v-if="!known" class="space-y-3 rounded-md border bg-muted/40 p-3 text-sm">

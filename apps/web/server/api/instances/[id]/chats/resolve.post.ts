@@ -16,7 +16,7 @@ const body = z.object({
  * plainly instead of returning a confusing failure.
  */
 export default defineEventHandler(async (event) => {
-  const instance = await requireOwnedInstance(event, getRouterParam(event, 'id'))
+  const instance = await requireOwnedInstanceOfKind(event, getRouterParam(event, 'id'), 'whatsapp')
   const { number } = await parseBody(event, body)
 
   let resolved: { jid: string, exists: boolean, name?: string }

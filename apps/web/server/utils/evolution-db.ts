@@ -47,66 +47,115 @@ import { mentionedJidsOf } from './mentions'
  * account (`enableFullHistorySync()`) is what puts them in flight.
  */
 
-let client: Sql | undefined
-
 /**
- * Whether this deployment can read messages at all.
+ * Whether the *deployment's own* Evolution database is configured.
  *
  * Checked at startup rather than gating a tool: hiding `read-messages` from a
  * client that has already been told the connector reads WhatsApp is a worse
  * answer than an error saying what is missing.
+ *
+ * It says nothing about a connection that brought its own Evolution server —
+ * that one carries its own URL and can read whether or not this is set.
  */
 export function messageDatabaseConfigured(): boolean {
   return Boolean(useRuntimeConfig().evolutionDatabaseUrl)
 }
 
 /**
- * Memoized pool, like `pocketbaseAdmin()`. `statement_timeout` matters more than
- * it looks: Evolution ships `@@index([instanceId])` and nothing else, so reading
- * or searching a large account is a sequential scan. A slow query has to surface
- * as an error the caller can report, not as an MCP call that never returns.
+ * Whether this connection lives on the Evolution server this deployment
+ * configured, as opposed to one the user supplied.
+ *
+ * The single test, because three things depend on it and the merge that
+ * introduced bring-your-own servers already produced one bug from computing it
+ * slightly differently in two places. A row carrying its own global key is
+ * definitively its own server; so is one pointing somewhere other than our
+ * configured URL.
  */
-function evolutionDb(): Sql {
-  if (client) return client
+export function onDeploymentServer(instance: Pick<AppInstance, 'admin_key' | 'base_url'>): boolean {
+  if (instance.admin_key) return false
+  const configUrl = useRuntimeConfig().evolutionUrl
+  if (!instance.base_url || !configUrl) return true
+  return sameEvolutionServer(instance.base_url, configUrl)
+}
+
+/**
+ * Which database this account's messages are in, and whether the URL came from
+ * a user (and so must be host-guarded and address-pinned).
+ *
+ * The only place the precedence rule exists. A connection's own
+ * `evolution_db_url` wins; otherwise a connection on our server falls back to
+ * the deployment's variable; otherwise there is no answer, and the caller
+ * refuses rather than querying a database that cannot contain the rows.
+ */
+export function canReadMessages(instance: AppInstance): boolean {
+  return messageDbUrlFor(instance) !== undefined
+}
+
+function messageDbUrlFor(instance: AppInstance): { url: string, guard: boolean } | undefined {
+  if (instance.evolution_db_url) return { url: instance.evolution_db_url, guard: true }
+  if (!onDeploymentServer(instance)) return undefined
 
   const url = useRuntimeConfig().evolutionDatabaseUrl
-  if (!url) {
-    // 500, not 503: a missing variable will not resolve itself on a retry, and
-    // saying "temporarily" about a deployment that can never answer sends the
-    // operator looking for an outage. Logged because a handled createError is
-    // not, and this one is the whole diagnosis.
-    console.error(
-      '[evolution-db] NUXT_EVOLUTION_DATABASE_URL is not set — read-messages and '
-      + 'search-messages cannot answer. See README "Reading and searching messages".',
-    )
+  // Ours, on our own network: `net-guard` would (correctly) refuse it as this
+  // deployment's own infrastructure, so it is deliberately not guarded.
+  return url ? { url, guard: false } : undefined
+}
+
+/**
+ * The pool for this account's message database.
+ *
+ * One pool per database URL in play rather than one for the process, because a
+ * connection can now bring its own. Everything that makes that safe — the host
+ * guard, the address pin, fingerprint invalidation when a URL is rotated, the
+ * LRU ceiling — lives in `pg-pool.ts` and is shared with the Postgres
+ * connection kind rather than reimplemented here.
+ *
+ * `statement_timeout` matters more than it looks: Evolution ships
+ * `@@index([instanceId])` and nothing else, so reading or searching a large
+ * account is a sequential scan. A slow query has to surface as an error the
+ * caller can report, not as an MCP call that never returns.
+ */
+async function evolutionDbFor(instance: AppInstance): Promise<Sql> {
+  const resolved = messageDbUrlFor(instance)
+
+  if (!resolved) {
+    if (onDeploymentServer(instance)) {
+      // 500, not 503: a missing variable will not resolve itself on a retry, and
+      // saying "temporarily" about a deployment that can never answer sends the
+      // operator looking for an outage. Logged because a handled createError is
+      // not, and this one is the whole diagnosis.
+      console.error(
+        '[evolution-db] NUXT_EVOLUTION_DATABASE_URL is not set — read-messages and '
+        + 'search-messages cannot answer for accounts on this deployment\'s Evolution '
+        + 'server. See README "Reading and searching messages".',
+      )
+      throw createError({
+        statusCode: 500,
+        statusMessage: 'NUXT_EVOLUTION_DATABASE_URL is not set',
+      })
+    }
+
+    // A user fixes this one, not an operator, so it names the thing to add.
+    // 501 rather than an empty page: this account's messages exist, in a
+    // database this app has not been given, and reporting "no messages" would
+    // be indistinguishable from an empty conversation.
     throw createError({
-      statusCode: 500,
-      statusMessage: 'NUXT_EVOLUTION_DATABASE_URL is not set',
+      statusCode: 501,
+      statusMessage: 'Claude cannot read messages for this account yet. Add your Evolution '
+        + 'server\'s database connection string to this connection to enable reading and '
+        + 'searching. Pairing, listing chats and sending already work without it.',
     })
   }
 
-  client = postgres(url, {
-    max: 3,
-    idle_timeout: 30,
-    connection: { statement_timeout: STATEMENT_TIMEOUT_MS },
-  })
-
-  return client
+  return keyedPool(
+    resolved.guard ? `evo:${instance.id}` : 'evo:default',
+    resolved.url,
+    { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS },
+  )
 }
 
 const STATEMENT_TIMEOUT_MS = 10_000
 
-/**
- * Evolution's own id for this instance — the value `Message.instanceId` is keyed
- * on, and the predicate that keeps one account's search inside that account.
- *
- * `createInstance()` stores it at pairing time, but writes `''` when Evolution's
- * create response did not carry one (`instances.ts`), and an empty id here would
- * mean either a query with no instance predicate at all or an account whose
- * search silently never matches. Neither is acceptable, so an empty value is
- * re-resolved from Evolution and written back, and a failure to resolve is a
- * hard error.
- */
 export async function resolveEvolutionInstanceId(instance: AppInstance): Promise<string> {
   if (instance.instance_id) return instance.instance_id
 
@@ -210,8 +259,12 @@ export async function searchMessages(
   instance: AppInstance,
   options: MessageSearchOptions,
 ): Promise<{ hits: MessageSearchHit[], truncated: boolean }> {
+  // Database first, deliberately. `resolveEvolutionInstanceId` may call the
+  // account's Evolution API, and its 409/503 would otherwise mask the clearer
+  // "add your database connection string" refusal for a connection that can
+  // never read — and would pay for a round trip to learn nothing.
+  const sql = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
-  const sql = evolutionDb()
 
   const patterns = options.terms.map(term => `%${escapeLike(term)}%`)
   const since = toUnixSeconds(options.since, 'since')
@@ -405,8 +458,12 @@ export async function listMessagesPage(
   instance: AppInstance,
   options: MessagePageOptions,
 ): Promise<{ records: MessageRecord[], hasMore: boolean, total?: number }> {
+  // Database first, deliberately. `resolveEvolutionInstanceId` may call the
+  // account's Evolution API, and its 409/503 would otherwise mask the clearer
+  // "add your database connection string" refusal for a connection that can
+  // never read — and would pay for a round trip to learn nothing.
+  const sql = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
-  const sql = evolutionDb()
 
   const since = toUnixSeconds(options.since, 'since')
   const until = toUnixSeconds(options.until, 'until')
@@ -542,15 +599,6 @@ interface MessageRow {
   mentioned: string[] | null
   /** `protocolMessage.key.id`, or null where the row is not an edit. */
   editOf: string | null
-}
-
-/**
- * `%` and `_` are wildcards to ILIKE, so a search for "50%" would otherwise match
- * anything starting "50". Backslash is the default escape character, and has to
- * be escaped first or it would escape the escapes.
- */
-function escapeLike(term: string): string {
-  return term.replace(/[\\%_]/g, '\\$&')
 }
 
 function toUnixSeconds(value: string | undefined, field: string): number | undefined {

@@ -12,9 +12,13 @@ import type { MentionDirectory } from '~~/server/utils/mentions'
  * Reaches Evolution's database rather than its API, as both read paths now do —
  * see `evolution-db.ts` for why.
  */
-export default defineMcpTool({
+export default defineKindTool({
   name: 'search-messages',
-  enabled: event => isToolAllowed(event, 'search-messages'),
+  kind: 'whatsapp',
+  // No `messageDatabaseConfigured()` half any more. Both read paths need the
+  // database now, so hiding only this one would leave `read-messages` visible
+  // and failing — the boot warning in plugins/evolution-db-check.ts is where an
+  // unconfigured deployment is reported instead.
   title: 'Search WhatsApp messages',
   description:
     'Find WhatsApp messages containing given words, newest first, across every '

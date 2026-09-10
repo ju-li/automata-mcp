@@ -2,17 +2,31 @@
 
 A Nuxt app that serves two surfaces from one Nitro server:
 
-1. **Web UI** — users manage their [Evolution API](https://doc.evolution-api.com/) (WhatsApp) instances.
+1. **Web UI** — users create *connections* and mint connector tokens for them.
 2. **MCP endpoint** — Claude connects to `/mcp` as a custom connector.
 
-PocketBase is the backend (users, sessions, per-user Evolution credentials).
-Evolution API, Postgres and Redis are dependencies you run, not code in this repo.
+A connection is one of two kinds, and a connector token reaches exactly one
+connection:
 
-> **Status.** Sign-up, WhatsApp pairing, the per-account dashboard, connector
-> token provisioning and history import all work. Five MCP tools: connection
-> status, chat listing, message reading, message search and text sending. Reading
-> and searching both need `NUXT_EVOLUTION_DATABASE_URL` — see "Reading and
-> searching messages". Webhook event handling is not built;
+- **WhatsApp**, through [Evolution API](https://doc.evolution-api.com/). Paired
+  by QR. Uses the Evolution server this app is configured with, or one the user
+  supplies.
+- **PostgreSQL**, through a connection string the user supplies. Read-only
+  unless a token is explicitly granted the write tool.
+
+PocketBase is the backend (users, sessions, connections and their credentials).
+Evolution API, its Postgres and its Redis are dependencies you run **only if you
+want WhatsApp connections** — they sit behind a compose profile, and
+`NUXT_EVOLUTION_URL` / `NUXT_EVOLUTION_ADMIN_KEY` are optional. If you do want
+them, `NUXT_EVOLUTION_DATABASE_URL` is **required** — both WhatsApp read tools go
+through it. See "Reading and searching messages".
+
+> **Status.** Sign-up, WhatsApp pairing, the per-connection dashboard, connector
+> token provisioning with per-chat and per-table scoping, and history import all
+> work. Ten MCP tools — five for WhatsApp (connection status, chat listing,
+> message reading, message search and text sending) and five for Postgres
+> (database info, table listing, table description, read-only query and
+> data-modifying statement). Webhook event handling is not built;
 > `/api/webhook/evolution` is a stub that logs and acks.
 
 ## Layout
@@ -37,8 +51,19 @@ Package manager is **pnpm** (`pnpm@11.22.0`, pinned via `packageManager`). Do no
 ```bash
 cp .env.example .env          # then fill in the blanks — see comments in the file
 pnpm install
-pnpm services:up              # postgres, redis, evolution, pocketbase
+pnpm services:up              # pocketbase only — enough for database connections
 ```
+
+Only `NUXT_POCKETBASE_ADMIN_EMAIL` and `NUXT_POCKETBASE_ADMIN_PASSWORD` have to
+be filled in for that to come up. If you want WhatsApp connections as well:
+
+```bash
+pnpm services:up:whatsapp     # + postgres, redis, evolution
+```
+
+Postgres, Redis and Evolution sit behind a `whatsapp` compose profile because
+they exist only to serve WhatsApp connections. `services:down`, `:logs` and
+`:ps` always pass `--profile whatsapp`, so they cover everything either way.
 
 The PocketBase superuser is created for you from `NUXT_POCKETBASE_ADMIN_EMAIL`
 and `NUXT_POCKETBASE_ADMIN_PASSWORD` — the container upserts it on every boot, so
@@ -62,7 +87,9 @@ There is no `predev` hook — bring the services up yourself.
 | `pnpm dev` | Nuxt dev server on the host |
 | `pnpm build` / `pnpm preview` | production build / serve it |
 | `pnpm typecheck` | `nuxt typecheck` across app + server |
-| `pnpm services:up` / `:down` / `:logs` / `:ps` | the compose stack |
+| `pnpm services:up` | PocketBase only |
+| `pnpm services:up:whatsapp` | + Evolution, its Postgres and Redis |
+| `pnpm services:down` / `:logs` / `:ps` | the whole stack, profile included |
 
 ## Networking
 
@@ -299,14 +326,92 @@ Two caveats worth knowing before you go looking for a bug:
   messages and can be quoted as an answer. It will often be smaller than the row
   count Evolution's own API reports for the same range. The two are not
   comparable, and the smaller one is the true one.
+- The scope editor lists the tools of the connection's own kind, and lists both
+  read tools whether or not the database URL is set. It deliberately does not
+  hide a tool with an unmet prerequisite: both read tools need that URL, so
+  hiding one would leave a scope editor that disagrees with the tool list a
+  client actually sees. An unset URL is reported at startup instead.
+- **A connection on your own Evolution server needs its own database URL.** This
+  variable names one database — the one belonging to the Evolution server this
+  app is configured with — and a bring-your-own connection's messages live in
+  that server's database instead. Supply it when creating the connection, or from
+  its dashboard afterwards; it is stored on the connection, not here. Until then
+  reads answer 501 naming the missing setting rather than matching nothing and
+  reporting an empty conversation. Pairing, chat listing and sending never need
+  it.
+
+  Same shape of role as above, in *your* database:
+
+  ```sql
+  CREATE ROLE evo_reader LOGIN PASSWORD 'change-me';
+  GRANT CONNECT ON DATABASE evolution TO evo_reader;
+  GRANT USAGE ON SCHEMA public TO evo_reader;
+  GRANT SELECT ON "Message" TO evo_reader;
+  ```
+
+  It is checked before it is stored — including that `"Message"` is actually
+  readable, because a URL that connects to the *wrong* database is otherwise
+  indistinguishable from an account with no messages.
 
 On Railway, Evolution's Postgres is its own service — use its private URL, and
 note the port there is whatever that service actually listens on (see "Pin the
 ports").
 
+### Database connections
+
+A user pastes a PostgreSQL connection string; nothing is provisioned. The DSN is
+proved by connecting *before* the row is written, so a typo is a failed create
+rather than a connection that fails every later tool call.
+
+**Give it a role that can do only what you need.** A connector token can be
+scoped to specific tables, and every statement is checked against the query plan
+before a row is read — but that keeps a *model* inside the tables you chose, and
+it is not a boundary against a determined caller holding a leaked token. Three
+things it cannot see: what a database trigger does, what a user-defined
+function's body reads (which is why calls outside `pg_catalog` are refused
+outright), and anything at all if the role is a superuser. The app warns when the
+connecting role is a superuser. The boundary is the role:
+
+```sql
+CREATE ROLE claude_reader LOGIN PASSWORD 'change-me';
+GRANT CONNECT ON DATABASE mydb TO claude_reader;
+GRANT USAGE ON SCHEMA public TO claude_reader;
+GRANT SELECT ON public.customers, public.invoices TO claude_reader;
+```
+
+Then use `postgres://claude_reader:change-me@host:5432/mydb` as the connection
+string. For a token that should also write, grant the specific
+`INSERT`/`UPDATE`/`DELETE` you intend and tick the write action when minting it —
+it is off by default.
+
+**Outbound host guard.** A connection string is an address a user chose, so by
+default this server refuses one that resolves to a private or loopback address:
+without that, `postgres://…@postgres:5432/evolution` pasted into the form reaches
+this deployment's own database, which holds every user's messages. Set
+`NUXT_ALLOW_PRIVATE_TARGETS=true` for local development and single-tenant
+self-hosting, and leave it off for anything shared. Independently of that
+setting, a target resolving to this deployment's own PocketBase, Evolution or
+Evolution database is always refused.
+
+### Bring your own Evolution server
+
+A WhatsApp connection can be created against a user's own Evolution server: the
+create form takes the base URL and that server's `AUTHENTICATION_API_KEY`, and
+the app provisions an instance on it exactly as it does on the default server.
+Both halves or neither — half a configuration is never completed from this
+deployment's own, because sending our global key to a server someone else
+controls would hand them every account on ours.
+
+With `NUXT_EVOLUTION_URL` and `NUXT_EVOLUTION_ADMIN_KEY` unset there is no
+default server, and supplying one becomes required to create a WhatsApp
+connection. Everything else in the app still works.
+
 ### Adding tools
 
-Drop a file in `apps/web/server/mcp/tools/` — it is discovered automatically.
+Drop a file in `apps/web/server/mcp/tools/<kind>/` — it is discovered
+automatically, and the directory sets the tool's `group`, which is what gates it
+to that kind of connection. Keep the basename globally unique: collisions are
+detected across groups, and two tools with one name make the MCP server throw.
 Give every tool a `title` and the applicable `readOnlyHint` / `destructiveHint`;
 see `get-connection-status.ts` (read) and `send-text-message.ts` (write) for the
 pattern.

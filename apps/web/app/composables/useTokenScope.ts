@@ -20,23 +20,74 @@ export interface ScopedChat {
   lastMessageAt?: string
 }
 
+/** One reachable Postgres relation, `schema.table`, case-sensitive. */
+export interface ScopedTable {
+  qname: string
+  schema: string
+  name: string
+  kind: string
+  comment?: string
+  estimatedRows?: number | null
+}
+
 export interface TokenScope {
   all_tools: boolean
   tool_names: string[]
   all_chats: boolean
   chat_jids: string[]
+  all_tables: boolean
+  table_names: string[]
 }
 
 export function openScope(): TokenScope {
-  return { all_tools: true, tool_names: [], all_chats: true, chat_jids: [] }
+  return {
+    all_tools: true,
+    tool_names: [],
+    all_chats: true,
+    chat_jids: [],
+    all_tables: true,
+    table_names: [],
+  }
 }
 
-/** One-line summary for the tokens table. */
-export function describeScope(scope: TokenScope): string {
-  if (scope.all_tools && scope.all_chats) return 'Full access'
+/**
+ * Initial scope for a new token on a Postgres connection: every read tool, no
+ * write tool.
+ *
+ * Read-only is the default because the cost of the two mistakes is not
+ * symmetric — a token that turns out to need writes is one edit away, and a
+ * token that turns out not to have needed them may already have made some.
+ * The caller passes the read tools because only the server knows what they are.
+ */
+export function readOnlyScope(readToolNames: string[]): TokenScope {
+  return {
+    all_tools: false,
+    tool_names: [...readToolNames],
+    all_chats: true,
+    chat_jids: [],
+    all_tables: true,
+    table_names: [],
+  }
+}
+
+/**
+ * One-line summary for the tokens table.
+ *
+ * Only the axis that applies to this connection's kind is mentioned: a Postgres
+ * token leaves `all_chats` at its default `true`, and reporting "All chats" for
+ * a database would be noise at best.
+ */
+export function describeScope(scope: TokenScope, kind: InstanceKind = 'whatsapp'): string {
+  const dataOpen = kind === 'postgres' ? scope.all_tables : scope.all_chats
+  if (scope.all_tools && dataOpen) return 'Full access'
 
   const parts: string[] = []
-  parts.push(scope.all_chats ? 'All chats' : plural(scope.chat_jids.length, 'chat'))
+  if (kind === 'postgres') {
+    parts.push(scope.all_tables ? 'All tables' : plural(scope.table_names.length, 'table'))
+  }
+  else {
+    parts.push(scope.all_chats ? 'All chats' : plural(scope.chat_jids.length, 'chat'))
+  }
   parts.push(scope.all_tools ? 'all actions' : plural(scope.tool_names.length, 'action'))
   return parts.join(' · ')
 }

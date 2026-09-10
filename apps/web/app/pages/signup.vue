@@ -32,7 +32,7 @@ async function submit() {
       Create an account
     </h1>
     <p class="mt-1 text-sm text-muted-foreground">
-      You will connect a WhatsApp number in the next step.
+      You will add your first connection in the next step.
     </p>
 
     <form class="mt-8 space-y-4" @submit.prevent="submit">

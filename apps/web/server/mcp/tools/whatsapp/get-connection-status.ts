@@ -9,11 +9,11 @@
  *     account, so `useEvolutionClient()` already resolves to it. Never accept
  *     an account identifier or an API key as a tool argument.
  */
-export default defineMcpTool({
+export default defineKindTool({
   // Declared explicitly rather than derived from the filename, so renaming the
   // file cannot silently detach it from the token scopes that reference it.
   name: 'get-connection-status',
-  enabled: event => isToolAllowed(event, 'get-connection-status'),
+  kind: 'whatsapp',
   title: 'Check WhatsApp connection',
   description:
     'Report whether the connected WhatsApp account is currently online, along with '

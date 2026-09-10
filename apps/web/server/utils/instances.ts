@@ -33,20 +33,50 @@ export interface InstanceQr {
   count?: number
 }
 
-/** What the UI is allowed to see. Never includes `api_key`. */
+/** What the UI is allowed to see. Never includes a secret field. */
 export interface PublicInstance {
   id: string
+  kind: InstanceKind
   name: string
   label: string
   created?: string
+  /**
+   * Where this connection points, for display. The Evolution base URL is not a
+   * secret; the Postgres DSN is, so only its host, port and database name are
+   * surfaced and never the credentials in it.
+   */
+  target?: string
+  /** True when this WhatsApp connection uses a server the user supplied. */
+  ownServer?: boolean
+  /**
+   * Whether `read-messages` and `search-messages` can answer for this
+   * connection at all.
+   *
+   * Computed here rather than in the client: it depends on the precedence
+   * between a connection's own database URL and the deployment's variable, and
+   * a second implementation of that rule in the UI would drift.
+   */
+  canReadMessages?: boolean
 }
 
 export function toPublicInstance(instance: AppInstance): PublicInstance {
+  const kind = instanceKind(instance)
   return {
     id: instance.id,
+    kind,
     name: instance.name,
-    label: instance.label || 'WhatsApp account',
+    label: instance.label || (kind === 'postgres' ? 'Database' : 'WhatsApp account'),
     created: instance.created,
+    target: kind === 'postgres'
+      ? [instance.pg_host, instance.pg_port].filter(Boolean).join(':')
+        + (instance.pg_database ? `/${instance.pg_database}` : '')
+      : instance.base_url,
+    ...(kind === 'whatsapp' && {
+      ownServer: Boolean(instance.admin_key),
+      // Not recomputed here: `canReadMessages` in evolution-db.ts is the rule,
+      // and the comment there calls itself the only place it lives.
+      canReadMessages: canReadMessages(instance),
+    }),
   }
 }
 
@@ -110,9 +140,46 @@ export async function requireOwnedInstance(event: H3Event, instanceId: string | 
  *
  * This is also the single place an instances-per-user cap would go.
  */
-export async function provisionInstance(user: AppUser, label?: string): Promise<AppInstance> {
-  const config = useRuntimeConfig()
-  const admin = evolutionAdminClient()
+export interface WhatsappProvisionInput {
+  label?: string
+  /**
+   * A bring-your-own Evolution server. `baseUrl` and `adminKey` are both halves
+   * of one thing and must arrive together; `dbUrl` is independently optional —
+   * without it the account pairs and sends but cannot be read, because reads go
+   * to Evolution's database and this app would not know which one.
+   */
+  server?: { baseUrl: string, adminKey: string, dbUrl?: string }
+}
+
+export async function provisionWhatsappInstance(
+  user: AppUser,
+  input: WhatsappProvisionInput = {},
+): Promise<AppInstance> {
+  const { label, server } = input
+
+  // Guarded before the first request rather than only inside the client, so a
+  // bad URL fails the create with a message about the URL instead of surfacing
+  // as a failed Evolution call.
+  if (server) await assertPublicUrl(server.baseUrl, 'Evolution server URL')
+
+  // Proved before anything is provisioned, so a bad database URL costs nothing
+  // — no Evolution instance to tear down, no row to clean up. `requireTable`
+  // catches the case that matters: a URL that connects to the wrong database.
+  if (server?.dbUrl) await probePgConnection(server.dbUrl, { requireTable: '"Message"' })
+
+  const creds = evolutionAdminCredentials(
+    server ? { base_url: server.baseUrl, admin_key: server.adminKey } : undefined,
+  )
+  if (!creds) {
+    throw createError({
+      statusCode: 422,
+      statusMessage: 'No Evolution server is available. Set NUXT_EVOLUTION_URL and '
+        + 'NUXT_EVOLUTION_ADMIN_KEY to provide a default, or supply your own server '
+        + 'URL and admin key.',
+    })
+  }
+
+  const admin = createEvolutionClient(creds)
   const name = generateInstanceName()
 
   const created = await admin<{ instance?: { instanceId?: string }, hash?: string | { apikey?: string } }>(
@@ -152,16 +219,162 @@ export async function provisionInstance(user: AppUser, label?: string): Promise<
     const pb = await pocketbaseAdmin()
     return await pb.collection('instances').create<AppInstance>({
       user: user.id,
+      kind: 'whatsapp',
       name,
       instance_id: created?.instance?.instanceId ?? '',
       api_key: apiKey,
-      base_url: config.evolutionUrl,
+      // The URL actually used, never runtimeConfig — otherwise a BYO instance
+      // would be recorded as living on our server and every later call would go
+      // to the wrong one.
+      base_url: creds.baseUrl,
+      // Stored only for a server the user supplied. A connection on the
+      // deployment default keeps following that default, including if it moves.
+      admin_key: server ? server.adminKey : '',
+      // Same: only ever set for a user's own server. A default-server connection
+      // reads through NUXT_EVOLUTION_DATABASE_URL and must not carry an override.
+      evolution_db_url: server?.dbUrl ?? '',
       label: label?.trim() || 'WhatsApp account',
     })
   } catch (error) {
     await admin(`/instance/delete/${encodeURIComponent(name)}`, { method: 'DELETE' }).catch(() => {})
     throw error
   }
+}
+
+/**
+ * Ownership *and* kind, for a route that only makes sense for one kind.
+ *
+ * 404 for the wrong kind, matching `requireOwnedInstance`'s reason for
+ * answering 404 rather than 403: the route genuinely does not exist for this
+ * connection, and a distinguishable error would confirm which id is which kind.
+ */
+export async function requireOwnedInstanceOfKind(
+  event: H3Event,
+  instanceId: string | undefined,
+  kind: InstanceKind,
+): Promise<AppInstance> {
+  const instance = await requireOwnedInstance(event, instanceId)
+  if (instanceKind(instance) !== kind) {
+    throw createError({ statusCode: 404, statusMessage: 'Not found' })
+  }
+  return instance
+}
+
+/**
+ * Health of one connection, whatever kind it is.
+ *
+ * `state` uses the same four values for both kinds so the listing can render a
+ * badge without branching: a database that answers is `open`, one that does not
+ * is `close`, and a row with no DSN at all is `unknown` — the same shape as a
+ * WhatsApp account that Evolution cannot be asked about.
+ *
+ * A type alias, not an interface, for the reason `InstanceStatus` gives.
+ */
+export type ConnectionHealth = {
+  state: ConnectionState
+  /** Human-readable line for the card: profile name, or database and version. */
+  detail?: string
+  error?: string
+}
+
+export async function getPostgresHealth(instance: AppInstance): Promise<ConnectionHealth> {
+  if (!instance.dsn) return { state: 'unknown', error: 'No connection string is stored for this database.' }
+
+  try {
+    const identity = await pgIdentity(await pgFor(instance))
+    return {
+      state: 'open',
+      detail: identity ? `PostgreSQL ${identity.serverVersion} · ${identity.database}` : undefined,
+    }
+  }
+  catch (cause) {
+    // The DSN carries a password and the driver's message can echo connection
+    // parameters, so only the code is surfaced. Logged here because a handled
+    // error is invisible to Nitro and "it just says disconnected" is not a
+    // diagnosis.
+    console.error(`[pg] health check failed for instance ${instance.id}`, cause)
+    const detail = (cause as { statusCode?: number, message?: string })
+    return {
+      state: 'close',
+      error: detail?.statusCode === 422
+        ? detail.message
+        : `Could not reach the database (${(cause as { code?: string })?.code ?? 'connection failed'}).`,
+    }
+  }
+}
+
+/**
+ * Record a Postgres connection.
+ *
+ * Nothing is provisioned: the database already exists and belongs to the user.
+ * But the DSN is proved to work *before* the row is written, so a typo is a
+ * failed create with a message about the connection string rather than a row
+ * that looks connected and fails every later tool call. That is the same
+ * ordering rule as the WhatsApp path, arrived at from the other direction —
+ * there, the remote thing is made first because it is the part that can leak.
+ *
+ * `name` is generated for a Postgres row too. It reaches no external system
+ * here, but `instances.name` is required and uniquely indexed, and leaving one
+ * kind out of that would make every query that touches `name` conditional.
+ */
+export interface PostgresProvisionInput {
+  label?: string
+  dsn: string
+}
+
+export async function provisionPostgresInstance(
+  user: AppUser,
+  input: PostgresProvisionInput,
+): Promise<AppInstance> {
+  const dsn = input.dsn.trim()
+  const { fields, probe } = await postgresFields(dsn)
+
+  const pb = await pocketbaseAdmin()
+  return await pb.collection('instances').create<AppInstance>({
+    user: user.id,
+    kind: 'postgres',
+    name: generateInstanceName(),
+    ...fields,
+    label: input.label?.trim() || probe.database || 'Database',
+  })
+}
+
+/**
+ * Prove a DSN and build the columns that go with it.
+ *
+ * The secret and its display-only mirrors are written together, in one place,
+ * so a new mirror cannot be added to the create path and forgotten on the
+ * update path — a miss there is silent, leaving a row that simply lacks the
+ * field.
+ */
+async function postgresFields(dsn: string) {
+  // Parses, runs the host guard, connects, and reports the role's privileges.
+  const probe = await probePgConnection(dsn)
+  const target = describeDsn(dsn)
+
+  return {
+    probe,
+    fields: {
+      dsn,
+      pg_host: target.host,
+      pg_port: target.port,
+      pg_database: probe.database,
+    },
+  }
+}
+
+/** Rotate a database connection's DSN. Every token on it keeps working. */
+export async function updatePostgresDsn(instance: AppInstance, dsn: string): Promise<AppInstance> {
+  const { fields } = await postgresFields(dsn)
+
+  const pb = await pocketbaseAdmin()
+  const updated = await pb.collection('instances').update<AppInstance>(instance.id, fields)
+
+  // Drop the pool so the change takes effect now rather than at the next
+  // fingerprint check. Belt and braces — `pgFor` would notice on its own.
+  await closePgPool(instance.id)
+
+  return updated
 }
 
 /**
@@ -301,16 +514,49 @@ export async function enableFullHistorySync(instance: AppInstance): Promise<void
  * Evolution is torn down first — if that fails we keep the row, because a row
  * pointing at a live instance is recoverable and a live instance nobody has a
  * record of is not. Evolution logs the instance out itself if it is connected.
+ *
+ * A Postgres connection owns nothing outside this app: there is no remote
+ * resource to release, only a local pool to close.
  */
 export async function deleteInstance(instance: AppInstance): Promise<void> {
-  const admin = evolutionAdminClient()
+  // Release whatever this kind holds, then delete the row — once, for every
+  // kind. The ordering is the rule stated above and it is the same either way:
+  // if releasing throws, the row survives and still points at the thing.
+  if (instanceKind(instance) === 'postgres') {
+    await closePgPool(instance.id)
+  }
+  else {
+    // A connection on its own server may hold a pool onto that server's message
+    // database. Keyed on the row, so it outlives the row unless dropped here.
+    await closeKeyedPool(`evo:${instance.id}`)
 
-  try {
-    await admin(`/instance/delete/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
-  } catch (error) {
-    // A 404 means Evolution has already lost it; carry on and clean up our row.
-    const status = (error as { status?: number, statusCode?: number })
-    if (status?.status !== 404 && status?.statusCode !== 404) throw error
+    // Uses the same server the instance was created on, with that server's own
+    // global key when it brought one.
+    //
+    // **Credentials missing is not a reason to refuse the delete.** With the
+    // Evolution variables now optional, and with a row's `base_url` able to stop
+    // matching a reconfigured deployment, `evolutionAdminCredentials` can
+    // return undefined for a row that already exists — and gating the row
+    // deletion on that would leave a connection, and its tokens, permanently
+    // undeletable. Better a logged orphan on the Evolution server than a
+    // record the owner cannot get rid of.
+    const creds = evolutionAdminCredentials(instance)
+
+    if (!creds) {
+      console.error(
+        `[instances] deleting ${instance.id} (${instance.name}) without tearing down its Evolution `
+        + 'instance: no global key is available for its server. It may need removing there by hand.',
+      )
+    }
+    else {
+      try {
+        await createEvolutionClient(creds)(`/instance/delete/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
+      } catch (error) {
+        // A 404 means Evolution has already lost it; carry on and clean up our row.
+        const status = (error as { status?: number, statusCode?: number })
+        if (status?.status !== 404 && status?.statusCode !== 404) throw error
+      }
+    }
   }
 
   const pb = await pocketbaseAdmin()

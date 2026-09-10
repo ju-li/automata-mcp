@@ -1,13 +1,14 @@
 import PocketBase from 'pocketbase'
 
 /**
- * PocketBase is the backend for users, sessions and per-user Evolution
- * credentials. Two distinct clients live here:
+ * PocketBase is the backend for users, sessions, connections and the credentials
+ * those connections carry. Two distinct clients live here:
  *
- *   `pocketbaseAdmin()`   — a long-lived superuser-authed client. Reads hidden
- *                           fields (`users.evolution_api_key`) and the
- *                           admin-only `mcp_tokens` collection. Never hand this
- *                           to anything that takes user input as a filter.
+ *   `pocketbaseAdmin()`   — a long-lived superuser-authed client. Reads the
+ *                           hidden fields on `instances` (`api_key`,
+ *                           `admin_key`, `dsn`) and the admin-only `mcp_tokens`
+ *                           collection. Never hand this to anything that takes
+ *                           user input as a filter.
  *
  *   `pocketbaseForRequest()` — a fresh, unauthenticated client per request, to
  *                           be loaded with the caller's own auth cookie. Its
@@ -118,20 +119,42 @@ export interface AppUser {
 }
 
 /**
- * One connected WhatsApp account.
+ * One connection. `kind` says what sort — the row's other fields are read
+ * according to it, and it decides which MCP tools a token on this row can see.
  *
- * `api_key` is Evolution's per-instance token, not the global admin key, and is
- * a `hidden` PocketBase field — it is only ever populated on records fetched
- * through `pocketbaseAdmin()`. A record that came from a session-scoped client
- * will have it undefined.
+ * Optional in the type, and absent on any row written before `kind` existed.
+ * Read it through `instanceKind()` in mcp-scope.ts rather than directly, so
+ * "absent means WhatsApp" is decided in exactly one place.
+ *
+ * Four fields are `hidden` PocketBase fields — `api_key`, `admin_key`, `dsn` and
+ * `evolution_db_url` — so they are only ever populated on records fetched
+ * through `pocketbaseAdmin()`. A record from a session-scoped client will have
+ * them undefined.
+ *
+ * `api_key` is Evolution's per-instance token. `admin_key` is a *global* key for
+ * a user-supplied Evolution server and can create and delete instances on it, so
+ * it is a wider secret than anything else on the row: never let it reach
+ * `credentialsForInstance()`. `dsn` is a user-supplied Postgres connection
+ * string, for a connection whose whole purpose is that database.
+ * `evolution_db_url` is a read-only URL for a bring-your-own Evolution server's
+ * own database, and reaches every account on that server rather than only this
+ * one. `hidden` keeps all four out of the REST projection; it is not encryption,
+ * and they sit in clear in `pb_data` and in every backup.
  */
 export interface AppInstance {
   id: string
   user: string
+  kind?: 'whatsapp' | 'postgres'
   name: string
   instance_id?: string
   api_key?: string
+  admin_key?: string
   base_url?: string
+  evolution_db_url?: string
+  dsn?: string
+  pg_host?: string
+  pg_port?: number
+  pg_database?: string
   label?: string
   created?: string
 }
@@ -150,6 +173,8 @@ export interface AppMcpToken {
   // boolean as `false`, so these must always be written explicitly.
   all_chats?: boolean
   chat_jids?: unknown
+  all_tables?: boolean
+  table_names?: unknown
   all_tools?: boolean
   tool_names?: unknown
 }

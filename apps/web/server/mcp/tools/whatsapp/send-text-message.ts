@@ -10,9 +10,9 @@ import { z } from 'zod'
  * `destructiveHint: true` is for. `idempotentHint` is false: calling this twice
  * sends two messages.
  */
-export default defineMcpTool({
+export default defineKindTool({
   name: 'send-text-message',
-  enabled: event => isToolAllowed(event, 'send-text-message'),
+  kind: 'whatsapp',
   title: 'Send WhatsApp message',
   description:
     'Send a plain-text WhatsApp message from the connected account. The account '
