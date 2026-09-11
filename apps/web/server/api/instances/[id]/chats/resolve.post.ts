@@ -23,7 +23,7 @@ export default defineEventHandler(async (event) => {
   try {
     resolved = await resolveNumberToJid(instance, number)
   } catch (error) {
-    if ((error as { statusCode?: number })?.statusCode === 422) throw error
+    if (httpStatusOf(error) === 422) throw error
     throw createError({
       statusCode: 409,
       statusMessage: 'Connect this WhatsApp account before adding numbers by hand',

@@ -78,14 +78,14 @@ export default defineKindTool({
     // it goes back to the caller as `window`.
     const range = {
       since: toIsoDate(since, 'since'),
-      // Pin the upper bound as soon as the caller names a lower one. Evolution
-      // honours a range only when both bounds are present, so `listMessages`
-      // widens a one-sided one — and it widens `until` to *now*, a value that
-      // moves between calls. Paging an unpinned window would take page 2 from a
-      // different range than page 1. Pinned here and echoed back, paging is
-      // repeatable. Left alone when there is no `since`: putting a
-      // `messageTimestamp` predicate on an ordinary unfiltered read would hit a
-      // table Evolution indexes by instance and nothing else.
+      // Pin the upper bound as soon as the caller names a lower one. An
+      // unpinned `until` means *now*, a value that moves between calls, so page
+      // 2 would come from a different range than page 1. Pinned here and echoed
+      // back as `window`, paging a range is repeatable. Not about a bound being
+      // ignored — the SQL path emits one predicate per bound. Left alone when
+      // there is no `since`: putting a `messageTimestamp` predicate on an
+      // ordinary unfiltered read would hit a table Evolution indexes by
+      // instance and nothing else.
       until: toIsoDate(until, 'until') ?? (since ? new Date().toISOString() : undefined),
     }
 
@@ -203,20 +203,13 @@ function coveredSpan(messages: ChatMessage[]): { from: string, to: string } | un
 }
 
 /**
- * Evolution parses range bounds with `new Date(...)` and, on a value it cannot
- * read, produces `NaN` — which it then floors into a timestamp that matches
- * nothing. An unparseable date would come back as "no messages", so reject it.
+ * Normalise a bound to ISO 8601, refusing anything unparseable.
+ *
+ * `parseDateBound` in `evolution-db.ts` does the parsing and owns the refusal,
+ * so the query and this envelope cannot disagree about what a date is. The ISO
+ * string is what goes back to the caller as `window`, for it to hand to the
+ * next page.
  */
 function toIsoDate(value: string | undefined, label: string): string | undefined {
-  if (!value) return undefined
-
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) {
-    throw createError({
-      statusCode: 400,
-      message: `\`${label}\` is not a date I can read: ${value}. Use a format like 2024-03-01 or 2024-03-01T12:00:00Z.`,
-    })
-  }
-
-  return parsed.toISOString()
+  return parseDateBound(value, label)?.toISOString()
 }

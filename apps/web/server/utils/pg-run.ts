@@ -5,16 +5,11 @@ import type { McpScope } from './mcp-scope'
 /**
  * Running caller-supplied SQL.
  *
- * Everything a user's SQL touches goes through one of the two functions here,
- * and both compose the same checks in the same order. See `pg-guard.ts` for why
- * each check exists and what is still open.
- *
- * **One transaction, not two.** The plan check and the execution share a
- * transaction so that (a) the `AccessShareLock` EXPLAIN takes is held until the
- * statement has run, which stops a concurrent `CREATE OR REPLACE VIEW` from
- * repointing a view between the check and the execution, and (b) both run under
- * one `SET LOCAL search_path`, so the same text provably resolves to the same
- * objects in both.
+ * Everything a user's SQL touches goes through one of the two exported
+ * functions here, and both compose the same checks in the same order because
+ * both delegate to `withGuardedStatement` — which is where that order, and the
+ * reasoning for it, lives. See `pg-guard.ts` for why each individual check
+ * exists and what is still open.
  */
 
 /** How much of one cell is ever returned. A bytea column would otherwise blow the response. */
@@ -89,16 +84,38 @@ async function applySessionGuards(tx: TransactionSql, scope: McpScope, timeoutMs
     set_config('jit',                                 ${'off'},                true)`
 }
 
-export async function runReadQuery(
+/**
+ * Open a transaction, apply every guard, then run the statement inside it.
+ *
+ * **The order below is the whole security argument, and it is here exactly once.**
+ * Both entry points used to carry their own copy of it, kept in step by hand
+ * while this module's header claimed they "compose the same checks in the same
+ * order" — a claim a reader had to verify by diffing two functions. Now the only
+ * thing either one chooses is the transaction mode and the statement-kind gate.
+ *
+ * **One transaction, not two.** The plan check and the execution share it, so
+ * the `AccessShareLock` that EXPLAIN takes is still held while the statement
+ * runs — which is what stops a concurrent `CREATE OR REPLACE VIEW` repointing a
+ * view between the check and the execution — and both run under one
+ * `SET LOCAL`, so the same text provably resolves to the same objects in both.
+ */
+async function withGuardedStatement<T>(
   instance: Pick<AppInstance, 'id' | 'dsn'>,
   scope: McpScope,
   statement: string,
-  options: ReadQueryOptions,
-): Promise<ReadQueryResult> {
+  options: {
+    /** `sql.begin('read only')`. A `CREATE TEMP TABLE` inside it fails 25006. */
+    readOnly: boolean
+    timeoutMs: number
+    /** `assertNoWrites` or `assertIsModify` — the only difference between the two callers. */
+    assertKind: (facts: PlanFacts) => void
+  },
+  body: (tx: TransactionSql, startedAt: number) => Promise<T>,
+): Promise<T> {
   const sql = await pgFor(instance)
   const startedAt = Date.now()
 
-  return await sql.begin('read only', async (tx) => {
+  const guarded = async (tx: TransactionSql): Promise<T> => {
     await applySessionGuards(tx, scope, options.timeoutMs)
 
     // Before the EXPLAIN, not after: Postgres folds an IMMUTABLE function with
@@ -108,12 +125,31 @@ export async function runReadQuery(
 
     const facts = await planFacts(tx, statement)
 
-    assertNoWrites(facts)
+    options.assertKind(facts)
     // Again from the plan, which catches what the text cannot — a function
     // reached through a view.
     await assertFunctionsSafe(tx, facts.functions)
     await assertRelationsInScope(tx, facts, scope)
 
+    return await body(tx, startedAt)
+  }
+
+  return options.readOnly
+    ? await sql.begin('read only', guarded) as T
+    : await sql.begin(guarded) as T
+}
+
+export async function runReadQuery(
+  instance: Pick<AppInstance, 'id' | 'dsn'>,
+  scope: McpScope,
+  statement: string,
+  options: ReadQueryOptions,
+): Promise<ReadQueryResult> {
+  return await withGuardedStatement(instance, scope, statement, {
+    readOnly: true,
+    timeoutMs: options.timeoutMs,
+    assertKind: assertNoWrites,
+  }, async (tx, startedAt) => {
     // The statement-kind gate, enforced by Postgres's own grammar rather than by
     // parsing: DECLARE CURSOR refuses INSERT/UPDATE/DELETE/CREATE TABLE AS
     // outright, refuses SELECT ... INTO by name, and answers 0A000 for a
@@ -159,24 +195,15 @@ export async function runWriteStatement(
   statement: string,
   options: { maxRows: number, timeoutMs: number, allowWholeTable?: boolean },
 ): Promise<WriteStatementResult> {
-  const sql = await pgFor(instance)
-  const startedAt = Date.now()
-
-  return await sql.begin(async (tx) => {
-    await applySessionGuards(tx, scope, options.timeoutMs)
-
-    await assertFunctionsSafe(tx, functionNamesInText(statement))
-
-    const facts = await planFacts(tx, statement)
-
+  return await withGuardedStatement(instance, scope, statement, {
+    readOnly: false,
+    timeoutMs: options.timeoutMs,
     // The kind gate for writes. CTAS and SELECT INTO plan to a bare Result and
     // REFRESH answers "Utility Statement" — none of them has a ModifyTable root,
     // so requiring one refuses all three as well as a plain SELECT sent here by
     // mistake.
-    assertIsModify(facts, options.allowWholeTable)
-    await assertFunctionsSafe(tx, facts.functions)
-    await assertRelationsInScope(tx, facts, scope)
-
+    assertKind: facts => assertIsModify(facts, options.allowWholeTable),
+  }, async (tx, startedAt) => {
     const result = await unsafeSingle(tx, statement)
     const rows = result as unknown as Array<Record<string, unknown>> & { count: number, command: string }
 

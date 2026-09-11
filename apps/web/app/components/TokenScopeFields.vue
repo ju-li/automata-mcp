@@ -55,8 +55,6 @@ const visibleTables = computed(() => {
   return rows.filter(t => t.qname.toLowerCase().includes(q))
 })
 
-
-
 const knownChats = computed<ScopedChat[]>(() => {
   const seen = new Map<string, ScopedChat>()
   for (const chat of [...(chatData.value?.chats ?? []), ...extraChats.value]) {
@@ -156,19 +154,13 @@ async function addByNumber() {
         </p>
       </div>
 
-      <RadioGroup
-        :model-value="scope.all_tools ? 'all' : 'some'"
-        @update:model-value="scope = { ...scope, all_tools: $event === 'all' }"
-      >
-        <div class="flex items-center gap-2">
-          <RadioGroupItem id="tools-all" value="all" />
-          <Label for="tools-all" class="font-normal">All actions</Label>
-        </div>
-        <div class="flex items-center gap-2">
-          <RadioGroupItem id="tools-some" value="some" />
-          <Label for="tools-some" class="font-normal">Only selected actions</Label>
-        </div>
-      </RadioGroup>
+      <ScopeModeRadio
+        :model-value="scope.all_tools"
+        name="tools"
+        all-label="All actions"
+        some-label="Only selected actions"
+        @update:model-value="scope = { ...scope, all_tools: $event }"
+      />
 
       <div v-if="!scope.all_tools" class="space-y-2 rounded-md border p-3">
         <div v-if="toolsLoading" class="space-y-3" aria-busy="true">
@@ -225,19 +217,13 @@ async function addByNumber() {
         </p>
       </div>
 
-      <RadioGroup
-        :model-value="scope.all_tables ? 'all' : 'some'"
-        @update:model-value="scope = { ...scope, all_tables: $event === 'all' }"
-      >
-        <div class="flex items-center gap-2">
-          <RadioGroupItem id="tables-all" value="all" />
-          <Label for="tables-all" class="font-normal">All tables the connection can read</Label>
-        </div>
-        <div class="flex items-center gap-2">
-          <RadioGroupItem id="tables-some" value="some" />
-          <Label for="tables-some" class="font-normal">Only selected tables</Label>
-        </div>
-      </RadioGroup>
+      <ScopeModeRadio
+        :model-value="scope.all_tables"
+        name="tables"
+        all-label="All tables the connection can read"
+        some-label="Only selected tables"
+        @update:model-value="scope = { ...scope, all_tables: $event }"
+      />
 
       <div v-if="!scope.all_tables" class="space-y-3 rounded-md border p-3">
         <div v-if="scope.table_names.length" class="flex flex-wrap gap-1.5">
@@ -305,19 +291,13 @@ async function addByNumber() {
         </p>
       </div>
 
-      <RadioGroup
-        :model-value="scope.all_chats ? 'all' : 'some'"
-        @update:model-value="scope = { ...scope, all_chats: $event === 'all' }"
-      >
-        <div class="flex items-center gap-2">
-          <RadioGroupItem id="chats-all" value="all" />
-          <Label for="chats-all" class="font-normal">All chats</Label>
-        </div>
-        <div class="flex items-center gap-2">
-          <RadioGroupItem id="chats-some" value="some" />
-          <Label for="chats-some" class="font-normal">Only selected chats</Label>
-        </div>
-      </RadioGroup>
+      <ScopeModeRadio
+        :model-value="scope.all_chats"
+        name="chats"
+        all-label="All chats"
+        some-label="Only selected chats"
+        @update:model-value="scope = { ...scope, all_chats: $event }"
+      />
 
       <div v-if="!scope.all_chats" class="space-y-3 rounded-md border p-3">
         <div v-if="selectedChats.length" class="flex flex-wrap gap-1.5">

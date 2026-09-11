@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
 import { ArrowLeftIcon, DatabaseIcon, TableIcon } from '@lucide/vue'
-import { toast } from 'vue-sonner'
 
 /**
  * The dashboard for a database connection.
@@ -37,8 +36,7 @@ const state = computed<ConnectionState>(() => data.value?.state ?? 'unknown')
 const connected = computed(() => state.value === 'open')
 const tablesLoading = computed(() => tableStatus.value === 'idle' || tableStatus.value === 'pending')
 
-const busy = ref(false)
-const deleteConfirm = ref('')
+const { busy, run } = useApiAction()
 const newDsn = ref('')
 const editingDsn = ref(false)
 
@@ -55,37 +53,25 @@ useIntervalFn(() => {
 
 async function saveDsn() {
   if (!newDsn.value.trim()) return
-  busy.value = true
-  try {
-    await $fetch(`/api/instances/${id.value}/dsn`, {
-      method: 'PATCH',
-      body: { dsn: newDsn.value.trim() },
-    })
-    newDsn.value = ''
-    editingDsn.value = false
-    await refresh()
-    await refreshTables()
-    toast.success('Connection string updated. Existing tokens keep working.')
-  }
-  catch (err: any) {
-    toast.error(apiErrorMessage(err, 'Could not update the connection string'))
-  }
-  finally {
-    busy.value = false
-  }
-}
 
-async function destroy() {
-  busy.value = true
-  try {
-    await $fetch(`/api/instances/${id.value}`, { method: 'DELETE' })
-    toast.success('Connection removed')
-    await navigateTo('/instances')
-  }
-  catch {
-    toast.error('Could not remove the connection')
-    busy.value = false
-  }
+  await run(
+    async () => {
+      await $fetch(`/api/instances/${id.value}/dsn`, {
+        method: 'PATCH',
+        body: { dsn: newDsn.value.trim() },
+      })
+      newDsn.value = ''
+      editingDsn.value = false
+      await refresh()
+      await refreshTables()
+    },
+    {
+      success: 'Connection string updated. Existing tokens keep working.',
+      // Worth the server's own words: it names the refused host, the wrong
+      // database, or the driver's error code.
+      failure: 'Could not update the connection string',
+    },
+  )
 }
 </script>
 
@@ -245,40 +231,7 @@ async function destroy() {
           Change connection string
         </Button>
 
-        <AlertDialog>
-          <AlertDialogTrigger as-child>
-            <Button variant="destructive" :disabled="busy">
-              Remove connection
-            </Button>
-          </AlertDialogTrigger>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Remove “{{ data?.instance.label }}”?</AlertDialogTitle>
-              <AlertDialogDescription>
-                This deletes the stored connection string and every connector token
-                issued for it, and Claude immediately loses access. Your database
-                and its data are not touched. This cannot be undone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-
-            <div class="space-y-2">
-              <Label for="confirm">Type <span class="font-mono">delete</span> to confirm</Label>
-              <Input id="confirm" v-model="deleteConfirm" autocomplete="off" />
-            </div>
-
-            <AlertDialogFooter>
-              <AlertDialogCancel @click="deleteConfirm = ''">
-                Cancel
-              </AlertDialogCancel>
-              <AlertDialogAction
-                :disabled="deleteConfirm !== 'delete' || busy"
-                @click="destroy"
-              >
-                Remove permanently
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+        <DeleteConnectionDialog :id="id" :label="data?.instance.label" kind="postgres" />
       </div>
     </section>
   </div>

@@ -601,7 +601,17 @@ interface MessageRow {
   editOf: string | null
 }
 
-function toUnixSeconds(value: string | undefined, field: string): number | undefined {
+/**
+ * A range bound, parsed once and refused loudly.
+ *
+ * The refusal matters more than the parse: an unreadable date silently floored
+ * into a timestamp matches nothing, so it would come back as "no messages" —
+ * indistinguishable from an empty conversation, which is the answer this whole
+ * module exists not to give by accident. Shared with `read-messages`, which
+ * needs the same bound as an ISO string to echo back as `window`, so the query
+ * and the envelope cannot disagree about what a date is.
+ */
+export function parseDateBound(value: string | undefined, field: string): Date | undefined {
   if (!value) return undefined
 
   const parsed = Date.parse(value)
@@ -612,5 +622,10 @@ function toUnixSeconds(value: string | undefined, field: string): number | undef
     })
   }
 
-  return Math.floor(parsed / 1000)
+  return new Date(parsed)
+}
+
+function toUnixSeconds(value: string | undefined, field: string): number | undefined {
+  const parsed = parseDateBound(value, field)
+  return parsed && Math.floor(parsed.getTime() / 1000)
 }

@@ -1,20 +1,7 @@
 <script setup lang="ts">
 import { PlusIcon } from '@lucide/vue'
 
-interface InstanceRow {
-  id: string
-  kind: InstanceKind
-  label: string
-  state: ConnectionState
-  target?: string
-  detail?: string
-  profileName?: string
-  number?: string
-  /** WhatsApp only. Absent for kinds with no message counts. */
-  stats?: { messages: number, chats: number, contacts: number }
-}
-
-const { data, status } = await useFetch<{ instances: InstanceRow[] }>('/api/instances')
+const { data, status } = await useFetch<{ instances: InstanceListRow[] }>('/api/instances')
 
 // A fresh account has nothing to list, so send it straight to the create flow —
 // that is what makes signup land somewhere useful rather than on an empty page.

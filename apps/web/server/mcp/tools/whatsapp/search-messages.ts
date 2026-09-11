@@ -171,23 +171,25 @@ async function resolveNames(instance: AppInstance, hits: MessageSearchHit[]): Pr
     const evolution = evolutionClientForInstance(instance)
     const contacts = await contactDirectory(instance, evolution)
 
-    const fromContacts = await mentionDirectory({ instance, evolution, chatJids: [], contacts })
+    // Built once and then added to. Calling `mentionDirectory` again for the
+    // group pass would re-walk the whole contact table and discard this.
+    const directory = contactsToDirectory(contacts)
 
     const unresolvedByGroup = new Map<string, number>()
     for (const hit of hits) {
       if (!hit.jid.endsWith('@g.us')) continue
-      const missing = identitiesOf(hit).filter(jid => !fromContacts.has(localPartOf(jid))).length
+      const missing = identitiesOf(hit).filter(jid => !directory.has(localPartOf(jid))).length
       if (missing) unresolvedByGroup.set(hit.jid, (unresolvedByGroup.get(hit.jid) ?? 0) + missing)
     }
 
-    if (!unresolvedByGroup.size) return fromContacts
+    if (!unresolvedByGroup.size) return directory
 
     const chatJids = [...unresolvedByGroup.entries()]
       .sort(([, a], [, b]) => b - a)
       .slice(0, MENTION_GROUP_LOOKUPS)
       .map(([jid]) => jid)
 
-    return await mentionDirectory({ instance, evolution, chatJids, contacts })
+    return await addGroupMembers(directory, { instance, evolution, chatJids })
   }
   catch (error) {
     console.error('[search] could not resolve names:', error)

@@ -122,28 +122,6 @@ export function evolutionAdminCredentials(
 }
 
 /**
- * Client for the global key of whichever server this instance lives on.
- *
- * Throws 422, not 500: with the Evolution variables now optional, "no server
- * configured" is a thing the caller can fix by supplying one, not a broken
- * deployment.
- */
-export function evolutionAdminClient(
-  server?: Pick<AppInstance, 'base_url' | 'admin_key'>,
-): EvolutionClient {
-  const creds = evolutionAdminCredentials(server)
-  if (!creds) {
-    throw createError({
-      statusCode: 422,
-      statusMessage: 'No Evolution server is available for this connection. '
-        + 'Set NUXT_EVOLUTION_URL and NUXT_EVOLUTION_ADMIN_KEY to provide a default, '
-        + 'or supply your own server URL and admin key when creating the connection.',
-    })
-  }
-  return createEvolutionClient(creds)
-}
-
-/**
  * Credentials for one connected account.
  *
  * There is deliberately NO fallback to a global key. If `api_key` is missing

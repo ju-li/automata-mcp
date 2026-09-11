@@ -9,20 +9,7 @@ import { DatabaseIcon, MessageCircleIcon } from '@lucide/vue'
  * database has a host and a server version. Rendering a zeroed message count for
  * a database would suggest it has messages.
  */
-const props = defineProps<{
-  instance: {
-    id: string
-    kind: InstanceKind
-    label: string
-    state: ConnectionState
-    target?: string
-    detail?: string
-    profileName?: string
-    number?: string
-    /** WhatsApp only. Absent for kinds with no message counts. */
-    stats?: { messages: number, chats: number, contacts: number }
-  }
-}>()
+const props = defineProps<{ instance: InstanceListRow }>()
 
 const isPostgres = computed(() => props.instance.kind === 'postgres')
 

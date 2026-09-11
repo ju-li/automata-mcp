@@ -28,11 +28,6 @@ export function redactPath(path: string | undefined): string {
     return pathname!
   }
 
-  // Routes the module owns and that carry no secret.
-  if (pathname === '/mcp/deeplink' || pathname === '/mcp/badge.svg') {
-    return pathname
-  }
-
   return `/mcp/${REDACTED}`
 }
 

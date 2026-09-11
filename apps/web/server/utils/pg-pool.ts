@@ -4,13 +4,19 @@ import postgres from 'postgres'
 import type { AppInstance } from './pocketbase'
 
 /**
- * Connections to *user-supplied* Postgres databases.
+ * Every Postgres connection this app opens — a user's own database, and
+ * Evolution's message database.
  *
- * `evolution-db.ts` memoizes one process-global pool because there is one
- * Evolution database and this app chose its address. Everything here is
- * different: the address comes from a user, there is one pool per connection
- * row, a user can rotate a DSN at any time, and a busy server holds many at
- * once. So: keyed cache, fingerprint invalidation, and a ceiling.
+ * Both go through `keyedPool()`, so the keyed cache, the fingerprint
+ * invalidation that notices a rotated URL, the idle sweep and the LRU ceiling
+ * exist once rather than twice: the address usually comes from a user, there is
+ * one pool per connection row, a DSN can be rotated at any time, and a busy
+ * server holds many at once.
+ *
+ * The *only* asymmetry between the two callers is the `guard` flag, which
+ * `KeyedPoolOptions` documents: true for anything a user typed, false for this
+ * deployment's own `NUXT_EVOLUTION_DATABASE_URL`, which `net-guard` would
+ * correctly refuse as our own infrastructure.
  *
  * **The address is pinned, not merely checked.** `assertPublicTarget` resolves
  * the DSN's host and approves an address, and that address is what
@@ -303,15 +309,6 @@ function sweep(): void {
   }
 }
 
-/**
- * Open a throwaway connection to prove a DSN works, and report what is behind
- * it. Used when a connection is created, so a broken DSN fails the create
- * rather than becoming a row that fails every later tool call.
- *
- * The privilege report is not decoration. A superuser DSN makes the per-token
- * table allowlist best-effort — a superuser can read anything through a
- * function the planner cannot see into — so the UI has to be able to say so.
- */
 /** What a connection says about itself. One query, three callers. */
 export interface PgIdentity {
   serverVersion: string
@@ -337,6 +334,15 @@ export interface PgProbe {
   canReadServerFiles: boolean
 }
 
+/**
+ * Open a throwaway connection to prove a DSN works, and report what is behind
+ * it. Used when a connection is created, so a broken DSN fails the create
+ * rather than becoming a row that fails every later tool call.
+ *
+ * The privilege report is not decoration. A superuser DSN makes the per-token
+ * table allowlist best-effort — a superuser can read anything through a
+ * function the planner cannot see into — so the UI has to be able to say so.
+ */
 export async function probePgConnection(dsn: string, options: {
   /**
    * A table that must exist and be readable, as `pg_catalog.has_table_privilege`

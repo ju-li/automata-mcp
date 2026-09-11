@@ -1,4 +1,6 @@
-export type ConnectionState = 'open' | 'connecting' | 'close' | 'unknown'
+import type { ConnectionState } from '#shared/connection'
+
+export type { ConnectionState }
 
 export interface StateDisplay {
   label: string

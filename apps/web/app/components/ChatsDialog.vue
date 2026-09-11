@@ -103,15 +103,12 @@ async function loadPage(skip: number) {
   }
 }
 
-const loading = computed(() => loadingFirst.value)
-const chats = computed(() => rows.value)
-
 /**
  * The list is short and there is no next page — so the missing conversations are
  * ones Evolution cannot list, not ones behind an offset.
  */
 const unlistable = computed(() =>
-  !hasMore.value && chats.value.length < (props.total ?? 0),
+  !hasMore.value && rows.value.length < (props.total ?? 0),
 )
 
 // ── search ─────────────────────────────────────────────────────────────────
@@ -130,8 +127,8 @@ watch(() => props.open, (open) => {
 
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase()
-  if (!q) return chats.value
-  return chats.value.filter(c =>
+  if (!q) return rows.value
+  return rows.value.filter(c =>
     c.name.toLowerCase().includes(q)
     || c.jid.toLowerCase().includes(q)
     || (c.number?.includes(q) ?? false),
@@ -270,7 +267,7 @@ function formatLastActivity(chat: ScopedChat): string {
           </TableHeader>
 
           <TableBody>
-            <template v-if="loading">
+            <template v-if="loadingFirst">
               <TableRow v-for="n in 6" :key="n">
                 <TableCell>
                   <div class="flex items-center gap-3">
@@ -284,7 +281,7 @@ function formatLastActivity(chat: ScopedChat): string {
               </TableRow>
             </template>
 
-            <TableRow v-else-if="!chats.length">
+            <TableRow v-else-if="!rows.length">
               <TableCell colspan="4" class="py-8 text-center text-sm text-muted-foreground">
                 No conversations recorded yet. They appear here once messages are
                 exchanged, or once a history import completes.
@@ -347,24 +344,24 @@ function formatLastActivity(chat: ScopedChat): string {
       -->
       <div class="flex items-center justify-between gap-3">
         <p class="text-xs text-muted-foreground">
-          <template v-if="loading">
+          <template v-if="loadingFirst">
             Loading conversations…
           </template>
           <!-- Search first: the shortfall line below is true permanently on most
                accounts, and would otherwise mask the match count for good. -->
           <template v-else-if="search.trim()">
-            {{ count.format(sorted.length) }} of {{ count.format(chats.length) }} chats match.
+            {{ count.format(sorted.length) }} of {{ count.format(rows.length) }} chats match.
           </template>
           <template v-else-if="hasMore">
-            Showing {{ count.format(chats.length) }}<template v-if="total"> of {{ count.format(total) }}</template> chats.
+            Showing {{ count.format(rows.length) }}<template v-if="total"> of {{ count.format(total) }}</template> chats.
           </template>
           <template v-else-if="unlistable">
-            Showing {{ count.format(chats.length) }} conversations with recorded
+            Showing {{ count.format(rows.length) }} conversations with recorded
             messages. The Chats card counts {{ count.format(total ?? 0) }} chat
             records; the rest have no messages stored, so there is nothing to list.
           </template>
           <template v-else>
-            {{ count.format(chats.length) }} {{ chats.length === 1 ? 'chat' : 'chats' }}.
+            {{ count.format(rows.length) }} {{ rows.length === 1 ? 'chat' : 'chats' }}.
           </template>
           <span v-if="loadFailed" class="text-destructive">
             That page could not be loaded. Try again.
@@ -372,7 +369,7 @@ function formatLastActivity(chat: ScopedChat): string {
         </p>
 
         <Button
-          v-if="hasMore && !loading"
+          v-if="hasMore && !loadingFirst"
           variant="outline"
           size="sm"
           class="shrink-0"

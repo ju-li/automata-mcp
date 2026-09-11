@@ -40,13 +40,11 @@ export function pocketbaseForRequest(): PocketBase {
 
 /**
  * Superuser-authenticated client, memoized. Re-authenticates when the token
- * expires. Concurrent callers share one in-flight auth request.
+ * expires, and when PocketBase rejects one that has not — see
+ * `createAdminClient`. Concurrent callers share one in-flight auth request.
  */
 export function pocketbaseAdmin(): Promise<PocketBase> {
-  if (!admin) {
-    admin = new PocketBase(baseUrl())
-    admin.autoCancellation(false)
-  }
+  if (!admin) admin = createAdminClient()
 
   if (admin.authStore.isValid) {
     return Promise.resolve(admin)
@@ -95,6 +93,76 @@ export function pocketbaseAdmin(): Promise<PocketBase> {
   }
 
   return adminAuth
+}
+
+/**
+ * The admin client, wrapped so a token PocketBase has stopped accepting is
+ * replaced rather than presented until it expires.
+ *
+ * `authStore.isValid` only reads the token's own expiry claim; it cannot know
+ * the server has revoked it. And the server does revoke it: `entrypoint.sh`
+ * runs `superuser upsert` on every boot, which rotates the account's token key.
+ * Before this, one PocketBase restart left every admin call answering 403 for
+ * the rest of the token's life — every MCP request a 503 even with a good
+ * connector token, every dashboard a raw 403 — with nothing in the logs,
+ * because the re-authentication path that logs was never reached.
+ *
+ * So a 401 or 403 reads as "this credential is dead", which is safe for this
+ * client alone: a superuser bypasses every API rule, so it is never refused for
+ * lack of permission, only for presenting a token PocketBase no longer honours.
+ * The request is retried exactly once, and a second refusal is rethrown as real.
+ *
+ * Retrying the caller's original `options` is sound because the SDK's `send`
+ * works on a shallow copy and writes `Authorization` into a fresh `headers`
+ * object, so the retry carries the new token rather than the rejected one.
+ */
+function createAdminClient(): PocketBase {
+  const pb = new PocketBase(baseUrl())
+  // Server-side there is no "user navigated away" — auto-cancellation would
+  // abort concurrent requests that happen to share a key.
+  pb.autoCancellation(false)
+
+  const send = pb.send.bind(pb)
+
+  pb.send = async <T = any>(path: string, options: Parameters<PocketBase['send']>[1]): Promise<T> => {
+    // Read before sending: the SDK takes the token synchronously as `send`
+    // starts, so this is the token the server is about to judge.
+    const presented = pb.authStore.token
+
+    try {
+      return await send<T>(path, options)
+    }
+    catch (error) {
+      // Never for the superuser auth call itself, which would wait on its own
+      // in-flight promise and never settle.
+      if (!isRejectedCredential(error) || path.startsWith(SUPERUSER_AUTH_PATH)) throw error
+
+      // Clear only the token that was refused. Concurrent requests all fail on
+      // the same dead token: the first clears it and re-authenticates, and a
+      // straggler arriving afterwards must not throw away the fresh one.
+      if (pb.authStore.token === presented) {
+        console.warn(
+          `[pocketbase] superuser token rejected (${httpStatusOf(error)}); re-authenticating and retrying once. `
+          + 'Expected after a PocketBase restart, which rotates the superuser token key.',
+        )
+        pb.authStore.clear()
+      }
+
+      // Resolves at once if another request already re-authenticated; joins the
+      // shared in-flight request otherwise. A failure here is the 503 it should be.
+      await pocketbaseAdmin()
+      return await send<T>(path, options)
+    }
+  }
+
+  return pb
+}
+
+const SUPERUSER_AUTH_PATH = '/api/collections/_superusers/auth-'
+
+function isRejectedCredential(error: unknown): boolean {
+  const status = httpStatusOf(error)
+  return status === 401 || status === 403
 }
 
 /**

@@ -73,11 +73,10 @@ export type MentionDirectory = Map<string, string>
  * same entry — which also means the caller does not have to know which form this
  * deployment stores, and a tag bump that changes it does not break the lookup.
  *
- * Group participants are fetched last because they outrank contacts. Evolution's
- * `Contact` table is written from inbound traffic keyed on `key.remoteJid`, which
- * for a group message is the *group's* JID, so it is a good source for 1:1 chats
- * and a poor one for group members. Participant metadata comes from the group
- * itself and is the authority on who is in it.
+ * Contacts first, then group participants over the top — see `addGroupMembers`
+ * for why that order and not the other. A caller that needs to inspect the
+ * contacts pass before paying for the group pass composes the two halves itself
+ * rather than calling this twice.
  */
 export async function mentionDirectory(options: {
   instance: AppInstance
@@ -87,14 +86,53 @@ export async function mentionDirectory(options: {
   /** Contact map from `contactDirectory()`, keyed by JID. Optional. */
   contacts?: Map<string, { name?: string }>
 }): Promise<MentionDirectory> {
+  return await addGroupMembers(contactsToDirectory(options.contacts), options)
+}
+
+/**
+ * The contacts half, on its own.
+ *
+ * Separate from `addGroupMembers` because `search-messages` needs the two in
+ * stages: it has to see what contacts already resolved before it can decide
+ * which groups are worth a round trip. It used to get that by calling
+ * `mentionDirectory` twice — once with no chats, then again with the groups —
+ * which walked the entire contact table a second time and threw the first
+ * result away. On an account with a large address book that was the more
+ * expensive half of the call.
+ */
+export function contactsToDirectory(contacts?: Map<string, { name?: string }>): MentionDirectory {
   const directory: MentionDirectory = new Map()
 
-  for (const [jid, info] of options.contacts ?? []) {
+  for (const [jid, info] of contacts ?? []) {
     const localPart = localPartOf(jid)
     const name = meaningfulName(info.name, localPart)
     if (localPart && name) directory.set(localPart, name)
   }
 
+  return directory
+}
+
+/**
+ * The group half: adds every named participant, **overwriting** contacts.
+ *
+ * That precedence is the reason this runs second and not first. Evolution's
+ * `Contact` table is written from inbound traffic keyed on `key.remoteJid`,
+ * which for a group message is the *group's* JID, so it is a good source for
+ * 1:1 chats and a poor one for group members. Participant metadata comes from
+ * the group itself and is the authority on who is in it.
+ *
+ * Mutates and returns the directory it was given, so a caller can build the
+ * contacts once and add to it.
+ */
+export async function addGroupMembers(
+  directory: MentionDirectory,
+  options: {
+    instance: AppInstance
+    evolution: EvolutionClient
+    /** Chats whose membership to look up. Non-group JIDs are ignored. */
+    chatJids: Iterable<string>
+  },
+): Promise<MentionDirectory> {
   const groupJids = [...new Set(options.chatJids)].filter(jid => jid.endsWith('@g.us'))
 
   const memberships = await Promise.all(
@@ -144,69 +182,65 @@ export function applyMentions(
 /**
  * Group membership, keyed by local part.
  *
- * Cached and guarded exactly like `fetchGroups` in `chats.ts`, and for the same
- * reasons: Evolution answers this from Baileys rather than its database, so it is
- * a live round trip that never returns while the account is disconnected. A
- * failure is cached for a shorter window so a disconnected account does not pay
- * the timeout on every single call.
+ * Cached through `staleWhileFailing`, which `fetchGroups` in `chats.ts` also
+ * uses and which explains the three behaviours it buys: Evolution answers this
+ * from Baileys rather than its database, so it is a live round trip that never
+ * returns while the account is disconnected.
  *
  * A participant is indexed under every identity it carries — `id`, `lid`,
  * `phoneNumber`, `jid` — because which one appears in `mentionedJid` depends on
  * the chat's addressing mode, which is WhatsApp's choice and not ours.
  */
-const PARTICIPANT_CACHE_TTL_MS = 5 * 60_000
-const PARTICIPANT_RETRY_TTL_MS = 60_000
 const PARTICIPANT_TIMEOUT_MS = 8_000
-const participantCache = new Map<string, { expiresAt: number, members: MentionDirectory }>()
 const emptyMembers: MentionDirectory = new Map()
+
+const participantCache = staleWhileFailing<MentionDirectory>({
+  ttlMs: 5 * 60_000,
+  retryTtlMs: 60_000,
+  empty: emptyMembers,
+})
 
 async function fetchParticipants(
   instance: AppInstance,
   evolution: EvolutionClient,
   groupJid: string,
 ): Promise<MentionDirectory> {
-  const cacheKey = `${instance.id}:${groupJid}`
-  const cached = participantCache.get(cacheKey)
-  if (cached && Date.now() < cached.expiresAt) return cached.members
+  return participantCache(`${instance.id}:${groupJid}`, async () => {
+    const result = await evolution<EvolutionParticipantsResponse | EvolutionParticipantRow[]>(
+      `/group/participants/${encodeURIComponent(instance.name)}?groupJid=${encodeURIComponent(groupJid)}`,
+      { timeout: PARTICIPANT_TIMEOUT_MS },
+    ).catch(() => undefined)
 
-  const result = await evolution<EvolutionParticipantsResponse | EvolutionParticipantRow[]>(
-    `/group/participants/${encodeURIComponent(instance.name)}?groupJid=${encodeURIComponent(groupJid)}`,
-    { timeout: PARTICIPANT_TIMEOUT_MS },
-  ).catch(() => undefined)
+    const rows = Array.isArray(result) ? result : result?.participants
 
-  const rows = Array.isArray(result) ? result : result?.participants
+    // Reported as a failure, so the cache serves whatever it had — see
+    // `staleWhileFailing`. A group whose members simply have no readable names
+    // answers with an empty map instead, and is cached for the full window.
+    if (!Array.isArray(rows)) return undefined
 
-  if (!Array.isArray(rows)) {
-    // A name we had a moment ago still beats a raw id, so a failed refresh serves
-    // the stale map rather than dropping back to nothing.
-    const members = cached?.members ?? emptyMembers
-    participantCache.set(cacheKey, { expiresAt: Date.now() + PARTICIPANT_RETRY_TTL_MS, members })
+    const members: MentionDirectory = new Map()
+    for (const row of rows) {
+      if (!row || typeof row !== 'object') continue
+
+      const identities = [row.id, row.lid, row.phoneNumber, row.jid]
+        .filter((value): value is string => typeof value === 'string' && value.length > 0)
+        .map(localPartOf)
+        .filter(Boolean)
+
+      if (!identities.length) continue
+
+      // Same rule as `meaningfulName`, widened to every identity the row carries: a
+      // participant labelled with any of its own ids has no name, not a numeric one.
+      const name = [row.name, row.notify, row.pushName, row.verifiedName]
+        .map(candidate => candidate?.trim())
+        .find(candidate => candidate && !identities.includes(candidate))
+
+      if (!name) continue
+      for (const localPart of identities) members.set(localPart, name)
+    }
+
     return members
-  }
-
-  const members: MentionDirectory = new Map()
-  for (const row of rows) {
-    if (!row || typeof row !== 'object') continue
-
-    const identities = [row.id, row.lid, row.phoneNumber, row.jid]
-      .filter((value): value is string => typeof value === 'string' && value.length > 0)
-      .map(localPartOf)
-      .filter(Boolean)
-
-    if (!identities.length) continue
-
-    // Same rule as `meaningfulName`, widened to every identity the row carries: a
-    // participant labelled with any of its own ids has no name, not a numeric one.
-    const name = [row.name, row.notify, row.pushName, row.verifiedName]
-      .map(candidate => candidate?.trim())
-      .find(candidate => candidate && !identities.includes(candidate))
-
-    if (!name) continue
-    for (const localPart of identities) members.set(localPart, name)
-  }
-
-  participantCache.set(cacheKey, { expiresAt: Date.now() + PARTICIPANT_CACHE_TTL_MS, members })
-  return members
+  })
 }
 
 /**

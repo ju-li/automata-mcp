@@ -9,35 +9,21 @@
  * `stats` is WhatsApp's own vocabulary and is simply absent for other kinds
  * rather than zeroed. A zeroed block would encode "this database has no
  * messages" into the payload, and the card does not read it anyway — it renders
- * `detail` instead.
+ * `detail` instead. `connectionState()` is what keeps that per-kind shape in one
+ * place rather than in every route that needs it.
+ *
+ * Tolerant, deliberately: a single half-provisioned connection must not take
+ * the whole listing down with it, since the listing is the only way to reach
+ * the page that would let you delete it.
  */
 export default defineEventHandler(async (event) => {
   const user = await requireSessionUser(event)
   const instances = await listInstancesForUser(user.id)
 
-  const rows = await Promise.all(instances.map(async (instance) => {
-    const base = toPublicInstance(instance)
-
-    if (instanceKind(instance) === 'postgres') {
-      const health = await getPostgresHealth(instance)
-      return {
-        ...base,
-        state: health.state,
-        detail: health.detail,
-        error: health.error,
-      }
-    }
-
-    const status = await getInstanceStatus(instance).catch(() => null)
-    return {
-      ...base,
-      state: status?.state ?? 'unknown',
-      profileName: status?.profileName,
-      profilePicUrl: status?.profilePicUrl,
-      number: status?.number,
-      stats: status?.stats ?? { messages: 0, chats: 0, contacts: 0 },
-    }
-  }))
+  const rows = await Promise.all(instances.map(async instance => ({
+    ...toPublicInstance(instance),
+    ...await connectionState(instance, { tolerant: true }),
+  })))
 
   return { instances: rows }
 })

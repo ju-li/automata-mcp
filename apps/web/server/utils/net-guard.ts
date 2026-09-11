@@ -225,7 +225,6 @@ async function assertNotOwnInfrastructure(
   const own = await ownTargets()
   if (own.length === 0) return
 
-
   for (const { address } of resolved) {
     const hit = own.find(t => t.address === address && t.port === port)
     if (hit) {
