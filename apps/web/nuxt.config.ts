@@ -9,6 +9,10 @@ export default defineNuxtConfig({
 
   app: {
     head: {
+      meta: [
+        // The page's own --background, so a mobile browser's chrome matches it.
+        { name: 'theme-color', content: '#f4f1e8' },
+      ],
       link: [
         { rel: 'icon', href: '/favicon.ico', sizes: 'any' },
         { rel: 'icon', href: '/favicon-16x16.png', type: 'image/png', sizes: '16x16' },
