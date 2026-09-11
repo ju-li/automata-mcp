@@ -1,8 +1,9 @@
 /**
  * The user's connections, each with its live state.
  *
- * One round-trip per connection — an Evolution `fetchInstances` for a WhatsApp
- * account, a one-row query for a database. Fine for the handful a person will
+ * One round-trip per connection — two parallel Evolution reads for a WhatsApp
+ * account (`fetchInstances` for the profile and counts, `connectionState` for
+ * the live state; see `getInstanceStatus`), a one-row query for a database. Fine for the handful a person will
  * have; if that stops being true, cache the state rather than dropping it, since
  * the list is unreadable without it.
  *

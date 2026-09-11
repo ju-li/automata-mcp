@@ -19,8 +19,26 @@ export interface StateDisplay {
  *
  * "close" in particular needs translating — for WhatsApp it means "not paired",
  * not "an error".
+ *
+ * Which is also why `lost` is an option rather than a fifth state. A WhatsApp
+ * session that dropped is `close` or `connecting` like one that was never
+ * paired, and the words for those — "scan a QR code" — are the wrong
+ * instruction for a phone that is still linked. The server tells the two apart
+ * (`sessionLost`); this only chooses what to say.
  */
-export function describeState(state: ConnectionState, kind: InstanceKind | undefined = 'whatsapp'): StateDisplay {
+export function describeState(
+  state: ConnectionState,
+  kind: InstanceKind | undefined = 'whatsapp',
+  options: { lost?: boolean } = {},
+): StateDisplay {
+  if (kind === 'whatsapp' && options.lost && state !== 'open') {
+    return {
+      label: 'Connection lost',
+      variant: 'destructive',
+      hint: 'WhatsApp dropped this account\'s connection. Evolution normally reconnects within seconds — if it stays like this, reconnect.',
+    }
+  }
+
   if (kind === 'postgres') {
     switch (state) {
       case 'open':

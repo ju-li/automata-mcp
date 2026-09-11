@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useIntervalFn } from '@vueuse/core'
 import { ArrowLeftIcon, MessagesSquareIcon, SmartphoneIcon } from '@lucide/vue'
+import { toast } from 'vue-sonner'
 
 /**
  * The pairing-and-dashboard panel for a WhatsApp connection. Chosen by
@@ -12,6 +13,8 @@ const props = defineProps<{ id: string }>()
 interface StatusResponse {
   instance: PublicInstanceRow
   state: ConnectionState
+  /** Was connected, and Evolution's live socket no longer is. */
+  sessionLost?: boolean
   profileName?: string
   profilePicUrl?: string
   number?: string
@@ -36,7 +39,29 @@ const polledState = ref<ConnectionState | null>(null)
 
 const state = computed<ConnectionState>(() => polledState.value ?? data.value?.state ?? 'unknown')
 const connected = computed(() => state.value === 'open')
-const display = computed(() => describeState(state.value))
+
+/**
+ * Set by Disconnect and Import full history. Both end the session on purpose,
+ * and for a moment afterwards Evolution's stored status still says `open` —
+ * which is exactly what a dropped session looks like. Without this the page
+ * would offer to reconnect the account it was just told to sign out.
+ */
+const pairingRequested = ref(false)
+
+/**
+ * What this page is showing. A lost session is its own mode rather than a
+ * flavour of pairing: its phone is still linked, so the instruction is
+ * different, and it must not be polled the way pairing is — see `applyMode`.
+ */
+type Mode = 'pairing' | 'lost' | 'connected'
+
+const mode = computed<Mode>(() => {
+  if (connected.value) return 'connected'
+  if (data.value?.sessionLost && !pairingRequested.value) return 'lost'
+  return 'pairing'
+})
+
+const display = computed(() => describeState(state.value, 'whatsapp', { lost: mode.value === 'lost' }))
 
 const qr = ref<QrResponse['qr'] | null>(null)
 const pairingTimedOut = ref(false)
@@ -44,6 +69,7 @@ const pairingStartedAt = ref(Date.now())
 
 const { busy, run } = useApiAction()
 const { busy: savingDbUrl, run: runSaveDbUrl } = useApiAction()
+const { busy: reconnectBusy, run: runReconnect } = useApiAction()
 
 // Reading goes to Evolution's own Postgres, so an account on a server the user
 // supplied needs that server's database URL. Surfaced here because otherwise the
@@ -81,7 +107,7 @@ const chatsOpen = ref(false)
 const PAIRING_TIMEOUT_MS = 5 * 60 * 1000
 
 const { pause: pauseQrPoll, resume: resumeQrPoll } = useIntervalFn(async () => {
-  if (connected.value) return
+  if (mode.value !== 'pairing') return
 
   if (Date.now() - pairingStartedAt.value > PAIRING_TIMEOUT_MS) {
     pairingTimedOut.value = true
@@ -91,12 +117,14 @@ const { pause: pauseQrPoll, resume: resumeQrPoll } = useIntervalFn(async () => {
 
   try {
     const result = await $fetch<QrResponse>(`/api/instances/${id.value}/qr`)
-    polledState.value = result.state
     if (result.state === 'open') {
       qr.value = null
+      // Refreshed rather than recorded, so the page does not flip to connected on
+      // this poll's word and back again while the status fetch catches up.
       await refresh()
       return
     }
+    polledState.value = result.state
     // Keep the previous QR while Evolution generates the next one, so the image
     // does not flicker between polls.
     if (result.qr?.base64) qr.value = result.qr
@@ -113,22 +141,95 @@ const { pause: pauseStatusPoll, resume: resumeStatusPoll } = useIntervalFn(
   { immediate: false },
 )
 
-watch(connected, (isConnected) => {
-  if (isConnected) {
+// ── reconnecting ───────────────────────────────────────────────────────────
+/**
+ * How long to watch for the connection to come back after asking. Evolution
+ * answers the request before the socket is up, and a healthy reconnect takes
+ * seconds; a minute without one means it is not coming on its own.
+ */
+const RECONNECT_WATCH_MS = 60_000
+
+const reconnecting = ref(false)
+const reconnectStalled = ref(false)
+const reconnectStartedAt = ref(0)
+
+const { pause: pauseReconnectPoll, resume: resumeReconnectPoll } = useIntervalFn(async () => {
+  await refresh()
+  if (mode.value === 'lost' && Date.now() - reconnectStartedAt.value > RECONNECT_WATCH_MS) {
+    pauseReconnectPoll()
+    reconnecting.value = false
+    reconnectStalled.value = true
+  }
+}, 3000, { immediate: false })
+
+/**
+ * Ask once, then watch. Three ways out, and only the last needs this function:
+ * the session comes back (`applyMode` sees `connected`), the credentials were
+ * rejected and Evolution shows a QR instead (`applyMode` sees `pairing`), or
+ * nothing happens within the window and the page says so.
+ */
+async function reconnect() {
+  reconnectStalled.value = false
+
+  const asked = await runReconnect(
+    async () => {
+      await $fetch(`/api/instances/${id.value}/reconnect`, { method: 'POST' })
+      return true
+    },
+    { failure: 'Could not reconnect this account' },
+  )
+
+  if (!asked) {
+    reconnectStalled.value = true
+    return
+  }
+
+  reconnecting.value = true
+  reconnectStartedAt.value = Date.now()
+  await refresh()
+  if (mode.value === 'lost') resumeReconnectPoll()
+}
+
+// ── polling follows the mode ───────────────────────────────────────────────
+/**
+ * **The QR poll runs in pairing mode only, and that is load-bearing.** It calls
+ * `/instance/connect`, which on an instance Evolution holds in `close` builds a
+ * brand-new socket from the stored credentials. Pointed every two seconds at a
+ * lost session Evolution cannot bring back, that is a fresh WhatsApp login every
+ * two seconds — sockets leaked on the server, and the pattern that gets a
+ * number banned. A lost session is reconnected once, when someone asks.
+ *
+ * The status poll runs whenever a session exists, lost included, so a recovery
+ * Evolution makes on its own is noticed without anyone pressing anything.
+ */
+function applyMode(next: Mode) {
+  if (next === 'pairing') {
+    pauseStatusPoll()
+    resumeQrPoll()
+  }
+  else {
     polledState.value = null
     pauseQrPoll()
     resumeStatusPoll()
   }
-  else {
-    pauseStatusPoll()
-    resumeQrPoll()
+
+  if (next !== 'lost') {
+    pauseReconnectPoll()
+    reconnecting.value = false
+    reconnectStalled.value = false
   }
+
+  if (next === 'connected') pairingRequested.value = false
+}
+
+watch(mode, (next, previous) => {
+  if (previous === 'lost' && next === 'connected' && reconnecting.value) {
+    toast.success('Reconnected.')
+  }
+  applyMode(next)
 })
 
-onMounted(() => {
-  if (connected.value) resumeStatusPoll()
-  else resumeQrPoll()
-})
+onMounted(() => applyMode(mode.value))
 
 function restartPairing() {
   pairingTimedOut.value = false
@@ -154,6 +255,7 @@ function backToPairing(path: string, success: string, failure: string) {
       await $fetch(`/api/instances/${id.value}/${path}`, { method: 'POST' })
       qr.value = null
       polledState.value = null
+      pairingRequested.value = true
       restartPairing()
       await refresh()
     },
@@ -195,12 +297,12 @@ const importHistory = () => backToPairing(
             {{ display.hint }}
           </p>
         </div>
-        <ConnectionBadge :state="state" kind="whatsapp" />
+        <ConnectionBadge :state="state" kind="whatsapp" :lost="mode === 'lost'" />
       </div>
     </div>
 
     <!-- ── pairing ─────────────────────────────────────────────────────── -->
-    <Card v-if="!connected">
+    <Card v-if="mode === 'pairing'">
       <CardHeader>
         <CardTitle>Scan to connect</CardTitle>
         <CardDescription>
@@ -229,8 +331,35 @@ const importHistory = () => backToPairing(
       </CardContent>
     </Card>
 
-    <!-- ── connected ───────────────────────────────────────────────────── -->
+    <!-- ── connected, or was ───────────────────────────────────────────── -->
     <template v-else>
+      <!--
+        A dropped session keeps its profile and counts below: the phone is still
+        linked, and everything stored up to the drop is still readable.
+      -->
+      <div v-if="mode === 'lost'" class="space-y-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-4">
+        <div>
+          <p class="text-sm font-medium">
+            WhatsApp dropped this account's connection
+          </p>
+          <p class="mt-1 text-sm text-muted-foreground">
+            New messages are not arriving and nothing can be sent until it
+            reconnects. The phone is still linked, so reconnecting normally needs
+            no new QR code.
+          </p>
+        </div>
+
+        <p v-if="reconnectStalled" class="text-sm text-muted-foreground">
+          Evolution did not bring the connection back. Its session for this account
+          may be stuck — restarting {{ data?.instance.ownServer ? 'your Evolution server' : 'the Evolution server' }}
+          usually reconnects it without a new scan.
+        </p>
+
+        <Button size="sm" :disabled="reconnectBusy || reconnecting" @click="reconnect">
+          {{ reconnecting ? 'Reconnecting…' : reconnectStalled ? 'Try again' : 'Reconnect' }}
+        </Button>
+      </div>
+
       <Card>
         <CardContent class="flex items-center gap-4 pt-6">
           <img

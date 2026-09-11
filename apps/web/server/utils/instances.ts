@@ -15,7 +15,14 @@ export type { ConnectionState }
 // `Record<string, unknown>`, and interfaces have no implicit index signature, so
 // an interface here fails to typecheck at the tool that returns it.
 export type InstanceStatus = {
+  /** Evolution's live, in-memory state — not its stored column. See `getInstanceStatus`. */
   state: ConnectionState
+  /**
+   * The account was connected and its socket no longer is, with the phone still
+   * linked. Distinct from never having paired, and answered by reconnecting
+   * rather than by scanning a QR code.
+   */
+  sessionLost?: boolean
   profileName?: string
   profilePicUrl?: string
   number?: string
@@ -386,22 +393,40 @@ export async function updatePostgresDsn(instance: AppInstance, dsn: string): Pro
  * Evolution enforces the scoping, we do not have to filter. An unpaired or
  * unknown instance reports `close` and zeroes rather than throwing, because the
  * dashboard should render for an account that has never been paired.
+ *
+ * **The state does not come from `fetchInstances`.** Its `connectionStatus` is
+ * Evolution's database column, and 2.3.7 writes that column only when a socket
+ * opens and when one closes for a reason it will not retry (logged out,
+ * forbidden, 402, 406). Every other close — a lost network, a server-side
+ * termination — takes the retry path, which updates only the in-memory state.
+ * When that retry never lands, the column says `open` indefinitely over a dead
+ * socket, and a badge read from it says Connected for an account that has
+ * received nothing for days. That was a reported bug. `GET
+ * /instance/connectionState` reads the in-memory state, so it is asked
+ * alongside; the row still supplies the profile and the counts.
+ *
+ * If that second read fails the state is `unknown`, never the column's value —
+ * falling back to the column is the bug.
+ *
+ * `sessionLost` is the disagreement between the two, and it is what tells a
+ * dropped session from an account with no session at all. A fresh instance and
+ * a logout both leave the column `close`, and a QR on screen leaves it
+ * `connecting`; only a retried close leaves it `open` with nothing live behind it.
  */
 export async function getInstanceStatus(instance: AppInstance): Promise<InstanceStatus> {
   const evolution = evolutionClientForInstance(instance)
 
-  let rows: EvolutionInstanceRow[] = []
-  try {
-    rows = await evolution<EvolutionInstanceRow[]>('/instance/fetchInstances')
-  } catch {
-    return emptyStatus()
-  }
+  const [rows, live] = await Promise.all([
+    evolution<EvolutionInstanceRow[]>('/instance/fetchInstances').catch(() => undefined),
+    liveConnectionState(evolution, instance).catch(() => undefined),
+  ])
 
   const row = Array.isArray(rows) ? rows.find(r => r?.name === instance.name) ?? rows[0] : undefined
   if (!row) return emptyStatus()
 
   return {
-    state: normalizeState(row.connectionStatus),
+    state: live ?? 'unknown',
+    sessionLost: row.connectionStatus === 'open' && live !== undefined && live !== 'open',
     profileName: row.profileName ?? undefined,
     profilePicUrl: row.profilePicUrl ?? undefined,
     number: row.number ?? row.ownerJid?.split('@')[0],
@@ -413,6 +438,66 @@ export async function getInstanceStatus(instance: AppInstance): Promise<Instance
       contacts: row._count?.Contact ?? 0,
     },
   }
+}
+
+/**
+ * The state Evolution holds in memory for this instance's socket — the one that
+ * is true, see `getInstanceStatus`. An instance Evolution has not loaded at all
+ * answers with no state, which reads as `unknown`.
+ */
+async function liveConnectionState(evolution: EvolutionClient, instance: AppInstance): Promise<ConnectionState> {
+  const response = await evolution<{ instance?: { state?: string } }>(
+    `/instance/connectionState/${encodeURIComponent(instance.name)}`,
+  )
+  return normalizeState(response?.instance?.state)
+}
+
+/**
+ * Bring a dropped session back from its stored credentials, without a QR scan
+ * if they still hold.
+ *
+ * Which Evolution call does that depends on the live state, and the wrong one is
+ * a silent no-op:
+ *
+ *   close       `GET /instance/connect`. In `close` Evolution builds a new socket
+ *               from the stored credentials.
+ *   connecting  `POST /instance/restart`. `connect` in this state only returns
+ *               the cached QR object, so a socket that hung while connecting is
+ *               never replaced by it. Restart ends the socket, and Evolution's
+ *               close handler reconnects.
+ *   unknown     restart as well; Evolution answers that the instance does not
+ *               exist, which is the error worth surfacing.
+ *   open        nothing. This is also the one state in which neither call could
+ *               help if the socket were in fact dead: Baileys' `end()` returns
+ *               early on a socket it already closed, and both routes answer
+ *               `open` with the state.
+ *
+ * Either call can still leave the account needing a QR — rejected credentials
+ * make Evolution emit one — which the caller sees as a state it can pair from.
+ *
+ * Both routes catch their own failures and answer **200** with
+ * `{ error: true, message }`, so a resolved request is not a success.
+ */
+export async function reconnectInstance(instance: AppInstance): Promise<ConnectionState> {
+  const evolution = evolutionClientForInstance(instance)
+  const name = encodeURIComponent(instance.name)
+
+  const before = await liveConnectionState(evolution, instance)
+  if (before === 'open') return before
+
+  const response = before === 'close'
+    ? await evolution<EvolutionActionResponse>(`/instance/connect/${name}`)
+    : await evolution<EvolutionActionResponse>(`/instance/restart/${name}`, { method: 'POST' })
+
+  if (response?.error) {
+    // Handled, so Nitro would log nothing; the message is Evolution's own.
+    console.error(
+      `[instances] reconnect of ${instance.id} (${instance.name}) from state ${before} failed: ${response.message}`,
+    )
+    throw createError({ statusCode: 502, statusMessage: 'Evolution could not reconnect this account' })
+  }
+
+  return await liveConnectionState(evolution, instance)
 }
 
 /**
@@ -572,6 +657,12 @@ interface EvolutionInstanceRow {
   number?: string
   disconnectionAt?: string
   _count?: { Message?: number, Chat?: number, Contact?: number }
+}
+
+/** What `connect` and `restart` answer with when they failed — as a 200. */
+interface EvolutionActionResponse {
+  error?: boolean
+  message?: string
 }
 
 interface EvolutionSettings {
