@@ -34,7 +34,7 @@ const secondary = computed(() => {
               {{ secondary }}
             </CardDescription>
           </div>
-          <ConnectionBadge :state="instance.state" :kind="instance.kind" />
+          <ConnectionBadge :state="instance.state" :kind="instance.kind" :lost="instance.sessionLost" />
         </div>
       </CardHeader>
       <CardContent>

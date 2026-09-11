@@ -232,6 +232,22 @@ Ordering is ours now, and both queries end `ORDER BY "messageTimestamp" DESC, ke
 
 Paging chats is real, though: 2.3.7 maps `take` to `LIMIT` and `skip` to `OFFSET`, and `contactValidateSchema` sets no `additionalProperties: false`, so both survive the route validator — re-verify that on a tag bump. Two consequences for callers. The order is `updatedAt DESC`, which live traffic reshuffles, so an accumulating client dedupes by JID and pages from rows *received* rather than rows *kept*. And naming the rows costs Evolution's whole contact table (the endpoint filters to one JID, not to a set), so it goes through `contactDirectory()` — `fetchContacts` behind a 5-minute per-account cache — rather than being re-read on every page and again for every mention lookup. Only *successes* are cached: unlike the group and participant lookups this is a plain database read that answers while the account is disconnected, so a failure is a real fault to retry, not an offline state to back off from. `listChats` still swallows a failed **first** page — an empty list is the honest answer for a fresh account and must not break the scope picker — but rethrows on `skip > 0`, because a swallowed later page reads as the end of the list.
 
+## Connection state lives in two places, and only one is true
+
+`fetchInstances` returns `connectionStatus` from Evolution's **database** row. 2.3.7 writes that column when a socket opens and when it closes for a reason it will not retry (`loggedOut`, `forbidden`, 402, 406) — nowhere else. Every other close takes the retry path in `connectionUpdate`, which touches only the in-memory `stateConnection`, so if that retry never opens, the column says `open` indefinitely over a dead socket. Not hypothetical: production showed "Connected" for a week while every `/group/participants` call answered `428 Connection Closed`. `getInstanceStatus()` therefore takes `state` from `GET /instance/connectionState` (in-memory) and only the profile and counts from the row, and reports `unknown` — never the column — when the live read fails.
+
+`sessionLost` is the disagreement: column `open`, live anything else. It is what separates a dropped session from no session, because a fresh instance and a logout both leave the column `close` and a QR on screen leaves it `connecting`. The dashboard gives it its own mode with a **Reconnect** button (`POST /api/instances/:id/reconnect` → `reconnectInstance()`).
+
+Three things about reconnecting that are easy to get wrong:
+
+- **The call depends on the live state.** `connect` rebuilds the socket only in `close`; in `connecting` it returns the cached QR object and does nothing, so a socket that hung while connecting needs `restart`. In `open` neither helps even if the socket is dead — Baileys' `end()` returns early on a socket it already closed — which is also why there is no liveness probe: it could detect that state, but nothing could act on it.
+- **Both routes answer 200 with `{ error: true, message }` on failure.** A resolved request is not a success.
+- **The QR poll must never run against a lost session.** It calls `connect`, which in `close` builds a new socket on every tick; pointed at an instance Evolution cannot bring back, that is a WhatsApp login every two seconds. `applyMode` in `InstanceWhatsapp.vue` keeps that poll to pairing mode.
+
+A reconnect that has not landed within a minute means Evolution's own session for that account is stuck — most likely its serial event queue (`eventProcessingQueue`), which no API call replaces. Restarting the Evolution service recovers it without a scan, because `setInstance` auto-connects every row whose column is `open` or `connecting`, which a dropped session's column still is. The UI says so rather than leaving the button to be pressed forever.
+
+`CONNECTION_UPDATE` webhooks would not have caught this: the retry path sends none, and the webhook is sent from inside that same queue. Re-verify all of the above on a tag bump — the column writes in `connectionUpdate`, `codesToNotReconnect`, the per-state branches of `connectToWhatsapp` and `restartInstance`, and `setInstance`'s auto-connect condition.
+
 ## Mentions are resolved from `contextInfo`, never from the text
 
 WhatsApp writes an @-mention as the bare local part of the mentioned JID, and in a
@@ -304,7 +320,7 @@ The other half of the trap: only the *per-instance* webhook sends custom headers
 
 `requireOwnedInstance()` and `revokeToken()` return **404**, not 403, when a record belongs to someone else. A 403 confirms the id exists and turns the route into a probe for other users' data.
 
-`requireOwnedInstanceOfKind()` answers 404 for the *wrong kind* too, for the same reason: the route genuinely does not exist for that connection, and a distinguishable error would confirm which id is which kind. The five WhatsApp-only routes — `qr`, `logout`, `resync`, `chats/*` — go through it.
+`requireOwnedInstanceOfKind()` answers 404 for the *wrong kind* too, for the same reason: the route genuinely does not exist for that connection, and a distinguishable error would confirm which id is which kind. The WhatsApp-only routes — `qr`, `logout`, `resync`, `reconnect`, `chats/*` — go through it.
 
 ## PocketBase
 

@@ -36,6 +36,8 @@ export interface InstanceListRow {
   kind: InstanceKind
   label: string
   state: ConnectionState
+  /** WhatsApp only: was connected, and Evolution's live socket no longer is. */
+  sessionLost?: boolean
   target?: string
   detail?: string
   profileName?: string

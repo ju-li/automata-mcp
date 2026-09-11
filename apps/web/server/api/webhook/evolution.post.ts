@@ -22,6 +22,14 @@
  * Delivery is also gated upstream: Evolution only sends an event whose
  * WEBHOOK_EVENTS_<EVENT> flag is true, each of which defaults to false. See the
  * evolution service in docker-compose.dev.yml.
+ *
+ * Not the place to learn connection state from, even once built. In 2.3.7 a
+ * close that Evolution retries sends no `connection.update` at all, and the
+ * webhook is sent from inside the same event queue that has to be healthy for
+ * anything to arrive — so the dropped session this would most want to report is
+ * the one it never hears about. The dashboard reads Evolution's live state
+ * instead (`getInstanceStatus`). Worth building together with alerting, with a
+ * `connectionState` poller as the backstop.
  */
 export default defineEventHandler(async (event) => {
   const { webhookSecret } = useRuntimeConfig()
