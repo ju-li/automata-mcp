@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { LogOutIcon, MessageCircleIcon } from '@lucide/vue'
+import { LogOutIcon } from '@lucide/vue'
 
 const { user, logout } = useSession()
 </script>
@@ -8,9 +8,8 @@ const { user, logout } = useSession()
   <div class="min-h-screen bg-background text-foreground">
     <header v-if="user" class="border-b">
       <div class="mx-auto flex h-14 max-w-5xl items-center justify-between gap-4 px-6">
-        <NuxtLink to="/instances" class="flex items-center gap-2 font-heading font-semibold">
-          <MessageCircleIcon class="size-5" />
-          <span>MCP Controller</span>
+        <NuxtLink to="/instances">
+          <AppLogo />
         </NuxtLink>
 
         <div class="flex items-center gap-3">
