@@ -14,30 +14,36 @@ connection:
 - **PostgreSQL**, through a connection string the user supplies. Read-only
   unless a token is explicitly granted the write tool.
 
-PocketBase is the backend (users, sessions, connections and their credentials).
-Evolution API, its Postgres and its Redis are dependencies you run **only if you
-want WhatsApp connections** — they sit behind a compose profile, and
-`NUXT_EVOLUTION_URL` / `NUXT_EVOLUTION_ADMIN_KEY` are optional. If you do want
-them, `NUXT_EVOLUTION_DATABASE_URL` is **required** — both WhatsApp read tools go
-through it. See "Reading and searching messages".
+PocketBase is the app's own database (users, sessions, connections and their
+credentials). Evolution API, its Postgres and its Redis are dependencies you run
+**only if you want WhatsApp connections** — they sit behind a compose profile,
+and `NUXT_EVOLUTION_URL` / `NUXT_EVOLUTION_ADMIN_KEY` are optional. If you do
+want them, `NUXT_EVOLUTION_DATABASE_URL` is **required** — both WhatsApp read
+tools go through it. See "Reading and searching messages".
 
-> **Status.** Sign-up, WhatsApp pairing, the per-connection dashboard, connector
-> token provisioning with per-chat and per-table scoping, and history import all
-> work. Ten MCP tools — five for WhatsApp (connection status, chat listing,
-> message reading, message search and text sending) and five for Postgres
-> (database info, table listing, table description, read-only query and
-> data-modifying statement). Webhook event handling is not built;
-> `/api/webhook/evolution` is a stub that logs and acks.
+> **Status.** Sign-up, both connection kinds (WhatsApp paired by QR with its
+> history imported, Postgres by connection string), the per-connection
+> dashboard, and connector token provisioning with per-chat and per-table
+> scoping all work. Ten MCP tools, five per kind — see "MCP tools". Webhook
+> event handling is not built; `/api/webhook/evolution` is a stub that logs and
+> acks.
 
 ## Layout
 
 ```
-apps/web/                    Nuxt 4 + TypeScript. Has its own Dockerfile.
-  app/                       pages, layouts, components (shadcn-vue)
+apps/web/                    Nuxt 4 + TypeScript. Own Dockerfile, built from the repo root.
+  app/pages/                 login, signup, instances/{index,new,[id]}
+  app/components/            app components + ui/ (shadcn-vue)
+  app/composables/           session, connection state, token scope, API actions
   modules/                   local Nuxt modules (registers /mcp/:token)
-  server/api/                auth, instances, tokens
-  server/mcp/                MCP handler + tools
-  server/utils/              PocketBase, auth, instances, Evolution client, redaction
+  shared/                    types used by both the app and the server
+  server/api/                auth, instances, tokens, webhook stub
+  server/mcp/index.ts        MCP handler + auth middleware
+  server/mcp/tools/<kind>/   one file per tool: whatsapp/, postgres/
+  server/plugins/            token redaction, per-kind instructions, startup check
+  server/utils/              PocketBase, auth, instances, tokens, Evolution client and
+                             message database, mentions, outbound host guard,
+                             Postgres pool / plan guard / runner / catalog
 services/pocketbase/         pinned PocketBase image + committed schema
 docker-compose.dev.yml       services only — NOT Nuxt
 .zed/                        tasks + language server config
@@ -76,7 +82,7 @@ Then start Nuxt **on the host** (it is deliberately not in compose, so you keep 
 pnpm dev                      # http://localhost:3000
 ```
 
-Admin UI: <http://localhost:8090/_/> · Evolution: <http://localhost:8080> · Nuxt: <http://localhost:3000>
+Admin UI: <http://localhost:8090/_/> · Evolution (WhatsApp profile): <http://localhost:8080> · Nuxt: <http://localhost:3000>
 
 There is no `predev` hook — bring the services up yourself.
 
@@ -86,7 +92,7 @@ There is no `predev` hook — bring the services up yourself.
 |---|---|
 | `pnpm dev` | Nuxt dev server on the host |
 | `pnpm build` / `pnpm preview` | production build / serve it |
-| `pnpm typecheck` | `nuxt typecheck` across app + server |
+| `pnpm typecheck` | `nuxt typecheck` across app + server — the only automated check |
 | `pnpm services:up` | PocketBase only |
 | `pnpm services:up:whatsapp` | + Evolution, its Postgres and Redis |
 | `pnpm services:down` / `:logs` / `:ps` | the whole stack, profile included |
@@ -99,7 +105,13 @@ Traffic crosses the host/container boundary in both directions.
 |---|---|---|
 | Nuxt (host) | Evolution | `http://localhost:8080` |
 | Nuxt (host) | PocketBase | `http://localhost:8090` |
+| Nuxt (host) | Evolution's Postgres | `localhost:5432` (read-only role, see below) |
 | Evolution (container) | Nuxt webhook | `http://host.docker.internal:3000/api/webhook/evolution` |
+
+Postgres (`5432`), Redis (`6379`) and Evolution (`8080`) publish on `127.0.0.1`
+only: their dev credentials have defaults, and between them they hold — and can
+send from — every paired account. PocketBase publishes `8090` on every
+interface.
 
 `host.docker.internal` is not resolvable in Linux containers by default, so the
 evolution service declares `extra_hosts: ["host.docker.internal:host-gateway"]`.
@@ -168,23 +180,29 @@ back to the browser session.**
 | Credential | PocketBase session cookie | `Authorization: Bearer <token>`, or `/mcp/<token>` |
 | Resolved by | `server/middleware/session.ts` → `server/utils/session.ts` | `server/mcp/index.ts` → `server/utils/mcp-auth.ts` |
 | Context key | `event.context.user` | `event.context.mcpAuth` |
+| Backend client | `evolutionClientForInstance(instance)` / `pgFor(instance)` | `useEvolutionClient()` / `pgFor(instance)` |
 | On failure | 401 JSON | **401 + `WWW-Authenticate`** — never 200 |
 
 `server/middleware/session.ts` returns early on `/mcp`, so cookies are never even
-parsed there. `useEvolutionClient()` (used by tools) reads `event.context.mcpAuth`
-and has no code path to the session user.
+parsed there. `useEvolutionClient()` (used by tools) reads `event.context.mcpAuth`,
+has no code path to the session user, and refuses a connection that is not a
+WhatsApp one.
 
 The MCP token is minted by this app — it is **not** Evolution's `apikey`. Only its
 SHA-256 hash is stored, in the superuser-only `mcp_tokens` collection, alongside
-`last_used_at` and `expires_at`. It resolves to one row in `instances`, which
-holds that account's Evolution token server-side.
+`last_used_at` and `expires_at`. It resolves to one row in `instances` — the
+connection — which holds that connection's credentials server-side: an Evolution
+token for WhatsApp, a connection string for Postgres.
 
-**Evolution's global key never reaches a user record.** It is used only to create
-and delete instances (`server/utils/instances.ts`). Every other call uses the
-per-instance token Evolution issues at create time, which Evolution itself scopes
-to that one instance. There is deliberately no fallback from a missing
-per-instance key to the global one — that would hand any token holder access to
-every user's account.
+**This deployment's Evolution global key never reaches a user record.** It is
+used only to create and delete instances on this deployment's server
+(`server/utils/instances.ts`). Every other call uses the per-instance token
+Evolution issues at create time, which Evolution itself scopes to that one
+instance. There is deliberately no fallback from a missing per-instance key to
+the global one — that would hand any token holder access to every user's
+account. A bring-your-own connection stores *its own* server's global key on its
+row, hidden, for the same two operations against that server only. Neither key
+is ever sent to the other's server.
 
 A PocketBase outage answers **503**, not 401 — a 401 would tell a client its
 valid token had been revoked and invite it to throw the token away.
@@ -197,29 +215,72 @@ through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
 ### Using it
 
 1. Sign up at <http://localhost:3000>.
-2. Name the account and continue — the app provisions an Evolution instance for
-   you and shows a QR code.
-3. Scan it: WhatsApp → Settings → Linked devices → Link a device.
-4. On the account page, create a connector token and copy the URL it shows.
-5. Add that URL to Claude as a custom connector.
+2. Create a connection: pick **WhatsApp account** or **PostgreSQL database**, and
+   name it.
+3. **WhatsApp:** continue to the QR code and scan it — WhatsApp → Settings →
+   Linked devices → Link a device. To use an Evolution server other than this
+   app's, tick **Use my own Evolution API server** first (see "Bring your own
+   Evolution server").
+   **Postgres:** paste a connection string. It is proved by connecting before
+   anything is saved (see "Database connections").
+4. On the connection's dashboard, create a **New connector token**: a name, an
+   expiry (30 days, 90 days — the default — 1 year, or never) and a scope.
+5. Add it to Claude. The **How to connect** dialog has the steps for Claude.ai
+   (Settings → Connectors → Add custom connector), Claude Code
+   (`claude mcp add --transport http <name> <url>`), clients that send an
+   `Authorization: Bearer` header, and the MCP Inspector.
 
-**One WhatsApp account per connector.** A token is bound to the account it was
-created on, so the tools take no account argument and Claude cannot address the
-wrong number. Connect several accounts and give each its own token.
+**One connection per connector.** A token is bound to the connection it was
+created on, so no tool takes a connection argument, and Claude cannot address the
+wrong number or the wrong database. Connect several and give each its own token.
+
+### MCP tools
+
+Every tool is gated twice: by the connection's kind — a Postgres token never sees
+a WhatsApp tool, whatever its scope — and by the token's scope. The server also
+sends per-kind instructions telling the model how to page and how to read what
+comes back.
+
+| Tool | Kind | | What it does |
+|---|---|---|---|
+| `get-connection-status` | WhatsApp | read | Whether the account is paired and connected (`open`) |
+| `list-chats` | WhatsApp | read | Conversations in scope, most recently active first, with the `jid` other tools take; says `hasMore` when it returned one page of several |
+| `read-messages` | WhatsApp | read | One chat, newest first, 1–200 per page (default 50), optional `since` / `until`; reports `hasMore`, `nextPage`, `covered` and `totalMatching` |
+| `search-messages` | WhatsApp | read | Messages containing every word of `query`, across chats in scope or one `jid`; optional date range and `fromMe`; up to 100 matches (default 20) |
+| `send-text-message` | WhatsApp | **write** | Send text to a number in international format |
+| `get-database-info` | Postgres | read | Server version, database, connecting role, and what this token is scoped to |
+| `list-tables` | Postgres | read | Tables in scope, filterable by schema and name, paged (1–500, default 100) |
+| `describe-table` | Postgres | read | Columns, keys, constraints, indexes and comments for one table |
+| `run-query` | Postgres | read | One `SELECT` / `WITH` / `VALUES` / `TABLE` in a read-only transaction; stops at `maxRows` (≤ 1000, default 200); 10 s timeout by default, 30 s max |
+| `run-statement` | Postgres | **write, destructive** | One `INSERT` / `UPDATE` / `DELETE` / `MERGE`; rolled back whole if it would change more than `maxRows` (default 100); no `WHERE` refused without `allowWholeTable`; 15 s timeout by default, 60 s max |
+
+`read-messages` and `search-messages` leave reactions out unless called with
+`includeReactions: true`, and say so with `reactionsExcluded`.
 
 ### Scoping a token
 
-A token can be narrowed on two independent axes, both edited from the account page:
+A token is narrowed on independent axes, set when it is created and editable from
+the connection's dashboard. Which axes appear depends on the kind:
 
-- **Actions** — all tools, or a chosen few. Enforced by refusing to register the
-  others for that request, so a tool outside scope is not merely hidden from the
-  tool list: calling it fails.
-- **Chats** — all conversations, or an allowlist. `list-chats` returns only
-  allowed conversations; `read-messages` and `send-text-message` refuse anything
-  else, naming the chat so the assistant can explain why. `search-messages` does
-  both: asked for a chat outside scope it refuses by name, while an unrestricted
-  search is narrowed to the allowed chats — out-of-scope messages are excluded by
-  the query itself, not filtered out after being read.
+- **Actions** (both kinds) — all tools, or a chosen few, listed from the
+  connection's own kind. Enforced by refusing to register the others for that
+  request, so a tool outside scope is not merely hidden from the tool list:
+  calling it fails. A new Postgres token starts read-only — the read tools
+  ticked, `run-statement` not.
+- **Chats** (WhatsApp) — all conversations, or an allowlist. `list-chats` returns
+  only allowed conversations; `read-messages` and `send-text-message` refuse
+  anything else, naming the chat so the assistant can explain why.
+  `search-messages` does both: asked for a chat outside scope it refuses by name,
+  while an unrestricted search is narrowed to the allowed chats — out-of-scope
+  messages are excluded by the query itself, not filtered out after being read.
+- **Tables** (Postgres) — every table the connecting role can read, or an
+  allowlist. `list-tables` and `describe-table` apply it in their own SQL, so a
+  table outside it is neither listed nor described. `run-query` and
+  `run-statement` check the statement's query plan before a row is read and
+  refuse anything that touches a table outside it. Names match case-sensitively
+  (`public.Orders` is not `public.orders`), and allowing a partitioned table
+  allows its partitions. What this does and does not protect against is in
+  "Database connections".
 
 The chat picker lists conversations Evolution has recorded — the history imported
 at pairing, plus everything since. An account paired before full-history sync was
@@ -236,7 +297,7 @@ disconnected, the message is not sent rather than sent unchecked.
 
 The token is shown exactly once — only its SHA-256 hash is stored. Lost tokens
 are replaced, not recovered. Revoking one takes effect immediately, and revoking
-stays available while an account is disconnected.
+stays available while an account is disconnected or a database is unreachable.
 
 Inspect the endpoint by hand with:
 
@@ -249,11 +310,12 @@ with an `Authorization: Bearer <token>` header.
 
 ### Reading and searching messages
 
-`NUXT_EVOLUTION_DATABASE_URL` is **required**. Both `read-messages` and
-`search-messages` read Evolution's Postgres directly, and neither can answer
-without it — pairing, `list-chats` and `send-text-message` still work, and the app
-says so once at startup. It is the one part of this app that does not go through
-the Evolution API, for two separate reasons.
+`NUXT_EVOLUTION_DATABASE_URL` is **required** for accounts on this deployment's
+Evolution server. Both `read-messages` and `search-messages` read Evolution's
+Postgres directly, and neither can answer without it — pairing, `list-chats` and
+`send-text-message` still work, and the app says so once at startup. It is the one
+part of this app that does not go through the Evolution API, for two separate
+reasons.
 
 **Searching.** Evolution 2.3.7 cannot search message content. `POST
 /chat/findMessages` accepts a `where.message` — its request schema even documents
@@ -317,7 +379,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
   ON "Message" ("instanceId", "messageTimestamp" DESC);
 ```
 
-Two caveats worth knowing before you go looking for a bug:
+Worth knowing before you go looking for a bug:
 
 - Both cover whatever Evolution holds: the history imported at pairing plus
   everything since. An account paired before full-history sync was turned on has
@@ -326,6 +388,10 @@ Two caveats worth knowing before you go looking for a bug:
   messages and can be quoted as an answer. It will often be smaller than the row
   count Evolution's own API reports for the same range. The two are not
   comparable, and the smaller one is the true one.
+- **The dashboard's chat count and `list-chats` count different things.** The
+  count is every conversation the phone listed at pairing; `list-chats` lists
+  conversations Evolution holds messages for, which is routinely fewer. The gap
+  is not more pages — `hasMore` is the only signal that there are.
 - The scope editor lists the tools of the connection's own kind, and lists both
   read tools whether or not the database URL is set. It deliberately does not
   hide a tool with an unmet prerequisite: both read tools need that URL, so
@@ -335,10 +401,10 @@ Two caveats worth knowing before you go looking for a bug:
   variable names one database — the one belonging to the Evolution server this
   app is configured with — and a bring-your-own connection's messages live in
   that server's database instead. Supply it when creating the connection, or from
-  its dashboard afterwards; it is stored on the connection, not here. Until then
-  reads answer 501 naming the missing setting rather than matching nothing and
-  reporting an empty conversation. Pairing, chat listing and sending never need
-  it.
+  its dashboard afterwards (**Enable reading**); it is stored on the connection,
+  not here. Until then reads answer 501 naming the missing setting rather than
+  matching nothing and reporting an empty conversation. Pairing, chat listing and
+  sending never need it.
 
   Same shape of role as above, in *your* database:
 
@@ -361,7 +427,10 @@ ports").
 
 A user pastes a PostgreSQL connection string; nothing is provisioned. The DSN is
 proved by connecting *before* the row is written, so a typo is a failed create
-rather than a connection that fails every later tool call.
+rather than a connection that fails every later tool call. **Change connection
+string** on the dashboard is checked the same way, and does not invalidate
+tokens: they name the connection, not the credential, so rotating a password
+never means reissuing them.
 
 **Give it a role that can do only what you need.** A connector token can be
 scoped to specific tables, and every statement is checked against the query plan
@@ -384,14 +453,39 @@ string. For a token that should also write, grant the specific
 `INSERT`/`UPDATE`/`DELETE` you intend and tick the write action when minting it —
 it is off by default.
 
+What the checks do enforce, on every statement:
+
+- **One statement.** Sent over the extended protocol, where Postgres itself
+  refuses anything after a `;`.
+- **Only tables in scope.** Read off `EXPLAIN (FORMAT JSON, VERBOSE)` — never
+  `EXPLAIN ANALYZE`, which would execute it — inside the same transaction as the
+  statement, so a view cannot be repointed between the check and the run.
+- **No functions that reach outside the query.** Calls are resolved against
+  `pg_proc` from both the statement text and the plan. Anything outside
+  `pg_catalog`, anything `SECURITY DEFINER`, and a denylist of builtins such as
+  `pg_read_file`, `lo_import`, `dblink` and `pg_sleep` are refused. The text is
+  scanned *before* `EXPLAIN` because Postgres folds an `IMMUTABLE` function with
+  constant arguments during planning, leaving only its result in the plan.
+- **Writes only through `run-statement`**, and only `INSERT`/`UPDATE`/`DELETE`/
+  `MERGE`. DDL, `TRUNCATE`, `COPY` and `CREATE TABLE AS` are refused, and
+  `run-query` runs in a read-only transaction.
+- **Bounded writes.** A statement that would change more rows than its `maxRows`
+  is rolled back whole, and an `UPDATE` or `DELETE` with no `WHERE` needs
+  `allowWholeTable: true`.
+
 **Outbound host guard.** A connection string is an address a user chose, so by
 default this server refuses one that resolves to a private or loopback address:
 without that, `postgres://…@postgres:5432/evolution` pasted into the form reaches
 this deployment's own database, which holds every user's messages. Set
 `NUXT_ALLOW_PRIVATE_TARGETS=true` for local development and single-tenant
-self-hosting, and leave it off for anything shared. Independently of that
-setting, a target resolving to this deployment's own PocketBase, Evolution or
-Evolution database is always refused.
+self-hosting — `.env.example` sets it; the app defaults to off — and leave it off
+for anything shared. Independently of that setting, a target resolving to this
+deployment's own PocketBase, Evolution or Evolution database is always refused.
+
+The guard runs whenever a connection is opened, not only when it is saved, so
+turning the setting off stops existing connections to private addresses. The
+approved address is pinned, so the driver cannot resolve the name to somewhere
+else afterwards — except for an IPv6 address, which is checked but not pinned.
 
 ### Bring your own Evolution server
 
@@ -406,36 +500,81 @@ With `NUXT_EVOLUTION_URL` and `NUXT_EVOLUTION_ADMIN_KEY` unset there is no
 default server, and supplying one becomes required to create a WhatsApp
 connection. Everything else in the app still works.
 
+Server URLs are compared by origin, so a trailing slash on `NUXT_EVOLUTION_URL`
+does not reclassify this deployment's own connections as bring-your-own. If a
+connection's server has no global key available any more — the variables were
+unset, or the row no longer matches the configured server — deleting it still
+removes the row and its tokens, and logs the instance left behind on that server.
+
 ### Adding tools
 
 Drop a file in `apps/web/server/mcp/tools/<kind>/` — it is discovered
-automatically, and the directory sets the tool's `group`, which is what gates it
-to that kind of connection. Keep the basename globally unique: collisions are
-detected across groups, and two tools with one name make the MCP server throw.
-Give every tool a `title` and the applicable `readOnlyHint` / `destructiveHint`;
-see `get-connection-status.ts` (read) and `send-text-message.ts` (write) for the
-pattern.
+automatically — and define it with `defineKindTool` from
+`server/utils/mcp-kind-tool.ts` rather than `defineMcpTool` directly:
 
-Also give it an explicit `name` and an `enabled` guard so it participates in
-token scoping, and enforce chat scope in the handler if it touches a
-conversation. Existing scoped tokens will not be granted the new tool — they list
-the tools they were given, so new tools are denied by default.
+```ts
+export default defineKindTool({
+  name: 'my-tool',
+  kind: 'postgres',
+  title: 'Shown in client UI',
+  description: 'Written for the model.',
+  annotations: { readOnlyHint: true, destructiveHint: false },
+  inputSchema: { /* zod shape */ },
+  handler: async (args) => { /* … */ },
+})
+```
+
+`kind` sets the tool's `group` and its `enabled` gate, so it registers only for a
+connection of that kind and only for a token whose scope allows it. Declaring the
+kind once is what makes a WhatsApp tool unreachable from a Postgres token. An
+optional `available()` adds a deployment-level prerequisite.
+
+Keep the basename globally unique: collisions are detected across groups, and two
+tools with one name make the MCP server throw. Give every tool an explicit
+`name`, a `title` and accurate `readOnlyHint` / `destructiveHint`; see
+`whatsapp/get-connection-status.ts` (read) and `postgres/run-statement.ts`
+(write) for the pattern. `enabled` cannot see arguments, so anything that
+depends on them belongs in the handler: enforce chat scope there if the tool
+touches a conversation, and run SQL through `server/utils/pg-run.ts`, which
+applies the table checks. Existing scoped tokens will not be granted the new
+tool — they list the tools they were given, so new tools are denied by default.
 
 Tool handlers get the MCP SDK's `RequestHandlerExtra`, not an H3 event, so
-credentials are reached through `useEvolutionClient()` → `useEvent()`. That is why
+credentials are reached through `useMcpAuth()`, `useEvolutionClient()` and
+`pgFor()`, which all go through `useEvent()`. That is why
 `nitro.experimental.asyncContext` is enabled in `nuxt.config.ts` — do not turn it off.
 
 ## PocketBase schema
 
-`users` holds accounts. `instances` holds one row per connected WhatsApp number,
-including that instance's Evolution token as a `hidden` field. `mcp_tokens` holds
-hashed connector tokens, each bound to one instance and cascade-deleted with it.
-All three collections are superuser-only — the browser never talks to PocketBase,
-so the session cookie is `httpOnly` and every read goes through a Nuxt route.
+`users` holds accounts; an account can read only its own record. `instances`
+holds one row per connection, with a `kind` of `whatsapp` or `postgres`:
+
+- **WhatsApp** — the Evolution instance's `name` and `instance_id`, its
+  `base_url`, and the per-instance `api_key`. A bring-your-own connection also
+  carries its server's `admin_key` and, once supplied, `evolution_db_url`.
+- **Postgres** — the `dsn`, plus `pg_host`, `pg_port` and `pg_database` for
+  display.
+
+`mcp_tokens` holds hashed connector tokens — `token_hash`, `label`,
+`last_used_at`, `expires_at`, `revoked` and six scope columns — each bound to one
+instance and cascade-deleted with it; instances cascade with their user.
+`instances` and `mcp_tokens` are superuser-only — the browser never talks to
+PocketBase, so the session cookie is `httpOnly` and every read goes through a
+Nuxt route.
+
+`api_key`, `admin_key`, `dsn` and `evolution_db_url` are `hidden` fields: absent
+from every API response, including to the owning user, but **not encrypted** —
+they sit in clear in `pb_data` and in every backup.
 
 `services/pocketbase/pb_migrations/` is committed and is the source of truth.
 `pb_migrations/` and `pb_hooks/` are bind-mounted, so schema changes you make in
-the admin UI are written straight back into the working tree — commit them.
+the admin UI are written straight back into the working tree — commit them. A
+PocketBase restart is what applies new migration files.
+
+Restarting PocketBase also rotates the superuser's token key (the entrypoint's
+`superuser upsert` does that). The app notices the rejected token, signs in again
+and retries once, logging `superuser token rejected … re-authenticating and
+retrying once` — expected after a restart, not a fault.
 
 `pb_data/` is gitignored runtime state. The container runs as root, so on Linux
 the directory ends up root-owned; remove it through a container:
@@ -465,10 +604,11 @@ scanned:
 | A fresh device link | scanning the QR | Reconnecting an existing session sends no history |
 
 New accounts get all three automatically. An account paired before this was
-turned on cannot be backfilled in place — **Import full history** on the account
-page sets the flag, signs the device out and puts the QR back up; the import
-rides in on the re-scan. Nothing already stored is lost: Evolution skips messages
-whose `key.id` it already has, so re-importing merges rather than duplicates.
+turned on cannot be backfilled in place — **Import full history** on the
+connection's dashboard sets the flag, signs the device out and puts the QR back
+up; the import rides in on the re-scan. Nothing already stored is lost: Evolution
+skips messages whose `key.id` it already has, so re-importing merges rather than
+duplicates.
 
 Watch it land with `pnpm services:logs` while scanning:
 
@@ -509,13 +649,15 @@ docker compose -f docker-compose.dev.yml down     # no -v
 
 ## Deploying to Railway
 
-Five services. Two are built from this repo, three you provision.
+Up to five services. Two are built from this repo; the other three you provision
+only if you want WhatsApp connections. A deployment that serves database
+connections alone is **pocketbase** and **web**.
 
 | Service | Source | Target port | Volume |
 |---|---|---|---|
-| **Postgres** | Railway template | — | managed |
-| **Redis** | Railway template | — | managed |
-| **evolution** | image `evoapicloud/evolution-api:v2.3.7` | 8080 | `/evolution/instances` |
+| **Postgres** *(WhatsApp only)* | Railway template | — | managed |
+| **Redis** *(WhatsApp only)* | Railway template | — | managed |
+| **evolution** *(WhatsApp only)* | image `evoapicloud/evolution-api:v2.3.7` | 8080 | `/evolution/instances` |
 | **pocketbase** | this repo, root directory `services/pocketbase` | 8090 | `/pb_data` |
 | **web** | this repo, root directory `/`, Dockerfile path `apps/web/Dockerfile` | 3000 | — |
 
@@ -525,7 +667,7 @@ directory.
 
 > **The volumes are not optional.** Without `/evolution/instances`, every deploy
 > unpairs every WhatsApp account and forces a fresh QR scan on each one. Without
-> `/pb_data`, you lose all users, connected accounts and tokens.
+> `/pb_data`, you lose all users, connections and tokens.
 >
 > Attach them in each service's settings. Railway rejects a `VOLUME` instruction
 > in a Dockerfile — *"docker VOLUME at Line N is not supported, use Railway
@@ -555,7 +697,7 @@ table above.
 Use Railway's variable references (`${{Service.VAR}}`) so a rotated secret
 propagates instead of drifting out of sync.
 
-**evolution**
+**evolution** *(WhatsApp only)*
 
 ```
 SERVER_PORT=8080
@@ -590,7 +732,7 @@ go quiet.
 that one covers the history WhatsApp hands over *once*, when a number is paired.
 Evolution checks it in the `messaging-history.set` handler and silently drops the
 whole payload if it is false — with no way to ask for the history again short of
-disconnecting and re-scanning the QR. See "Importing existing history" below.
+disconnecting and re-scanning the QR. See "Importing existing history" above.
 
 **web** — internal addresses for the backends, public URLs for anything a user sees:
 
@@ -598,11 +740,14 @@ disconnecting and re-scanning the QR. See "Importing existing history" below.
 NUXT_POCKETBASE_URL=http://pocketbase.railway.internal:8090   # matches PORT=8090 above
 NUXT_POCKETBASE_ADMIN_EMAIL=<you>
 NUXT_POCKETBASE_ADMIN_PASSWORD=<generate>
+NUXT_PUBLIC_APP_URL=https://<web-domain>
+
+# WhatsApp only
 NUXT_EVOLUTION_URL=http://evolution.railway.internal:8080    # matches SERVER_PORT above
 NUXT_EVOLUTION_ADMIN_KEY=${{evolution.AUTHENTICATION_API_KEY}}
+NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:<password>@<postgres-private-host>:<port>/<database>
 NUXT_WEBHOOK_URL=https://<web-domain>/api/webhook/evolution
-NUXT_WEBHOOK_SECRET=<openssl rand -hex 32>
-NUXT_PUBLIC_APP_URL=https://<web-domain>
+NUXT_WEBHOOK_SECRET=
 ```
 
 `NUXT_PUBLIC_APP_URL` is what connector URLs are built from. Get it wrong and
@@ -610,6 +755,19 @@ every token you hand out points at the wrong host.
 
 `NUXT_EVOLUTION_ADMIN_KEY` is the most sensitive value in the deployment: it can
 create, read and delete every user's WhatsApp connection.
+
+`NUXT_EVOLUTION_DATABASE_URL` points at the same Postgres service Evolution uses,
+but as the read-only role from "Reading and searching messages" — create it
+there first. Do not reference `${{Postgres.DATABASE_URL}}`: that is the
+database's owner, and this connection reaches every user's messages.
+
+**Leave `NUXT_WEBHOOK_SECRET` empty.** The global webhook configured above sends
+no custom headers, so any value turns every delivery into a 401 — which Evolution
+treats as non-retryable and drops. It only becomes useful once per-instance
+webhooks are registered with an `x-webhook-secret` header.
+
+**Leave `NUXT_ALLOW_PRIVATE_TARGETS` unset.** It defaults to off, which is right
+for any deployment more than one person uses — see "Database connections".
 
 ### First run
 
@@ -627,9 +785,9 @@ Because the upsert runs every boot, rotating the password is editing the variabl
 on both services and redeploying. Look for `[entrypoint] superuser ready:` in the
 pocketbase logs to confirm.
 
-That account can read every user's Evolution API key. Give it a long password —
-PocketBase's CLI will accept a short one without complaint, though the entrypoint
-warns.
+That account can read every stored credential — Evolution keys, connection
+strings and message database URLs. Give it a long password — PocketBase's CLI
+will accept a short one without complaint, though the entrypoint warns.
 
 Then open the web service's domain and sign up.
 
