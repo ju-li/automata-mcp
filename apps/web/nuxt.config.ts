@@ -65,10 +65,12 @@ export default defineNuxtConfig({
     // user-supplied server carries its own key on the instance row instead; the
     // two are never cross-paired.
     evolutionAdminKey: '',
-    // Read-only connection to Evolution's own Postgres, for message search only.
-    // Optional: unset, the search tool is not registered. This reaches every
-    // user's messages, so the role behind it must be SELECT-only — see
-    // server/utils/evolution-db.ts and README "Message search".
+    // Read-only connection to Evolution's own Postgres, behind both
+    // `read-messages` and `search-messages`. Unset, both fail for accounts on the
+    // default server (announced once at startup); a bring-your-own connection
+    // carries its own URL instead. This reaches every user's messages, so the
+    // role behind it must be SELECT-only — see server/utils/evolution-db.ts and
+    // README "Reading and searching messages".
     evolutionDatabaseUrl: '',
 
     // Let a user-supplied Postgres DSN or Evolution URL point at a private or
