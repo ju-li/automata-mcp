@@ -310,7 +310,7 @@ The other half of the trap: only the *per-instance* webhook sends custom headers
 
 Two clients in `server/utils/pocketbase.ts`, and the distinction is a security boundary:
 
-- `pocketbaseAdmin()` — memoized superuser client, re-auths on expiry, concurrent callers share one in-flight request. Reads the hidden fields (`api_key`, `admin_key`, `dsn`) and `mcp_tokens`. **Never build a filter for it from user input** (use `pb.filter()` with bindings, as `mcp-auth.ts` does).
+- `pocketbaseAdmin()` — memoized superuser client, re-auths on expiry *and* when PocketBase rejects an unexpired token (a restart rotates the key through `superuser upsert`; that request is retried once), concurrent callers share one in-flight request. Reads the hidden fields (`api_key`, `admin_key`, `dsn`) and `mcp_tokens`. **Never build a filter for it from user input** (use `pb.filter()` with bindings, as `mcp-auth.ts` does).
 - `pocketbaseForRequest()` — fresh unauthenticated client per request, loaded with the caller's own cookie. Its auth store must never be shared across requests, and must never overwrite the admin store's.
 
 `pb_migrations/` and `pb_hooks/` are **COPYed into the PocketBase image**, and also bind-mounted in development. The mount shadows the baked copy, which is what lets schema edits made in the admin UI land back in the repo — but the baked copy is the only one that exists in production. A change that removes the COPY ships a deployment with no collections at all.
