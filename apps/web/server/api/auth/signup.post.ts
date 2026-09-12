@@ -7,6 +7,8 @@ const body = z.object({
   // rather than surfacing its validation payload.
   password: z.string().min(8, 'Password must be at least 8 characters'),
   name: z.string().max(100).optional(),
+  /** Signing up through an invitation link joins that organization instead. */
+  invite: z.string().max(200).optional(),
 })
 
 /**
@@ -25,13 +27,35 @@ const body = z.object({
  * with no transaction between them, so the one that can be undone is the one
  * that goes first.
  *
+ * Signing up **through an invitation** joins that organization instead, and
+ * creates no solo organization — otherwise every invited signup would make one
+ * and delete it again one request later. The invitation is resolved and its
+ * email checked BEFORE the account is created: a bad code must not burn an email
+ * address, which is unrecoverable for the person holding it.
+ *
  * `authWithPassword` runs on a fresh per-request client, never the admin one —
  * its auth store must not be clobbered by a visitor's session.
  */
 export default defineEventHandler(async (event) => {
-  const { email, password, name } = await parseBody(event, body)
+  const { email, password, name, invite: code } = await parseBody(event, body)
 
   const admin = await pocketbaseAdmin()
+
+  const invited = code ? await resolveInvite(code) : undefined
+  if (invited) {
+    if (invited.problem || !invited.invite) {
+      throw createError({
+        statusCode: invited.problem === 'not-found' || !invited.problem ? 404 : 422,
+        statusMessage: inviteProblemMessage(invited.problem ?? 'not-found'),
+      })
+    }
+    if (normaliseEmail(email) !== invited.invite.email) {
+      throw createError({
+        statusCode: 403,
+        statusMessage: `This invitation is for ${invited.invite.email}. Sign up with that address to accept it.`,
+      })
+    }
+  }
 
   let created: AppUser
   try {
@@ -54,12 +78,18 @@ export default defineEventHandler(async (event) => {
   }
 
   try {
-    await createOrganizationFor(created)
+    if (invited?.invite) {
+      await acceptInviteInto(created, invited.invite.org, invited.invite.role)
+      await markInviteAccepted(invited.invite.id, created.id)
+    }
+    else {
+      await createOrganizationFor(created)
+    }
   } catch (error) {
     // An account with no organization is a dead end the user cannot fix and an
     // email address they can never register again. Undo it.
     await admin.collection('users').delete(created.id).catch(() => {})
-    console.error('[signup] could not create an organization; the account was rolled back', error)
+    console.error('[signup] could not place the account in an organization; it was rolled back', error)
     throw error
   }
 

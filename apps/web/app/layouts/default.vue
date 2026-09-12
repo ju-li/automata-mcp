@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { LogOutIcon } from '@lucide/vue'
+import { LogOutIcon, UsersIcon } from '@lucide/vue'
 
 const { user, org, logout } = useSession()
 </script>
@@ -21,6 +21,12 @@ const { user, org, logout } = useSession()
         </div>
 
         <div class="flex items-center gap-3">
+          <Button v-if="org" as-child variant="ghost" size="sm">
+            <NuxtLink to="/team">
+              <UsersIcon class="size-4" />
+              <span class="hidden sm:inline">Organization</span>
+            </NuxtLink>
+          </Button>
           <span class="hidden text-sm text-muted-foreground sm:inline">{{ user.email }}</span>
           <Button variant="ghost" size="sm" @click="logout()">
             <LogOutIcon class="size-4" />
