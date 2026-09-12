@@ -11,7 +11,16 @@ import { ArrowLeftIcon, DatabaseIcon, TableIcon } from '@lucide/vue'
  * check, the tables it can reach, and the two things an owner needs — rotate the
  * connection string, remove the connection.
  */
-const props = defineProps<{ id: string }>()
+const props = withDefaults(defineProps<{
+  id: string
+  /**
+   * Whether this viewer may change the connection, as opposed to use it.
+   *
+   * Decided by the server and passed down from the page. It gates presentation
+   * only — every control it hides is independently refused with a 403.
+   */
+  canManage?: boolean
+}>(), { canManage: false })
 
 interface StatusResponse {
   instance: PublicInstanceRow
@@ -193,46 +202,56 @@ async function saveDsn() {
       mean you could not revoke a token for a connection that is down — which is
       exactly when you would want to.
     -->
-    <McpTokens :instance-id="id" kind="postgres" :connected="connected" />
+    <McpTokens
+      :instance-id="id"
+      kind="postgres"
+      :connected="connected"
+      :can-manage="canManage"
+    />
 
-    <Separator />
+    <template v-if="canManage">
+      <Separator />
 
-    <!-- ── controls ────────────────────────────────────────────────────── -->
-    <section class="space-y-4">
-      <h2 class="font-heading text-lg font-semibold">
-        Manage
-      </h2>
+      <!-- ── controls ──────────────────────────────────────────────────── -->
+      <section class="space-y-4">
+        <h2 class="font-heading text-lg font-semibold">
+          Manage
+        </h2>
 
-      <div v-if="editingDsn" class="max-w-xl space-y-2 rounded-md border p-4">
-        <Label for="new-dsn">New connection string</Label>
-        <Input
-          id="new-dsn"
-          v-model="newDsn"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="postgres://user:password@host:5432/database"
-        />
-        <p class="text-xs text-muted-foreground">
-          Checked by connecting before it is saved. Every connector token for this
-          connection keeps working — they name the connection, not the credential.
-        </p>
-        <div class="flex gap-2 pt-1">
-          <Button :disabled="busy || !newDsn.trim()" @click="saveDsn">
-            {{ busy ? 'Checking…' : 'Save' }}
-          </Button>
-          <Button variant="ghost" :disabled="busy" @click="editingDsn = false; newDsn = ''">
-            Cancel
-          </Button>
+        <div v-if="editingDsn" class="max-w-xl space-y-2 rounded-md border p-4">
+          <Label for="new-dsn">New connection string</Label>
+          <Input
+            id="new-dsn"
+            v-model="newDsn"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="postgres://user:password@host:5432/database"
+          />
+          <p class="text-xs text-muted-foreground">
+            Checked by connecting before it is saved. Every connector token for this
+            connection keeps working — they name the connection, not the credential.
+          </p>
+          <div class="flex gap-2 pt-1">
+            <Button :disabled="busy || !newDsn.trim()" @click="saveDsn">
+              {{ busy ? 'Checking…' : 'Save' }}
+            </Button>
+            <Button variant="ghost" :disabled="busy" @click="editingDsn = false; newDsn = ''">
+              Cancel
+            </Button>
+          </div>
         </div>
-      </div>
 
-      <div class="flex flex-wrap gap-3">
-        <Button v-if="!editingDsn" variant="outline" :disabled="busy" @click="editingDsn = true">
-          Change connection string
-        </Button>
+        <div class="flex flex-wrap gap-3">
+          <Button v-if="!editingDsn" variant="outline" :disabled="busy" @click="editingDsn = true">
+            Change connection string
+          </Button>
 
-        <DeleteConnectionDialog :id="id" :label="data?.instance.label" kind="postgres" />
-      </div>
-    </section>
+          <AssignConnectionDialog :id="id" kind="postgres" />
+
+          <DeleteConnectionDialog :id="id" :label="data?.instance.label" kind="postgres" />
+        </div>
+      </section>
+    </template>
+
   </div>
 </template>

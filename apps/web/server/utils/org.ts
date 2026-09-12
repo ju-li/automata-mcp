@@ -186,6 +186,79 @@ export async function listAssignedInstanceIds(userId: string): Promise<string[]>
   return rows.map(row => row.instance)
 }
 
+/** The user ids assigned to one connection. Admins are not in here — see `authorizesInstance`. */
+export async function listInstanceAssignees(instanceId: string): Promise<string[]> {
+  const pb = await pocketbaseAdmin()
+  const rows = await pb.collection('instance_assignments').getFullList<AppInstanceAssignment>({
+    filter: pb.filter('instance = {:iid}', { iid: instanceId }),
+  })
+  return rows.map(row => row.user)
+}
+
+/**
+ * Give a member the use of one connection.
+ *
+ * Refuses anyone outside the organization with a 404, the same answer every
+ * other cross-organization lookup gives. Assigning an admin is accepted and does
+ * nothing: they already reach it, and erroring would make the picker's "select
+ * all" behave differently depending on who is in the list.
+ */
+export async function assignInstance(orgId: string, instanceId: string, userId: string): Promise<void> {
+  const member = await requireOrgMember(orgId, userId)
+  if (member.role === 'admin') return
+
+  const pb = await pocketbaseAdmin()
+  const existing = await firstOrNone<AppInstanceAssignment>(
+    pb,
+    'instance_assignments',
+    pb.filter('user = {:uid} && instance = {:iid}', { uid: userId, iid: instanceId }),
+  )
+  if (existing) return
+
+  await pb.collection('instance_assignments').create({ instance: instanceId, user: userId })
+}
+
+/**
+ * Take it away again — and revoke the tokens that stops working.
+ *
+ * Without the revoke, those tokens keep rendering as "Active" while answering
+ * 401 on the wire, with nothing in the Nitro log to explain it. That is one of
+ * the four operations that can silently kill a token; each one deals with the
+ * consequence in the same handler that causes it.
+ */
+export async function unassignInstance(
+  orgId: string,
+  instanceId: string,
+  userId: string,
+): Promise<{ revokedTokens: number }> {
+  await requireOrgMember(orgId, userId)
+
+  const pb = await pocketbaseAdmin()
+  const existing = await firstOrNone<AppInstanceAssignment>(
+    pb,
+    'instance_assignments',
+    pb.filter('user = {:uid} && instance = {:iid}', { uid: userId, iid: instanceId }),
+  )
+  if (existing) await pb.collection('instance_assignments').delete(existing.id)
+
+  return { revokedTokens: await revokeTokensFor(userId, { instanceId }) }
+}
+
+/**
+ * How many live tokens an unassignment would revoke, without doing it, so the
+ * confirmation can say what it costs rather than asking "are you sure".
+ */
+export async function countTokensOn(userId: string, instanceId: string): Promise<number> {
+  const pb = await pocketbaseAdmin()
+  const page = await pb.collection('mcp_tokens').getList(1, 1, {
+    filter: pb.filter('assigned_to = {:uid} && instance = {:iid} && revoked != true', {
+      uid: userId,
+      iid: instanceId,
+    }),
+  })
+  return page.totalItems
+}
+
 async function hasAssignment(userId: string, instanceId: string): Promise<boolean> {
   const pb = await pocketbaseAdmin()
   const row = await firstOrNone<AppInstanceAssignment>(

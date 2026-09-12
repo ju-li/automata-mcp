@@ -20,7 +20,7 @@ PocketBase is the app's database (users, sessions, connections and their credent
 
 `README.md` is the operator's manual — first-run setup, networking tables, the Linux firewall rule, Railway deploy, MCP client connection. Read it before doing anything involving Docker or the local stack; this file covers the code.
 
-**Status:** the product loop works end to end for both kinds — sign up, create a connection, pair by QR (importing that number's WhatsApp history as it connects) or paste a DSN, per-connection dashboard, connector token provisioning with per-chat or per-table scoping. Ten MCP tools, gated by kind:
+**Status:** the product loop works end to end for both kinds — sign up (which creates an organization), invite colleagues, create a connection, pair by QR (importing that number's WhatsApp history as it connects) or paste a DSN, per-connection dashboard, assign connections to members, and connector token provisioning with per-chat or per-table scoping. Ten MCP tools, gated by kind:
 
 - `whatsapp`: `get-connection-status`, `list-chats`, `read-messages`, `search-messages`, `send-text-message`
 - `postgres`: `get-database-info`, `list-tables`, `describe-table`, `run-query`, `run-statement` (write)
@@ -362,6 +362,20 @@ An invitation code is a **bearer credential for joining an organization** and is
 **A demotion that would kill tokens is refused with a 409 and a count, not done quietly** — the caller retries with `revokeTokens: true`, which is an admin saying yes to that specific consequence. The last-admin check runs *before* the token question, so an absolute refusal never arrives dressed as a confirmable one. Only tokens on connections the demoted admin will no longer reach are revoked; ones on connections assigned to them keep working.
 
 Pending invitations are admin-only on `/api/org`; the member roster is not, because "ask an admin to assign you a connection" is only actionable if you can see which of your colleagues is an admin. `/api/invites/:code` is reachable signed out — holding the code is the authorization — and exposes only the organization's name, the invited address and the role. **An invitation link escapes every redirect in `auth.global.ts`**, including the org-less one: someone who has just been removed must still be able to open one and accept it.
+
+## Assignment, token assignment, rotation
+
+**Assigning a connection grants use, never management.** A member with an assignment gets the dashboard and may hold connector tokens on it; they cannot delete, reconnect, resync, re-pair it or rotate its credentials. Admins hold **no** assignment rows at all — they reach every connection in the organization — so an empty assignment list is not the same as no access, and `authorizesInstance()` consults the role first.
+
+**Minting for someone who cannot reach the connection is refused (422), and the assignment is not created as a side effect.** Such a token is born dead: it would render as "Active" and answer 401 on every call, with nothing in the Nitro log. Auto-assigning instead would quietly make "give them a token" mean "give them the dashboard", which is a different decision and belongs to a different button.
+
+**Unassigning revokes that member's tokens on that connection, in the same handler.** This is the last of the four operations that can silently kill a token — the other three are in the membership section above — and each one deals with the consequence where it causes it. The assignment listing carries a live-token count per person so the confirmation can name the cost rather than asking "are you sure".
+
+**Rotation replaces the secret and nothing else.** It is the one write a member may make to their own token, because responding to a leak must never queue behind someone else's approval; and it is safe to give them precisely *because* scope is untouched — rotating changes what the secret is, not what it reaches. `expires_at` and `last_used_at` are left alone too, which is why a revoked or expired token is refused with a 422 rather than rotated into a new secret that is already dead. The plaintext is returned here and nowhere else, exactly as at creation.
+
+**`canManage` is computed server-side** and returned on `/api/instances` rows and on `/api/instances/:id/summary`; the UI never recomputes it from the session role. Same argument as `canReadMessages`: one rule, one place.
+
+**A member never enters pairing mode in `InstanceWhatsapp.vue`.** That is a safety property, not tidiness. Pairing mode runs the QR poll, which calls `/instance/connect` — refused with a 403 for them, so it would be a failing request every two seconds forever; and pairing binds a real phone number, which is management. They get the `lost` wording without the Reconnect button, and every hint that tells someone to act (`describeState`'s text, the "re-import under Manage" footnote) is replaced for them with what the state *is* and who can fix it. A UI that instructs someone to press a button they do not have is worse than one that says nothing.
 
 ## PocketBase
 
