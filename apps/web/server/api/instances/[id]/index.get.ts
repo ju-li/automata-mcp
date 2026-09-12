@@ -11,7 +11,7 @@
  * have.
  */
 export default defineEventHandler(async (event) => {
-  const instance = await requireOwnedInstance(event, getRouterParam(event, 'id'))
+  const { instance } = await requireReadableInstance(event, getRouterParam(event, 'id'))
 
   return {
     instance: toPublicInstance(instance),

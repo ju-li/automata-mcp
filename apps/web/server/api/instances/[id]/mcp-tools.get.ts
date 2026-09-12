@@ -23,7 +23,7 @@ import { tools } from '#nuxt-mcp-toolkit/tools.mjs'
  * be right — it comes from the tool's own `readOnlyHint`.
  */
 export default defineEventHandler(async (event) => {
-  const instance = await requireOwnedInstance(event, getRouterParam(event, 'id'))
+  const { instance } = await requireReadableInstance(event, getRouterParam(event, 'id'))
   const kind = instanceKind(instance)
 
   const available = tools

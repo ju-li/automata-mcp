@@ -176,6 +176,52 @@ export function isPocketBaseNotFound(error: unknown): boolean {
 }
 
 /**
+ * First row of a filtered read, or `undefined` — WITHOUT conflating "no row"
+ * with "no collection".
+ *
+ * `getFirstListItem` throws 404 for an empty result, and PocketBase answers 404
+ * for a collection that does not exist as well. `isPocketBaseNotFound` cannot
+ * tell them apart, so a read written with `getFirstListItem` treats a schema
+ * that has not been migrated yet as "this row is absent". Nuxt and PocketBase
+ * deploy as separate services with nothing ordering them, so that window is
+ * real, and on the MCP side it would answer **401** — telling every connected
+ * client that its perfectly good token had been revoked, and inviting it to
+ * throw the token away. That is the exact outcome the 401-vs-503 rule exists to
+ * prevent.
+ *
+ * `getList` makes an empty result a value and leaves a throw meaning a fault.
+ * Use this for every read whose absence is an authorization answer.
+ */
+export async function firstOrNone<T>(
+  pb: PocketBase,
+  collection: string,
+  filter: string,
+): Promise<T | undefined> {
+  const page = await pb.collection(collection).getList<T>(1, 1, { filter })
+  return page.items[0]
+}
+
+/**
+ * `getOne`, with a genuinely missing record as `undefined` rather than a throw.
+ *
+ * Safe where `firstOrNone` is not: fetching by primary key names one record in
+ * one collection, and a caller that reaches here has already established the
+ * collection exists. Anything but a 404 still throws.
+ */
+export async function getOneOrNone<T>(
+  pb: PocketBase,
+  collection: string,
+  id: string,
+): Promise<T | undefined> {
+  try {
+    return await pb.collection(collection).getOne<T>(id)
+  } catch (error) {
+    if (isPocketBaseNotFound(error)) return undefined
+    throw error
+  }
+}
+
+/**
  * Shapes of our PocketBase records. Kept here so both `evolution.ts` and
  * `instances.ts` can refer to them without importing each other.
  */
@@ -184,6 +230,59 @@ export interface AppUser {
   id: string
   email: string
   name?: string
+}
+
+/** An organization. Everything a user can reach hangs off exactly one of these. */
+export interface AppOrganization {
+  id: string
+  name: string
+  created?: string
+}
+
+export type OrgRole = 'admin' | 'member'
+
+/**
+ * One user's place in one organization.
+ *
+ * `role` lives here rather than on `users` because `users` is the one collection
+ * a visitor's own PocketBase credential can write to — see the header of
+ * `1787470000_organizations.js`. A unique index on `user` is what enforces one
+ * organization per user, and why accepting an invitation updates this row.
+ */
+export interface AppMembership {
+  id: string
+  org: string
+  user: string
+  role: OrgRole
+  created?: string
+}
+
+/**
+ * A grant of "may use, not manage" over one connection, to one member.
+ *
+ * Admins reach every connection in their organization and hold no rows here, so
+ * an empty result is not the same as no access — always consult the role first.
+ */
+export interface AppInstanceAssignment {
+  id: string
+  instance: string
+  user: string
+  created?: string
+}
+
+/** A pending or spent invitation. `code_hash` is the SHA-256 of the link code. */
+export interface AppInvitation {
+  id: string
+  org: string
+  email: string
+  role: OrgRole
+  code_hash: string
+  invited_by?: string
+  accepted_by?: string
+  expires_at?: string
+  accepted_at?: string
+  revoked?: boolean
+  created?: string
 }
 
 /**
@@ -211,7 +310,16 @@ export interface AppUser {
  */
 export interface AppInstance {
   id: string
-  user: string
+  /**
+   * The owning organization. Authorization is decided against this and never
+   * against `created_by`.
+   */
+  org: string
+  /**
+   * Who created the connection. Provenance only — it grants nothing, and it is
+   * empty on a row whose creator has since been removed.
+   */
+  created_by?: string
   kind?: 'whatsapp' | 'postgres'
   name: string
   instance_id?: string
@@ -229,7 +337,14 @@ export interface AppInstance {
 
 export interface AppMcpToken {
   id: string
-  user: string
+  /**
+   * The member this token was issued to. It authenticates only while that user
+   * is still a member of the instance's organization and still reaches the
+   * instance — see `resolveMcpAuth`.
+   */
+  assigned_to: string
+  /** Who minted it. Provenance only; it confers nothing. */
+  created_by?: string
   instance: string
   token_hash: string
   label?: string

@@ -5,7 +5,7 @@
  * comes back after a QR scan on the phone — so the UI confirms before calling it.
  */
 export default defineEventHandler(async (event) => {
-  const instance = await requireOwnedInstanceOfKind(event, getRouterParam(event, 'id'), 'whatsapp')
+  const { instance } = await requireManagedInstanceOfKind(event, getRouterParam(event, 'id'), 'whatsapp')
   await enableFullHistorySync(instance)
   return { ok: true }
 })

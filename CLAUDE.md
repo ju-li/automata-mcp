@@ -27,7 +27,7 @@ PocketBase is the app's database (users, sessions, connections and their credent
 
 Webhook event handling is not built; `/api/webhook/evolution` is a stub that logs and acks.
 
-A user may hold **several** connections of either kind. Each is a row in `instances`, and each MCP token is bound to exactly one of them.
+An organization may hold **several** connections of either kind. Each is a row in `instances`, owned by the organization rather than by a person, and each MCP token is bound to exactly one of them and issued to exactly one member. See "Organizations and roles".
 
 ## Commands
 
@@ -57,16 +57,16 @@ Nuxt only overrides `runtimeConfig` from `NUXT_`-prefixed vars, so a few values 
 
 ```
 apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context = repo root).
-  app/pages/                 login, signup, instances/{index,new,[id]}
+  app/pages/                 login, signup, no-organization, instances/{index,new,[id]}
   app/components/            app components + ui/ (shadcn-vue, bare names)
-  app/composables/           useSession, useConnectionState
-  app/middleware/            auth.global.ts — session gate only
+  app/composables/           useSession (user + org + role), useConnectionState
+  app/middleware/            auth.global.ts — session + organization gate
   modules/mcp-token-route.ts local Nuxt module — registers /mcp/:token
   server/api/                auth/, instances/, tokens/
   server/mcp/index.ts        default MCP handler (auth middleware)
   server/mcp/tools/<kind>/    one file per tool, auto-discovered; the directory
                               sets `group`, which is what gates a tool to a kind
-  server/utils/              pocketbase, session, auth-cookie, mcp-auth, instances, tokens,
+  server/utils/              pocketbase, session, auth-cookie, org, mcp-auth, instances, tokens,
                              evolution, evolution-db, mentions, redact,
                              net-guard, pg-pool, pg-guard, pg-run, pg-catalog
 services/pocketbase/         pinned PocketBase build + committed schema migrations
@@ -192,7 +192,7 @@ The connection is far wider than anything else the app holds (every user's messa
 
 **A DSN change does not invalidate tokens, on purpose.** Tokens name the *connection*, not the credential. Making an owner reissue them because a password rotated would be a reason not to rotate it.
 
-**Hidden fields require the admin client.** `instances.api_key` is a `hidden` PocketBase field. It is absent from anything fetched with a session-scoped client, including `getSessionUser()`'s `authRefresh`. Anything that needs it must go through `pocketbaseAdmin()` — `requireOwnedInstance()` already does.
+**Hidden fields require the admin client.** `instances.api_key` is a `hidden` PocketBase field. It is absent from anything fetched with a session-scoped client, including `getSessionUser()`'s `authRefresh`. Anything that needs it must go through `pocketbaseAdmin()` — `requireReadableInstance()` already does.
 
 **Never normalise JIDs locally.** Evolution's `createJid` carries country-specific rules (Brazil's ninth digit, Mexico and Argentina prefixes). A JID stored by our rules but matched by theirs is a token scope that silently reaches the wrong chat, or refuses the right one. `resolveNumberToJid` in `server/utils/mcp-scope.ts` asks Evolution; both storing a scope and checking one go through it.
 
@@ -316,11 +316,34 @@ wrong name is the failure the whole module exists to prevent.
 
 The other half of the trap: only the *per-instance* webhook sends custom headers. The global webhook sends none, so setting `NUXT_WEBHOOK_SECRET` while relying on the global URL makes every delivery 401 — and Evolution treats 401 as non-retryable, so it is dropped rather than retried. Leave the secret empty until per-instance webhooks are registered with the header.
 
-## Ownership checks answer 404
+## Organizations and roles
 
-`requireOwnedInstance()` and `revokeToken()` return **404**, not 403, when a record belongs to someone else. A 403 confirms the id exists and turns the route into a probe for other users' data.
+A connection belongs to an **organization**, never to a person. Every signup silently creates one and makes that user its admin; joining another happens only by accepting an invitation. A user belongs to exactly **one** organization — `UNIQUE(memberships.user)` is that rule, and it is why accepting an invitation is an `UPDATE` of the existing membership row and never a delete-then-create: the row is the user's single slot, so one write is atomic and there is no window in which they belong to nothing.
 
-`requireOwnedInstanceOfKind()` answers 404 for the *wrong kind* too, for the same reason: the route genuinely does not exist for that connection, and a distinguishable error would confirm which id is which kind. The WhatsApp-only routes — `qr`, `logout`, `resync`, `reconnect`, `chats/*` — go through it.
+Two roles. An **admin** manages the organization, invites, changes roles, creates connections, assigns them, mints tokens and edits token scope. A **member** uses the connections assigned to them, sees only their own tokens on those connections, and may revoke or rotate a token's secret but never widen it — rotating a leaked credential must not queue behind someone else's approval.
+
+**Role is not a field on `users`, and the reason is not the obvious one.** `users` is the one collection a visitor's own PocketBase credential can write to (`updateRule = 'id = @request.auth.id'`; `pb_auth` is `httpOnly`, which hides it from `document.cookie` and not from the devtools Application panel). A `hidden: true` role field would *probably* hold — the non-superuser record upsert refuses to load hidden fields, which is what `instances.api_key` already relies on — but `hidden` means "absent from the API projection" everywhere else in this schema, and a superuser-only `memberships` collection needs no *probably*. The organizations migration also sets `users.createRule` and `users.deleteRule` to `null`: signup now creates the account through `pocketbaseAdmin()`, which is what makes "every user has a membership" an invariant rather than a hope, and there is deliberately **no** lazy self-heal — creating an organization for whoever turns up without one would hand a free one to anyone who can reach PocketBase, and silently resurrect a user an admin had just removed.
+
+**`instances.created_by` does not cascade, and that is load-bearing.** It was `user`, `required`, `cascadeDelete: true`. Under org ownership a cascade there deletes `instances` rows straight out of the database whenever a creator's account goes — bypassing `deleteInstance()` entirely: no `/instance/delete` on Evolution, no pool closed, a live socket on a real phone number left running with nothing recording that it exists. `instances.org` is non-cascading for the same reason, so deleting an organization that still owns connections fails loudly. `mcp_tokens.assigned_to` **does** cascade: a deleted account's tokens must stop working.
+
+**Authorization answers 404, then 403.** The old rule — ownership failures answer 404 so an id cannot be probed — still holds and gains a second half now that a connection can be visible to someone who may not act on it:
+
+- **invisible → 404** — another organization's connection, an unassigned one for a member, a missing one. Indistinguishable, which is the point.
+- **visible but forbidden → 403** — a member pressing Delete on a connection assigned to them. They are looking at it; refusing by role confirms nothing new and is a far better error.
+
+`requireReadableInstance` / `requireManagedInstance` / `requireManagedInstanceOfKind` in `server/utils/org.ts` are the only implementations. The order inside the kind-gated one is **readable → role → kind**, and the role check must stay in front: kind-first would let a member probing `/dsn` distinguish 404 (a WhatsApp connection) from 403 (a Postgres one). Role-first answers 403 for a member whatever the kind. For an admin the wrong kind is still 404.
+
+`requireReadableInstanceOfKind` consults **no role at all**, so `chats/*` and `tables` answer 404 for the wrong kind to everyone. Those two are reads a member is entitled to — an assigned connection's chats and tables are already reachable through `list-chats` and `list-tables` over MCP, and refusing them in the UI while serving them on the wire would be incoherent.
+
+`resolveTokenForActor()` replaces the old `findOwnedToken`, whose `user = me` predicate is now wrong in both directions: too narrow, because an admin must reach a member's token, and too wide, because it never looked at the connection's organization. A token belonging to a colleague on a shared connection is a **404**, not a 403 — a member cannot see that it exists.
+
+**The MCP surface answers the same question separately, and must keep doing so.** `resolveMcpAuth` loads the holder's membership and assignment itself; `org.ts` is for the session surface. What the two share is `authorizesInstance()` — a *pure* predicate over already-loaded facts, no event, no PocketBase — so the rule lives once while each surface keeps its own credential path and its own failure semantics. A single `getCurrentActor(event)` used by both would collapse the auth split.
+
+**Every new PocketBase read on an auth path uses `firstOrNone()`, never `getFirstListItem`.** `getFirstListItem` throws 404 for an empty result *and* PocketBase answers 404 for a collection that does not exist, and `isPocketBaseNotFound` cannot tell them apart. Nuxt and PocketBase deploy as separate services with nothing ordering them, so a membership read written the obvious way turns a not-yet-migrated PocketBase into a **401 storm** — every connected client told its valid token was revoked, and invited to throw it away. `firstOrNone` makes an empty result a value and leaves a throw meaning a fault (→ 503). Verified: renaming `memberships` out from under a running server answers 503, not 401.
+
+**Four ordinary actions would otherwise leave tokens that read "Active" and answer 401** — unassigning a connection, demoting an admin, removing a member, and minting for a member who holds no assignment. Each falsifies the MCP predicate without touching `mcp_tokens`, and `toPublicToken` computes status from the row alone. `revokeTokensFor()` exists for the first three; the fourth is refused at mint time. Never add a path that changes membership or assignment without dealing with the tokens it kills.
+
+Every refusal inside `resolveMcpAuth` logs which half failed. A handled 401 is invisible to Nitro, and "my token stopped working" with nothing in the logs is the failure that rule exists to prevent.
 
 ## PocketBase
 

@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
-import type { AppInstance, AppUser } from './pocketbase'
+import type { AppInstance, AppInstanceAssignment, AppMembership, AppUser } from './pocketbase'
 import type { McpScope } from './mcp-scope'
 import type { EvolutionCredentials } from './evolution'
 
@@ -46,7 +46,8 @@ export type McpAuth =
 
 interface McpTokenRecord {
   id: string
-  user: string
+  /** The member the token was issued to. See `resolveMcpAuth`. */
+  assigned_to: string
   instance: string
   token_hash: string
   expires_at: string
@@ -130,20 +131,98 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     return undefined
   }
 
-  let instance: AppInstance
-  let user: AppUser
+  // ── who this token still reaches ─────────────────────────────────────────
+  //
+  // A token names a member and a connection. It authenticates only while that
+  // member is still in the connection's organization and still reaches the
+  // connection — so removing someone, or unassigning a connection from them,
+  // kills their tokens on the very next request even if an explicit revoke was
+  // missed. That is the whole reason this is read live and neither cached nor
+  // denormalized onto the token: a cache would delay exactly the effect this
+  // exists to produce, and a copied `org` would go stale on every one of those
+  // transitions.
+  //
+  // Four independent reads, so one fan-out rather than four serial hops — two
+  // round-trips in total against a PocketBase on the same private network,
+  // fewer than the three this used to make. The assignment is fetched
+  // unconditionally and consulted only for a member: one wasted local query
+  // beats a second serial hop.
+  //
+  // `expand: 'instance,assigned_to'` is deliberately NOT used. `api_key`,
+  // `dsn`, `admin_key` and `evolution_db_url` are hidden PocketBase fields, and
+  // whether an expanded relation carries hidden fields for a superuser is
+  // precisely the kind of thing that appears to work and then yields
+  // `credentialsForInstance() === undefined` — a 401 on a valid token.
+  //
+  // Failure semantics, which are the point of this block:
+  //
+  //   membership read empty            → 401, logged   the holder is in no org
+  //   membership read THROWS           → 503           includes "collection does
+  //                                                    not exist yet" mid-rollout
+  //   membership.org !== instance.org  → 401, logged   they left the org
+  //   instance.org empty               → 401, logged   fail closed, never match ''
+  //   assignment empty, role member    → 401, logged   assignment revoked
+  //   assignment read THROWS           → 503
+  //   role admin                       → authorized, assignments not consulted
+  //
+  // `firstOrNone` is what keeps the two THROWS rows honest: `getFirstListItem`
+  // answers 404 for an empty result *and* for a missing collection, and
+  // `isPocketBaseNotFound` cannot tell them apart.
+  let instance: AppInstance | undefined
+  let user: AppUser | undefined
+  let membership: AppMembership | undefined
+  let assignment: AppInstanceAssignment | undefined
   try {
     // The instance carries the Evolution credentials. `api_key` is a hidden
     // PocketBase field, so this only works through the admin client.
-    instance = await pb.collection('instances').getOne<AppInstance>(record.instance)
-    user = await pb.collection('users').getOne<AppUser>(record.user)
+    ;[instance, user, membership, assignment] = await Promise.all([
+      getOneOrNone<AppInstance>(pb, 'instances', record.instance),
+      getOneOrNone<AppUser>(pb, 'users', record.assigned_to),
+      firstOrNone<AppMembership>(
+        pb,
+        'memberships',
+        pb.filter('user = {:uid}', { uid: record.assigned_to }),
+      ),
+      firstOrNone<AppInstanceAssignment>(
+        pb,
+        'instance_assignments',
+        pb.filter('user = {:uid} && instance = {:iid}', { uid: record.assigned_to, iid: record.instance }),
+      ),
+    ])
   } catch (error) {
-    if (isPocketBaseNotFound(error)) return undefined
+    // Every throw that reaches here is a fault, never an absence: the two
+    // `getOneOrNone` reads swallow their own 404s and the two `firstOrNone`
+    // reads cannot produce one for an empty result.
     throw backendUnavailable(error)
   }
 
-  // A token cannot outlive its instance's owner changing underneath it.
-  if (instance.user !== user.id) return undefined
+  // The token points at a row that is gone. A dead credential, not an outage.
+  if (!instance || !user) return undefined
+
+  if (!membership) {
+    console.error(`[mcp-auth] user ${record.assigned_to} is in no organization; token ${record.id} refused`)
+    return undefined
+  }
+
+  if (!instance.org) {
+    console.error(`[mcp-auth] instance ${instance.id} has no organization; token ${record.id} refused`)
+    return undefined
+  }
+
+  // The rule itself lives in org.ts and is shared verbatim with the web UI, so
+  // the two surfaces cannot drift on who may reach what while still loading
+  // their own facts through their own credential path.
+  if (!authorizesInstance(
+    { role: membership.role, orgId: membership.org },
+    instance.org,
+    Boolean(assignment),
+  )) {
+    console.error(
+      `[mcp-auth] user ${user.id} (${membership.role}, org ${membership.org}) `
+      + `does not reach instance ${instance.id} (org ${instance.org}); token ${record.id} refused`,
+    )
+    return undefined
+  }
 
   // Per-kind credentials. A missing one means the connection was never finished,
   // which is a genuine "this credential does not work" and so a 401 — not the

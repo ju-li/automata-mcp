@@ -15,16 +15,18 @@ const query = z.object({
  * disagree about which tables exist would be a support problem the first time
  * they did.
  *
- * `OPEN_SCOPE` because this is the *owner* choosing what to grant: the picker
- * must show every table the connection reaches, not the subset some existing
- * token was given. Ownership is what authorises it, and `requireOwnedInstance`
- * has already established that.
+ * `OPEN_SCOPE` because this is an admin choosing what to grant: the picker must
+ * show every table the connection reaches, not the subset some existing token
+ * was given. Reaching the connection at all is what authorises it, and
+ * `requireReadableInstanceOfKind` has already established that — the route is
+ * readable rather than managed because a member assigned to this connection can
+ * already list its tables through the `list-tables` MCP tool.
  */
 export default defineEventHandler(async (event) => {
   // 404 for the wrong kind, like every other kind-guarded route: this route
   // genuinely does not exist for a WhatsApp connection, and a distinguishable
   // error would turn it into a probe for which id is which kind.
-  const instance = await requireOwnedInstanceOfKind(event, getRouterParam(event, 'id'), 'postgres')
+  const { instance } = await requireReadableInstanceOfKind(event, getRouterParam(event, 'id'), 'postgres')
 
   const params = await getValidatedQuery(event, q => query.parse(q))
 

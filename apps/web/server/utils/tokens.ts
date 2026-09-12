@@ -3,12 +3,15 @@ import type { McpScope } from './mcp-scope'
 import type { ScopeInput } from './scope-schema'
 
 /**
- * MCP token CRUD, always scoped to one instance and one owner.
+ * MCP token CRUD.
  *
- * Every query filters on the owning user as well as the id it was handed, so a
- * guessed id from another account resolves to nothing rather than to someone
- * else's token. Filters use `pb.filter()` bindings — the admin client must
- * never receive a filter string built by concatenating user input.
+ * Authorization is NOT decided here any more — `resolveTokenForActor()` in
+ * `org.ts` does it, and every mutating function below takes a token record that
+ * has already been through it. What stays here is the rule that a read is always
+ * a predicate in the query: `listTokens` narrows to one connection and, for a
+ * member, to their own tokens, in the `filter` rather than by dropping rows
+ * afterwards. Filters use `pb.filter()` bindings — the admin client must never
+ * receive a filter string built by concatenating user input.
  */
 
 /** What the UI may see. `token_hash` is never included. */
@@ -38,10 +41,26 @@ export function toPublicToken(token: AppMcpToken): PublicToken {
   }
 }
 
-export async function listTokens(instanceId: string): Promise<PublicToken[]> {
+/**
+ * The tokens on one connection.
+ *
+ * `assignedTo` narrows to one member's own, which is what a member gets: a token
+ * label names where a colleague runs Claude, and `last_used_at` and the scope of
+ * an admin's own token are not theirs to read. Admins pass nothing and see all
+ * of them.
+ */
+export async function listTokens(
+  instanceId: string,
+  options: { assignedTo?: string } = {},
+): Promise<PublicToken[]> {
   const pb = await pocketbaseAdmin()
+
+  const filter = options.assignedTo
+    ? pb.filter('instance = {:iid} && assigned_to = {:uid}', { iid: instanceId, uid: options.assignedTo })
+    : pb.filter('instance = {:iid}', { iid: instanceId })
+
   const rows = await pb.collection('mcp_tokens').getFullList<AppMcpToken>({
-    filter: pb.filter('instance = {:iid}', { iid: instanceId }),
+    filter,
     sort: '-created',
   })
   return rows.map(toPublicToken)
@@ -79,24 +98,30 @@ function scopeFields(scope: McpScope) {
  * Mint a token. The plaintext is returned to the caller once, here, and is not
  * recoverable afterwards — only its SHA-256 hash is stored.
  */
-export async function createToken(
-  userId: string,
-  instanceId: string,
-  label: string,
-  preset: ExpiryPreset,
-  scope: McpScope,
-): Promise<{ token: string, record: PublicToken }> {
+export interface CreateTokenInput {
+  instanceId: string
+  /** The member it is issued to. Their membership and access are what keep it alive. */
+  assignedTo: string
+  /** Who minted it. Provenance only. */
+  createdBy: string
+  label: string
+  preset: ExpiryPreset
+  scope: McpScope
+}
+
+export async function createToken(input: CreateTokenInput): Promise<{ token: string, record: PublicToken }> {
   const { token, hash } = mintMcpToken()
   const pb = await pocketbaseAdmin()
 
   const record = await pb.collection('mcp_tokens').create<AppMcpToken>({
-    user: userId,
-    instance: instanceId,
+    assigned_to: input.assignedTo,
+    created_by: input.createdBy,
+    instance: input.instanceId,
     token_hash: hash,
-    label: label.trim() || 'Untitled token',
-    expires_at: expiryFromPreset(preset),
+    label: input.label.trim() || 'Untitled token',
+    expires_at: expiryFromPreset(input.preset),
     revoked: false,
-    ...scopeFields(scope),
+    ...scopeFields(input.scope),
   })
 
   return { token, record: toPublicToken(record) }
@@ -109,13 +134,9 @@ export async function createToken(
  * reach changes, from the next request onward. Scope is read fresh on every MCP
  * request, so there is nothing to invalidate.
  */
-export async function updateTokenScope(userId: string, tokenId: string, scope: McpScope): Promise<PublicToken | undefined> {
+export async function updateTokenScope(token: AppMcpToken, scope: McpScope): Promise<PublicToken> {
   const pb = await pocketbaseAdmin()
-
-  const existing = await findOwnedToken(pb, userId, tokenId)
-  if (!existing) return undefined
-
-  const record = await pb.collection('mcp_tokens').update<AppMcpToken>(existing.id, scopeFields(scope))
+  const record = await pb.collection('mcp_tokens').update<AppMcpToken>(token.id, scopeFields(scope))
   return toPublicToken(record)
 }
 
@@ -123,26 +144,38 @@ export async function updateTokenScope(userId: string, tokenId: string, scope: M
  * Revoke rather than delete: access stops immediately, and the row survives so
  * `last_used_at` stays available as an audit trail.
  *
- * Returns false when the token does not exist or is not this user's — the
- * caller answers 404 either way, so ownership is not observable.
+ * Takes a record the caller has already resolved through
+ * `resolveTokenForActor()` — this function makes no authorization decision of
+ * its own, which is also why it is safe to call in bulk when a member is
+ * removed or unassigned.
  */
-export async function revokeToken(userId: string, tokenId: string): Promise<boolean> {
+export async function revokeToken(token: AppMcpToken): Promise<void> {
   const pb = await pocketbaseAdmin()
-
-  const record = await findOwnedToken(pb, userId, tokenId)
-  if (!record) return false
-
-  await pb.collection('mcp_tokens').update(record.id, { revoked: true })
-  return true
+  await pb.collection('mcp_tokens').update(token.id, { revoked: true })
 }
 
-async function findOwnedToken(pb: Awaited<ReturnType<typeof pocketbaseAdmin>>, userId: string, tokenId: string) {
-  try {
-    return await pb.collection('mcp_tokens').getFirstListItem<AppMcpToken>(
-      pb.filter('id = {:id} && user = {:uid}', { id: tokenId, uid: userId }),
-    )
-  } catch (error) {
-    if (isPocketBaseNotFound(error)) return undefined
-    throw error
+/**
+ * Revoke every live token one member holds, optionally narrowed to one
+ * connection.
+ *
+ * Used wherever an action would otherwise leave a token that still reads
+ * "Active" in the UI and answers 401 on the wire: removing a member, demoting
+ * an admin, unassigning a connection. Returns how many were revoked so the
+ * caller can say so.
+ */
+export async function revokeTokensFor(
+  userId: string,
+  options: { instanceId?: string } = {},
+): Promise<number> {
+  const pb = await pocketbaseAdmin()
+
+  const filter = options.instanceId
+    ? pb.filter('assigned_to = {:uid} && instance = {:iid} && revoked != true', { uid: userId, iid: options.instanceId })
+    : pb.filter('assigned_to = {:uid} && revoked != true', { uid: userId })
+
+  const rows = await pb.collection('mcp_tokens').getFullList<AppMcpToken>({ filter })
+  for (const row of rows) {
+    await pb.collection('mcp_tokens').update(row.id, { revoked: true })
   }
+  return rows.length
 }

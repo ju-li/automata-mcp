@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
-import type { H3Event } from 'h3'
-import type { AppInstance, AppUser } from './pocketbase'
+import type { AppInstance } from './pocketbase'
+import type { Actor } from './org'
 import type { ConnectionState } from '#shared/connection'
 
 /**
@@ -98,44 +98,43 @@ function generateInstanceName(): string {
   return `i-${randomBytes(8).toString('base64url')}`
 }
 
-export async function listInstancesForUser(userId: string): Promise<AppInstance[]> {
+/**
+ * The connections one actor may see.
+ *
+ * An admin sees their whole organization's; a member sees only what is assigned
+ * to them. Both are a **predicate in the query**, never a filter applied to rows
+ * after they are read — the same rule chat scope and the Postgres table
+ * allowlist follow, and it is what keeps this from becoming an enumeration
+ * surface: a member must not learn the size or the labels of the estate.
+ */
+export async function listInstancesForActor(actor: Actor): Promise<AppInstance[]> {
   const pb = await pocketbaseAdmin()
+
+  if (actor.role === 'admin') {
+    return await pb.collection('instances').getFullList<AppInstance>({
+      filter: pb.filter('org = {:org}', { org: actor.org.id }),
+      sort: 'created',
+    })
+  }
+
+  const assigned = await listAssignedInstanceIds(actor.user.id)
+  if (!assigned.length) return []
+
+  // Bindings, one per id — the admin client must never receive a filter string
+  // built by concatenating values.
+  const params: Record<string, string> = { org: actor.org.id }
+  const clauses = assigned.map((id, index) => {
+    params[`i${index}`] = id
+    return `id = {:i${index}}`
+  })
+
+  // The organization predicate is kept even though every assignment already
+  // implies it: an assignment left behind by a member who has since moved
+  // organizations must not reach back into their old one.
   return await pb.collection('instances').getFullList<AppInstance>({
-    filter: pb.filter('user = {:uid}', { uid: userId }),
+    filter: pb.filter(`org = {:org} && (${clauses.join(' || ')})`, params),
     sort: 'created',
   })
-}
-
-/**
- * Resolve an instance id from the URL against the session user.
- *
- * Answers **404** rather than 403 when the instance belongs to someone else —
- * a 403 would confirm the id exists and turn this route into a probe.
- */
-export async function requireOwnedInstance(event: H3Event, instanceId: string | undefined): Promise<AppInstance> {
-  const user = await requireSessionUser(event)
-
-  if (!instanceId) {
-    throw createError({ statusCode: 404, statusMessage: 'Not found' })
-  }
-
-  const pb = await pocketbaseAdmin()
-
-  let instance: AppInstance
-  try {
-    instance = await pb.collection('instances').getOne<AppInstance>(instanceId)
-  } catch (error) {
-    if (isPocketBaseNotFound(error)) {
-      throw createError({ statusCode: 404, statusMessage: 'Not found' })
-    }
-    throw error
-  }
-
-  if (instance.user !== user.id) {
-    throw createError({ statusCode: 404, statusMessage: 'Not found' })
-  }
-
-  return instance
 }
 
 /**
@@ -161,7 +160,7 @@ export interface WhatsappProvisionInput {
 }
 
 export async function provisionWhatsappInstance(
-  user: AppUser,
+  actor: Actor,
   input: WhatsappProvisionInput = {},
 ): Promise<AppInstance> {
   const { label, server } = input
@@ -227,7 +226,9 @@ export async function provisionWhatsappInstance(
   try {
     const pb = await pocketbaseAdmin()
     return await pb.collection('instances').create<AppInstance>({
-      user: user.id,
+      // The organization owns it; `created_by` is provenance and grants nothing.
+      org: actor.org.id,
+      created_by: actor.user.id,
       kind: 'whatsapp',
       name,
       instance_id: created?.instance?.instanceId ?? '',
@@ -248,25 +249,6 @@ export async function provisionWhatsappInstance(
     await admin(`/instance/delete/${encodeURIComponent(name)}`, { method: 'DELETE' }).catch(() => {})
     throw error
   }
-}
-
-/**
- * Ownership *and* kind, for a route that only makes sense for one kind.
- *
- * 404 for the wrong kind, matching `requireOwnedInstance`'s reason for
- * answering 404 rather than 403: the route genuinely does not exist for this
- * connection, and a distinguishable error would confirm which id is which kind.
- */
-export async function requireOwnedInstanceOfKind(
-  event: H3Event,
-  instanceId: string | undefined,
-  kind: InstanceKind,
-): Promise<AppInstance> {
-  const instance = await requireOwnedInstance(event, instanceId)
-  if (instanceKind(instance) !== kind) {
-    throw createError({ statusCode: 404, statusMessage: 'Not found' })
-  }
-  return instance
 }
 
 /**
@@ -332,7 +314,7 @@ export interface PostgresProvisionInput {
 }
 
 export async function provisionPostgresInstance(
-  user: AppUser,
+  actor: Actor,
   input: PostgresProvisionInput,
 ): Promise<AppInstance> {
   const dsn = input.dsn.trim()
@@ -340,7 +322,8 @@ export async function provisionPostgresInstance(
 
   const pb = await pocketbaseAdmin()
   return await pb.collection('instances').create<AppInstance>({
-    user: user.id,
+    org: actor.org.id,
+    created_by: actor.user.id,
     kind: 'postgres',
     name: generateInstanceName(),
     ...fields,

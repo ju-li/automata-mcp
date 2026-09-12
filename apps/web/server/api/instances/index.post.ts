@@ -35,12 +35,15 @@ const body = z.discriminatedUnion('kind', [
 ])
 
 export default defineEventHandler(async (event) => {
-  const user = await requireSessionUser(event)
+  // Admin-only: a connection costs money and, for WhatsApp, a real phone number.
+  // The organization owns whatever is created here; the acting admin is recorded
+  // as its creator and gains nothing extra by it.
+  const actor = await requireOrgAdmin(event)
   const parsed = await parseBody(event, body)
 
   const instance = parsed.kind === 'postgres'
-    ? await provisionPostgresInstance(user, { label: parsed.label, dsn: parsed.dsn })
-    : await provisionWhatsappInstance(user, { label: parsed.label, server: parsed.server })
+    ? await provisionPostgresInstance(actor, { label: parsed.label, dsn: parsed.dsn })
+    : await provisionWhatsappInstance(actor, { label: parsed.label, server: parsed.server })
 
   return { instance: toPublicInstance(instance) }
 })
