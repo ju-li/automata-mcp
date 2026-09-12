@@ -193,7 +193,7 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
         <Table v-else>
           <TableHeader>
             <TableRow>
-              <TableHead>Email</TableHead>
+              <TableHead>Member</TableHead>
               <TableHead>Role</TableHead>
               <TableHead v-if="isAdmin" class="text-right">
                 Actions
@@ -203,7 +203,14 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
           <TableBody>
             <TableRow v-for="member in data?.members ?? []" :key="member.membershipId">
               <TableCell>
-                <div class="font-medium">
+                <!-- The display name is what a colleague recognises; the address
+                     is what an admin acts on, so both are here rather than one
+                     standing in for the other. `name` has always come back on
+                     this row — it was simply dropped before it was editable. -->
+                <div v-if="member.name" class="font-medium">
+                  {{ member.name }}
+                </div>
+                <div :class="member.name ? 'text-xs text-muted-foreground' : 'font-medium'">
                   {{ member.email }}
                 </div>
                 <div v-if="member.userId === user?.id" class="text-xs text-muted-foreground">
