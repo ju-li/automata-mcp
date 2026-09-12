@@ -57,18 +57,20 @@ Nuxt only overrides `runtimeConfig` from `NUXT_`-prefixed vars, so a few values 
 
 ```
 apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context = repo root).
-  app/pages/                 login, signup, no-organization, instances/{index,new,[id]}
+  app/pages/                 login, signup, no-organization, team, invite/[code],
+                             instances/{index,new,[id]}
   app/components/            app components + ui/ (shadcn-vue, bare names)
-  app/composables/           useSession (user + org + role), useConnectionState
+  app/composables/           useSession (user + org + role), useOrg, useConnectionState
   app/middleware/            auth.global.ts — session + organization gate
   modules/mcp-token-route.ts local Nuxt module — registers /mcp/:token
-  server/api/                auth/, instances/, tokens/
+  server/api/                auth/, org/, invites/, instances/, tokens/
   server/mcp/index.ts        default MCP handler (auth middleware)
   server/mcp/tools/<kind>/    one file per tool, auto-discovered; the directory
                               sets `group`, which is what gates a tool to a kind
-  server/utils/              pocketbase, session, auth-cookie, org, mcp-auth, instances, tokens,
-                             evolution, evolution-db, mentions, redact,
-                             net-guard, pg-pool, pg-guard, pg-run, pg-catalog
+  server/utils/              pocketbase, session, auth-cookie, org, invites,
+                             mcp-auth, instances, tokens, evolution, evolution-db,
+                             mentions, redact, net-guard, pg-pool, pg-guard,
+                             pg-run, pg-catalog
 services/pocketbase/         pinned PocketBase build + committed schema migrations
 docker-compose.dev.yml       services only, NOT Nuxt
 ```
@@ -344,6 +346,22 @@ Two roles. An **admin** manages the organization, invites, changes roles, create
 **Four ordinary actions would otherwise leave tokens that read "Active" and answer 401** — unassigning a connection, demoting an admin, removing a member, and minting for a member who holds no assignment. Each falsifies the MCP predicate without touching `mcp_tokens`, and `toPublicToken` computes status from the row alone. `revokeTokensFor()` exists for the first three; the fourth is refused at mint time. Never add a path that changes membership or assignment without dealing with the tokens it kills.
 
 Every refusal inside `resolveMcpAuth` logs which half failed. A handled 401 is invisible to Nitro, and "my token stopped working" with nothing in the logs is the failure that rule exists to prevent.
+
+## Invitations and membership changes
+
+An invitation code is a **bearer credential for joining an organization** and is handled like an MCP token: `waorg_` + 32 random bytes, returned once, stored only as a SHA-256 hash, compared in constant time. `server/utils/invites.ts` is the only file that mints or resolves one.
+
+**A code alone cannot join you to anything.** Every invitation names an email address, and acceptance requires the accepting account's own email to match, so a link forwarded into a group chat is not redeemable by whoever reads it first. Signing up *through* an invitation checks the address **before** the account is created — a bad code must not burn an email address, which is unrecoverable for the person holding it — and creates **no** personal organization, or every invited signup would make one and delete it again one request later.
+
+**Accepting is an `UPDATE` of the membership row.** `UNIQUE(memberships.user)` makes that row the user's single slot, so one write is atomic, trips no index, and leaves no window in which they belong to nothing — and there is no transaction to wrap the delete-then-create alternative in. Two refusals, both 409: their current organization still owns connections (those are org-owned, so leaving strands them; migrating them would move a WhatsApp account and its history across a trust boundary on the strength of a link), or they are the only admin of an organization that still has other members. The emptied old organization is deleted afterwards, best-effort — a stranded empty organization is harmless, a failed cleanup must not fail the join.
+
+**The last admin is guarded twice, and both are needed.** `assertAdminSurvivesChange()` is a read-only pre-check: it loses a race, so it is not the authority, but it is what makes the ordinary refusal have **no side effects**. `assertAdminSurvives()` runs after the write and undoes it if the admin count hit zero: that one is the authority, and it turns a permanent lockout into a retry. Neither may be "simplified" away — the first has no teeth, the second has no manners.
+
+**`removeMember` deletes the membership first and revokes tokens only once the removal has stuck.** The obvious order is the opposite — revoke first, so a crash over-revokes rather than under-revokes — and it is wrong for an operation that can be *refused*. The first version revoked an admin's connector tokens on its way to telling them they could not leave, and the compensating action restored the membership but could not un-revoke anything. The residual risk, a crash between the delete and the revoke, is closed at the other end: `acceptInviteInto()` revokes whatever a joiner still holds, so old tokens cannot come back to life on a re-invite.
+
+**A demotion that would kill tokens is refused with a 409 and a count, not done quietly** — the caller retries with `revokeTokens: true`, which is an admin saying yes to that specific consequence. The last-admin check runs *before* the token question, so an absolute refusal never arrives dressed as a confirmable one. Only tokens on connections the demoted admin will no longer reach are revoked; ones on connections assigned to them keep working.
+
+Pending invitations are admin-only on `/api/org`; the member roster is not, because "ask an admin to assign you a connection" is only actionable if you can see which of your colleagues is an admin. `/api/invites/:code` is reachable signed out — holding the code is the authorization — and exposes only the organization's name, the invited address and the role. **An invitation link escapes every redirect in `auth.global.ts`**, including the org-less one: someone who has just been removed must still be able to open one and accept it.
 
 ## PocketBase
 

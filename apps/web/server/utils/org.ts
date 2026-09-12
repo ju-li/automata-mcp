@@ -303,6 +303,323 @@ export async function requireManagedInstanceOfKind(
   return found
 }
 
+/** One row of the member list. */
+export interface OrgMember {
+  membershipId: string
+  userId: string
+  email: string
+  name?: string
+  role: OrgRole
+  joined?: string
+}
+
+export async function listOrgMembers(orgId: string): Promise<OrgMember[]> {
+  const pb = await pocketbaseAdmin()
+
+  const memberships = await pb.collection('memberships').getFullList<AppMembership>({
+    filter: pb.filter('org = {:org}', { org: orgId }),
+    sort: 'created',
+  })
+  if (!memberships.length) return []
+
+  // One filtered read rather than one per member, with a binding per id — the
+  // admin client must never receive a filter built by concatenating values.
+  const params: Record<string, string> = {}
+  const clauses = memberships.map((m, index) => {
+    params[`u${index}`] = m.user
+    return `id = {:u${index}}`
+  })
+  const users = await pb.collection('users').getFullList<AppUser>({
+    filter: pb.filter(clauses.join(' || '), params),
+  })
+  const byId = new Map(users.map(u => [u.id, u]))
+
+  return memberships.map(m => ({
+    membershipId: m.id,
+    userId: m.user,
+    email: byId.get(m.user)?.email ?? '(unknown)',
+    name: byId.get(m.user)?.name,
+    role: m.role,
+    joined: m.created,
+  }))
+}
+
+async function countOrgAdmins(orgId: string): Promise<number> {
+  const pb = await pocketbaseAdmin()
+  const page = await pb.collection('memberships').getList(1, 1, {
+    filter: pb.filter('org = {:org} && role = "admin"', { org: orgId }),
+  })
+  return page.totalItems
+}
+
+async function countOrgMembers(orgId: string): Promise<number> {
+  const pb = await pocketbaseAdmin()
+  const page = await pb.collection('memberships').getList(1, 1, {
+    filter: pb.filter('org = {:org}', { org: orgId }),
+  })
+  return page.totalItems
+}
+
+export async function listOrgInstances(orgId: string): Promise<AppInstance[]> {
+  const pb = await pocketbaseAdmin()
+  return await pb.collection('instances').getFullList<AppInstance>({
+    filter: pb.filter('org = {:org}', { org: orgId }),
+  })
+}
+
+const NO_ADMIN_LEFT = 'That would leave the organization with no admin. Make someone else an admin first.'
+
+/**
+ * The last admin cannot be demoted or removed. **Two** checks, and both are
+ * needed for different reasons.
+ *
+ * This one is an ordinary read-modify-write pre-check. It loses a race, so it is
+ * not the authority — but it is what makes the ordinary refusal have **no side
+ * effects at all**. That is not a nicety: the first version of `removeMember`
+ * revoked the member's tokens before discovering it could not remove them, and
+ * the compensating action put the membership back but not the tokens. A refused
+ * operation that silently kills an admin's connector tokens is worse than the
+ * race it was guarding against.
+ *
+ * Call it before doing anything destructive.
+ */
+export async function assertAdminSurvivesChange(
+  orgId: string,
+  member: OrgMember,
+  nextRole?: OrgRole,
+): Promise<void> {
+  if (member.role !== 'admin') return
+  if (nextRole === 'admin') return
+  if (await countOrgAdmins(orgId) > 1) return
+
+  throw createError({ statusCode: 409, statusMessage: NO_ADMIN_LEFT })
+}
+
+/**
+ * The authority, and the race guard.
+ *
+ * There is no transaction to hold across a read and a write, so two admins
+ * demoting each other concurrently can both pass the pre-check above and both
+ * write, leaving an organization nobody can administer. So the count is taken
+ * **after** the write, and the change is undone if it went to zero.
+ *
+ * A compensating action rather than a lock, the same shape the Evolution
+ * provisioning path uses — it turns a permanent lockout into a retry. Do not
+ * "simplify" either of these two checks away: the first has no teeth and the
+ * second has no manners.
+ */
+async function assertAdminSurvives(orgId: string, undo: () => Promise<void>): Promise<void> {
+  if (await countOrgAdmins(orgId) > 0) return
+
+  await undo()
+  throw createError({ statusCode: 409, statusMessage: NO_ADMIN_LEFT })
+}
+
+/**
+ * Change a member's role.
+ *
+ * Demoting an admin can kill tokens: a member only reaches connections assigned
+ * to them, and an admin holds no assignments. Those tokens would keep reading
+ * "Active" in the UI while answering 401 on the wire, with nothing in the logs —
+ * so they are revoked here, and the caller is expected to have said how many
+ * first. `preview` reports the count without changing anything.
+ */
+export async function previewRoleChange(
+  orgId: string,
+  member: OrgMember,
+  role: OrgRole,
+): Promise<{ tokensAtRisk: number }> {
+  if (role !== 'member' || member.role !== 'admin') return { tokensAtRisk: 0 }
+
+  const pb = await pocketbaseAdmin()
+  const assigned = new Set(await listAssignedInstanceIds(member.userId))
+  const orgInstances = await listOrgInstances(orgId)
+  const unreachable = orgInstances.filter(i => !assigned.has(i.id)).map(i => i.id)
+  if (!unreachable.length) return { tokensAtRisk: 0 }
+
+  const params: Record<string, string> = { uid: member.userId }
+  const clauses = unreachable.map((id, index) => {
+    params[`i${index}`] = id
+    return `instance = {:i${index}}`
+  })
+  const page = await pb.collection('mcp_tokens').getList(1, 1, {
+    filter: pb.filter(`assigned_to = {:uid} && revoked != true && (${clauses.join(' || ')})`, params),
+  })
+  return { tokensAtRisk: page.totalItems }
+}
+
+export async function changeMemberRole(
+  orgId: string,
+  member: OrgMember,
+  role: OrgRole,
+): Promise<{ revokedTokens: number }> {
+  const pb = await pocketbaseAdmin()
+  if (member.role === role) return { revokedTokens: 0 }
+
+  await assertAdminSurvivesChange(orgId, member, role)
+  await pb.collection('memberships').update(member.membershipId, { role })
+  await assertAdminSurvives(orgId, async () => {
+    await pb.collection('memberships').update(member.membershipId, { role: member.role })
+  })
+
+  if (role !== 'member') return { revokedTokens: 0 }
+
+  // Revoke only what the demotion actually breaks: tokens on connections they
+  // still reach keep working, and an admin re-promoted a minute later would find
+  // nothing to explain if we had revoked everything.
+  const assigned = new Set(await listAssignedInstanceIds(member.userId))
+  const orgInstances = await listOrgInstances(orgId)
+
+  let revoked = 0
+  for (const instance of orgInstances) {
+    if (assigned.has(instance.id)) continue
+    revoked += await revokeTokensFor(member.userId, { instanceId: instance.id })
+  }
+  return { revokedTokens: revoked }
+}
+
+/**
+ * Remove a member from the organization.
+ *
+ * **The membership goes first, and the tokens only once the removal has stuck.**
+ * The obvious order is the other way round — revoke first, so that dying halfway
+ * over-revokes rather than under-revokes — and it is wrong here, because this
+ * operation can be *refused*. Revoking before the last-admin guard has had its
+ * say means a 409 that silently killed an admin's connector tokens on its way to
+ * saying no, and the compensating action restores the membership but cannot
+ * un-revoke anything.
+ *
+ * What the chosen order risks instead is a crash between the delete and the
+ * revoke, leaving tokens marked live that no longer authenticate — harmless on
+ * its own, since `resolveMcpAuth` refuses them the moment the membership is
+ * gone, and closed at the other end by `acceptInviteInto`, which revokes
+ * whatever a joiner still holds.
+ *
+ * The account itself is untouched. Removing someone from an organization is not
+ * deleting them, and they land on `/no-organization` rather than being signed
+ * out from under themselves.
+ */
+export async function removeMember(orgId: string, member: OrgMember): Promise<{ revokedTokens: number }> {
+  const pb = await pocketbaseAdmin()
+
+  await assertAdminSurvivesChange(orgId, member)
+
+  await pb.collection('memberships').delete(member.membershipId)
+  await assertAdminSurvives(orgId, async () => {
+    // Recreate the row rather than "un-delete" it: the id changes, but the
+    // organization keeps an admin, which is the invariant being defended.
+    await pb.collection('memberships').create({ org: orgId, user: member.userId, role: member.role })
+  })
+
+  const revokedTokens = await revokeTokensFor(member.userId)
+
+  const assignments = await pb.collection('instance_assignments').getFullList<AppInstanceAssignment>({
+    filter: pb.filter('user = {:uid}', { uid: member.userId }),
+  })
+  for (const row of assignments) {
+    await pb.collection('instance_assignments').delete(row.id)
+  }
+
+  return { revokedTokens }
+}
+
+/**
+ * Move a user into the organization an invitation names.
+ *
+ * This is an **UPDATE** of their existing membership row, never a
+ * delete-then-create. `UNIQUE(memberships.user)` makes the row the user's single
+ * slot, so one write is atomic, trips no index, and leaves no window in which
+ * they belong to nothing — which matters because there is no transaction to
+ * wrap the alternative in.
+ *
+ * Two refusals, both 409, because the alternative in each case is losing
+ * something:
+ *
+ *   - their current organization still owns connections. Those are org-owned, so
+ *     leaving would strand them with no member who can reach them. Migrating
+ *     them into the inviting organization instead would move a WhatsApp account
+ *     and its entire history across a trust boundary on the strength of a link.
+ *   - they are the only admin of an organization that still has other members.
+ *     Leaving would lock those members out.
+ *
+ * The now-empty old organization is deleted afterwards, best-effort: a stranded
+ * empty organization is harmless, and a failed cleanup must not fail the join.
+ */
+export async function acceptInviteInto(
+  user: AppUser,
+  orgId: string,
+  role: OrgRole,
+): Promise<{ movedFrom?: string }> {
+  const pb = await pocketbaseAdmin()
+
+  const current = await firstOrNone<AppMembership>(
+    pb,
+    'memberships',
+    pb.filter('user = {:uid}', { uid: user.id }),
+  )
+
+  if (!current) {
+    await pb.collection('memberships').create({ org: orgId, user: user.id, role })
+    return {}
+  }
+
+  if (current.org === orgId) {
+    // Already here. Idempotent rather than an error: a double-clicked link, or a
+    // second copy of the same mail, must not read as a failure.
+    return {}
+  }
+
+  const previousOrg = current.org
+
+  const owned = await listOrgInstances(previousOrg)
+  if (owned.length) {
+    const names = owned.map(i => i.label || i.name).join(', ')
+    throw createError({
+      statusCode: 409,
+      statusMessage: `Your current organization still owns ${owned.length} connection(s): ${names}. `
+        + 'Delete them, or ask to be invited from a different account, before joining another organization.',
+    })
+  }
+
+  if (current.role === 'admin' && await countOrgAdmins(previousOrg) === 1 && await countOrgMembers(previousOrg) > 1) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: 'You are the only admin of your current organization. '
+        + 'Make someone else an admin there before joining another one.',
+    })
+  }
+
+  await pb.collection('memberships').update(current.id, { org: orgId, role })
+
+  // Nobody carries live connector tokens across a boundary. In the ordinary case
+  // there are none — leaving requires owning no connections, and a token names
+  // one. It closes the narrow window `removeMember` documents, where a crash
+  // between dropping a membership and revoking could otherwise let old tokens
+  // come back to life if the same person were re-invited.
+  await revokeTokensFor(user.id)
+
+  if (await countOrgMembers(previousOrg) === 0) {
+    await pb.collection('organizations').delete(previousOrg).catch(() => {})
+  }
+
+  return { movedFrom: previousOrg }
+}
+
+/**
+ * One member of this organization, by user id, for a management route.
+ *
+ * 404 rather than 403 for a user in another organization: an admin has no
+ * business learning that some id exists somewhere else.
+ */
+export async function requireOrgMember(orgId: string, userId: string | undefined): Promise<OrgMember> {
+  if (!userId) throw createError({ statusCode: 404, statusMessage: 'Not found' })
+
+  const members = await listOrgMembers(orgId)
+  const member = members.find(m => m.userId === userId)
+  if (!member) throw createError({ statusCode: 404, statusMessage: 'Not found' })
+  return member
+}
+
 /** What an actor may do with one token. */
 export type TokenAccess = 'manage' | 'use'
 
