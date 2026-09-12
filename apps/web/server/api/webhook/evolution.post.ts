@@ -1,3 +1,5 @@
+import type { AppInstance } from '~~/server/utils/pocketbase'
+
 /**
  * Inbound webhook from Evolution API.
  *
@@ -6,31 +8,43 @@
  *   dev  http://host.docker.internal:3000/api/webhook/evolution
  *   prod https://<app>/api/webhook/evolution
  *
- * Stub. Evolution v2 does not sign webhook payloads, so this checks a shared
- * secret header. Event handling is yours to build.
+ * One job: notice that a connection's state may have changed and hand it to
+ * `evaluateConnectionHealth`. Nothing else is dispatched — a `MESSAGES_UPSERT`
+ * or a `QRCODE_UPDATED` delivery is acked and dropped.
  *
- * Two things about that secret, both load-bearing:
+ * **The payload is a hint, never a fact.** Its `state` is not read. Evolution v2
+ * does not sign deliveries, the global webhook sends no headers whatsoever, and
+ * this route is reachable by anyone who knows the URL — so a payload claiming
+ * `close` would otherwise be enough for a stranger to mail a user that their
+ * account is down. Instead the connection is looked up by name and its live
+ * state read from Evolution with that instance's own credentials. A forged
+ * delivery costs one rate-limited round-trip and can never produce an email.
  *
- * - Only Evolution's **per-instance** webhook sends custom headers. The global
- *   webhook — which is what we configure, via WEBHOOK_GLOBAL_URL — sends none, so
- *   setting NUXT_WEBHOOK_SECRET today makes every delivery fail this check.
- * - Evolution treats 401 as non-retryable (alongside 400/403/404/422), so a
- *   rejected delivery is dropped for good rather than retried. Leaving the secret
- *   unset leaves this route unauthenticated; setting it silently discards
- *   everything. Register per-instance webhooks with the header before you set it.
+ * The shared-secret check below is real but optional, and the reason is
+ * historical: only Evolution's **per-instance** webhook sends custom headers,
+ * and until `registerConnectionWebhook()` existed this deployment configured
+ * only the global one, so setting NUXT_WEBHOOK_SECRET silently 401'd every
+ * delivery — which Evolution treats as non-retryable and drops for good. Now
+ * that every connection is registered individually with the header, the secret
+ * should be set. If both webhooks are somehow live at once, the global copy
+ * fails this check and the per-instance copy carries the event.
  *
- * Delivery is also gated upstream: Evolution only sends an event whose
- * WEBHOOK_EVENTS_<EVENT> flag is true, each of which defaults to false. See the
- * evolution service in docker-compose.dev.yml.
- *
- * Not the place to learn connection state from, even once built. In 2.3.7 a
- * close that Evolution retries sends no `connection.update` at all, and the
- * webhook is sent from inside the same event queue that has to be healthy for
- * anything to arrive — so the dropped session this would most want to report is
- * the one it never hears about. The dashboard reads Evolution's live state
- * instead (`getInstanceStatus`). Worth building together with alerting, with a
- * `connectionState` poller as the backstop.
+ * Always acks 200, including for a secret-less unknown instance: a non-2xx puts
+ * Evolution into a ten-attempt retry ladder for a delivery nothing wanted.
  */
+
+/**
+ * Per-connection cooldown, so a socket flapping between `connecting` and
+ * `close` cannot drive one live Evolution round-trip per event. The state it
+ * guards is the read, not the alert — `evaluateConnectionHealth` is idempotent
+ * and the grace period is what decides whether anything is sent.
+ *
+ * In-memory and per-worker on purpose. It protects Evolution from a burst; it
+ * is not a security control, and nothing breaks if a restart empties it.
+ */
+const COOLDOWN_MS = 30_000
+const lastChecked = new Map<string, number>()
+
 export default defineEventHandler(async (event) => {
   const { webhookSecret } = useRuntimeConfig()
 
@@ -43,9 +57,55 @@ export default defineEventHandler(async (event) => {
 
   const payload = await readBody<{ event?: string, instance?: string }>(event)
 
-  // TODO: dispatch on payload.event (messages.upsert, connection.update,
-  // qrcode.updated, ...). Ack fast — Evolution retries on non-2xx.
-  console.info('[webhook] evolution', payload?.event, payload?.instance)
+  // Evolution emits the dotted form; the underscored spelling is what its own
+  // config flags use, so accept both rather than depend on which one arrives.
+  const name = typeof payload?.instance === 'string' ? payload.instance.trim() : ''
+  const kind = String(payload?.event ?? '').toLowerCase().replace(/_/g, '.')
+  if (kind !== 'connection.update' || !name) return { ok: true }
+
+  const instance = await findInstanceByName(name)
+  // Unknown name: another deployment's instance, a deleted connection, or a
+  // forged post. Acked and ignored either way.
+  if (!instance) return { ok: true }
+
+  const now = Date.now()
+  const previous = lastChecked.get(instance.id) ?? 0
+  if (now - previous < COOLDOWN_MS) return { ok: true }
+  lastChecked.set(instance.id, now)
+
+  try {
+    await evaluateConnectionHealth(instance)
+  }
+  catch (error) {
+    // Acked anyway — a retry would arrive into the same failure, and the hourly
+    // sweep covers this connection regardless. Logged because a handled error
+    // leaves nothing in Nitro's own logs.
+    console.error(`[webhook] could not evaluate connection ${instance.id} (${instance.name}):`, error)
+  }
 
   return { ok: true }
 })
+
+/**
+ * Name is unique on `instances` (`idx_instances_name`), and it is Evolution's
+ * own identifier for the account, so it is the only thing a delivery can be
+ * matched on.
+ *
+ * The admin client is required rather than convenient: `api_key` is a hidden
+ * field, and without it there is nothing to read Evolution's live state with.
+ * The filter is bound with `pb.filter()` — the name arrives from the network and
+ * must never be concatenated into a filter string.
+ */
+async function findInstanceByName(name: string): Promise<AppInstance | undefined> {
+  try {
+    const pb = await pocketbaseAdmin()
+    return await pb.collection('instances').getFirstListItem<AppInstance>(
+      pb.filter('name = {:name}', { name }),
+    )
+  }
+  catch (error) {
+    if (isPocketBaseNotFound(error)) return undefined
+    console.error('[webhook] could not resolve the connection for a delivery:', error)
+    return undefined
+  }
+}

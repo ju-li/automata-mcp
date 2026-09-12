@@ -333,6 +333,14 @@ export interface AppInstance {
   pg_database?: string
   label?: string
   created?: string
+  /**
+   * Outage state, written only by server/utils/alerts.ts. `down_since` empty
+   * means healthy; `alerted_at` set means the current outage has already been
+   * mailed. Two dates rather than a status field so neither PocketBase default
+   * — `''` for a select, `false` for a bool — can mean something unintended.
+   */
+  down_since?: string
+  alerted_at?: string
 }
 
 export interface AppMcpToken {

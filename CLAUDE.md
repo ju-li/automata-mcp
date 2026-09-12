@@ -25,7 +25,7 @@ PocketBase is the app's database (users, sessions, connections and their credent
 - `whatsapp`: `get-connection-status`, `list-chats`, `read-messages`, `search-messages`, `send-text-message`
 - `postgres`: `get-database-info`, `list-tables`, `describe-table`, `run-query`, `run-statement` (write)
 
-Webhook event handling is not built; `/api/webhook/evolution` is a stub that logs and acks.
+A WhatsApp connection that drops emails its owner and emails them again on recovery — see "Disconnect alerts".
 
 An organization may hold **several** connections of either kind. Each is a row in `instances`, owned by the organization rather than by a person, and each MCP token is bound to exactly one of them and issued to exactly one member. See "Organizations and roles".
 
@@ -312,11 +312,34 @@ many, so it resolves from contacts first and only pays for group membership wher
 something is still unresolved, capped busiest-group-first. A raw id is honest; a
 wrong name is the failure the whole module exists to prevent.
 
-## Webhook delivery is gated twice
+## Webhooks are registered per instance, and the global one is off
 
-`WEBHOOK_GLOBAL_ENABLED` + `WEBHOOK_GLOBAL_URL` deliver **nothing** on their own. Evolution checks the matching `WEBHOOK_EVENTS_<EVENT>` flag for every global delivery, and every one of them defaults to false. An event not listed on the evolution service in `docker-compose.dev.yml` never reaches the handler.
+`registerConnectionWebhook()` in `instances.ts` does it, at provision time and again on every sweep. `WEBHOOK_GLOBAL_ENABLED` is `false` in `docker-compose.dev.yml` and in the README's Railway block, and turning it back on delivers everything twice.
 
-The other half of the trap: only the *per-instance* webhook sends custom headers. The global webhook sends none, so setting `NUXT_WEBHOOK_SECRET` while relying on the global URL makes every delivery 401 — and Evolution treats 401 as non-retryable, so it is dropped rather than retried. Leave the secret empty until per-instance webhooks are registered with the header.
+Two reasons the per-instance route is the one that works, and they are independent:
+
+- **Only the per-instance webhook sends custom headers.** The global one sends none, so `NUXT_WEBHOOK_SECRET` could never be satisfied by it — a value there made every delivery 401, which Evolution treats as non-retryable and drops rather than retries. That is why the secret was documented as "leave empty" until now, and why it should now be **set**.
+- **A bring-your-own Evolution server has no `WEBHOOK_GLOBAL_URL` pointing here**, and no reason to. Global-only means those connections deliver nothing at all.
+
+The global path had a second gate worth remembering if it is ever re-enabled: `WEBHOOK_GLOBAL_ENABLED` + `WEBHOOK_GLOBAL_URL` deliver nothing on their own, because Evolution also checks the matching `WEBHOOK_EVENTS_<EVENT>` flag and every one of them defaults to false.
+
+## Disconnect alerts
+
+`server/utils/alerts.ts` decides; `server/utils/mailer.ts` and `services/pocketbase/pb_hooks/mail.pb.js` deliver. Two date fields on `instances` hold the state — `down_since` (empty = healthy) and `alerted_at` (set = the current outage has been reported). Dates rather than a status field so neither PocketBase default (`''` for a select, `false` for a bool) can mean something unintended.
+
+**The webhook cannot be the whole mechanism, and the sweep is not a backstop.** In 2.3.7 a close Evolution intends to retry emits *no* `connection.update` — `connectionUpdate` rebuilds the socket and returns, and only a close it will not retry (`loggedOut`, `forbidden`, 402, 406) sends anything. So the failure this feature exists for — a socket that died and stayed dead, the one `sessionLost` is built on — is invisible to the webhook by construction. The hourly `alerts:sweep` task is the only thing that sees it, because it performs a live read.
+
+**The payload is a hint; the live read is the fact.** Neither path reads `state` off the delivery. Evolution v2 does not sign webhooks, and with no secret set the route is reachable by anyone, so trusting the payload would let a stranger mail a user that their account is down. A delivery resolves an instance by name, is rate-limited per connection (30s), and then goes through `getInstanceStatus()` like the sweep does.
+
+Three rules in `evaluateConnectionHealth` that are easy to undo:
+
+- **`ownerJid` absent means never paired, and is skipped.** A fresh connection sits in `close` until somebody scans its QR, and nothing else distinguishes that from a logout — both leave the column `close`.
+- **A live `close` alerts immediately; everything else serves the grace period.** Evolution reports `close` live only once it has given up, so waiting on it adds nothing. `connecting` and `unknown` are the states that routinely resolve themselves.
+- **`alerted_at` is written only after a mail actually went out.** A broken SMTP configuration then delays an alert instead of losing it. Same for the recovery mail clearing the fields.
+
+The sweep is in-process, so **more than one replica mails more than once**. `nitro.scheduledTasks` needs `nitro.experimental.tasks`; both are in `nuxt.config.ts`.
+
+PocketBase is the mailer because it has no generic send-email REST endpoint at all — every mail route it ships is auth-flow bound — so `pb_hooks/mail.pb.js` registers `POST /api/app/send-email` behind `$apis.requireSuperuserAuth()` and applies the SMTP settings from `PB_SMTP_*` on boot. **Turning SMTP on also turns on PocketBase's own login-alert mail**, so the superuser gets a "Login from a new location" message whenever the Nuxt server signs in from a new client — which is every restart. Disable the auth alert on `_superusers` in the admin UI if that noise matters; it is not disabled in code, because silently turning off a security notification is worse than the noise.
 
 ## Organizations and roles
 

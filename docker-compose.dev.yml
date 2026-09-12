@@ -106,16 +106,27 @@ services:
       CACHE_REDIS_SAVE_INSTANCES: 'false'
       CACHE_LOCAL_ENABLED: 'false'
 
-      # Same value as NUXT_WEBHOOK_URL in .env — this is the one knob that makes
-      # dev and prod differ by config only.
-      WEBHOOK_GLOBAL_ENABLED: 'true'
+      # Off, and the app registers a **per-instance** webhook for every
+      # connection instead (`registerConnectionWebhook` in server/utils/
+      # instances.ts). Two reasons, and neither is a preference:
+      #
+      #  - The global webhook sends no custom headers, so NUXT_WEBHOOK_SECRET
+      #    can never be satisfied by it. A per-instance webhook does, which is
+      #    what lets the inbound route be authenticated at all.
+      #  - A connection on a user's own Evolution server has no
+      #    WEBHOOK_GLOBAL_URL pointing here. Only per-instance registration
+      #    reaches those.
+      #
+      # Leaving it on would also deliver every event twice. The URL still comes
+      # from WEBHOOK_URL / NUXT_WEBHOOK_URL, so dev and prod differ by config
+      # only — that is now the value the app registers, not this one.
+      #
+      # If you turn it back on: WEBHOOK_GLOBAL_ENABLED alone delivers nothing.
+      # Evolution gates every global delivery on the matching WEBHOOK_EVENTS_*
+      # flag, and each defaults to false.
+      WEBHOOK_GLOBAL_ENABLED: 'false'
       WEBHOOK_GLOBAL_URL: ${WEBHOOK_URL:-http://host.docker.internal:3000/api/webhook/evolution}
       WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: 'false'
-      # WEBHOOK_GLOBAL_ENABLED alone delivers nothing: Evolution gates every
-      # global delivery on the matching WEBHOOK_EVENTS_* flag, and each defaults
-      # to false. An event not listed here never reaches the handler.
-      WEBHOOK_EVENTS_CONNECTION_UPDATE: 'true'
-      WEBHOOK_EVENTS_MESSAGES_UPSERT: 'true'
     volumes:
       - evolution_instances:/evolution/instances
     networks: [app]
@@ -130,6 +141,18 @@ services:
       # they have to match, so they are read from the one .env.
       NUXT_POCKETBASE_ADMIN_EMAIL: ${NUXT_POCKETBASE_ADMIN_EMAIL:?set NUXT_POCKETBASE_ADMIN_EMAIL in .env}
       NUXT_POCKETBASE_ADMIN_PASSWORD: ${NUXT_POCKETBASE_ADMIN_PASSWORD:?set NUXT_POCKETBASE_ADMIN_PASSWORD in .env}
+      # SMTP, applied on every boot by pb_hooks/mail.pb.js. PocketBase is this
+      # deployment's mailer — the Nuxt server has no SMTP client of its own and
+      # sends disconnect alerts through it. All optional: with PB_SMTP_HOST
+      # unset nothing is configured and no alert mail goes out.
+      PB_SMTP_HOST: ${PB_SMTP_HOST:-}
+      PB_SMTP_PORT: ${PB_SMTP_PORT:-587}
+      PB_SMTP_USERNAME: ${PB_SMTP_USERNAME:-}
+      PB_SMTP_PASSWORD: ${PB_SMTP_PASSWORD:-}
+      PB_SMTP_TLS: ${PB_SMTP_TLS:-false}
+      PB_SMTP_AUTH_METHOD: ${PB_SMTP_AUTH_METHOD:-PLAIN}
+      PB_SENDER_ADDRESS: ${PB_SENDER_ADDRESS:-}
+      PB_SENDER_NAME: ${PB_SENDER_NAME:-}
     ports:
       - '8090:8090'
     volumes:
