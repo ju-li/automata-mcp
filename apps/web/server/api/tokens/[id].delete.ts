@@ -1,15 +1,14 @@
 /**
- * Revoke a token. Scoped to the caller: another account's token id resolves to
- * 404, so this cannot be used to probe which ids exist or to revoke someone
- * else's connector.
+ * Revoke a token.
+ *
+ * Either an organization admin or the member the token was issued to: destroying
+ * your own credential must never need someone else's approval, and a member who
+ * cannot revoke is a member who cannot respond to a leak. A token id outside the
+ * actor's organization, or another member's, resolves to 404 rather than 403, so
+ * this cannot be used to probe which ids exist.
  */
 export default defineEventHandler(async (event) => {
-  const user = await requireSessionUser(event)
-  const id = getRouterParam(event, 'id')
-
-  if (!id || !await revokeToken(user.id, id)) {
-    throw createError({ statusCode: 404, statusMessage: 'Not found' })
-  }
-
+  const { token } = await resolveTokenForActor(event, getRouterParam(event, 'id'))
+  await revokeToken(token)
   return { ok: true }
 })

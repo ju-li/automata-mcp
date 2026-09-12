@@ -22,7 +22,7 @@ const body = z.object({
  * connection, not the credential — the same rule `dsn.patch.ts` follows.
  */
 export default defineEventHandler(async (event) => {
-  const instance = await requireOwnedInstanceOfKind(event, getRouterParam(event, 'id'), 'whatsapp')
+  const { instance } = await requireManagedInstanceOfKind(event, getRouterParam(event, 'id'), 'whatsapp')
   const { dbUrl: raw } = await parseBody(event, body)
   const dbUrl = raw.trim()
 

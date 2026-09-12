@@ -5,6 +5,6 @@
  * first time it is called on a disconnected instance.
  */
 export default defineEventHandler(async (event) => {
-  const instance = await requireOwnedInstanceOfKind(event, getRouterParam(event, 'id'), 'whatsapp')
+  const { instance } = await requireManagedInstanceOfKind(event, getRouterParam(event, 'id'), 'whatsapp')
   return await getInstanceQr(instance)
 })

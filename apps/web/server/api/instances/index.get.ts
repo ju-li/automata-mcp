@@ -1,5 +1,15 @@
 /**
- * The user's connections, each with its live state.
+ * The connections this user can reach, each with its live state.
+ *
+ * An admin gets their whole organization's; a member gets only what has been
+ * assigned to them. `listInstancesForActor` puts that in the query rather than
+ * filtering afterwards — this route is an enumeration surface now, and a member
+ * must not learn the size or the labels of the estate.
+ *
+ * `canManage` is decided here rather than in the client. The rule is one line,
+ * but a second copy of it in the UI would drift, and the same argument
+ * `canReadMessages` makes in `toPublicInstance` applies: the server owns the
+ * answer, the client renders it.
  *
  * One round-trip per connection — two parallel Evolution reads for a WhatsApp
  * account (`fetchInstances` for the profile and counts, `connectionState` for
@@ -18,11 +28,12 @@
  * the page that would let you delete it.
  */
 export default defineEventHandler(async (event) => {
-  const user = await requireSessionUser(event)
-  const instances = await listInstancesForUser(user.id)
+  const actor = await requireMembership(event)
+  const instances = await listInstancesForActor(actor)
 
   const rows = await Promise.all(instances.map(async instance => ({
     ...toPublicInstance(instance),
+    canManage: actor.role === 'admin',
     ...await connectionState(instance, { tolerant: true }),
   })))
 

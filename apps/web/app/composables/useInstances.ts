@@ -44,6 +44,16 @@ export interface InstanceListRow {
   number?: string
   /** WhatsApp only. Absent for kinds with no message counts. */
   stats?: { messages: number, chats: number, contacts: number }
+  /**
+   * Whether this actor may change the connection — delete it, reconnect it,
+   * rotate its credentials — as opposed to merely use it.
+   *
+   * Decided by the server and carried on the row rather than recomputed from
+   * the session role, for the same reason `canReadMessages` is: one rule, one
+   * place. It gates presentation only; every action it hides is independently
+   * refused with a 403.
+   */
+  canManage?: boolean
 }
 
 /** What to call this kind of connection in prose, singular. */

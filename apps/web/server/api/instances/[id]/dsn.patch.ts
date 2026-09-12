@@ -18,7 +18,7 @@ const body = z.object({
  * a password rotated would be a reason not to rotate it.
  */
 export default defineEventHandler(async (event) => {
-  const instance = await requireOwnedInstanceOfKind(event, getRouterParam(event, 'id'), 'postgres')
+  const { instance } = await requireManagedInstanceOfKind(event, getRouterParam(event, 'id'), 'postgres')
   const { dsn: raw } = await parseBody(event, body)
   const dsn = raw.trim()
 
