@@ -1,11 +1,24 @@
 <script setup lang="ts">
 import { PlusIcon } from '@lucide/vue'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   instanceId: string
   kind: InstanceKind
   connected?: boolean
-}>()
+  /**
+   * Whether this viewer administers the connection.
+   *
+   * An admin mints tokens, edits their scope, and sees every token on the
+   * connection with who holds it. A member sees only their own and may revoke or
+   * rotate them — destroying or replacing your own credential must never need
+   * someone else's approval, and widening one must always be theirs.
+   *
+   * Presentation only: the server refuses each of these independently.
+   */
+  canManage?: boolean
+}>(), { canManage: false })
+
+const { user } = useSession()
 
 /**
  * A new token's starting scope depends on the kind.
@@ -54,6 +67,8 @@ interface TokenRow {
   expires_at?: string
   revoked: boolean
   expired: boolean
+  /** The email is present only for an admin; a member's own list carries none. */
+  assignedTo: { id: string, email?: string }
   scope: TokenScope
 }
 
@@ -76,6 +91,27 @@ const editScope = ref<TokenScope>(openScope())
 const { busy: creating, run: runCreate } = useApiAction()
 const { busy: savingScope, run: runSaveScope } = useApiAction()
 const { run: runRevoke } = useApiAction()
+const { run: runRotate } = useApiAction()
+
+/** Which token is mid-rotate, so only that row's button is disabled. */
+const rotating = ref<string | null>(null)
+
+/**
+ * Who an admin may issue a token to.
+ *
+ * Fetched only for an admin, and only for the create dialog. The server refuses
+ * a token for someone who cannot reach the connection — it would be born dead —
+ * so the picker offers exactly the people who can.
+ */
+const { data: assignable, refresh: refreshAssignable } = await useFetch<{
+  members: { userId: string, email: string, role: OrgRole, assigned: boolean, implicit: boolean }[]
+}>(() => `/api/instances/${props.instanceId}/assignments`, { immediate: false })
+
+const newAssignee = ref<string>('')
+
+const assigneeOptions = computed(() =>
+  (assignable.value?.members ?? []).filter(m => m.implicit || m.assigned),
+)
 
 const howTo = ref<TokenRow | null>(null)
 
@@ -96,7 +132,9 @@ function openCreate() {
   newLabel.value = ''
   newExpiry.value = '90d'
   newScope.value = initialScope()
+  newAssignee.value = user.value?.id ?? ''
   createOpen.value = true
+  if (props.canManage) refreshAssignable()
 }
 
 function startEdit(token: TokenRow) {
@@ -132,7 +170,12 @@ async function create() {
   const result = await runCreate(
     () => $fetch<{ token: string }>(`/api/instances/${props.instanceId}/tokens`, {
       method: 'POST',
-      body: { label: newLabel.value, expiry: newExpiry.value, ...scope },
+      body: {
+        label: newLabel.value,
+        expiry: newExpiry.value,
+        assignedTo: newAssignee.value || undefined,
+        ...scope,
+      },
     }),
     { failure: 'Could not create the token' },
   )
@@ -164,6 +207,28 @@ async function revoke(id: string) {
     },
   )
   revoking.value = null
+}
+
+/**
+ * Replace a token's secret, keeping its scope.
+ *
+ * The one write a member may make to their own token: responding to a leak must
+ * not queue behind an admin. The new plaintext is in the response and nowhere
+ * else, so it goes straight into the reveal dialog rather than through a
+ * refetch — the same rule as minting.
+ */
+async function rotate(token: TokenRow) {
+  rotating.value = token.id
+  const result = await runRotate(
+    () => $fetch<{ token: string }>(`/api/tokens/${token.id}/rotate`, { method: 'POST' }),
+    { failure: 'Could not issue a new secret' },
+  )
+  rotating.value = null
+  if (!result) return
+
+  revealed.value = result.token
+  revealedScope.value = token.scope
+  await refresh()
 }
 
 function formatDate(value?: string) {
@@ -200,7 +265,10 @@ function statusOf(token: TokenRow) {
         </p>
       </div>
 
-      <Button size="sm" @click="openCreate()">
+      <!-- Minting is admin-only: what a token reaches is an organization
+           decision, and a member who could mint could grant themselves any scope
+           the connection has. -->
+      <Button v-if="canManage" size="sm" @click="openCreate()">
         <PlusIcon class="size-4" />
         New token
       </Button>
@@ -214,7 +282,13 @@ function statusOf(token: TokenRow) {
         </div>
 
         <p v-else-if="!data?.tokens?.length" class="p-6 text-sm text-muted-foreground">
-          No tokens yet. Create one, then paste its URL into Claude as a custom connector.
+          <template v-if="canManage">
+            No tokens yet. Create one, then paste its URL into Claude as a custom connector.
+          </template>
+          <template v-else>
+            You have no connector tokens for this connection yet. An admin of your
+            organization can issue you one.
+          </template>
         </p>
 
         <Table v-else>
@@ -233,6 +307,13 @@ function statusOf(token: TokenRow) {
             <TableRow v-for="token in data.tokens" :key="token.id">
               <TableCell class="font-medium">
                 {{ token.label }}
+                <!-- Whose it is, for an admin looking at the whole
+                     organization's tokens. Under the name rather than in its own
+                     column: a seventh column pushes the row actions off the
+                     edge at ordinary widths. -->
+                <div v-if="canManage" class="text-xs font-normal text-muted-foreground">
+                  {{ token.assignedTo.id === user?.id ? 'You' : (token.assignedTo.email || 'Unknown holder') }}
+                </div>
               </TableCell>
               <TableCell class="text-muted-foreground">
                 {{ formatDate(token.created) }}
@@ -260,14 +341,40 @@ function statusOf(token: TokenRow) {
                 >
                   How to
                 </Button>
+                <!-- Scope is admin-only. A member may replace the secret, never
+                     widen what it reaches. -->
                 <Button
-                  v-if="!token.revoked"
+                  v-if="canManage && !token.revoked"
                   variant="ghost"
                   size="sm"
                   @click="startEdit(token)"
                 >
                   Edit
                 </Button>
+                <AlertDialog v-if="!token.revoked && !token.expired">
+                  <AlertDialogTrigger as-child>
+                    <Button variant="ghost" size="sm" :disabled="rotating === token.id">
+                      New secret
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Issue a new secret for “{{ token.label }}”?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        The current one stops working immediately and every Claude
+                        connector using it has to be updated. What the token can
+                        reach does not change. Use this if the token may have
+                        leaked.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction @click="rotate(token)">
+                        Issue a new secret
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
                 <AlertDialog v-if="!token.revoked">
                   <AlertDialogTrigger as-child>
                     <Button variant="ghost" size="sm" :disabled="revoking === token.id">
@@ -310,6 +417,35 @@ function statusOf(token: TokenRow) {
           <div class="space-y-2">
             <Label for="token-label">Name</Label>
             <Input id="token-label" v-model="newLabel" placeholder="Claude desktop" />
+          </div>
+
+          <!--
+            Only people who already reach this connection are offered: the
+            server refuses a token for anyone else, because it would authenticate
+            as nobody and answer 401 on every call while still rendering as
+            "Active". Assigning the connection is a separate, deliberate act —
+            see AssignConnectionDialog.
+          -->
+          <div v-if="assigneeOptions.length > 1" class="space-y-2">
+            <Label for="token-assignee">Issue to</Label>
+            <Select v-model="newAssignee">
+              <SelectTrigger id="token-assignee">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem
+                  v-for="member in assigneeOptions"
+                  :key="member.userId"
+                  :value="member.userId"
+                >
+                  {{ member.email }}{{ member.userId === user?.id ? ' (you)' : '' }}
+                </SelectItem>
+              </SelectContent>
+            </Select>
+            <p class="text-xs text-muted-foreground">
+              They can revoke it or issue themselves a new secret for it, but not
+              change what it reaches.
+            </p>
           </div>
 
           <div class="space-y-2">

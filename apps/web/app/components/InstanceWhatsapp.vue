@@ -8,7 +8,16 @@ import { toast } from 'vue-sonner'
  * pages/instances/[id].vue from the connection's kind; everything in here
  * assumes Evolution and a phone, which is why it is not the page itself.
  */
-const props = defineProps<{ id: string }>()
+const props = withDefaults(defineProps<{
+  id: string
+  /**
+   * Whether this viewer may change the connection, as opposed to use it.
+   *
+   * Decided by the server and passed down from the page. It gates presentation
+   * only — every control it hides is independently refused with a 403.
+   */
+  canManage?: boolean
+}>(), { canManage: false })
 
 interface StatusResponse {
   instance: PublicInstanceRow
@@ -55,8 +64,21 @@ const pairingRequested = ref(false)
  */
 type Mode = 'pairing' | 'lost' | 'connected'
 
+/**
+ * **A member never enters pairing mode**, and that is a safety property rather
+ * than a tidiness one. Pairing mode runs the QR poll, and the QR poll calls
+ * `/instance/connect` — which a member is refused with a 403 anyway, so for them
+ * it would be a failing request every two seconds forever. Pairing is
+ * management: scanning a code binds a real phone number, and someone who cannot
+ * press Reconnect or Disconnect has no business being shown a QR either.
+ *
+ * They get the `lost` wording instead, minus the button, which is the honest
+ * description of what they are looking at: a connection that is not currently
+ * usable and that somebody else has to fix.
+ */
 const mode = computed<Mode>(() => {
   if (connected.value) return 'connected'
+  if (!props.canManage) return 'lost'
   if (data.value?.sessionLost && !pairingRequested.value) return 'lost'
   return 'pairing'
 })
@@ -293,8 +315,15 @@ const importHistory = () => backToPairing(
           <h1 class="truncate font-heading text-2xl font-semibold">
             {{ data?.instance.label }}
           </h1>
+          <!--
+            `describeState`'s hints are written for someone who can act on them
+            — "reconnect", "scan a QR code" — and a member can do neither. The
+            banner below already says what is wrong and who fixes it, so for
+            them the subtitle says what the connection *is* instead of issuing
+            an instruction they cannot follow.
+          -->
           <p class="text-sm text-muted-foreground">
-            {{ display.hint }}
+            {{ canManage ? display.hint : `WhatsApp account · ${display.label.toLowerCase()}` }}
           </p>
         </div>
         <ConnectionBadge :state="state" kind="whatsapp" :lost="mode === 'lost'" />
@@ -342,20 +371,24 @@ const importHistory = () => backToPairing(
           <p class="text-sm font-medium">
             WhatsApp dropped this account's connection
           </p>
-          <p class="mt-1 text-sm text-muted-foreground">
+          <p v-if="canManage" class="mt-1 text-sm text-muted-foreground">
             New messages are not arriving and nothing can be sent until it
             reconnects. The phone is still linked, so reconnecting normally needs
             no new QR code.
           </p>
+          <p v-else class="mt-1 text-sm text-muted-foreground">
+            New messages are not arriving and nothing can be sent until it
+            reconnects. An admin of your organization can bring it back.
+          </p>
         </div>
 
-        <p v-if="reconnectStalled" class="text-sm text-muted-foreground">
+        <p v-if="canManage && reconnectStalled" class="text-sm text-muted-foreground">
           Evolution did not bring the connection back. Its session for this account
           may be stuck — restarting {{ data?.instance.ownServer ? 'your Evolution server' : 'the Evolution server' }}
           usually reconnects it without a new scan.
         </p>
 
-        <Button size="sm" :disabled="reconnectBusy || reconnecting" @click="reconnect">
+        <Button v-if="canManage" size="sm" :disabled="reconnectBusy || reconnecting" @click="reconnect">
           {{ reconnecting ? 'Reconnecting…' : reconnectStalled ? 'Try again' : 'Reconnect' }}
         </Button>
       </div>
@@ -397,10 +430,19 @@ const importHistory = () => backToPairing(
         :total="data?.stats.chats ?? 0"
       />
 
+      <!-- The last sentence points at a section a member does not have, and
+           re-importing costs a QR scan on a real phone — so they are told what
+           the counts mean, not how to change them. -->
       <p class="text-xs text-muted-foreground">
         WhatsApp hands over its history only at the moment a device is linked, so
-        these counts are the import from pairing plus everything since. If an old
-        conversation is missing, re-import it under Manage.
+        these counts are the import from pairing plus everything since.
+        <template v-if="canManage">
+          If an old conversation is missing, re-import it under Manage.
+        </template>
+        <template v-else>
+          If an old conversation is missing, an admin of your organization can
+          re-import it.
+        </template>
       </p>
     </template>
 
@@ -451,69 +493,78 @@ const importHistory = () => backToPairing(
       cannot revoke a token for an account that is offline — which is exactly
       when you are most likely to want to.
     -->
-    <McpTokens :instance-id="id" kind="whatsapp" :connected="connected" />
+    <McpTokens
+      :instance-id="id"
+      kind="whatsapp"
+      :connected="connected"
+      :can-manage="canManage"
+    />
 
-    <Separator />
+    <template v-if="canManage">
+      <Separator />
 
-    <!-- ── controls ────────────────────────────────────────────────────── -->
-    <section class="space-y-4">
-      <h2 class="font-heading text-lg font-semibold">
-        Manage
-      </h2>
+      <!-- ── controls ──────────────────────────────────────────────────── -->
+      <section class="space-y-4">
+        <h2 class="font-heading text-lg font-semibold">
+          Manage
+        </h2>
 
-      <div class="flex flex-wrap gap-3">
-        <AlertDialog v-if="connected">
-          <AlertDialogTrigger as-child>
-            <Button variant="outline" :disabled="busy">
-              Disconnect
-            </Button>
-          </AlertDialogTrigger>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Disconnect this account?</AlertDialogTitle>
-              <AlertDialogDescription>
-                WhatsApp signs this device out. Your tokens and message history are
-                kept, but nothing can send or receive until you scan a new QR code
-                with the same phone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction @click="disconnect">
+        <div class="flex flex-wrap gap-3">
+          <AlertDialog v-if="connected">
+            <AlertDialogTrigger as-child>
+              <Button variant="outline" :disabled="busy">
                 Disconnect
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Disconnect this account?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  WhatsApp signs this device out. Your tokens and message history are
+                  kept, but nothing can send or receive until you scan a new QR code
+                  with the same phone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction @click="disconnect">
+                  Disconnect
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
 
-        <AlertDialog>
-          <AlertDialogTrigger as-child>
-            <Button variant="outline" :disabled="busy">
-              Import full history
-            </Button>
-          </AlertDialogTrigger>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Import this account's full history?</AlertDialogTitle>
-              <AlertDialogDescription>
-                WhatsApp only hands over past conversations while a device is being
-                linked, so this signs the device out and imports as you scan a new
-                QR code with the same phone. Nothing already stored is lost, and
-                nothing can send or receive until the scan completes. Repeatedly
-                linking and unlinking a number risks it being banned by WhatsApp.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>Cancel</AlertDialogCancel>
-              <AlertDialogAction @click="importHistory">
-                Disconnect and import
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+          <AlertDialog>
+            <AlertDialogTrigger as-child>
+              <Button variant="outline" :disabled="busy">
+                Import full history
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Import this account's full history?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  WhatsApp only hands over past conversations while a device is being
+                  linked, so this signs the device out and imports as you scan a new
+                  QR code with the same phone. Nothing already stored is lost, and
+                  nothing can send or receive until the scan completes. Repeatedly
+                  linking and unlinking a number risks it being banned by WhatsApp.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                <AlertDialogAction @click="importHistory">
+                  Disconnect and import
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
 
-        <DeleteConnectionDialog :id="id" :label="data?.instance.label" kind="whatsapp" />
-      </div>
-    </section>
+          <AssignConnectionDialog :id="id" kind="whatsapp" />
+
+          <DeleteConnectionDialog :id="id" :label="data?.instance.label" kind="whatsapp" />
+        </div>
+      </section>
+    </template>
   </div>
 </template>

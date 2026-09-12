@@ -11,11 +11,17 @@
 const route = useRoute()
 const id = computed(() => route.params.id as string)
 
-const { data, error } = await useFetch<{ instance: PublicInstanceRow }>(
+const { data, error } = await useFetch<{ instance: PublicInstanceRow, canManage: boolean }>(
   () => `/api/instances/${id.value}/summary`,
 )
 
 const kind = computed(() => data.value?.instance.kind)
+
+// Decided by the server and carried on the summary this page already fetches,
+// rather than recomputed from the session role — one rule, one place, the same
+// argument `canReadMessages` makes. It gates presentation only: every control it
+// hides is independently refused with a 403.
+const canManage = computed(() => data.value?.canManage === true)
 </script>
 
 <template>
@@ -24,7 +30,7 @@ const kind = computed(() => data.value?.instance.kind)
       This connection could not be loaded. It may have been removed.
     </p>
 
-    <InstancePostgres v-else-if="kind === 'postgres'" :id="id" />
-    <InstanceWhatsapp v-else-if="kind === 'whatsapp'" :id="id" />
+    <InstancePostgres v-else-if="kind === 'postgres'" :id="id" :can-manage="canManage" />
+    <InstanceWhatsapp v-else-if="kind === 'whatsapp'" :id="id" :can-manage="canManage" />
   </div>
 </template>

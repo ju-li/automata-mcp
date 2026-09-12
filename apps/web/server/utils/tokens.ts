@@ -23,11 +23,17 @@ export interface PublicToken {
   expires_at?: string
   revoked: boolean
   expired: boolean
+  /**
+   * Who holds it. The email is filled in only when the caller supplied a
+   * directory — an admin listing their organization's tokens — so a member's
+   * own list never carries anyone else's address.
+   */
+  assignedTo: { id: string, email?: string }
   /** Wire shape, identical to what create and patch accept. */
   scope: ScopeInput
 }
 
-export function toPublicToken(token: AppMcpToken): PublicToken {
+export function toPublicToken(token: AppMcpToken, emails?: Map<string, string>): PublicToken {
   const expired = Boolean(token.expires_at) && new Date(token.expires_at!).getTime() <= Date.now()
   return {
     id: token.id,
@@ -37,6 +43,7 @@ export function toPublicToken(token: AppMcpToken): PublicToken {
     expires_at: token.expires_at || undefined,
     revoked: Boolean(token.revoked),
     expired,
+    assignedTo: { id: token.assigned_to, email: emails?.get(token.assigned_to) },
     scope: scopeToInput(scopeFromRecord(token)),
   }
 }
@@ -51,7 +58,7 @@ export function toPublicToken(token: AppMcpToken): PublicToken {
  */
 export async function listTokens(
   instanceId: string,
-  options: { assignedTo?: string } = {},
+  options: { assignedTo?: string, emails?: Map<string, string> } = {},
 ): Promise<PublicToken[]> {
   const pb = await pocketbaseAdmin()
 
@@ -63,7 +70,7 @@ export async function listTokens(
     filter,
     sort: '-created',
   })
-  return rows.map(toPublicToken)
+  return rows.map(row => toPublicToken(row, options.emails))
 }
 
 /** Expiry presets offered by the UI. `never` leaves `expires_at` empty. */
@@ -134,6 +141,44 @@ export async function createToken(input: CreateTokenInput): Promise<{ token: str
  * reach changes, from the next request onward. Scope is read fresh on every MCP
  * request, so there is nothing to invalidate.
  */
+/**
+ * Issue a new secret for an existing token, leaving everything else alone.
+ *
+ * This is the one write a member may make to their own token, and it exists so
+ * that responding to a leaked credential never queues behind someone else's
+ * approval. Scope is deliberately untouched — rotating changes *what the secret
+ * is*, not *what it reaches* — which is what makes it safe to hand to someone
+ * who may not edit scope.
+ *
+ * `expires_at` is untouched too, so a rotated token does not quietly gain
+ * another 90 days; that is why an expired one is refused rather than rotated
+ * into a new secret that is already dead on arrival. `last_used_at` stays as
+ * well: it is the row's audit trail, not the secret's.
+ *
+ * The plaintext is returned here and nowhere else, exactly as at creation.
+ */
+export async function rotateToken(token: AppMcpToken): Promise<{ token: string, record: PublicToken }> {
+  if (token.revoked) {
+    throw createError({
+      statusCode: 422,
+      statusMessage: 'This token has been revoked. Ask an admin for a new one instead.',
+    })
+  }
+  if (token.expires_at && new Date(token.expires_at).getTime() <= Date.now()) {
+    throw createError({
+      statusCode: 422,
+      statusMessage: 'This token has expired, so a new secret for it would not work. '
+        + 'Ask an admin for a new one instead.',
+    })
+  }
+
+  const { token: plaintext, hash } = mintMcpToken()
+  const pb = await pocketbaseAdmin()
+
+  const record = await pb.collection('mcp_tokens').update<AppMcpToken>(token.id, { token_hash: hash })
+  return { token: plaintext, record: toPublicToken(record) }
+}
+
 export async function updateTokenScope(token: AppMcpToken, scope: McpScope): Promise<PublicToken> {
   const pb = await pocketbaseAdmin()
   const record = await pb.collection('mcp_tokens').update<AppMcpToken>(token.id, scopeFields(scope))
