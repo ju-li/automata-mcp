@@ -9,9 +9,9 @@ const body = z.object({
  * Invite someone to this organization.
  *
  * The plaintext code is in this response and nowhere else — only its SHA-256
- * hash is stored, exactly like an MCP token. There is no SMTP in this
- * deployment, so the admin copies the URL and passes it on themselves; the UI
- * must show it once and say so.
+ * hash is stored, exactly like an MCP token. The UI must show it once and say
+ * so; emailing it is a separate request (`[id]/email.post.ts`) the admin makes
+ * from that same dialog, so a mail failure never costs them the link.
  *
  * Inviting an address that already has a pending invitation supersedes it rather
  * than failing: re-inviting almost always means "the last link got lost", and
@@ -27,10 +27,9 @@ export default defineEventHandler(async (event) => {
 
   const { code, invite } = await createInvite(actor.org.id, actor.user, email, role)
 
-  const origin = useRuntimeConfig().public.appUrl || getRequestURL(event).origin
   return {
     invite,
     code,
-    url: `${origin.replace(/\/$/, '')}/invite/${code}`,
+    url: inviteUrl(event, code),
   }
 })

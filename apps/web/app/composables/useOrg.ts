@@ -49,3 +49,16 @@ export function describeRoleCapabilities(role: OrgRole): string {
     ? 'Manages the organization, its people, and every connection. Can create connections and issue connector tokens.'
     : 'Uses the connections assigned to them. Can rotate or revoke their own tokens, but not change what a token reaches.'
 }
+
+/**
+ * An invitation whose link is on screen right now. `code` is the plaintext and
+ * exists only in the create or resend response, which is why it travels with
+ * the id: emailing the link is authorized by presenting it.
+ */
+export interface RevealedInvite {
+  id: string
+  code: string
+  url: string
+  email: string
+  role: OrgRole
+}
