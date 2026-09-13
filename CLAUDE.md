@@ -39,6 +39,8 @@ Run from the repo root — root scripts delegate with `pnpm --filter web`:
 pnpm install          # postinstall runs `nuxt prepare` in apps/web
 pnpm services:up      # pocketbase only (compose)
 pnpm services:up:whatsapp   # + postgres, redis, evolution
+pnpm services:up:telegram   # + postgres, telegram-db-init, telegram-bridge
+pnpm bridge:dev       # the Telegram bridge on the host, http://localhost:8095
 pnpm dev              # Nuxt on the host, http://localhost:3000
 pnpm typecheck        # nuxt typecheck across app + server
 pnpm build            # production build -> apps/web/.output/
@@ -71,6 +73,8 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              mcp-auth, instances, tokens, evolution, evolution-db,
                              mentions, redact, net-guard, pg-pool, pg-guard,
                              pg-run, pg-catalog
+apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
+                             own Postgres database. See "Telegram bridge".
 services/pocketbase/         pinned PocketBase build + committed schema migrations
 docker-compose.dev.yml       services only, NOT Nuxt
 ```
@@ -403,6 +407,26 @@ Pending invitations are admin-only on `/api/org`; the member roster is not, beca
 **`canManage` is computed server-side** and returned on `/api/instances` rows and on `/api/instances/:id/summary`; the UI never recomputes it from the session role. Same argument as `canReadMessages`: one rule, one place.
 
 **A member never enters pairing mode in `InstanceWhatsapp.vue`.** That is a safety property, not tidiness. Pairing mode runs the QR poll, which calls `/instance/connect` — refused with a 403 for them, so it would be a failing request every two seconds forever; and pairing binds a real phone number, which is management. They get the `lost` wording without the Reconnect button, and every hint that tells someone to act (`describeState`'s text, the "re-import under Manage" footnote) is replaced for them with what the state *is* and who can fix it. A UI that instructs someone to press a button they do not have is worse than one that says nothing.
+
+## Telegram bridge
+
+`apps/telegram-bridge` is Telegram's counterpart to Evolution: a separate Node service, and the only thing in the repo that speaks MTProto. Personal accounts link by QR code through `teleproto` (the maintained GramJS fork, pinned). **It is not wired into the app yet** — there is no `telegram` value on `instances.kind`, no tool and no UI; those land in later PRs, and so do chat listing, sending and message sync.
+
+Node runs `src/*.ts` directly (type stripping, Node ≥ 22.18), so there is no build step and `erasableSyntaxOnly` is on: no enums, namespaces or parameter properties. `pnpm typecheck` does not cover it — use `pnpm bridge:typecheck`, or `cd apps/telegram-bridge && node_modules/.bin/tsc --noEmit`.
+
+**One process per session, enforced.** Two connections on one auth key make Telegram answer `AUTH_KEY_DUPLICATED` and kill the key, which costs a QR scan — and a rolling deploy that overlaps old and new is exactly that. `locks.ts` takes a Postgres advisory lock per session, all on **one dedicated connection**: a session-level lock belongs to its backend, so a replaced connection silently drops every lock. Its backend pid is re-checked every 5 s, and a changed pid *or a failed check* stops every client that held one. Neither pool timeout may rotate that connection (`idle_timeout: 0`, `max_lifetime: null`). The lock key is 64 bits of sha256, not `hashtext`'s 32, so two sessions cannot block each other.
+
+**State is live, never a column** — the WhatsApp lesson. `session_enc` says a session exists and `revoked_at` that Telegram refused it; `open` requires a connected client whose last probe (`updates.getState`, every 30 s) answered. Revocation is recognised by RPC error **code** (`REVOKED` in `sessions.ts`), not by teleproto's error classes, which a bump can rename; on it the sealed session is cleared and only a new pairing recovers.
+
+**`GET /qr` never asks Telegram for anything.** Only `POST /pair` starts a flow, bounded to five minutes, so a polling client cannot turn into a stream of login attempts. The two-step verification password is handed to teleproto's SRP check and dropped: never stored, never kept on the flow, and request bodies are never logged — errors log the route label, not the URL.
+
+**Shutdown disconnects and never logs out**, so a redeploy unlinks nobody. Logout, conversely, forgets the session even when the Telegram-side logout fails; what is left is an entry in the account's Telegram → Devices, which its owner can terminate.
+
+**Keys.** The global `TELEGRAM_BRIDGE_ADMIN_KEY` creates and deletes sessions and opens nothing else; each session has its own bearer key, stored only as a SHA-256 hash, which is the only credential for its other routes. Session strings and webhook headers are sealed with AES-256-GCM under `TELEGRAM_SESSION_ENCRYPTION_KEY`, with the row id as additional data so a sealed value moved to another row does not open. Losing that key unlinks every account.
+
+**Database isolation.** The bridge has its own `telegram` database, owned by the non-superuser `telegram_bridge`, by default on the same Postgres server as Evolution (`db-init.sh`, run as the compose job `telegram-db-init`). `telegram_reader` is re-granted on every boot from an explicit column allowlist (`grantReader` in `db.ts`): never `sessions`, never `access_hash` or `phone`, and a new column stays hidden until it is added there. CONNECT is deliberately **not** revoked from PUBLIC on Evolution's database — Evolution's existing read-only role depends on it — and the Telegram roles see no Evolution table there because none is granted to PUBLIC.
+
+**`chat_id` is the Bot API marked id**, stored as `bigint`: a user is positive, a basic group `-id`, a channel or supergroup `-(10^12 + id)`. `messages.in_channel` is derived from it by a CHECK, and the partial unique index on `(session_id, message_id) WHERE NOT in_channel` is what will let a deletion that arrives with ids and no chat resolve — private chats and basic groups share one message-id counter per account. If Telegram ever breaks that, inserts fail loudly rather than a deletion hitting the wrong chat.
 
 ## PocketBase
 

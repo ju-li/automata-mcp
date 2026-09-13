@@ -1,0 +1,178 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { z } from 'zod'
+import type { BridgeConfig } from './config.ts'
+import { digestsEqual, hashKey } from './crypto.ts'
+import { HttpError, describeError } from './http-error.ts'
+import type { SessionManager } from './sessions.ts'
+
+/**
+ * The bridge's HTTP API, shaped like Evolution's: one global admin key creates
+ * and deletes sessions, and each session has its own key for everything else.
+ *
+ * The admin key does **not** open session routes. A deployment's app holds both,
+ * but a key that can create sessions has no reason to also read one, and keeping
+ * them apart is what lets the per-session key be the only thing a leaked
+ * connection record exposes.
+ *
+ * Request bodies are never logged — one of them is a two-step verification
+ * password — and neither is the raw URL: errors are logged against the route's
+ * label.
+ */
+
+const MAX_BODY_BYTES = 16 * 1024
+
+type Access = 'public' | 'admin' | 'session'
+
+interface Reply {
+  status: number
+  body?: unknown
+}
+
+interface Route {
+  label: string
+  method: string
+  pattern: RegExp
+  access: Access
+  handle: (request: { id: string, body: unknown }) => Promise<Reply>
+}
+
+const createBody = z.object({
+  name: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/, 'letters, digits, _ and - only'),
+})
+
+const passwordBody = z.object({ password: z.string().min(1).max(256) })
+
+const webhookBody = z.object({
+  url: z.string().url().refine(url => /^https?:\/\//i.test(url), 'must be http or https').nullable(),
+  headers: z.record(z.string().regex(/^[A-Za-z0-9-]{1,64}$/), z.string().max(512))
+    .refine(headers => Object.keys(headers).length <= 10, 'at most 10 headers')
+    .default({}),
+})
+
+export function createBridgeServer(manager: SessionManager, config: BridgeConfig): Server {
+  const adminDigest = hashKey(config.adminKey)
+
+  const routes: Route[] = [
+    {
+      label: 'GET /health', method: 'GET', pattern: /^\/health$/, access: 'public',
+      handle: async () => ({ status: 200, body: { ok: true } }),
+    },
+    {
+      label: 'POST /sessions', method: 'POST', pattern: /^\/sessions$/, access: 'admin',
+      handle: async ({ body }) => ({ status: 201, body: await manager.create(parse(createBody, body).name) }),
+    },
+    {
+      label: 'DELETE /sessions/:id', method: 'DELETE', pattern: /^\/sessions\/([^/]+)$/, access: 'admin',
+      handle: async ({ id }) => {
+        await manager.remove(id)
+        return { status: 204 }
+      },
+    },
+    {
+      label: 'GET /sessions/:id/state', method: 'GET', pattern: /^\/sessions\/([^/]+)\/state$/, access: 'session',
+      handle: async ({ id }) => ({ status: 200, body: await manager.state(id) }),
+    },
+    {
+      label: 'POST /sessions/:id/pair', method: 'POST', pattern: /^\/sessions\/([^/]+)\/pair$/, access: 'session',
+      handle: async ({ id }) => ({ status: 202, body: await manager.pair(id) }),
+    },
+    {
+      label: 'GET /sessions/:id/qr', method: 'GET', pattern: /^\/sessions\/([^/]+)\/qr$/, access: 'session',
+      handle: async ({ id }) => ({ status: 200, body: await manager.qr(id) }),
+    },
+    {
+      label: 'POST /sessions/:id/password', method: 'POST', pattern: /^\/sessions\/([^/]+)\/password$/, access: 'session',
+      handle: async ({ id, body }) => ({ status: 202, body: await manager.submitPassword(id, parse(passwordBody, body).password) }),
+    },
+    {
+      label: 'POST /sessions/:id/logout', method: 'POST', pattern: /^\/sessions\/([^/]+)\/logout$/, access: 'session',
+      handle: async ({ id }) => ({ status: 200, body: await manager.logout(id) }),
+    },
+    {
+      label: 'POST /sessions/:id/reconnect', method: 'POST', pattern: /^\/sessions\/([^/]+)\/reconnect$/, access: 'session',
+      handle: async ({ id }) => ({ status: 202, body: await manager.reconnect(id) }),
+    },
+    {
+      label: 'PUT /sessions/:id/webhook', method: 'PUT', pattern: /^\/sessions\/([^/]+)\/webhook$/, access: 'session',
+      handle: async ({ id, body }) => {
+        const { url, headers } = parse(webhookBody, body)
+        await manager.setWebhook(id, url, headers)
+        return { status: 204 }
+      },
+    },
+  ]
+
+  async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const path = (req.url ?? '/').split('?')[0] ?? '/'
+    const matching = routes.filter(route => route.pattern.test(path))
+    const route = matching.find(candidate => candidate.method === req.method)
+
+    if (!route) {
+      req.resume()
+      return send(res, matching.length > 0 ? { status: 405, body: { error: 'Method not allowed.' } } : { status: 404, body: { error: 'Not found.' } })
+    }
+
+    try {
+      const id = route.pattern.exec(path)?.[1] ?? ''
+      const bearer = bearerOf(req)
+
+      if (route.access === 'admin' && !(bearer && digestsEqual(hashKey(bearer), adminDigest))) {
+        req.resume()
+        return send(res, { status: 401, body: { error: 'Unauthorized.' } })
+      }
+      if (route.access === 'session' && !(await manager.authorize(id, bearer))) {
+        req.resume()
+        return send(res, { status: 401, body: { error: 'Unauthorized.' } })
+      }
+
+      const body = req.method === 'POST' || req.method === 'PUT' ? await readJson(req) : undefined
+      send(res, await route.handle({ id, body }))
+    }
+    catch (error) {
+      if (error instanceof HttpError) return send(res, { status: error.status, body: { error: error.message } })
+      console.error(`[http] ${route.label} failed: ${describeError(error)}`)
+      send(res, { status: 500, body: { error: 'Internal error.' } })
+    }
+  }
+
+  return createServer((req, res) => { void handle(req, res) })
+}
+
+function bearerOf(req: IncomingMessage): string | undefined {
+  const match = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? '')
+  return match?.[1]
+}
+
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length
+    if (size > MAX_BODY_BYTES) throw new HttpError(413, 'Request body too large.')
+    chunks.push(chunk as Buffer)
+  }
+  if (size === 0) return {}
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  }
+  catch {
+    throw new HttpError(400, 'Request body is not valid JSON.')
+  }
+}
+
+function parse<T>(schema: z.ZodType<T>, body: unknown): T {
+  const result = schema.safeParse(body)
+  if (result.success) return result.data
+  const detail = result.error.issues.map(issue => `${issue.path.join('.') || 'body'}: ${issue.message}`).join('; ')
+  throw new HttpError(400, detail)
+}
+
+function send(res: ServerResponse, reply: Reply): void {
+  if (res.headersSent) return
+  if (reply.body === undefined) {
+    res.writeHead(reply.status, { 'cache-control': 'no-store' }).end()
+    return
+  }
+  res.writeHead(reply.status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
+    .end(JSON.stringify(reply.body))
+}

@@ -1,0 +1,21 @@
+{
+  // Node runs src/*.ts directly (type stripping, Node >= 22.18), so there is no
+  // build step and tsc only checks. `erasableSyntaxOnly` is what keeps that
+  // possible: no enums, namespaces or parameter properties, because Node strips
+  // types and cannot transform anything else.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "skipLibCheck": true
+  },
+  "include": ["src"]
+}
