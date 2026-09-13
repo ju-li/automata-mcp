@@ -6,14 +6,19 @@
 # Evolution exist ONLY to serve WhatsApp connections, so they sit behind the
 # `whatsapp` profile: `pnpm services:up` brings up PocketBase alone, and
 # `pnpm services:up:whatsapp` brings up everything. The down/logs/ps scripts pass
-# `--profile whatsapp` unconditionally so they still cover the full set — a
-# profiled service you forgot the flag for looks simply absent, which is the one
-# sharp edge profiles have.
+# `--profile whatsapp --profile telegram` unconditionally so they still cover the
+# full set — a profiled service you forgot the flag for looks simply absent, which
+# is the one sharp edge profiles have.
+#
+# The `telegram` profile runs the Telegram bridge (apps/telegram-bridge). It
+# reuses the Postgres server above — its own `telegram` database and roles, never
+# Evolution's — so that server is in both profiles. `pnpm services:up:telegram`.
 #
 # Networking, both directions:
 #   Nuxt (host)      -> Evolution:  http://localhost:8080
 #   Nuxt (host)      -> PocketBase: http://localhost:8090
 #   Evolution (ctr)  -> Nuxt:       http://host.docker.internal:3000/api/webhook/evolution
+#   Nuxt (host)      -> bridge:     http://localhost:8095
 #
 # Every image tag is pinned. Do not relax one to `latest`.
 
@@ -22,7 +27,7 @@ name: claude-whatsapp-mcp
 services:
   postgres:
     image: postgres:16.15-alpine
-    profiles: [whatsapp]
+    profiles: [whatsapp, telegram]
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-evolution}
@@ -129,6 +134,58 @@ services:
       WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS: 'false'
     volumes:
       - evolution_instances:/evolution/instances
+    networks: [app]
+
+  # One-shot: creates the `telegram` database and its two roles on the Postgres
+  # above, as that server's superuser, then exits. Idempotent, so it runs on every
+  # `up`. The bridge never sees the superuser credential.
+  telegram-db-init:
+    image: postgres:16.15-alpine
+    profiles: [telegram]
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-evolution}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      PGDATABASE: ${POSTGRES_DB:-evolution}
+      # Empty defaults, not `:?` — compose interpolates every service whether its
+      # profile is on or not, and a missing Telegram value must not break
+      # `pnpm services:up`. db-init.sh refuses to run with either one empty.
+      TELEGRAM_BRIDGE_DB_PASSWORD: ${TELEGRAM_BRIDGE_DB_PASSWORD:-}
+      TELEGRAM_READER_PASSWORD: ${TELEGRAM_READER_PASSWORD:-}
+    volumes:
+      - ./apps/telegram-bridge/db-init.sh:/db-init.sh:ro
+    entrypoint: ['sh', '/db-init.sh']
+    networks: [app]
+
+  telegram-bridge:
+    build:
+      context: .
+      dockerfile: apps/telegram-bridge/Dockerfile
+    profiles: [telegram]
+    restart: unless-stopped
+    depends_on:
+      telegram-db-init:
+        condition: service_completed_successfully
+    ports:
+      # Loopback only: the admin key creates sessions, and a session key can link
+      # a Telegram account and will read its chats.
+      - '127.0.0.1:8095:8095'
+    # Same reason as Evolution: the bridge posts connection webhooks to Nuxt on
+    # the host.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    environment:
+      TELEGRAM_BRIDGE_PORT: 8095
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_BRIDGE_ADMIN_KEY: ${TELEGRAM_BRIDGE_ADMIN_KEY:-}
+      TELEGRAM_SESSION_ENCRYPTION_KEY: ${TELEGRAM_SESSION_ENCRYPTION_KEY:-}
+      TELEGRAM_BRIDGE_DATABASE_URL: postgres://telegram_bridge:${TELEGRAM_BRIDGE_DB_PASSWORD:-}@postgres:5432/telegram
+      TELEGRAM_TEST_SERVERS: ${TELEGRAM_TEST_SERVERS:-false}
     networks: [app]
 
   pocketbase:

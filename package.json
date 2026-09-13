@@ -9,10 +9,13 @@
     "preview": "pnpm --filter web preview",
     "generate": "pnpm --filter web generate",
     "typecheck": "pnpm --filter web typecheck",
+    "bridge:dev": "pnpm --filter telegram-bridge dev",
+    "bridge:typecheck": "pnpm --filter telegram-bridge typecheck",
     "services:up": "docker compose -f docker-compose.dev.yml up -d",
     "services:up:whatsapp": "docker compose -f docker-compose.dev.yml --profile whatsapp up -d",
-    "services:down": "docker compose -f docker-compose.dev.yml --profile whatsapp down",
-    "services:logs": "docker compose -f docker-compose.dev.yml --profile whatsapp logs -f",
-    "services:ps": "docker compose -f docker-compose.dev.yml --profile whatsapp ps"
+    "services:up:telegram": "docker compose -f docker-compose.dev.yml --profile telegram up -d",
+    "services:down": "docker compose -f docker-compose.dev.yml --profile whatsapp --profile telegram down",
+    "services:logs": "docker compose -f docker-compose.dev.yml --profile whatsapp --profile telegram logs -f",
+    "services:ps": "docker compose -f docker-compose.dev.yml --profile whatsapp --profile telegram ps"
   }
 }
