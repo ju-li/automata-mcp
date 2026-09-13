@@ -24,9 +24,9 @@ tools go through it. See "Reading and searching messages".
 > **Status.** Sign-up, both connection kinds (WhatsApp paired by QR with its
 > history imported, Postgres by connection string), the per-connection
 > dashboard, and connector token provisioning with per-chat and per-table
-> scoping all work. Ten MCP tools, five per kind — see "MCP tools". Webhook
-> event handling is not built; `/api/webhook/evolution` is a stub that logs and
-> acks.
+> scoping all work. Ten MCP tools, five per kind — see "MCP tools". A WhatsApp
+> connection that drops emails the people who use it, and emails them again when it comes
+> back — see "Connection alerts".
 
 ## Layout
 
@@ -37,7 +37,7 @@ apps/web/                    Nuxt 4 + TypeScript. Own Dockerfile, built from the
   app/composables/           session, connection state, token scope, API actions
   modules/                   local Nuxt modules (registers /mcp/:token)
   shared/                    types used by both the app and the server
-  server/api/                auth, instances, tokens, webhook stub
+  server/api/                auth, instances, tokens, Evolution webhook
   server/mcp/index.ts        MCP handler + auth middleware
   server/mcp/tools/<kind>/   one file per tool: whatsapp/, postgres/
   server/plugins/            token redaction, per-kind instructions, startup check
@@ -562,9 +562,20 @@ instance and cascade-deleted with it; instances cascade with their user.
 PocketBase, so the session cookie is `httpOnly` and every read goes through a
 Nuxt route.
 
+Two more columns on `instances` carry outage state — `down_since` and
+`alerted_at`, both dates, both written only by the server. See "Connection
+alerts".
+
 `api_key`, `admin_key`, `dsn` and `evolution_db_url` are `hidden` fields: absent
 from every API response, including to the owning user, but **not encrypted** —
-they sit in clear in `pb_data` and in every backup.
+they sit in clear in `pb_data` and in every backup. So is the SMTP password, and
+for the same reason: PocketBase encrypts its settings only when
+`PB_ENCRYPTION_KEY` is set.
+
+`pb_hooks/mail.pb.js` is the one hook file. It applies the SMTP settings from the
+environment at boot and registers `POST /api/app/send-email`, superuser-only —
+PocketBase has no generic send-email endpoint of its own, only the auth-flow
+ones.
 
 `services/pocketbase/pb_migrations/` is committed and is the source of truth.
 `pb_migrations/` and `pb_hooks/` are bind-mounted, so schema changes you make in
@@ -586,6 +597,83 @@ docker compose -f docker-compose.dev.yml up -d pocketbase
 ```
 
 That resets everything, including the superuser, and re-applies every migration.
+
+## Connection alerts
+
+A WhatsApp connection that stops working emails everyone who can reach it, and
+emails them again once it recovers. Always on, no setting; it needs SMTP
+configured on the pocketbase service (`PB_SMTP_*`) and nothing else.
+
+**Who gets it:** every admin of the owning organization, plus the members the
+connection is assigned to — the same set that can reach it in the app, decided by
+the same predicate. One message each rather than one message addressed to all of
+them, so nobody's alert discloses the roster. The two roles get different advice:
+reconnecting and re-pairing are management, so a member is told what happened and
+that an admin can fix it rather than being sent to press a button they do not
+have.
+
+Two things feed it, and they are not redundant.
+
+| | What it catches | Latency |
+|---|---|---|
+| Per-connection webhook | logout, ban, session replaced, QR limit | seconds |
+| Hourly sweep | everything, including a socket that died and never came back | up to an hour |
+
+The sweep is not a backstop for a flaky webhook. In Evolution 2.3.7 a close that
+Evolution intends to **retry** emits no `connection.update` at all — it rebuilds
+the socket and returns — so the failure worth catching most is the one the
+webhook can never report. That is the same disagreement `sessionLost` is built
+on: the stored column still says `open`, nothing live is behind it, and the
+dashboard showed "Connected" for a week over a dead socket. Only a live read
+finds it, and the sweep is what performs one.
+
+Both paths end in the same function, and **neither trusts the webhook payload**.
+Its `state` is never read. Evolution v2 does not sign deliveries, so the route is
+reachable by anyone who knows the URL; a delivery means *look at this
+connection*, and `GET /instance/connectionState` says what is actually true. A
+forged post costs one rate-limited round-trip and can never produce an email.
+
+What it will and will not send:
+
+- A connection that has **never been paired** is skipped. A fresh instance sits
+  in `close` until somebody scans its QR code, and `ownerJid` is the only thing
+  that tells that apart from a logout.
+- A live `close` mails immediately — Evolution only reports that once it has
+  given up. `connecting` and `unknown` serve out a 10-minute grace period first,
+  so a reconnect in progress or one failed status read stays quiet.
+- One mail per outage. `alerted_at` is written only once a message actually went
+  out, so a broken SMTP configuration delays an alert rather than losing it.
+- The mail says which fix applies: a dropped session asks for **Reconnect**, an
+  unlinked account asks for a QR scan. Sending someone to scan a code they did
+  not need to costs a real phone.
+
+The sweep runs in-process on the `alerts:sweep` scheduled task, so keep the web
+service to a single replica or it mails twice. In development the tasks are
+reachable by hand at `/_nitro/tasks/alerts:sweep`.
+
+Registration is re-asserted on every sweep, which is what picks up a connection
+created before this existed, or one whose Evolution server was rebuilt. It uses
+the instance's own token, not a global key.
+
+**Configuring SMTP also switches on PocketBase's own login alerts.** The web
+server signs in as the superuser, so that account gets a "Login from a new
+location" mail on roughly every restart. Turn the auth alert off on the
+`_superusers` collection in the admin UI if the noise is not worth it — nothing
+in this repo disables it for you.
+
+To try it locally without a mail provider, point `PB_SMTP_HOST` at a catcher on
+the compose network:
+
+```bash
+docker run -d --name wamcp-mailpit --network claude-whatsapp-mcp_app -p 8025:8025 axllent/mailpit:v1.21
+# .env: PB_SMTP_HOST=wamcp-mailpit, PB_SMTP_PORT=1025, PB_SENDER_ADDRESS=alerts@automata.test
+```
+
+Then read what was sent at <http://localhost:8025>. `PB_SENDER_ADDRESS` has to be
+a valid address — PocketBase rejects `alerts@localhost` and the hook logs
+`[mail] WARNING: could not apply the SMTP settings`. The sweep can be triggered
+by hand in development with `curl -X POST
+http://localhost:3000/_nitro/tasks/alerts:sweep`.
 
 ## Importing existing history
 
@@ -716,13 +804,16 @@ CACHE_REDIS_ENABLED=true
 CACHE_REDIS_URI=${{Redis.REDIS_URL}}/6
 CACHE_REDIS_PREFIX_KEY=evolution
 CACHE_LOCAL_ENABLED=false
-WEBHOOK_GLOBAL_ENABLED=true
-WEBHOOK_GLOBAL_URL=https://<web-domain>/api/webhook/evolution
-WEBHOOK_GLOBAL_WEBHOOK_BY_EVENTS=false
-WEBHOOK_EVENTS_CONNECTION_UPDATE=true
-WEBHOOK_EVENTS_MESSAGES_UPSERT=true
+WEBHOOK_GLOBAL_ENABLED=false
 TELEMETRY_ENABLED=false
 ```
+
+`WEBHOOK_GLOBAL_ENABLED=false` is deliberate. The app registers a webhook **per
+connection** instead, and Evolution fires the global and per-instance deliveries
+independently — so with both on, every event arrives twice. The global one also
+sends no custom headers, so once `NUXT_WEBHOOK_SECRET` is set that copy 401s on
+every event and is dropped rather than retried. Turning it back on buys no
+coverage either: it never reached a connection on a user's own Evolution server.
 
 The `DATABASE_SAVE_DATA_*` flags are what populate the dashboard counts and make
 `list-chats` and `read-messages` return anything. Turn them off and those tools
@@ -733,6 +824,35 @@ that one covers the history WhatsApp hands over *once*, when a number is paired.
 Evolution checks it in the `messaging-history.set` handler and silently drops the
 whole payload if it is false — with no way to ask for the history again short of
 disconnecting and re-scanning the QR. See "Importing existing history" above.
+
+**pocketbase** — the superuser it upserts at boot, and the SMTP settings it sends
+mail with. Both admin values must be identical to the web service's; use a Railway
+variable reference so they cannot drift:
+
+```
+PORT=8090
+NUXT_POCKETBASE_ADMIN_EMAIL=<you>
+NUXT_POCKETBASE_ADMIN_PASSWORD=<generate>
+
+# Mail. Optional — with PB_SMTP_HOST empty, connection alerts are computed and
+# then not delivered.
+PB_SMTP_HOST=<smtp host>
+PB_SMTP_PORT=587
+PB_SMTP_USERNAME=<username>
+PB_SMTP_PASSWORD=<password>
+PB_SMTP_TLS=false          # false = STARTTLS on 587; true = implicit TLS on 465
+PB_SMTP_AUTH_METHOD=PLAIN  # or LOGIN
+PB_SENDER_ADDRESS=<a from address the provider will accept>
+PB_SENDER_NAME=Automata MCP
+```
+
+The SMTP values are applied on every boot by `pb_hooks/mail.pb.js`, so changing
+one is a redeploy rather than a click through the admin UI — look for `[mail]
+SMTP configured from the environment` in the logs. `PB_SENDER_ADDRESS` must be a
+real address: PocketBase validates it, and rejects something like
+`alerts@localhost` with `[mail] WARNING: could not apply the SMTP settings`. The
+password is stored in `pb_data` in clear unless `PB_ENCRYPTION_KEY` is set — the
+same standing as the hidden fields on `instances`.
 
 **web** — internal addresses for the backends, public URLs for anything a user sees:
 
@@ -747,7 +867,7 @@ NUXT_EVOLUTION_URL=http://evolution.railway.internal:8080    # matches SERVER_PO
 NUXT_EVOLUTION_ADMIN_KEY=${{evolution.AUTHENTICATION_API_KEY}}
 NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:<password>@<postgres-private-host>:<port>/<database>
 NUXT_WEBHOOK_URL=https://<web-domain>/api/webhook/evolution
-NUXT_WEBHOOK_SECRET=
+NUXT_WEBHOOK_SECRET=<openssl rand -hex 32>
 ```
 
 `NUXT_PUBLIC_APP_URL` is what connector URLs are built from. Get it wrong and
@@ -761,10 +881,14 @@ but as the read-only role from "Reading and searching messages" — create it
 there first. Do not reference `${{Postgres.DATABASE_URL}}`: that is the
 database's owner, and this connection reaches every user's messages.
 
-**Leave `NUXT_WEBHOOK_SECRET` empty.** The global webhook configured above sends
-no custom headers, so any value turns every delivery into a 401 — which Evolution
-treats as non-retryable and drops. It only becomes useful once per-instance
-webhooks are registered with an `x-webhook-secret` header.
+**Set `NUXT_WEBHOOK_SECRET`.** The app registers a webhook per connection and
+attaches it as `x-webhook-secret`; per-instance webhooks are the only ones
+Evolution sends custom headers on. That is also why `WEBHOOK_GLOBAL_ENABLED` is
+off above — the global webhook sends none, so with a secret set every global
+delivery would 401, which Evolution treats as non-retryable and drops.
+
+**Keep the web service at one replica.** The hourly connection sweep runs
+in-process, so a second replica means a second sweep and duplicate alert emails.
 
 **Leave `NUXT_ALLOW_PRIVATE_TARGETS` unset.** It defaults to off, which is right
 for any deployment more than one person uses — see "Database connections".
@@ -777,8 +901,8 @@ service — to the same values — and its entrypoint upserts the superuser on e
 boot. The schema needs no action either; `pb_migrations/` is baked into the image
 and applied at startup.
 
-Both variables must match across the two services: the web server signs in with
-them to read hidden fields and the admin-only collections. A Railway variable
+Both admin variables must match across the two services: the web server signs in
+with them to read hidden fields and the admin-only collections. A Railway variable
 reference (`${{pocketbase.NUXT_POCKETBASE_ADMIN_EMAIL}}`) keeps them in step.
 
 Because the upsert runs every boot, rotating the password is editing the variable

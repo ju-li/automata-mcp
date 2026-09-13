@@ -36,6 +36,20 @@ export default defineNuxtConfig({
       // `RequestHandlerExtra` — not an H3 event. `useEvent()` is the only way to
       // reach per-request credentials from inside a tool, and it needs this flag.
       asyncContext: true,
+      // Required for `scheduledTasks` below and for server/tasks/ to be built.
+      tasks: true,
+    },
+    /**
+     * The connection sweep. It is not a backstop for the webhook — a close
+     * Evolution intends to retry emits no `connection.update` at all, so this is
+     * the only thing that ever sees a session that dropped and stayed dropped.
+     *
+     * Runs in-process, once per running instance of this server. More than one
+     * replica means more than one sweep, and so duplicate emails; keep this
+     * service to a single instance or give the sweep a lock first.
+     */
+    scheduledTasks: {
+      '0 * * * *': ['alerts:sweep'],
     },
   },
 

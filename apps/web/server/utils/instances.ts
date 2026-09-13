@@ -223,9 +223,11 @@ export async function provisionWhatsappInstance(
     })
   }
 
+  let record: AppInstance
+
   try {
     const pb = await pocketbaseAdmin()
-    return await pb.collection('instances').create<AppInstance>({
+    record = await pb.collection('instances').create<AppInstance>({
       // The organization owns it; `created_by` is provenance and grants nothing.
       org: actor.org.id,
       created_by: actor.user.id,
@@ -249,6 +251,83 @@ export async function provisionWhatsappInstance(
     await admin(`/instance/delete/${encodeURIComponent(name)}`, { method: 'DELETE' }).catch(() => {})
     throw error
   }
+
+  // Deliberately non-fatal, and deliberately outside the compensating-delete
+  // block rather than inside it. A connection that exists in both systems is a
+  // working connection; tearing down a real Evolution instance over a missing
+  // alert subscription would be the wrong trade. The hourly sweep re-asserts it.
+  await registerConnectionWebhook(record).catch((error) => {
+    console.error(`[instances] could not register the webhook for ${record.id} (${record.name}):`, error)
+  })
+
+  return record
+}
+
+let webhookUrlWarned = false
+
+/**
+ * Subscribe this connection's Evolution instance to `CONNECTION_UPDATE`.
+ *
+ * Per-instance rather than global, for two separate reasons:
+ *
+ * - The **global** webhook sends no custom headers at all, so
+ *   `NUXT_WEBHOOK_SECRET` could never be satisfied by it — setting the secret
+ *   made every delivery 401, and Evolution drops a 401 rather than retrying. A
+ *   per-instance webhook does send `headers`, which is what makes the secret
+ *   usable at all.
+ * - A connection on a **bring-your-own** Evolution server has no
+ *   `WEBHOOK_GLOBAL_URL` pointing at this deployment, and no reason to: it is
+ *   the user's own server. Without this call those connections would deliver
+ *   nothing, and their owners would be the only ones not told when they broke.
+ *
+ * Uses the instance's own token. Evolution's guard accepts it for this route, so
+ * the no-global-key rule in `credentialsForInstance()` is not in play.
+ *
+ * Idempotent — upstream `set` upserts on the instance — so the sweep can call it
+ * every hour to heal a registration that was never made, or that was lost with
+ * the server it lived on.
+ */
+export async function registerConnectionWebhook(instance: AppInstance): Promise<void> {
+  const { webhookUrl, webhookSecret } = useRuntimeConfig()
+
+  if (!webhookUrl) {
+    if (!webhookUrlWarned) {
+      webhookUrlWarned = true
+      console.warn(
+        '[instances] NUXT_WEBHOOK_URL is not set, so connections are not subscribed to '
+        + 'Evolution connection events. Disconnect alerts still work, but only as fast '
+        + 'as the hourly sweep.',
+      )
+    }
+    return
+  }
+
+  // Absent for a Postgres connection, and for a WhatsApp row that never finished
+  // provisioning. Neither has anything to subscribe.
+  const creds = credentialsForInstance(instance)
+  if (!creds) return
+
+  const evolution = createEvolutionClient(creds)
+
+  await evolution(`/webhook/set/${encodeURIComponent(instance.name)}`, {
+    method: 'POST',
+    body: {
+      webhook: {
+        enabled: true,
+        url: webhookUrl,
+        // Sent verbatim on every per-instance delivery. Empty when no secret is
+        // configured, which leaves the route unauthenticated — see
+        // server/api/webhook/evolution.post.ts for why that is survivable.
+        headers: webhookSecret ? { 'x-webhook-secret': webhookSecret } : {},
+        // One URL for every event, not one path per event.
+        byEvents: false,
+        base64: false,
+        // Only this one. `MESSAGES_UPSERT` would deliver every message this
+        // account receives to an endpoint that has no use for them.
+        events: ['CONNECTION_UPDATE'],
+      },
+    },
+  })
 }
 
 /**
