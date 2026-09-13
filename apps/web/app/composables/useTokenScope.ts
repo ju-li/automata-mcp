@@ -1,3 +1,5 @@
+import { assertNever } from '#shared/connection'
+
 export interface McpToolInfo {
   name: string
   title: string
@@ -77,19 +79,25 @@ export function readOnlyScope(readToolNames: string[]): TokenScope {
  * token leaves `all_chats` at its default `true`, and reporting "All chats" for
  * a database would be noise at best.
  */
-export function describeScope(scope: TokenScope, kind: InstanceKind = 'whatsapp'): string {
-  const dataOpen = kind === 'postgres' ? scope.all_tables : scope.all_chats
-  if (scope.all_tools && dataOpen) return 'Full access'
+export function describeScope(scope: TokenScope, kind: InstanceKind): string {
+  let dataOpen: boolean
+  let data: string
+  switch (kind) {
+    case 'postgres':
+      dataOpen = scope.all_tables
+      data = scope.all_tables ? 'All tables' : plural(scope.table_names.length, 'table')
+      break
+    case 'whatsapp':
+    case 'telegram':
+      dataOpen = scope.all_chats
+      data = scope.all_chats ? 'All chats' : plural(scope.chat_jids.length, 'chat')
+      break
+    default:
+      return assertNever(kind, 'connection kind')
+  }
 
-  const parts: string[] = []
-  if (kind === 'postgres') {
-    parts.push(scope.all_tables ? 'All tables' : plural(scope.table_names.length, 'table'))
-  }
-  else {
-    parts.push(scope.all_chats ? 'All chats' : plural(scope.chat_jids.length, 'chat'))
-  }
-  parts.push(scope.all_tools ? 'all actions' : plural(scope.tool_names.length, 'action'))
-  return parts.join(' · ')
+  if (scope.all_tools && dataOpen) return 'Full access'
+  return [data, scope.all_tools ? 'all actions' : plural(scope.tool_names.length, 'action')].join(' · ')
 }
 
 function plural(n: number, noun: string): string {

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { assertNever } from '#shared/connection'
+
 /**
  * Remove a connection, behind a typed confirmation.
  *
@@ -13,6 +15,19 @@
  */
 const props = defineProps<{ id: string, label?: string, kind: InstanceKind }>()
 
+/** What the owner calls the thing: a messaging account, or a connection to a database. */
+const noun = computed<'connection' | 'account'>(() => {
+  switch (props.kind) {
+    case 'postgres':
+      return 'connection'
+    case 'whatsapp':
+    case 'telegram':
+      return 'account'
+    default:
+      return assertNever(props.kind, 'connection kind')
+  }
+})
+
 const { busy, run } = useApiAction()
 const confirmation = ref('')
 
@@ -26,12 +41,10 @@ async function destroy() {
       await navigateTo('/instances')
     },
     {
-      success: props.kind === 'postgres' ? 'Connection removed' : 'Account removed',
+      success: noun.value === 'connection' ? 'Connection removed' : 'Account removed',
       // A generic, deliberately: the failures here answer "Not found" or "Not
       // signed in", which is a worse thing to show someone than this sentence.
-      failure: props.kind === 'postgres'
-        ? 'Could not remove the connection'
-        : 'Could not remove the account',
+      failure: `Could not remove the ${noun.value}`,
       preferServerMessage: false,
       // Navigating away — clearing the flag would re-enable a button on a page
       // that is already going.
@@ -45,7 +58,7 @@ async function destroy() {
   <AlertDialog>
     <AlertDialogTrigger as-child>
       <Button variant="destructive" :disabled="busy">
-        {{ kind === 'postgres' ? 'Remove connection' : 'Remove account' }}
+        {{ noun === 'connection' ? 'Remove connection' : 'Remove account' }}
       </Button>
     </AlertDialogTrigger>
     <AlertDialogContent>
@@ -57,10 +70,16 @@ async function destroy() {
             issued for it, and Claude immediately loses access. Your database
             and its data are not touched. This cannot be undone.
           </template>
-          <template v-else>
+          <template v-else-if="kind === 'whatsapp'">
             This permanently deletes the connection, every message and chat
             stored for it, and every connector token issued for it. Claude will
             immediately lose access. This cannot be undone.
+          </template>
+          <template v-else-if="kind === 'telegram'">
+            This logs this app out of the Telegram account and permanently
+            deletes every message and chat synced for it, and every connector
+            token issued for it. Claude will immediately lose access. Your
+            Telegram account itself is not touched. This cannot be undone.
           </template>
         </AlertDialogDescription>
       </AlertDialogHeader>

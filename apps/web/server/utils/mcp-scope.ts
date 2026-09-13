@@ -27,9 +27,45 @@ export type { InstanceKind }
 /**
  * A row written before `kind` existed is a WhatsApp account. PocketBase
  * materialises an unset SelectField as `''`, so this must not be `??`.
+ *
+ * **Only those two spellings default to WhatsApp.** Anything else this build
+ * does not recognise throws. PocketBase and Nuxt deploy separately, so a row can
+ * carry a kind the running code has never heard of — a migration that landed
+ * first, a rollback, a fork — and treating it as WhatsApp would hand its
+ * `base_url`/`api_key` to the Evolution client and authenticate its tokens as a
+ * WhatsApp connection. A loud refusal is the only safe reading of a value we
+ * cannot interpret.
  */
 export function instanceKind(instance: Pick<AppInstance, 'kind'>): InstanceKind {
-  return instance.kind === 'postgres' ? 'postgres' : 'whatsapp'
+  const kind = instance.kind as string | undefined
+  switch (kind) {
+    case undefined:
+    case '':
+    case 'whatsapp':
+      return 'whatsapp'
+    case 'postgres':
+    case 'telegram':
+      return kind
+    default:
+      console.error(`[kind] connection kind ${JSON.stringify(kind)} is not supported by this build`)
+      throw createError({ statusCode: 500, statusMessage: 'Unsupported connection kind' })
+  }
+}
+
+/**
+ * Whether `instanceKind()` can interpret this row, for the one caller that must
+ * not throw on a row it cannot: the listing, where one unreadable connection
+ * would otherwise take every other connection off the screen with it.
+ */
+export function isSupportedInstance(instance: Pick<AppInstance, 'id' | 'kind'>): boolean {
+  try {
+    instanceKind(instance)
+    return true
+  }
+  catch {
+    console.error(`[kind] connection ${instance.id} left out of the listing: its kind is not supported by this build`)
+    return false
+  }
 }
 
 export interface McpScope {

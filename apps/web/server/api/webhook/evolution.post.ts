@@ -99,8 +99,11 @@ export default defineEventHandler(async (event) => {
 async function findInstanceByName(name: string): Promise<AppInstance | undefined> {
   try {
     const pb = await pocketbaseAdmin()
+    // Kind-filtered: only a WhatsApp connection has an Evolution instance, so a
+    // delivery naming any other row is forged or misrouted and must not trigger
+    // a health check against it.
     return await pb.collection('instances').getFirstListItem<AppInstance>(
-      pb.filter('name = {:name}', { name }),
+      pb.filter('name = {:name} && kind = {:kind}', { name, kind: 'whatsapp' }),
     )
   }
   catch (error) {

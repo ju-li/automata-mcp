@@ -1,3 +1,4 @@
+import { assertNever } from '#shared/connection'
 import { z } from 'zod'
 
 /**
@@ -41,9 +42,17 @@ export default defineEventHandler(async (event) => {
   const actor = await requireOrgAdmin(event)
   const parsed = await parseBody(event, body)
 
-  const instance = parsed.kind === 'postgres'
-    ? await provisionPostgresInstance(actor, { label: parsed.label, dsn: parsed.dsn })
-    : await provisionWhatsappInstance(actor, { label: parsed.label, server: parsed.server })
+  let instance
+  switch (parsed.kind) {
+    case 'postgres':
+      instance = await provisionPostgresInstance(actor, { label: parsed.label, dsn: parsed.dsn })
+      break
+    case 'whatsapp':
+      instance = await provisionWhatsappInstance(actor, { label: parsed.label, server: parsed.server })
+      break
+    default:
+      return assertNever(parsed, 'connection kind')
+  }
 
   return { instance: toPublicInstance(instance) }
 })

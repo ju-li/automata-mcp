@@ -21,9 +21,9 @@ const { connectorUrl, bearerUrl } = useConnectorUrl()
 const known = computed(() => Boolean(props.token))
 const url = computed(() => connectorUrl(props.token))
 const authHeader = computed(() => `Authorization: Bearer ${props.token || MASKED_TOKEN}`)
-// The CLI needs a name for the server. Derived from the kind rather than
-// hardcoded, so a database connector is not added to Claude as "whatsapp".
-const serverName = computed(() => (props.kind === 'postgres' ? 'postgres' : 'whatsapp'))
+// The CLI needs a name for the server. The kind itself, rather than a hardcoded
+// or two-way choice, so no connector is added to Claude under another kind's name.
+const serverName = computed(() => props.kind)
 const cliCommand = computed(() => `claude mcp add --transport http ${serverName.value} ${url.value}`)
 </script>
 

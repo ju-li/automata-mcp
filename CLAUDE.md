@@ -14,7 +14,7 @@ A connection is a row in `instances` with a `kind`, and a connector token is bou
 - **`whatsapp`** — an [Evolution API](https://doc.evolution-api.com/) instance, paired by QR, on the Evolution server this deployment is configured with *or* one the user supplied.
 - **`postgres`** — a user-supplied PostgreSQL DSN.
 
-`kind` is read through `instanceKind()` in `mcp-scope.ts`, never off the record directly: PocketBase materialises an unset SelectField as `''`, and a row written before the field existed is a WhatsApp account. That default lives in exactly one function.
+`kind` is read through `instanceKind()` in `mcp-scope.ts`, never off the record directly: PocketBase materialises an unset SelectField as `''`, and a row written before the field existed is a WhatsApp account. That default lives in exactly one function — and it covers exactly those two spellings: any other value throws, because PocketBase and Nuxt deploy separately and a row whose kind the running build has never heard of must be refused, not served as WhatsApp. Every per-kind branch is a `switch` ending in `assertNever` (`shared/connection.ts`), never an `if … else`, so adding a kind fails to compile everywhere it has not been decided.
 
 PocketBase is the app's database (users, sessions, connections and their credentials). Evolution API, its Postgres and its Redis are dependencies you run **only for WhatsApp connections** — they sit behind a `whatsapp` compose profile, and the `NUXT_EVOLUTION_*` variables are optional.
 

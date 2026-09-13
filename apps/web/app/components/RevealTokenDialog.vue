@@ -34,8 +34,12 @@ const open = computed({
           Anyone with this token can query this database — and write to it, if you
           granted the write action. Treat it like a password.
         </p>
-        <p v-else>
+        <p v-else-if="kind === 'whatsapp'">
           Anyone with this token can read and send WhatsApp messages from this
+          account. Treat it like a password.
+        </p>
+        <p v-else-if="kind === 'telegram'">
+          Anyone with this token can read and send Telegram messages from this
           account. Treat it like a password.
         </p>
       </div>

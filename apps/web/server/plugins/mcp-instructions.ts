@@ -1,3 +1,4 @@
+import { assertNever } from '#shared/connection'
 import type { McpAuth } from '../utils/mcp-auth'
 import { POSTGRES_INSTRUCTIONS, WHATSAPP_INSTRUCTIONS } from '../utils/mcp-instructions'
 
@@ -31,8 +32,15 @@ export default defineNitroPlugin((nitro) => {
     // connection to describe. Leave the configured fallback in place.
     if (!auth) return
 
-    config.instructions = auth.kind === 'postgres'
-      ? POSTGRES_INSTRUCTIONS
-      : WHATSAPP_INSTRUCTIONS
+    switch (auth.kind) {
+      case 'postgres':
+        config.instructions = POSTGRES_INSTRUCTIONS
+        break
+      case 'whatsapp':
+        config.instructions = WHATSAPP_INSTRUCTIONS
+        break
+      default:
+        assertNever(auth, 'MCP auth kind')
+    }
   })
 })
