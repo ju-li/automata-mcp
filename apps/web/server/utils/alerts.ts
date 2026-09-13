@@ -1,8 +1,8 @@
-import type { AppInstance, AppUser } from './pocketbase'
+import type { AppInstance } from './pocketbase'
 import type { InstanceStatus } from './instances'
 
 /**
- * Telling a connection's owner that it died.
+ * Telling the people who use a connection that it died.
  *
  * Two things feed this, and they are not redundant:
  *
@@ -25,7 +25,7 @@ import type { InstanceStatus } from './instances'
  */
 
 /**
- * How long a connection must be unhealthy before its owner is told.
+ * How long a connection must be unhealthy before anyone is told.
  *
  * Only `connecting` and `unknown` serve it out — a live `close` is Evolution
  * having given up, so it mails at once. The grace exists for the states that
@@ -64,7 +64,7 @@ export async function evaluateConnectionHealth(instance: AppInstance): Promise<v
 
     if (instance.alerted_at) {
       // Nobody was told it broke, so there is nothing to say about it working.
-      const sent = await notifyOwner(instance, recoveryMail(instance, status))
+      const sent = await notifyWatchers(instance, () => recoveryMail(instance, status))
       if (!sent) return
     }
 
@@ -85,7 +85,7 @@ export async function evaluateConnectionHealth(instance: AppInstance): Promise<v
   const definitive = status.state === 'close'
   if (!definitive && Date.now() - downSince < GRACE_MS) return
 
-  const sent = await notifyOwner(instance, outageMail(instance, status))
+  const sent = await notifyWatchers(instance, canManage => outageMail(instance, status, canManage))
   if (sent) await pb.collection('instances').update(instance.id, { alerted_at: new Date().toISOString() })
 }
 
@@ -100,7 +100,7 @@ export async function evaluateConnectionHealth(instance: AppInstance): Promise<v
  *
  * A connection whose status read fails reads as `unknown`, which is unhealthy.
  * That is the honest answer: a connection this server cannot reach is one its
- * owner cannot use either. It costs one grace period before anything is sent.
+ * users cannot use either. It costs one grace period before anything is sent.
  */
 export async function sweepConnectionAlerts(): Promise<{ checked: number, failed: number }> {
   const pb = await pocketbaseAdmin()
@@ -140,6 +140,12 @@ interface AlertMail {
   text: string
 }
 
+interface AlertRecipient {
+  email: string
+  /** An admin of the owning organization. Decides which fix the mail names. */
+  canManage: boolean
+}
+
 /**
  * PocketBase serialises a date as `2026-09-12 10:00:00.000Z` — a space where
  * ISO 8601 wants a `T`. V8's fallback parser accepts it, but not by contract,
@@ -164,21 +170,35 @@ function connectionLabel(instance: AppInstance): string {
 }
 
 /**
- * What the owner is asked to do differs by which failure this is, and getting it
- * backwards wastes a real phone: `sessionLost` means the phone is still linked
- * and Reconnect is enough, while a connection that is simply not linked any more
- * needs a QR scan. The dashboard already draws that distinction; the mail must
- * make the same one or it sends people to scan a code they do not need to.
+ * What the reader is asked to do differs on two axes, and both get it wrong in a
+ * way that costs something real.
+ *
+ * **Which failure it is.** `sessionLost` means the phone is still linked and
+ * Reconnect is enough; a connection that is not linked any more needs a QR scan.
+ * The dashboard already draws that distinction, and getting it backwards sends
+ * someone to re-pair a number that did not need it.
+ *
+ * **Who is reading.** Reconnecting and re-pairing are management, so a member
+ * has neither button — `InstanceWhatsapp.vue` does not even enter pairing mode
+ * for them. Telling them to press one is the failure the panel is careful to
+ * avoid, reproduced in their inbox where nobody can see that the button is
+ * missing. They are told what the state is and who can fix it instead.
  */
-function outageMail(instance: AppInstance, status: InstanceStatus): AlertMail {
+function outageMail(instance: AppInstance, status: InstanceStatus, canManage: boolean): AlertMail {
   const label = connectionLabel(instance)
   const url = connectionUrl(instance)
 
   const cause = status.sessionLost
-    ? 'The session dropped. Your phone is still linked, so reconnecting should be '
-      + 'enough — open the connection and press Reconnect. No QR scan needed.'
-    : 'The account is no longer linked. Open the connection and scan the QR code '
-      + 'again to pair it.'
+    ? canManage
+      ? 'The session dropped. The phone is still linked, so reconnecting should be '
+        + 'enough — open the connection and press Reconnect. No QR scan needed.'
+      : 'The session dropped. The phone is still linked, so an admin can bring it '
+        + 'back with Reconnect — no QR scan needed.'
+    : canManage
+      ? 'The account is no longer linked. Open the connection and scan the QR code '
+        + 'again to pair it.'
+      : 'The account is no longer linked. An admin has to scan the QR code again '
+        + 'to pair it.'
 
   return {
     subject: `${label} is disconnected`,
@@ -208,24 +228,79 @@ function recoveryMail(instance: AppInstance, _status: InstanceStatus): AlertMail
 }
 
 /**
- * Resolve the owner and send. Answers whether the mail went out.
+ * Everyone who can reach this connection, and so everyone for whom it breaking
+ * is their problem: every admin of the owning organization, plus the members it
+ * is assigned to.
  *
- * The owner is read here rather than passed in because both callers hold the
- * instance and not the user, and because a connection whose owner has been
- * deleted should be skipped quietly rather than throwing inside a sweep.
+ * That set is not invented here — it is `authorizesInstance()` evaluated over
+ * the roster, the same predicate the session and MCP surfaces decide access
+ * with. Mailing a different set would mean a second definition of "reaches this
+ * connection" that drifts from the one that grants it.
+ *
+ * `listOrgMembers` already carries each member's email, so this is two reads
+ * whatever the size of the organization.
  */
-async function notifyOwner(instance: AppInstance, mail: AlertMail): Promise<boolean> {
+async function recipientsFor(instance: AppInstance): Promise<AlertRecipient[]> {
+  // The schema forbids it, but fail closed rather than mail an organization
+  // resolved from an empty string.
+  if (!instance.org) return []
+
+  const [members, assignees] = await Promise.all([
+    listOrgMembers(instance.org),
+    listInstanceAssignees(instance.id),
+  ])
+
+  const assigned = new Set(assignees)
+
+  return members
+    .filter(member => authorizesInstance(
+      { role: member.role, orgId: instance.org },
+      instance.org,
+      assigned.has(member.userId),
+    ))
+    .filter(member => Boolean(member.email))
+    .map(member => ({ email: member.email, canManage: member.role === 'admin' }))
+}
+
+/**
+ * Resolve the recipients and send. Answers whether the mail reached anyone.
+ *
+ * Recipients are resolved here rather than passed in because both callers hold
+ * the instance and not a person, and because a connection whose organization has
+ * emptied out should be skipped quietly rather than throw inside a sweep.
+ *
+ * One message each rather than one message with everyone in `to`: the recipients
+ * are colleagues, not a mailing list, and putting a company's roster in a header
+ * is a disclosure nobody asked for. "Reached anyone" is the bar for writing
+ * `alerted_at` — one failed address must not queue a repeat to the others on
+ * every sweep.
+ */
+async function notifyWatchers(
+  instance: AppInstance,
+  build: (canManage: boolean) => AlertMail,
+): Promise<boolean> {
+  let recipients: AlertRecipient[]
+
   try {
-    const pb = await pocketbaseAdmin()
-    const owner = await pb.collection('users').getOne<AppUser>(instance.user)
-    if (!owner?.email) {
-      console.error(`[alerts] connection ${instance.id} has no owner email; not sending "${mail.subject}".`)
-      return false
-    }
-    return await sendAppEmail({ to: owner.email, subject: mail.subject, text: mail.text })
+    recipients = await recipientsFor(instance)
   }
   catch (error) {
-    console.error(`[alerts] could not resolve the owner of connection ${instance.id}:`, error)
+    console.error(`[alerts] could not resolve who to notify about connection ${instance.id}:`, error)
     return false
   }
+
+  if (!recipients.length) {
+    // Reachable: an organization whose only admin was removed, or a connection
+    // assigned to nobody in an organization with no admin left. Worth a line —
+    // the alert is computed and then has nowhere to go.
+    console.error(`[alerts] connection ${instance.id} has nobody to notify; not sending "${build(true).subject}".`)
+    return false
+  }
+
+  const results = await Promise.all(recipients.map((recipient) => {
+    const mail = build(recipient.canManage)
+    return sendAppEmail({ to: recipient.email, subject: mail.subject, text: mail.text })
+  }))
+
+  return results.some(Boolean)
 }

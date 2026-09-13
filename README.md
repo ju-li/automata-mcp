@@ -25,7 +25,7 @@ tools go through it. See "Reading and searching messages".
 > history imported, Postgres by connection string), the per-connection
 > dashboard, and connector token provisioning with per-chat and per-table
 > scoping all work. Ten MCP tools, five per kind — see "MCP tools". A WhatsApp
-> connection that drops emails its owner, and emails them again when it comes
+> connection that drops emails the people who use it, and emails them again when it comes
 > back — see "Connection alerts".
 
 ## Layout
@@ -600,9 +600,17 @@ That resets everything, including the superuser, and re-applies every migration.
 
 ## Connection alerts
 
-A WhatsApp connection that stops working emails its owner, and emails them again
-once it recovers. Always on, no setting; it needs SMTP configured on the
-pocketbase service (`PB_SMTP_*`) and nothing else.
+A WhatsApp connection that stops working emails everyone who can reach it, and
+emails them again once it recovers. Always on, no setting; it needs SMTP
+configured on the pocketbase service (`PB_SMTP_*`) and nothing else.
+
+**Who gets it:** every admin of the owning organization, plus the members the
+connection is assigned to — the same set that can reach it in the app, decided by
+the same predicate. One message each rather than one message addressed to all of
+them, so nobody's alert discloses the roster. The two roles get different advice:
+reconnecting and re-pairing are management, so a member is told what happened and
+that an admin can fix it rather than being sent to press a button they do not
+have.
 
 Two things feed it, and they are not redundant.
 
@@ -800,6 +808,13 @@ WEBHOOK_GLOBAL_ENABLED=false
 TELEMETRY_ENABLED=false
 ```
 
+`WEBHOOK_GLOBAL_ENABLED=false` is deliberate. The app registers a webhook **per
+connection** instead, and Evolution fires the global and per-instance deliveries
+independently — so with both on, every event arrives twice. The global one also
+sends no custom headers, so once `NUXT_WEBHOOK_SECRET` is set that copy 401s on
+every event and is dropped rather than retried. Turning it back on buys no
+coverage either: it never reached a connection on a user's own Evolution server.
+
 The `DATABASE_SAVE_DATA_*` flags are what populate the dashboard counts and make
 `list-chats` and `read-messages` return anything. Turn them off and those tools
 go quiet.
@@ -809,6 +824,35 @@ that one covers the history WhatsApp hands over *once*, when a number is paired.
 Evolution checks it in the `messaging-history.set` handler and silently drops the
 whole payload if it is false — with no way to ask for the history again short of
 disconnecting and re-scanning the QR. See "Importing existing history" above.
+
+**pocketbase** — the superuser it upserts at boot, and the SMTP settings it sends
+mail with. Both admin values must be identical to the web service's; use a Railway
+variable reference so they cannot drift:
+
+```
+PORT=8090
+NUXT_POCKETBASE_ADMIN_EMAIL=<you>
+NUXT_POCKETBASE_ADMIN_PASSWORD=<generate>
+
+# Mail. Optional — with PB_SMTP_HOST empty, connection alerts are computed and
+# then not delivered.
+PB_SMTP_HOST=<smtp host>
+PB_SMTP_PORT=587
+PB_SMTP_USERNAME=<username>
+PB_SMTP_PASSWORD=<password>
+PB_SMTP_TLS=false          # false = STARTTLS on 587; true = implicit TLS on 465
+PB_SMTP_AUTH_METHOD=PLAIN  # or LOGIN
+PB_SENDER_ADDRESS=<a from address the provider will accept>
+PB_SENDER_NAME=Automata MCP
+```
+
+The SMTP values are applied on every boot by `pb_hooks/mail.pb.js`, so changing
+one is a redeploy rather than a click through the admin UI — look for `[mail]
+SMTP configured from the environment` in the logs. `PB_SENDER_ADDRESS` must be a
+real address: PocketBase validates it, and rejects something like
+`alerts@localhost` with `[mail] WARNING: could not apply the SMTP settings`. The
+password is stored in `pb_data` in clear unless `PB_ENCRYPTION_KEY` is set — the
+same standing as the hidden fields on `instances`.
 
 **web** — internal addresses for the backends, public URLs for anything a user sees:
 
@@ -856,25 +900,6 @@ Nothing to do. Set `NUXT_POCKETBASE_ADMIN_EMAIL` and
 service — to the same values — and its entrypoint upserts the superuser on every
 boot. The schema needs no action either; `pb_migrations/` is baked into the image
 and applied at startup.
-
-**pocketbase** also carries the SMTP settings, because it is what sends mail for
-this deployment:
-
-```
-PB_SMTP_HOST=<smtp host>
-PB_SMTP_PORT=587
-PB_SMTP_USERNAME=<username>
-PB_SMTP_PASSWORD=<password>
-PB_SMTP_TLS=false          # false = STARTTLS on 587; true = implicit TLS on 465
-PB_SMTP_AUTH_METHOD=PLAIN  # or LOGIN
-PB_SENDER_ADDRESS=<from address the provider will accept>
-PB_SENDER_NAME=Automata MCP
-```
-
-Applied on every boot by `pb_hooks/mail.pb.js`, so changing one is a redeploy and
-not a click through the admin UI. Look for `[mail] SMTP configured from the
-environment` in the logs. Leave `PB_SMTP_HOST` empty and no alert mail is
-delivered — see "Connection alerts".
 
 Both admin variables must match across the two services: the web server signs in
 with them to read hidden fields and the admin-only collections. A Railway variable

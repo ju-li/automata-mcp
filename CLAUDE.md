@@ -25,7 +25,7 @@ PocketBase is the app's database (users, sessions, connections and their credent
 - `whatsapp`: `get-connection-status`, `list-chats`, `read-messages`, `search-messages`, `send-text-message`
 - `postgres`: `get-database-info`, `list-tables`, `describe-table`, `run-query`, `run-statement` (write)
 
-A WhatsApp connection that drops emails its owner and emails them again on recovery — see "Disconnect alerts".
+A WhatsApp connection that drops emails everyone who can reach it and emails them again on recovery — see "Disconnect alerts".
 
 An organization may hold **several** connections of either kind. Each is a row in `instances`, owned by the organization rather than by a person, and each MCP token is bound to exactly one of them and issued to exactly one member. See "Organizations and roles".
 
@@ -325,7 +325,9 @@ The global path had a second gate worth remembering if it is ever re-enabled: `W
 
 ## Disconnect alerts
 
-`server/utils/alerts.ts` decides; `server/utils/mailer.ts` and `services/pocketbase/pb_hooks/mail.pb.js` deliver. Two date fields on `instances` hold the state — `down_since` (empty = healthy) and `alerted_at` (set = the current outage has been reported). Dates rather than a status field so neither PocketBase default (`''` for a select, `false` for a bool) can mean something unintended.
+`server/utils/alerts.ts` decides; `server/utils/mailer.ts` and `services/pocketbase/pb_hooks/mail.pb.js` deliver.
+
+**Recipients are not a new policy.** `recipientsFor()` runs `authorizesInstance()` over `listOrgMembers()` — every admin of the owning organization plus the members the connection is assigned to, which is the set that can reach it and therefore the set it breaking is a problem for. Inventing a second definition of "reaches this connection" is how the two drift. One message each, never one addressed to all of them: these are colleagues, not a mailing list, and the `to` header would disclose the roster. `alerted_at` is written when the mail reached **anyone**, so one bad address does not queue a repeat to everyone else on every sweep. The outage mail is also role-aware — a member has no Reconnect button and never enters pairing mode, so telling them to press one reproduces in their inbox exactly the failure `InstanceWhatsapp.vue` is careful to avoid. Two date fields on `instances` hold the state — `down_since` (empty = healthy) and `alerted_at` (set = the current outage has been reported). Dates rather than a status field so neither PocketBase default (`''` for a select, `false` for a bool) can mean something unintended.
 
 **The webhook cannot be the whole mechanism, and the sweep is not a backstop.** In 2.3.7 a close Evolution intends to retry emits *no* `connection.update` — `connectionUpdate` rebuilds the socket and returns, and only a close it will not retry (`loggedOut`, `forbidden`, 402, 406) sends anything. So the failure this feature exists for — a socket that died and stayed dead, the one `sessionLost` is built on — is invisible to the webhook by construction. The hourly `alerts:sweep` task is the only thing that sees it, because it performs a live read.
 
