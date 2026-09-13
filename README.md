@@ -604,6 +604,11 @@ A WhatsApp connection that stops working emails everyone who can reach it, and
 emails them again once it recovers. Always on, no setting; it needs SMTP
 configured on the pocketbase service (`PB_SMTP_*`) and nothing else.
 
+The same SMTP settings deliver organization invitations: the invitation-link
+dialog has **Send invite email**, and each pending invitation has **Resend
+email**, which replaces the old link with a new one. Without SMTP both answer
+with an error and the link can still be copied by hand.
+
 **Who gets it:** every admin of the owning organization, plus the members the
 connection is assigned to — the same set that can reach it in the app, decided by
 the same predicate. One message each rather than one message addressed to all of

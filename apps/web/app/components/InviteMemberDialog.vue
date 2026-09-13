@@ -9,7 +9,7 @@ import { UserPlusIcon } from '@lucide/vue'
  * redeemed by whoever reads it first. The copy says so, because an admin who
  * thinks the link alone grants access will hand it out carelessly.
  */
-const emit = defineEmits<{ created: [{ url: string, email: string, role: OrgRole }] }>()
+const emit = defineEmits<{ created: [RevealedInvite] }>()
 
 const open = ref(false)
 const email = ref('')
@@ -27,12 +27,18 @@ async function submit() {
   if (!address) return
 
   await run(async () => {
-    const result = await $fetch<{ url: string }>('/api/org/invites', {
+    const result = await $fetch<{ url: string, code: string, invite: { id: string, email: string } }>('/api/org/invites', {
       method: 'POST',
       body: { email: address, role: role.value },
     })
     open.value = false
-    emit('created', { url: result.url, email: address, role: role.value })
+    emit('created', {
+      id: result.invite.id,
+      code: result.code,
+      url: result.url,
+      email: result.invite.email,
+      role: role.value,
+    })
   }, { failure: 'Could not create the invitation' })
 }
 </script>
@@ -50,7 +56,7 @@ async function submit() {
       <DialogHeader>
         <DialogTitle>Invite someone</DialogTitle>
         <DialogDescription>
-          You will get a link to send them. There is no email delivery here.
+          You will get a link to copy, or to email to them from the next step.
         </DialogDescription>
       </DialogHeader>
 

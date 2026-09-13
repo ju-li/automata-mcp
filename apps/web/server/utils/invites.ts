@@ -1,15 +1,18 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
+import type { H3Event } from 'h3'
 import type { AppInvitation, AppUser, OrgRole } from './pocketbase'
+import type { Actor } from './org'
 
 /**
  * Organization invitations.
  *
- * Link/code based, because this deployment has no SMTP: an admin creates an
- * invitation for an email address, the app returns a one-time URL, and the admin
- * passes it on however they like. The code is therefore a **bearer credential
- * for joining an organization**, and gets the same handling as an MCP token —
- * 32 random bytes, shown exactly once, stored only as a SHA-256 hash, compared
- * in constant time.
+ * Link/code based: an admin creates an invitation for an email address, the app
+ * returns a one-time URL, and the admin either copies it or has it emailed to
+ * that address. The code is therefore a **bearer credential for joining an
+ * organization**, and gets the same handling as an MCP token — 32 random bytes,
+ * shown exactly once, stored only as a SHA-256 hash, compared in constant time.
+ * Email is an additional delivery, never a replacement for showing the link:
+ * mail can fail, and a link nobody saw is an invitation nobody can accept.
  *
  * A bearer credential alone is not enough to join. Every invitation names an
  * email address and acceptance requires the accepting account's own email to
@@ -178,6 +181,129 @@ export function inviteProblemMessage(problem: InviteProblem): string {
     default:
       return 'This invitation link is not valid.'
   }
+}
+
+/**
+ * The link that redeems a code. One definition for create, email and resend, so
+ * the link shown on screen and the link in the mail cannot differ.
+ */
+export function inviteUrl(event: H3Event, code: string): string {
+  const origin = useRuntimeConfig().public.appUrl || getRequestURL(event).origin
+  return `${origin.replace(/\/+$/, '')}/invite/${code}`
+}
+
+/**
+ * A crude throttle on invitation mail.
+ *
+ * Every signup makes its author an admin of a fresh organization, so without
+ * this the invite form is a way for anyone to mail any address from this
+ * deployment's domain, with an organization name of their choosing in the
+ * subject. Two limits: one mail per address per organization per minute (keyed
+ * on the address, not the invitation id, because a resend mints a new id each
+ * time), and a ceiling per organization per hour.
+ *
+ * In-memory and per-process, like the webhook cooldown. It is a speed bump, not
+ * a security control: a restart empties it and a second replica doubles it.
+ */
+const INVITE_MAIL_COOLDOWN_MS = 60_000
+const ORG_MAIL_WINDOW_MS = 60 * 60 * 1000
+const ORG_MAIL_LIMIT = 20
+
+const lastMailedAddress = new Map<string, number>()
+const orgMailTimes = new Map<string, number[]>()
+
+function pruneMailThrottle(now: number): void {
+  for (const [key, at] of lastMailedAddress) {
+    if (now - at >= INVITE_MAIL_COOLDOWN_MS) lastMailedAddress.delete(key)
+  }
+  for (const [org, times] of orgMailTimes) {
+    const recent = times.filter(at => now - at < ORG_MAIL_WINDOW_MS)
+    if (recent.length) orgMailTimes.set(org, recent)
+    else orgMailTimes.delete(org)
+  }
+}
+
+/** Throws 429 if this organization may not send invitation mail right now. */
+export function assertInviteMailAllowed(orgId: string, email: string): void {
+  const now = Date.now()
+  pruneMailThrottle(now)
+
+  if (lastMailedAddress.has(`${orgId}:${normaliseEmail(email)}`)) {
+    throw createError({
+      statusCode: 429,
+      statusMessage: 'An invitation was just emailed to that address. Wait a minute before sending another.',
+    })
+  }
+  if ((orgMailTimes.get(orgId)?.length ?? 0) >= ORG_MAIL_LIMIT) {
+    throw createError({
+      statusCode: 429,
+      statusMessage: 'Too many invitation emails from this organization in the last hour. Copy the link instead, or try again later.',
+    })
+  }
+}
+
+function recordInviteMail(orgId: string, email: string): void {
+  const now = Date.now()
+  lastMailedAddress.set(`${orgId}:${normaliseEmail(email)}`, now)
+  orgMailTimes.set(orgId, [...(orgMailTimes.get(orgId) ?? []), now])
+}
+
+/** A header must not carry a line break; the organization name is user-typed. */
+function singleLine(value: string): string {
+  return value.replace(/[\r\n]+/g, ' ').trim()
+}
+
+export function inviteMail(input: {
+  orgName: string
+  invitedBy: AppUser
+  role: OrgRole
+  email: string
+  url: string
+}): { subject: string, text: string } {
+  const org = singleLine(input.orgName) || 'an organization'
+  const inviter = singleLine(input.invitedBy.name || '') || input.invitedBy.email
+
+  return {
+    subject: `You're invited to join ${org}`,
+    text: [
+      `${inviter} has invited you to join ${org} as ${input.role === 'admin' ? 'an admin' : 'a member'}.`,
+      '',
+      'Open this link to accept:',
+      input.url,
+      '',
+      `Sign in or sign up as ${input.email} to accept — the link works only for `
+      + 'that address. It expires in 14 days.',
+      '',
+      'If you were not expecting this, you can ignore this email.',
+    ].join('\n'),
+  }
+}
+
+/**
+ * Email an invitation's link to the address stored on it. Answers whether the
+ * mail went out; `sendAppEmail` logs the cause when it did not.
+ *
+ * The recipient is always the invitation's own address, never one taken from a
+ * request. Call `assertInviteMailAllowed` first — separately, because a resend
+ * must be refused before it supersedes the old link, not after.
+ */
+export async function sendInviteEmail(
+  event: H3Event,
+  actor: Actor,
+  invite: Pick<AppInvitation, 'email' | 'role'>,
+  code: string,
+): Promise<boolean> {
+  recordInviteMail(actor.org.id, invite.email)
+
+  const mail = inviteMail({
+    orgName: actor.org.name,
+    invitedBy: actor.user,
+    role: invite.role,
+    email: invite.email,
+    url: inviteUrl(event, code),
+  })
+
+  return sendAppEmail({ to: invite.email, subject: mail.subject, text: mail.text })
 }
 
 export async function markInviteAccepted(inviteId: string, userId: string): Promise<void> {

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CheckIcon, PencilIcon, XIcon } from '@lucide/vue'
+import { CheckIcon, MailIcon, PencilIcon, XIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
 /**
@@ -15,7 +15,7 @@ const { user, isAdmin, refresh: refreshSession } = useSession()
 
 const { data, refresh, status } = await useFetch<OrgResponse>('/api/org')
 
-const revealed = ref<{ url: string, email: string, role: OrgRole } | null>(null)
+const revealed = ref<RevealedInvite | null>(null)
 
 const renaming = ref(false)
 const draftName = ref('')
@@ -130,7 +130,39 @@ async function revokeInvite(invite: OrgInviteRow) {
   }, { success: 'Invitation revoked.', failure: 'Could not revoke that invitation' })
 }
 
-function onInvited(created: { url: string, email: string, role: OrgRole }) {
+/**
+ * Email a pending invitation again.
+ *
+ * The old link cannot be re-sent — only its hash exists — so the server mints a
+ * new one, superseding the old, and mails that. If the mail fails the old link
+ * is already dead, so the new one is shown instead: otherwise the invitation
+ * would exist with no link anyone has seen.
+ */
+async function resendInvite(invite: OrgInviteRow) {
+  await runMember(async () => {
+    const result = await $fetch<{ url: string, code: string, invite: { id: string }, emailed: boolean }>(
+      `/api/org/invites/${invite.id}/resend`,
+      { method: 'POST' },
+    )
+    await refresh()
+
+    if (result.emailed) {
+      toast.success(`New invitation emailed to ${invite.email}.`)
+      return
+    }
+
+    toast.error('Could not send the email. Here is the new link — the old one no longer works.')
+    revealed.value = {
+      id: result.invite.id,
+      code: result.code,
+      url: result.url,
+      email: invite.email,
+      role: invite.role,
+    }
+  }, { failure: 'Could not resend that invitation' })
+}
+
+function onInvited(created: RevealedInvite) {
   revealed.value = created
   refresh()
 }
@@ -306,15 +338,42 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
                 <RoleBadge :role="invite.role" />
               </TableCell>
               <TableCell class="text-right">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  class="text-destructive"
-                  :disabled="memberBusy"
-                  @click="revokeInvite(invite)"
-                >
-                  Revoke
-                </Button>
+                <div class="flex items-center justify-end gap-2">
+                  <AlertDialog>
+                    <AlertDialogTrigger as-child>
+                      <Button size="sm" variant="outline" :disabled="memberBusy">
+                        <MailIcon class="size-4" />
+                        Resend email
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Email {{ invite.email }} a new link?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          The previous link is not stored, so a new one is created and
+                          emailed. The previous link stops working immediately — if you
+                          shared it somewhere else, it will no longer let them in.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction @click="resendInvite(invite)">
+                          Resend
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    class="text-destructive"
+                    :disabled="memberBusy"
+                    @click="revokeInvite(invite)"
+                  >
+                    Revoke
+                  </Button>
+                </div>
               </TableCell>
             </TableRow>
           </TableBody>
@@ -324,6 +383,8 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
 
     <InviteLinkDialog
       :url="revealed?.url ?? null"
+      :invite-id="revealed?.id"
+      :code="revealed?.code"
       :email="revealed?.email"
       :role="revealed?.role"
       @close="revealed = null"
