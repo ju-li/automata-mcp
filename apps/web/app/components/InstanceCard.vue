@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { DatabaseIcon, MessageCircleIcon } from '@lucide/vue'
+import { DatabaseIcon, MessageCircleIcon, SendIcon } from '@lucide/vue'
+import { assertNever } from '#shared/connection'
 
 /**
  * One connection in the listing.
@@ -12,6 +13,20 @@ import { DatabaseIcon, MessageCircleIcon } from '@lucide/vue'
 const props = defineProps<{ instance: InstanceListRow }>()
 
 const isPostgres = computed(() => props.instance.kind === 'postgres')
+
+const kindIcon = computed(() => {
+  const kind = props.instance.kind
+  switch (kind) {
+    case 'postgres':
+      return DatabaseIcon
+    case 'whatsapp':
+      return MessageCircleIcon
+    case 'telegram':
+      return SendIcon
+    default:
+      return assertNever(kind, 'connection kind')
+  }
+})
 
 const secondary = computed(() => {
   if (isPostgres.value) return props.instance.target || 'No connection string stored'
@@ -26,8 +41,7 @@ const secondary = computed(() => {
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
             <CardTitle class="flex items-center gap-2 truncate">
-              <DatabaseIcon v-if="isPostgres" class="size-4 shrink-0 text-muted-foreground" />
-              <MessageCircleIcon v-else class="size-4 shrink-0 text-muted-foreground" />
+              <component :is="kindIcon" class="size-4 shrink-0 text-muted-foreground" />
               {{ instance.label }}
             </CardTitle>
             <CardDescription class="truncate" :class="isPostgres && 'font-mono text-xs'">

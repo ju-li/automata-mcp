@@ -22,7 +22,7 @@
  * Read a row's kind through `instanceKind()` in `server/utils/mcp-scope.ts`,
  * never off the record: PocketBase materialises an unset SelectField as `''`.
  */
-export type InstanceKind = 'whatsapp' | 'postgres'
+export type InstanceKind = 'whatsapp' | 'postgres' | 'telegram'
 
 /**
  * How a connection is doing, in four values that mean the same thing for every
@@ -34,3 +34,17 @@ export type InstanceKind = 'whatsapp' | 'postgres'
  * becomes "not paired" for WhatsApp and "unreachable" for a database.
  */
 export type ConnectionState = 'open' | 'connecting' | 'close' | 'unknown'
+
+/**
+ * The `default` arm of every switch over a union declared here.
+ *
+ * Every per-kind branch in both surfaces is a `switch` that ends in this, never
+ * an `if (kind === 'postgres') … else …`. The `else` form compiles unchanged when
+ * a kind is added and quietly sends the new kind down whichever branch was last —
+ * which, for most of this codebase's history, was the Evolution one. With this,
+ * adding a member to `InstanceKind` fails to compile at every branch that has
+ * not decided what the new kind does.
+ */
+export function assertNever(value: never, what = 'value'): never {
+  throw new Error(`Unhandled ${what}: ${JSON.stringify(value)}`)
+}

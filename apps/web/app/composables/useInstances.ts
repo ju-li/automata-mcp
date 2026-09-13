@@ -1,3 +1,4 @@
+import { assertNever } from '#shared/connection'
 import type { InstanceKind } from '#shared/connection'
 
 /**
@@ -58,7 +59,16 @@ export interface InstanceListRow {
 
 /** What to call this kind of connection in prose, singular. */
 export function describeKind(kind: InstanceKind): string {
-  return kind === 'postgres' ? 'database' : 'WhatsApp account'
+  switch (kind) {
+    case 'postgres':
+      return 'database'
+    case 'whatsapp':
+      return 'WhatsApp account'
+    case 'telegram':
+      return 'Telegram account'
+    default:
+      return assertNever(kind, 'connection kind')
+  }
 }
 
 /**

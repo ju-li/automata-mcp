@@ -1,3 +1,4 @@
+import type { InstanceKind } from '#shared/connection'
 import PocketBase from 'pocketbase'
 
 /**
@@ -320,7 +321,8 @@ export interface AppInstance {
    * empty on a row whose creator has since been removed.
    */
   created_by?: string
-  kind?: 'whatsapp' | 'postgres'
+  /** `''` on a row written before the field existed. Read through `instanceKind()`. */
+  kind?: InstanceKind | ''
   name: string
   instance_id?: string
   api_key?: string

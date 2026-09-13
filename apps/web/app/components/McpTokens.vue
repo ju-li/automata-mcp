@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { PlusIcon } from '@lucide/vue'
+import { assertNever } from '#shared/connection'
 
 const props = withDefaults(defineProps<{
   instanceId: string
@@ -40,9 +41,17 @@ const { data: toolCatalogue } = await useFetch<{ tools: McpToolInfo[] }>(
 )
 
 function initialScope(): TokenScope {
-  if (props.kind !== 'postgres') return openScope()
-  const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly).map(t => t.name)
-  return readOnlyScope(readTools)
+  switch (props.kind) {
+    case 'whatsapp':
+    case 'telegram':
+      return openScope()
+    case 'postgres': {
+      const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly).map(t => t.name)
+      return readOnlyScope(readTools)
+    }
+    default:
+      return assertNever(props.kind, 'connection kind')
+  }
 }
 
 /**
@@ -258,9 +267,13 @@ function statusOf(token: TokenRow) {
             This database is not reachable, so tokens cannot read or write
             anything until it is. You can still revoke them.
           </template>
-          <template v-else>
+          <template v-else-if="kind === 'whatsapp'">
             This account is not connected, so tokens cannot send or read anything
             until you pair it again. You can still revoke them.
+          </template>
+          <template v-else-if="kind === 'telegram'">
+            This account is not connected, so tokens cannot send or read anything
+            until it is linked again. You can still revoke them.
           </template>
         </p>
       </div>

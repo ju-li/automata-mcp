@@ -1,3 +1,4 @@
+import { assertNever } from '#shared/connection'
 import { randomBytes } from 'node:crypto'
 import type { AppInstance } from './pocketbase'
 import type { Actor } from './org'
@@ -70,22 +71,32 @@ export interface PublicInstance {
 
 export function toPublicInstance(instance: AppInstance): PublicInstance {
   const kind = instanceKind(instance)
-  return {
-    id: instance.id,
-    kind,
-    name: instance.name,
-    label: instance.label || (kind === 'postgres' ? 'Database' : 'WhatsApp account'),
-    created: instance.created,
-    target: kind === 'postgres'
-      ? [instance.pg_host, instance.pg_port].filter(Boolean).join(':')
-        + (instance.pg_database ? `/${instance.pg_database}` : '')
-      : instance.base_url,
-    ...(kind === 'whatsapp' && {
-      ownServer: Boolean(instance.admin_key),
-      // Not recomputed here: `canReadMessages` in evolution-db.ts is the rule,
-      // and the comment there calls itself the only place it lives.
-      canReadMessages: canReadMessages(instance),
-    }),
+  const base = { id: instance.id, kind, name: instance.name, created: instance.created }
+
+  switch (kind) {
+    case 'postgres':
+      return {
+        ...base,
+        label: instance.label || 'Database',
+        target: [instance.pg_host, instance.pg_port].filter(Boolean).join(':')
+          + (instance.pg_database ? `/${instance.pg_database}` : ''),
+      }
+    case 'whatsapp':
+      return {
+        ...base,
+        label: instance.label || 'WhatsApp account',
+        target: instance.base_url,
+        ownServer: Boolean(instance.admin_key),
+        // Not recomputed here: `canReadMessages` in evolution-db.ts is the rule,
+        // and the comment there calls itself the only place it lives.
+        canReadMessages: canReadMessages(instance),
+      }
+    case 'telegram':
+      // Deliberately not `ownServer`/`canReadMessages`: both read Evolution's
+      // rules off `admin_key` and `base_url`, and mean nothing for a bridge.
+      return { ...base, label: instance.label || 'Telegram account', target: instance.base_url }
+    default:
+      return assertNever(kind, 'connection kind')
   }
 }
 
@@ -668,10 +679,19 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
   // Release whatever this kind holds, then delete the row — once, for every
   // kind. The ordering is the rule stated above and it is the same either way:
   // if releasing throws, the row survives and still points at the thing.
-  if (instanceKind(instance) === 'postgres') {
+  const kind = instanceKind(instance)
+
+  if (kind === 'telegram') {
+    // Refused rather than deleted row-only: a Telegram connection will own a
+    // live session on a bridge, and deleting the row without logging that out
+    // is the orphan the ordering above exists to prevent.
+    throw createError({ statusCode: 501, statusMessage: 'Telegram connections are not supported by this build yet.' })
+  }
+
+  if (kind === 'postgres') {
     await closePgPool(instance.id)
   }
-  else {
+  else if (kind === 'whatsapp') {
     // A connection on its own server may hold a pool onto that server's message
     // database. Keyed on the row, so it outlives the row unless dropped here.
     await closeKeyedPool(`evo:${instance.id}`)
@@ -702,6 +722,9 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
         if (httpStatusOf(error) !== 404) throw error
       }
     }
+  }
+  else {
+    assertNever(kind, 'connection kind')
   }
 
   const pb = await pocketbaseAdmin()
@@ -796,13 +819,22 @@ export async function connectionState(
   instance: AppInstance,
   options: { tolerant?: boolean } = {},
 ): Promise<ConnectionStateReport> {
-  if (instanceKind(instance) === 'postgres') {
-    const health = await getPostgresHealth(instance)
-    return { state: health.state, detail: health.detail, error: health.error }
+  const kind = instanceKind(instance)
+  switch (kind) {
+    case 'postgres': {
+      const health = await getPostgresHealth(instance)
+      return { state: health.state, detail: health.detail, error: health.error }
+    }
+    case 'whatsapp':
+      if (!options.tolerant) return await getInstanceStatus(instance)
+      return await getInstanceStatus(instance).catch(() => unknownStatus())
+    case 'telegram':
+      // `unknown`, not `close`, for the reason given above: this build cannot
+      // establish the state, which is not the same as the account being unpaired.
+      return { state: 'unknown', error: 'Telegram connections are not supported by this build yet.' }
+    default:
+      return assertNever(kind, 'connection kind')
   }
-
-  if (!options.tolerant) return await getInstanceStatus(instance)
-  return await getInstanceStatus(instance).catch(() => unknownStatus())
 }
 
 /** Evolution answered, but not about an account it recognises. */

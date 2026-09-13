@@ -1,3 +1,4 @@
+import { assertNever } from '#shared/connection'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
 import type { AppInstance, AppInstanceAssignment, AppMembership, AppUser } from './pocketbase'
@@ -229,24 +230,44 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   // 503 that a backend outage gets. It is also invisible in the logs otherwise,
   // and "my token stopped working" with nothing in the logs is the failure that
   // rule exists to prevent, so say which connection and why.
-  const kind = instanceKind(instance)
+  // A kind this build cannot interpret is refused, never guessed at — see
+  // `instanceKind()`. `instanceKind` has already logged which value it was.
+  let kind: InstanceKind
+  try {
+    kind = instanceKind(instance)
+  }
+  catch {
+    console.error(`[mcp-auth] instance ${instance.id} has an unsupported kind; token ${record.id} refused`)
+    return undefined
+  }
   const base = { user, instance, tokenId: record.id, scope: scopeFromRecord(record) }
 
   let auth: McpAuth
-  if (kind === 'postgres') {
-    if (!instance.dsn) {
-      console.error(`[mcp-auth] instance ${instance.id} is kind=postgres with no dsn; token ${record.id} refused`)
-      return undefined
+  switch (kind) {
+    case 'postgres': {
+      if (!instance.dsn) {
+        console.error(`[mcp-auth] instance ${instance.id} is kind=postgres with no dsn; token ${record.id} refused`)
+        return undefined
+      }
+      auth = { ...base, kind: 'postgres' }
+      break
     }
-    auth = { ...base, kind: 'postgres' }
-  }
-  else {
-    const evolution = credentialsForInstance(instance)
-    if (!evolution) {
-      console.error(`[mcp-auth] instance ${instance.id} has no Evolution credentials; token ${record.id} refused`)
-      return undefined
+    case 'whatsapp': {
+      const evolution = credentialsForInstance(instance)
+      if (!evolution) {
+        console.error(`[mcp-auth] instance ${instance.id} has no Evolution credentials; token ${record.id} refused`)
+        return undefined
+      }
+      auth = { ...base, kind: 'whatsapp', evolution }
+      break
     }
-    auth = { ...base, kind: 'whatsapp', evolution }
+    case 'telegram':
+      // Recognised so that it can never fall through to the Evolution branch
+      // above, but not served by this build: there are no Telegram tools yet.
+      console.error(`[mcp-auth] instance ${instance.id} is kind=telegram, which this build does not serve; token ${record.id} refused`)
+      return undefined
+    default:
+      return assertNever(kind, 'connection kind')
   }
 
   // Best-effort; a write failure must not fail an otherwise valid request.

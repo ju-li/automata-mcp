@@ -29,7 +29,9 @@
  */
 export default defineEventHandler(async (event) => {
   const actor = await requireMembership(event)
-  const instances = await listInstancesForActor(actor)
+  // A row whose kind this build cannot read is left out (and logged) rather than
+  // failing the whole listing — see `isSupportedInstance`.
+  const instances = (await listInstancesForActor(actor)).filter(isSupportedInstance)
 
   const rows = await Promise.all(instances.map(async instance => ({
     ...toPublicInstance(instance),
