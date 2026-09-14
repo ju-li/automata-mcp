@@ -14,9 +14,9 @@ import type { SessionManager } from './sessions.ts'
  * them apart is what lets the per-session key be the only thing a leaked
  * connection record exposes.
  *
- * Request bodies are never logged — one of them is a two-step verification
- * password — and neither is the raw URL: errors are logged against the route's
- * label.
+ * Request bodies are never logged — one is a two-step verification password,
+ * another is a message — and neither is the raw URL: errors are logged against
+ * the route's label.
  */
 
 const MAX_BODY_BYTES = 16 * 1024
@@ -33,7 +33,7 @@ interface Route {
   method: string
   pattern: RegExp
   access: Access
-  handle: (request: { id: string, body: unknown }) => Promise<Reply>
+  handle: (request: { id: string, body: unknown, query: URLSearchParams }) => Promise<Reply>
 }
 
 const createBody = z.object({
@@ -47,6 +47,15 @@ const webhookBody = z.object({
   headers: z.record(z.string().regex(/^[A-Za-z0-9-]{1,64}$/), z.string().max(512))
     .refine(headers => Object.keys(headers).length <= 10, 'at most 10 headers')
     .default({}),
+})
+
+const resolveBody = z.object({ query: z.string().trim().min(1).max(256) })
+
+const sendBody = z.object({
+  // A marked chat id as a string: a JS number would round a 64-bit id into a different chat.
+  chatId: z.string().regex(/^-?\d{1,20}$/, 'a chat id as a string of digits'),
+  // Telegram's own limit for one text message.
+  text: z.string().min(1).max(4096),
 })
 
 export function createBridgeServer(manager: SessionManager, config: BridgeConfig): Server {
@@ -100,10 +109,29 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
         return { status: 204 }
       },
     },
+    {
+      label: 'GET /sessions/:id/chats', method: 'GET', pattern: /^\/sessions\/([^/]+)\/chats$/, access: 'session',
+      handle: async ({ id, query }) => ({
+        status: 200,
+        body: await manager.chats(id, clampInt(query.get('take'), 100, 1, 500), clampInt(query.get('skip'), 0, 0, 1_000_000)),
+      }),
+    },
+    {
+      label: 'POST /sessions/:id/resolve', method: 'POST', pattern: /^\/sessions\/([^/]+)\/resolve$/, access: 'session',
+      handle: async ({ id, body }) => ({ status: 200, body: await manager.resolve(id, parse(resolveBody, body).query) }),
+    },
+    {
+      label: 'POST /sessions/:id/send', method: 'POST', pattern: /^\/sessions\/([^/]+)\/send$/, access: 'session',
+      handle: async ({ id, body }) => {
+        const { chatId, text } = parse(sendBody, body)
+        return { status: 200, body: await manager.send(id, chatId, text) }
+      },
+    },
   ]
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    const path = (req.url ?? '/').split('?')[0] ?? '/'
+    const url = new URL(req.url ?? '/', 'http://bridge')
+    const path = url.pathname
     const matching = routes.filter(route => route.pattern.test(path))
     const route = matching.find(candidate => candidate.method === req.method)
 
@@ -126,7 +154,7 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       }
 
       const body = req.method === 'POST' || req.method === 'PUT' ? await readJson(req) : undefined
-      send(res, await route.handle({ id, body }))
+      send(res, await route.handle({ id, body, query: url.searchParams }))
     }
     catch (error) {
       if (error instanceof HttpError) return send(res, { status: error.status, body: { error: error.message } })
@@ -141,6 +169,11 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
 function bearerOf(req: IncomingMessage): string | undefined {
   const match = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? '')
   return match?.[1]
+}
+
+function clampInt(raw: string | null, fallback: number, min: number, max: number): number {
+  const value = raw === null ? Number.NaN : Number.parseInt(raw, 10)
+  return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback
 }
 
 async function readJson(req: IncomingMessage): Promise<unknown> {

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { parseKey } from './crypto.ts'
+import type { BackfillOptions } from './sync/syncer.ts'
 
 /**
  * Everything the bridge reads from its environment, validated once at boot.
@@ -16,6 +17,10 @@ const schema = z.object({
   TELEGRAM_BRIDGE_DATABASE_URL: z.string().min(1),
   TELEGRAM_READER_ROLE: z.string().regex(/^[a-z_][a-z0-9_]{0,62}$/).default('telegram_reader'),
   TELEGRAM_TEST_SERVERS: z.enum(['true', 'false']).default('false'),
+  TELEGRAM_BACKFILL_MAX_PER_CHAT: z.coerce.number().int().min(0).default(2000),
+  TELEGRAM_BACKFILL_DAYS: z.coerce.number().int().min(0).default(365),
+  TELEGRAM_BACKFILL_BROADCAST: z.enum(['true', 'false']).default('false'),
+  TELEGRAM_BACKFILL_PAGE_DELAY_MS: z.coerce.number().int().min(0).default(1000),
   TELEGRAM_BRIDGE_PORT: z.coerce.number().int().min(1).max(65535).optional(),
   // Railway injects PORT into every service; following it is what makes the
   // bridge listen where the platform routes to.
@@ -32,11 +37,14 @@ export interface BridgeConfig {
   /** The SELECT-only role the app reads synced data with. */
   readerRole: string
   testServers: boolean
+  backfill: BackfillOptions
   port: number
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
-  const parsed = schema.safeParse(env)
+  // An empty value in a compose file or .env means "unset", not zero.
+  const present = Object.fromEntries(Object.entries(env).filter(([, value]) => value !== ''))
+  const parsed = schema.safeParse(present)
   if (!parsed.success) {
     const lines = parsed.error.issues.map(issue => `  ${issue.path.join('.')}: ${issue.message}`)
     throw new Error(`telegram-bridge cannot start. Fix these environment variables:\n${lines.join('\n')}`)
@@ -59,6 +67,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
     databaseUrl: e.TELEGRAM_BRIDGE_DATABASE_URL,
     readerRole: e.TELEGRAM_READER_ROLE,
     testServers: e.TELEGRAM_TEST_SERVERS === 'true',
+    backfill: {
+      maxPerChat: e.TELEGRAM_BACKFILL_MAX_PER_CHAT,
+      days: e.TELEGRAM_BACKFILL_DAYS,
+      includeBroadcast: e.TELEGRAM_BACKFILL_BROADCAST === 'true',
+      pageDelayMs: e.TELEGRAM_BACKFILL_PAGE_DELAY_MS,
+    },
     port: e.TELEGRAM_BRIDGE_PORT ?? e.PORT ?? 8095,
   }
 }
