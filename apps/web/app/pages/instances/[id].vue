@@ -32,6 +32,7 @@ const canManage = computed(() => data.value?.canManage === true)
 
     <InstancePostgres v-else-if="kind === 'postgres'" :id="id" :can-manage="canManage" />
     <InstanceWhatsapp v-else-if="kind === 'whatsapp'" :id="id" :can-manage="canManage" />
+    <InstanceTelegram v-else-if="kind === 'telegram'" :id="id" :can-manage="canManage" />
     <!-- A kind with no panel in this build. Said out loud rather than rendering
          an empty page, which reads as a load that never finished. -->
     <p v-else-if="data" class="text-sm text-muted-foreground">

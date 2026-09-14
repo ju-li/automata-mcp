@@ -100,6 +100,7 @@ function toggle(key: ScopeList, value: string, on: boolean) {
  * country-specific rules, and this app never applies those locally.
  */
 function secondaryLine(chat: ScopedChat): string {
+  if (chat.username) return `@${chat.username}`
   if (chat.isGroup) {
     if (!chat.participantCount) return ''
     return chat.participantCount === 1 ? '1 member' : `${chat.participantCount} members`
@@ -114,11 +115,17 @@ async function addByNumber() {
 
   resolving.value = true
   try {
-    const result = await $fetch<{ jid: string, name?: string }>(
+    // WhatsApp resolves a phone number; Telegram an @username, t.me link or phone.
+    const result = await $fetch<{ jid: string, name?: string, username?: string }>(
       `/api/instances/${props.instanceId}/chats/resolve`,
-      { method: 'POST', body: { number } },
+      { method: 'POST', body: props.kind === 'telegram' ? { query: number } : { number } },
     )
-    if (!knownChats.value.some(c => c.jid === result.jid)) {
+    if (props.kind === 'telegram') {
+      if (!knownChats.value.some(c => c.jid === result.jid)) {
+        extraChats.value.push({ jid: result.jid, name: result.name?.trim() || result.jid, username: result.username })
+      }
+    }
+    else if (!knownChats.value.some(c => c.jid === result.jid)) {
       // The number under the name comes off the resolved JID, not what was typed:
       // Evolution's rules may have rewritten it, and the JID is what scope matches.
       const resolvedNumber = result.jid.split('@')[0]!
@@ -280,7 +287,7 @@ async function addByNumber() {
       </div>
     </section>
 
-    <!-- ── chats (WhatsApp only) ───────────────────────────────────────── -->
+    <!-- ── chats (WhatsApp and Telegram) ───────────────────────────────── -->
     <section v-else class="space-y-3">
       <div>
         <h3 class="text-sm font-medium">
@@ -333,8 +340,14 @@ async function addByNumber() {
           </div>
 
           <p v-else-if="!knownChats.length" class="py-2 text-xs text-muted-foreground">
-            No conversations recorded yet — they appear here once messages are
-            exchanged. Add a number directly below.
+            <template v-if="kind === 'telegram'">
+              No chats synced yet — they appear once the account is linked. Add one by
+              username below.
+            </template>
+            <template v-else>
+              No conversations recorded yet — they appear here once messages are
+              exchanged. Add a number directly below.
+            </template>
           </p>
 
           <p v-else-if="!visibleChats.length" class="py-2 text-xs text-muted-foreground">
@@ -368,12 +381,12 @@ async function addByNumber() {
         </div>
 
         <div class="space-y-1 border-t pt-3">
-          <Label for="manual-number" class="text-xs">Add by phone number</Label>
+          <Label for="manual-number" class="text-xs">{{ kind === 'telegram' ? 'Add by @username or t.me link' : 'Add by phone number' }}</Label>
           <div class="flex gap-2">
             <Input
               id="manual-number"
               v-model="manualNumber"
-              placeholder="5511999999999"
+              :placeholder="kind === 'telegram' ? '@username' : '5511999999999'"
               class="min-w-0 flex-1"
               @keydown.enter.prevent="addByNumber"
             />
@@ -383,7 +396,7 @@ async function addByNumber() {
               size="icon"
               class="shrink-0"
               :disabled="resolving"
-              aria-label="Add number"
+              :aria-label="kind === 'telegram' ? 'Add chat' : 'Add number'"
               @click="addByNumber"
             >
               <PlusIcon class="size-4" />
@@ -391,6 +404,10 @@ async function addByNumber() {
           </div>
           <p v-if="manualError" class="text-xs text-destructive">
             {{ manualError }}
+          </p>
+          <p v-else-if="kind === 'telegram'" class="text-xs text-muted-foreground">
+            A person, group or channel with a public username. Checked with Telegram
+            before it is added, so the account must be connected.
           </p>
           <p v-else class="text-xs text-muted-foreground">
             International format, no “+”. Checked against WhatsApp before it is added.

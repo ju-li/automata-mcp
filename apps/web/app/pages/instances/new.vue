@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { DatabaseIcon, MessageCircleIcon } from '@lucide/vue'
+import { DatabaseIcon, MessageCircleIcon, SendIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
 /**
@@ -14,8 +14,9 @@ const kind = ref<InstanceKind | undefined>()
 const label = ref('')
 const busy = ref(false)
 
-// WhatsApp: bring-your-own Evolution server. All or nothing — half of it is not
-// completed from our configuration, see evolutionAdminCredentials().
+// WhatsApp and Telegram: bring-your-own server (an Evolution server, or a Telegram
+// bridge). All or nothing — half of it is not completed from our configuration,
+// see evolutionAdminCredentials() and telegramAdminCredentials().
 const ownServer = ref(false)
 const serverUrl = ref('')
 const serverKey = ref('')
@@ -30,7 +31,7 @@ const dsn = ref('')
 const canSubmit = computed(() => {
   if (busy.value) return false
   if (kind.value === 'postgres') return dsn.value.trim().length > 0
-  if (kind.value === 'whatsapp') {
+  if (kind.value === 'whatsapp' || kind.value === 'telegram') {
     if (!ownServer.value) return true
     return serverUrl.value.trim().length > 0 && serverKey.value.trim().length > 0
   }
@@ -44,7 +45,7 @@ async function create() {
   const body = kind.value === 'postgres'
     ? { kind: 'postgres', label: label.value, dsn: dsn.value.trim() }
     : {
-        kind: 'whatsapp',
+        kind: kind.value,
         label: label.value,
         ...(ownServer.value && {
           server: {
@@ -102,6 +103,20 @@ async function create() {
       <button
         type="button"
         class="flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-accent"
+        @click="kind = 'telegram'"
+      >
+        <SendIcon class="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+        <span>
+          <span class="block font-medium">Telegram account</span>
+          <span class="block text-sm text-muted-foreground">
+            Link your account by scanning a QR code. Claude can read and send messages.
+          </span>
+        </span>
+      </button>
+
+      <button
+        type="button"
+        class="flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-accent"
         @click="kind = 'postgres'"
       >
         <DatabaseIcon class="mt-0.5 size-5 shrink-0 text-muted-foreground" />
@@ -123,7 +138,7 @@ async function create() {
             <Input
               id="label"
               v-model="label"
-              :placeholder="kind === 'postgres' ? 'Production analytics' : 'Work phone'"
+              :placeholder="kind === 'postgres' ? 'Production analytics' : kind === 'telegram' ? 'Personal Telegram' : 'Work phone'"
               @keydown.enter="create"
             />
             <p class="text-xs text-muted-foreground">
@@ -148,6 +163,67 @@ async function create() {
                 again afterwards. It is stored so this app can reconnect, so treat
                 the password in it as one this server holds.
               </p>
+            </div>
+          </template>
+
+          <!-- Telegram -->
+          <template v-else-if="kind === 'telegram'">
+            <Separator />
+            <div class="flex items-start gap-2">
+              <Checkbox
+                id="own-bridge"
+                :model-value="ownServer"
+                @update:model-value="value => ownServer = value === true"
+              />
+              <div class="space-y-1">
+                <Label for="own-bridge" class="font-normal">
+                  Use my own Telegram bridge
+                </Label>
+                <p class="text-xs text-muted-foreground">
+                  Leave this off to use the bridge this app is configured with.
+                </p>
+              </div>
+            </div>
+
+            <div v-if="ownServer" class="space-y-4 rounded-md border p-3">
+              <div class="space-y-2">
+                <Label for="bridge-url">Bridge URL</Label>
+                <Input
+                  id="bridge-url"
+                  v-model="serverUrl"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="https://telegram-bridge.example.com"
+                />
+              </div>
+              <div class="space-y-2">
+                <Label for="bridge-key">Admin key</Label>
+                <Input
+                  id="bridge-key"
+                  v-model="serverKey"
+                  type="password"
+                  autocomplete="off"
+                  placeholder="TELEGRAM_BRIDGE_ADMIN_KEY"
+                />
+                <p class="text-xs text-muted-foreground">
+                  Your bridge's <span class="font-mono">TELEGRAM_BRIDGE_ADMIN_KEY</span>. It
+                  creates and deletes sessions on that bridge.
+                </p>
+              </div>
+              <div class="space-y-2">
+                <Label for="bridge-db">Database connection string <span class="text-muted-foreground">(optional)</span></Label>
+                <Input
+                  id="bridge-db"
+                  v-model="serverDbUrl"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="postgresql://user:password@host:5432/database"
+                />
+                <p class="text-xs text-muted-foreground">
+                  Your bridge's database. Claude needs it to <span class="font-medium">read and
+                  search</span> chats; linking and sending work without it, and you can add it later.
+                </p>
+              </div>
             </div>
           </template>
 
@@ -243,6 +319,16 @@ async function create() {
             everything can be talked into reading everything. Create a role with
             <span class="font-mono">GRANT SELECT</span> on just the tables you
             want, and use that here.
+          </p>
+        </template>
+        <template v-else-if="kind === 'telegram'">
+          <p class="font-medium">
+            Use an account you are comfortable linking to a third-party app.
+          </p>
+          <p class="mt-1 text-muted-foreground">
+            This app signs in as an unofficial Telegram client, which Telegram watches
+            more closely than its own apps, and Telegram's API terms restrict using
+            chats for AI. Linking happens on the next page, by QR code.
           </p>
         </template>
         <template v-else>

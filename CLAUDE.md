@@ -410,7 +410,7 @@ Pending invitations are admin-only on `/api/org`; the member roster is not, beca
 
 ## Telegram bridge
 
-`apps/telegram-bridge` is Telegram's counterpart to Evolution: a separate Node service, and the only thing in the repo that speaks MTProto. Personal accounts link by QR code through `teleproto` (the maintained GramJS fork, pinned), and their chats are synced into a `telegram` schema of the database Evolution uses; the bridge also lists chats, resolves a username or phone number, and sends text. The app reads it and exposes it over MCP (below); creating a Telegram connection from the UI, its dashboard and its disconnect alerts land in later PRs.
+`apps/telegram-bridge` is Telegram's counterpart to Evolution: a separate Node service, and the only thing in the repo that speaks MTProto. Personal accounts link by QR code through `teleproto` (the maintained GramJS fork, pinned), and their chats are synced into a `telegram` schema of the database Evolution uses; the bridge also lists chats, resolves a username or phone number, and sends text. The app creates and links Telegram connections, reads them and exposes them over MCP (below); disconnect alerts land in a later PR.
 
 Node runs `src/*.ts` directly (type stripping, Node ≥ 22.18), so there is no build step and `erasableSyntaxOnly` is on: no enums, namespaces or parameter properties. `pnpm typecheck` does not cover it — use `pnpm bridge:typecheck`, or `cd apps/telegram-bridge && node_modules/.bin/tsc --noEmit`.
 
@@ -459,6 +459,12 @@ The same split as WhatsApp — `telegram.ts` talks to the bridge over HTTP, `tel
 **Reads report what sync could not see.** `read-telegram-messages` excludes deleted and service messages in SQL, so `hasMore` and `totalMatching` describe the same set, and reports `deletedExcluded` / `serviceMessagesExcluded` counted over the whole window. It carries `history` from the chat row and says in `note` when `hasMore: false` is the oldest *synced* message rather than the start of the chat — the Telegram form of "a page must say it is a page", and the one paging cannot fix. A migrated basic group stays readable, since its old messages live there, and names `migratedTo`; sending to it is refused by the bridge with the new id.
 
 **Sending resolves before it checks scope, and fails closed.** A `username` goes through the bridge's resolve first, so a scoped token cannot reach by name a chat it could not reach by id, and an unreachable bridge refuses the send rather than skipping the check. The bridge's 4xx bodies are written for callers and pass through `relayBridgeError()`; anything else is logged and answered 503.
+
+**Linking is started, never polled into existence.** A Telegram connection is created unlinked. `POST /api/instances/:id/telegram/pair` starts a QR flow on the bridge, and the dashboard then polls `GET …/telegram/qr` every two seconds — safe here, unlike WhatsApp's QR poll, because it only reads a flow `pair` started and never asks Telegram for a login token. Only managers pair or poll (`InstanceTelegram.vue`, same rule as WhatsApp). The QR image reaches the page and its `tg://login` URL does not (`pairingView`). The two-step verification password goes input → `…/telegram/password` → bridge → Telegram's SRP check, is cleared from the input as it is sent, and is stored and logged nowhere.
+
+**Unlinking deletes synced chats.** `…/telegram/logout` signs out and wipes them; deleting the connection deletes its bridge session, which does both, and a bridge that cannot be reached keeps the row (`deleteTelegramSession`, the same ordering `deleteInstance` insists on). The admin key is used only there and at create (`telegram-instances.ts`), and `telegramAdminCredentials` never pairs our key with a user's bridge or theirs with ours.
+
+**The chat list and chat lookup routes serve both messaging kinds** through `requireReadableInstanceOfKinds`. Telegram rows come back in the picker's existing shape with the chat id in `jid`, so `TokenScopeFields` and `ChatsDialog` are shared rather than copied; `ChatsDialog` takes the kind to show an @username instead of a phone number.
 
 **Tool names carry `telegram`** (`read-telegram-messages`, …) because tool basenames are global across groups.
 

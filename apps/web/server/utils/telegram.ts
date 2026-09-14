@@ -6,10 +6,13 @@ import type { ConnectionState } from '#shared/connection'
  * The one client for a Telegram bridge (apps/telegram-bridge). The Telegram
  * counterpart of `evolution.ts`, with the same boundary:
  *
- *   admin     the bridge's global key. Creates and deletes sessions, nothing
- *             else. Not used by anything in this file.
+ *   admin     the bridge's global key. Creates and deletes sessions and nothing
+ *             else. Two callers, both in telegram-instances.ts. Either the
+ *             deployment's own key, or a key the user supplied for their own
+ *             bridge — never cross-paired, see `telegramAdminCredentials`.
  *   session   the per-session key the bridge issued, on the row's `api_key`.
- *             State, resolve and send — every call made on a user's behalf.
+ *             Pairing, state, resolve and send — every call made on a user's
+ *             behalf.
  *
  * And the same cut across both: a base URL that is not this deployment's
  * `NUXT_TELEGRAM_URL` came from a user, so it is host-guarded on every request.
@@ -28,6 +31,12 @@ export interface TelegramCredentials {
   userSupplied: boolean
 }
 
+export interface TelegramAdminCredentials {
+  baseUrl: string
+  adminKey: string
+  userSupplied: boolean
+}
+
 /**
  * Whether this connection lives on the bridge this deployment configured.
  *
@@ -42,6 +51,29 @@ export function onDeploymentBridge(instance: Pick<AppInstance, 'admin_key' | 'ba
   const configUrl = useRuntimeConfig().telegramUrl
   if (!instance.base_url || !configUrl) return true
   return sameEvolutionServer(instance.base_url, configUrl)
+}
+
+/**
+ * The bridge's global key, for creating and deleting a session — and only ever
+ * paired with the URL it belongs to.
+ *
+ * A row that carries its own admin key is a bring-your-own bridge, and both
+ * halves come from it. A row naming a different bridge with no key of its own
+ * answers undefined rather than being completed from our configuration: sending
+ * our admin key to a bridge a user chose would hand them every session on ours.
+ */
+export function telegramAdminCredentials(
+  server?: Pick<AppInstance, 'base_url' | 'admin_key'>,
+): TelegramAdminCredentials | undefined {
+  if (server?.admin_key) {
+    if (!server.base_url) return undefined
+    return { baseUrl: server.base_url, adminKey: server.admin_key, userSupplied: true }
+  }
+  if (server && !onDeploymentBridge(server)) return undefined
+
+  const config = useRuntimeConfig()
+  if (!config.telegramUrl || !config.telegramAdminKey) return undefined
+  return { baseUrl: config.telegramUrl, adminKey: config.telegramAdminKey, userSupplied: false }
 }
 
 /**
@@ -67,12 +99,17 @@ export function telegramCredentialsForInstance(
   }
 }
 
+// Type aliases rather than interfaces throughout: a tool or route may return
+// these, and an interface has no implicit index signature.
+
 /** The bridge's `GET /sessions/:id/state`, as far as this app reads it. */
-interface BridgeSessionState {
+export type BridgeSessionState = {
   state: ConnectionState
   sessionLost: boolean
   revoked: boolean
   pairing?: 'qr' | 'password'
+  passwordHint?: string
+  passwordRejected?: boolean
   heldElsewhere: boolean
   me?: { id: string, username?: string, name?: string, phone?: string }
   lastError?: string
@@ -80,8 +117,11 @@ interface BridgeSessionState {
   sync: { backfilling: boolean, pausedUntil?: string, dialogsSyncedAt?: string, pendingBackfill: number }
 }
 
-// Type aliases rather than interfaces: a tool may return these, and an interface
-// has no implicit index signature.
+export type BridgeQr = {
+  state: BridgeSessionState
+  qr?: { url: string, dataUrl: string, expiresAt: string }
+}
+
 export type BridgeResolved = {
   chatId: string
   type: string
@@ -96,30 +136,61 @@ export type BridgeSent = {
   date: string
 }
 
-export function createTelegramBridge(creds: TelegramCredentials) {
-  const client = $fetch.create({
-    baseURL: creds.baseUrl,
-    headers: { authorization: `Bearer ${creds.apiKey}` },
+/**
+ * A `$fetch` bound to one bridge and one bearer key. Same check-not-pin caveat
+ * as `createEvolutionClient`: `$fetch` resolves DNS itself, so the guard narrows
+ * the rebinding window rather than closing it.
+ */
+function bridgeFetch(baseUrl: string, key: string, userSupplied: boolean) {
+  return $fetch.create({
+    baseURL: baseUrl,
+    headers: { authorization: `Bearer ${key}` },
     retry: 0,
     timeout: 20_000,
-    // Same check-not-pin caveat as `createEvolutionClient`: `$fetch` resolves DNS
-    // itself, so this narrows the rebinding window rather than closing it.
     async onRequest({ options }) {
-      if (!creds.userSupplied) return
-      await assertPublicUrl(creds.baseUrl, 'Telegram bridge URL')
+      if (!userSupplied) return
+      await assertPublicUrl(baseUrl, 'Telegram bridge URL')
       options.redirect = 'error'
     },
   })
+}
+
+export function createTelegramBridge(creds: TelegramCredentials) {
+  const client = bridgeFetch(creds.baseUrl, creds.apiKey, creds.userSupplied)
   const session = `/sessions/${encodeURIComponent(creds.sessionId)}`
 
   return {
     state: () => client<BridgeSessionState>(`${session}/state`),
+    pair: () => client<BridgeSessionState>(`${session}/pair`, { method: 'POST' }),
+    qr: () => client<BridgeQr>(`${session}/qr`),
+    // The password is in the body of this one request and nowhere else: not
+    // logged here, and the bridge never stores it.
+    password: (password: string) => client<BridgeSessionState>(`${session}/password`, { method: 'POST', body: { password } }),
+    reconnect: () => client<BridgeSessionState>(`${session}/reconnect`, { method: 'POST' }),
+    logout: () => client<BridgeSessionState>(`${session}/logout`, { method: 'POST' }),
     resolve: (query: string) => client<BridgeResolved>(`${session}/resolve`, { method: 'POST', body: { query } }),
     send: (chatId: string, text: string) => client<BridgeSent>(`${session}/send`, { method: 'POST', body: { chatId, text } }),
   }
 }
 
 export type TelegramBridge = ReturnType<typeof createTelegramBridge>
+
+/** For management routes, where the instance came from `pocketbaseAdmin()`. */
+export function telegramBridgeForInstance(instance: AppInstance): TelegramBridge {
+  const creds = telegramCredentialsForInstance(instance)
+  if (!creds) {
+    throw createError({ statusCode: 409, statusMessage: 'This Telegram connection is not fully provisioned' })
+  }
+  return createTelegramBridge(creds)
+}
+
+export function createTelegramAdminBridge(creds: TelegramAdminCredentials) {
+  const client = bridgeFetch(creds.baseUrl, creds.adminKey, creds.userSupplied)
+  return {
+    createSession: (name: string) => client<{ id: string, name: string, apiKey: string }>('/sessions', { method: 'POST', body: { name } }),
+    deleteSession: (id: string) => client(`/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  }
+}
 
 /**
  * For MCP tool handlers. Reads `event.context.mcpAuth` and nothing else, like
@@ -157,8 +228,6 @@ export function relayBridgeError(error: unknown, action: string): never {
   })
 }
 
-// A type alias rather than an interface: MCP tool handlers may return it, and
-// interfaces carry no implicit index signature.
 export type TelegramStatus = {
   /** The bridge's live client state, never a stored column. */
   state: ConnectionState
@@ -216,5 +285,36 @@ export async function getTelegramStatus(instance: AppInstance): Promise<Telegram
       ...(bridge.sync.dialogsSyncedAt && { dialogsSyncedAt: bridge.sync.dialogsSyncedAt }),
       ...(bridge.sync.pausedUntil && { pausedUntil: bridge.sync.pausedUntil }),
     },
+  }
+}
+
+/**
+ * What the pairing screen needs from the bridge, and nothing else.
+ *
+ * The QR's image is passed on and its `tg://login` URL is not: the page renders
+ * the image, and the URL is exactly as much of a login credential as the image
+ * is, so it has no reason to travel further than it must.
+ */
+export type TelegramPairingView = {
+  state: ConnectionState
+  pairing?: 'qr' | 'password'
+  passwordHint?: string
+  passwordRejected?: boolean
+  sessionLost?: boolean
+  revoked?: boolean
+  error?: string
+  qr?: { dataUrl: string, expiresAt: string }
+}
+
+export function pairingView(bridge: BridgeSessionState, qr?: BridgeQr['qr']): TelegramPairingView {
+  return {
+    state: bridge.state,
+    ...(bridge.pairing && { pairing: bridge.pairing }),
+    ...(bridge.passwordHint && { passwordHint: bridge.passwordHint }),
+    ...(bridge.passwordRejected && { passwordRejected: true }),
+    ...(bridge.sessionLost && { sessionLost: true }),
+    ...(bridge.revoked && { revoked: true }),
+    ...(bridge.lastError && { error: bridge.lastError }),
+    ...(qr && { qr: { dataUrl: qr.dataUrl, expiresAt: qr.expiresAt } }),
   }
 }

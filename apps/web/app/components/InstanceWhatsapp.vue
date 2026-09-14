@@ -427,6 +427,7 @@ const importHistory = () => backToPairing(
       <ChatsDialog
         v-model:open="chatsOpen"
         :instance-id="id"
+        kind="whatsapp"
         :total="data?.stats.chats ?? 0"
       />
 
