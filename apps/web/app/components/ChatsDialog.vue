@@ -15,6 +15,8 @@ import { ArrowUpDownIcon, ChevronDownIcon, ChevronUpIcon, SearchIcon, UserIcon, 
  */
 const props = defineProps<{
   instanceId: string
+  /** WhatsApp shows a phone number beside each chat; Telegram shows its @username. */
+  kind: InstanceKind
   open: boolean
   /** The dashboard's chat count. Explains a shortfall; never decides whether to fetch. */
   total?: number
@@ -131,9 +133,14 @@ const filtered = computed(() => {
   return rows.value.filter(c =>
     c.name.toLowerCase().includes(q)
     || c.jid.toLowerCase().includes(q)
-    || (c.number?.includes(q) ?? false),
+    || (secondaryId(c)?.toLowerCase().includes(q) ?? false),
   )
 })
+
+/** The identifier shown beside a chat's name: a phone number, or a Telegram @username. */
+function secondaryId(chat: ScopedChat): string | undefined {
+  return props.kind === 'telegram' ? chat.username : chat.number
+}
 
 // ── sorting ────────────────────────────────────────────────────────────────
 // Sorted here rather than trusted from the server: Evolution decides the order of
@@ -143,12 +150,12 @@ type SortKey = 'name' | 'number' | 'type' | 'last'
 const sortKey = ref<SortKey>('last')
 const sortDir = ref<'asc' | 'desc'>('desc')
 
-const columns: { key: SortKey, label: string, class?: string }[] = [
+const columns = computed<{ key: SortKey, label: string, class?: string }[]>(() => [
   { key: 'name', label: 'Name' },
-  { key: 'number', label: 'Number' },
+  { key: 'number', label: props.kind === 'telegram' ? 'Username' : 'Number' },
   { key: 'type', label: 'Type' },
   { key: 'last', label: 'Last message' },
-]
+])
 
 function toggleSort(key: SortKey) {
   if (sortKey.value === key) {
@@ -197,7 +204,7 @@ const sorted = computed(() => {
       case 'name':
         return dir * byName(a, b)
       case 'number':
-        return missingLast(a.number, b.number, (x, y) => x.localeCompare(y, undefined, { numeric: true }), dir) || byName(a, b)
+        return missingLast(secondaryId(a), secondaryId(b), (x, y) => x.localeCompare(y, undefined, { numeric: true }), dir) || byName(a, b)
       case 'type':
         return dir * (Number(Boolean(a.isGroup)) - Number(Boolean(b.isGroup))) || byName(a, b)
       case 'last':
@@ -227,7 +234,11 @@ function formatLastActivity(chat: ScopedChat): string {
     <DialogContent class="max-h-[85vh] sm:max-w-3xl">
       <DialogHeader>
         <DialogTitle>Chats</DialogTitle>
-        <DialogDescription>
+        <DialogDescription v-if="kind === 'telegram'">
+          Every chat synced for this account — new messages as they arrive, and older
+          history within this connection's sync limits.
+        </DialogDescription>
+        <DialogDescription v-else>
           Every conversation this account has recorded — the history imported at
           pairing plus everything since.
         </DialogDescription>
@@ -235,7 +246,7 @@ function formatLastActivity(chat: ScopedChat): string {
 
       <div class="relative">
         <SearchIcon class="absolute top-1/2 left-2 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input v-model="search" placeholder="Search by name or number" class="pl-8" />
+        <Input v-model="search" :placeholder="kind === 'telegram' ? 'Search by name or username' : 'Search by name or number'" class="pl-8" />
       </div>
 
       <!--
@@ -283,8 +294,14 @@ function formatLastActivity(chat: ScopedChat): string {
 
             <TableRow v-else-if="!rows.length">
               <TableCell colspan="4" class="py-8 text-center text-sm text-muted-foreground">
-                No conversations recorded yet. They appear here once messages are
-                exchanged, or once a history import completes.
+                <template v-if="kind === 'telegram'">
+                  No chats synced yet. They appear here once the account is linked and
+                  its chat list has synced.
+                </template>
+                <template v-else>
+                  No conversations recorded yet. They appear here once messages are
+                  exchanged, or once a history import completes.
+                </template>
               </TableCell>
             </TableRow>
 
@@ -319,7 +336,12 @@ function formatLastActivity(chat: ScopedChat): string {
                   country-specific rules, and this app never applies those locally.
                 -->
                 <TableCell class="tabular-nums">
-                  {{ chat.number ? `+${chat.number}` : '—' }}
+                  <template v-if="kind === 'telegram'">
+                    {{ chat.username ? `@${chat.username}` : '—' }}
+                  </template>
+                  <template v-else>
+                    {{ chat.number ? `+${chat.number}` : '—' }}
+                  </template>
                 </TableCell>
 
                 <TableCell>

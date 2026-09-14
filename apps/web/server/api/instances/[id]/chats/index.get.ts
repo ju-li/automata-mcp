@@ -1,5 +1,11 @@
+import { assertNever } from '#shared/connection'
+
 /**
- * Conversations for the scope picker and the dashboard's chat list.
+ * Conversations for the scope picker and the dashboard's chat list, for a
+ * WhatsApp or a Telegram connection. Telegram's rows come back in the same shape
+ * — `jid` carries its chat id — so the picker and the dialog need no second copy.
+ *
+ * For WhatsApp:
  *
  * Evolution builds this from its message table, so a freshly paired account
  * returns an empty list. That is expected, not an error — the picker offers
@@ -19,7 +25,7 @@
 const MAX_TAKE = 2000
 
 export default defineEventHandler(async (event) => {
-  const { instance } = await requireReadableInstanceOfKind(event, getRouterParam(event, 'id'), 'whatsapp')
+  const { instance, kind } = await requireReadableInstanceOfKinds(event, getRouterParam(event, 'id'), ['whatsapp', 'telegram'])
 
   const query = getQuery(event)
 
@@ -33,5 +39,13 @@ export default defineEventHandler(async (event) => {
     ? Math.max(Math.trunc(requestedSkip), 0)
     : undefined
 
-  return await listChats(instance, { take, skip })
+  switch (kind) {
+    case 'whatsapp':
+      return await listChats(instance, { take, skip })
+    case 'telegram':
+      // A database read, so it works while the account is disconnected.
+      return await listTelegramChatsForPicker(instance, { take: take ?? 500, skip: skip ?? 0 })
+    default:
+      return assertNever(kind, 'connection kind')
+  }
 })

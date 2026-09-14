@@ -11,8 +11,10 @@ export interface ScopedChat {
   jid: string
   name: string
   isGroup?: boolean
-  /** Bare phone number of a 1:1 chat. Groups do not have one. */
+  /** Bare phone number of a 1:1 WhatsApp chat. Groups do not have one. */
   number?: string
+  /** Telegram only: the chat's public @username, without the @. */
+  username?: string
   /** Members in a group. Absent when the group lookup was skipped as unnecessary. */
   participantCount?: number
   profilePicUrl?: string

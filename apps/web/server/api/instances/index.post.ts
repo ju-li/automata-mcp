@@ -33,6 +33,16 @@ const body = z.discriminatedUnion('kind', [
     label: z.string().max(100).optional(),
     dsn: z.string().min(1).max(2000),
   }),
+  // Same all-or-nothing `server` shape as WhatsApp, for a bridge the user runs.
+  z.object({
+    kind: z.literal('telegram'),
+    label: z.string().max(100).optional(),
+    server: z.object({
+      baseUrl: z.string().url(),
+      adminKey: z.string().min(1),
+      dbUrl: z.string().min(1).max(2000).optional(),
+    }).optional(),
+  }),
 ])
 
 export default defineEventHandler(async (event) => {
@@ -49,6 +59,9 @@ export default defineEventHandler(async (event) => {
       break
     case 'whatsapp':
       instance = await provisionWhatsappInstance(actor, { label: parsed.label, server: parsed.server })
+      break
+    case 'telegram':
+      instance = await provisionTelegramInstance(actor, { label: parsed.label, server: parsed.server })
       break
     default:
       return assertNever(parsed, 'connection kind')

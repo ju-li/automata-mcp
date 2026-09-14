@@ -92,9 +92,15 @@ export function toPublicInstance(instance: AppInstance): PublicInstance {
         canReadMessages: canReadMessages(instance),
       }
     case 'telegram':
-      // Deliberately not `ownServer`/`canReadMessages`: both read Evolution's
-      // rules off `admin_key` and `base_url`, and mean nothing for a bridge.
-      return { ...base, label: instance.label || 'Telegram account', target: instance.base_url }
+      return {
+        ...base,
+        label: instance.label || 'Telegram account',
+        target: instance.base_url,
+        // A bridge the user runs carries its own admin key.
+        ownServer: Boolean(instance.admin_key),
+        // Telegram's own rule, not Evolution's: see `telegramDbUrlFor`.
+        canReadMessages: canReadTelegramMessages(instance),
+      }
     default:
       return assertNever(kind, 'connection kind')
   }
@@ -105,7 +111,7 @@ export function toPublicInstance(instance: AppInstance): PublicInstance {
  * rather than derived from the user id, so one user can hold several and no
  * name leaks who owns it.
  */
-function generateInstanceName(): string {
+export function generateInstanceName(): string {
   return `i-${randomBytes(8).toString('base64url')}`
 }
 
@@ -682,13 +688,10 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
   const kind = instanceKind(instance)
 
   if (kind === 'telegram') {
-    // Refused rather than deleted row-only: a Telegram connection will own a
-    // live session on a bridge, and deleting the row without logging that out
-    // is the orphan the ordering above exists to prevent.
-    throw createError({ statusCode: 501, statusMessage: 'Telegram connections are not supported by this build yet.' })
+    // Logs the account out on Telegram's side and deletes its synced chats.
+    await deleteTelegramSession(instance)
   }
-
-  if (kind === 'postgres') {
+  else if (kind === 'postgres') {
     await closePgPool(instance.id)
   }
   else if (kind === 'whatsapp') {

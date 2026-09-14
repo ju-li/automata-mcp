@@ -254,6 +254,40 @@ export async function telegramChat(instance: AppInstance, chatId: string): Promi
   return row ? toChatSummary(row) : undefined
 }
 
+/**
+ * One chat as the token scope picker and the chats dialog render it — the shape
+ * they already use for WhatsApp, with the Telegram chat id in `jid`. One shape
+ * rather than a second pair of components that drift apart.
+ */
+export type TelegramPickerChat = {
+  jid: string
+  name: string
+  isGroup: boolean
+  username?: string
+  participantCount?: number
+  lastMessageAt?: string
+  telegramType: TelegramChatType
+}
+
+export async function listTelegramChatsForPicker(
+  instance: AppInstance,
+  options: { take: number, skip: number },
+): Promise<{ chats: TelegramPickerChat[], hasMore: boolean }> {
+  const { chats, hasMore } = await listTelegramChats(instance, options)
+  return {
+    hasMore,
+    chats: chats.map(chat => ({
+      jid: chat.chatId,
+      name: chat.title || (chat.username ? `@${chat.username}` : chat.chatId),
+      isGroup: chat.type !== 'private' && chat.type !== 'bot',
+      ...(chat.username && { username: chat.username }),
+      ...(chat.participantCount !== undefined && { participantCount: chat.participantCount }),
+      ...(chat.lastMessageAt && { lastMessageAt: chat.lastMessageAt }),
+      telegramType: chat.type,
+    })),
+  }
+}
+
 export interface TelegramPageOptions {
   chatId: string
   limit: number

@@ -334,6 +334,27 @@ export async function requireReadableInstanceOfKind(
 }
 
 /**
+ * Readable and one of several kinds, for a read route more than one kind serves
+ * — the chat list and chat lookup, which WhatsApp and Telegram both have.
+ *
+ * Same rule as `requireReadableInstanceOfKind`: no role is consulted, and any
+ * other kind is a 404. Answers the kind so the route can dispatch on it without
+ * reading it off the row a second time.
+ */
+export async function requireReadableInstanceOfKinds<const K extends InstanceKind>(
+  event: H3Event,
+  instanceId: string | undefined,
+  kinds: readonly K[],
+): Promise<{ instance: AppInstance, actor: Actor, kind: K }> {
+  const found = await requireReadableInstance(event, instanceId)
+  const kind = instanceKind(found.instance)
+  if (!(kinds as readonly InstanceKind[]).includes(kind)) {
+    throw createError({ statusCode: 404, statusMessage: 'Not found' })
+  }
+  return { ...found, kind: kind as K }
+}
+
+/**
  * A connection this actor may change: create, delete, reconnect, resync, rotate
  * credentials.
  *
