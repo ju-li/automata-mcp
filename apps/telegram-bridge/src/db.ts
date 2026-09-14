@@ -3,6 +3,14 @@ import postgres from 'postgres'
 
 export type Sql = postgres.Sql
 
+/**
+ * The schema every bridge table lives in. The bridge normally shares a database
+ * with Evolution (on Railway, one Postgres service), and keeps out of `public`.
+ * The app names the same schema in `server/utils/telegram-db.ts`; keep the two in
+ * step.
+ */
+export const BRIDGE_SCHEMA = 'telegram'
+
 const MIGRATIONS = new URL('./migrations/', import.meta.url)
 /** Serialises migrations across processes starting at once. */
 const MIGRATE_LOCK = '7340031542916270001'
@@ -14,8 +22,44 @@ export function connect(databaseUrl: string): Sql {
     connect_timeout: 10,
     // A RAISE NOTICE can carry row data; the process log is not where that goes.
     onnotice: () => {},
-    connection: { application_name: 'telegram-bridge', statement_timeout: 15_000 },
+    // search_path is set on these connections, never on the database role: the
+    // role is usually the one Evolution connects as, and a role default would
+    // redirect its queries too. `public` stays second only so an extension
+    // installed there (pg_trgm) still resolves; no bridge table is created in
+    // it — see ensureBridgeSchema.
+    connection: {
+      application_name: 'telegram-bridge',
+      statement_timeout: 15_000,
+      search_path: `${BRIDGE_SCHEMA}, public`,
+    },
   })
+}
+
+/**
+ * Make the bridge's schema exist, and prove unqualified names resolve into it.
+ *
+ * Every bridge query and migration names its tables without a schema and finds
+ * them through this connection's search_path. If that setting did not take — a
+ * connection pooler dropping startup parameters, say — the current schema would
+ * be `public`, and the first migration would create every table beside
+ * Evolution's. So this is checked, not assumed.
+ *
+ * Existence is tested before creating because `CREATE SCHEMA IF NOT EXISTS`
+ * still demands CREATE on the database, which a restricted role may lack even
+ * when the schema is already there.
+ */
+export async function ensureBridgeSchema(sql: Sql): Promise<void> {
+  const [existing] = await sql`SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = ${BRIDGE_SCHEMA}`
+  if (!existing) await sql`CREATE SCHEMA IF NOT EXISTS ${sql(BRIDGE_SCHEMA)}`
+
+  const [row] = await sql<{ schema: string | null }[]>`SELECT current_schema() AS schema`
+  if (row?.schema !== BRIDGE_SCHEMA) {
+    throw new Error(
+      `telegram-bridge cannot start: its connection resolves names in schema ${row?.schema ?? '(none)'} rather than `
+      + `${BRIDGE_SCHEMA}, so its tables would be created beside Evolution's. Something between the bridge and `
+      + 'Postgres is overriding search_path.',
+    )
+  }
 }
 
 /**
@@ -46,8 +90,9 @@ export async function migrate(sql: Sql): Promise<string[]> {
 }
 
 /**
- * What the app's reader role may see: synced messages, and the chat and user
- * directories **minus** `access_hash` and `phone`.
+ * What an optional reader role for the app may see (`TELEGRAM_READER_ROLE`):
+ * synced messages, and the chat and user directories **minus** `access_hash` and
+ * `phone`. Unused when the app reads with the bridge's own credential.
  *
  * An explicit column allowlist, not "every column except": a column added later
  * stays invisible to the reader until someone decides here that it should not be.
@@ -79,8 +124,8 @@ export async function grantReader(sql: Sql, role: string): Promise<boolean> {
   if (row.is_self) throw new Error(`TELEGRAM_READER_ROLE is the bridge's own role (${role}); it must be a separate, SELECT-only role`)
 
   await sql.begin(async (tx) => {
-    await tx`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM ${tx(role)}`
-    await tx`GRANT USAGE ON SCHEMA public TO ${tx(role)}`
+    await tx`REVOKE ALL ON ALL TABLES IN SCHEMA ${tx(BRIDGE_SCHEMA)} FROM ${tx(role)}`
+    await tx`GRANT USAGE ON SCHEMA ${tx(BRIDGE_SCHEMA)} TO ${tx(role)}`
     await tx`GRANT SELECT ON messages TO ${tx(role)}`
     await tx`GRANT SELECT (${tx(READER_COLUMNS.chats)}) ON chats TO ${tx(role)}`
     await tx`GRANT SELECT (${tx(READER_COLUMNS.users)}) ON users TO ${tx(role)}`

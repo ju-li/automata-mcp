@@ -1,5 +1,5 @@
 import { type BridgeConfig, loadConfig } from './config.ts'
-import { connect, grantReader, migrate } from './db.ts'
+import { BRIDGE_SCHEMA, connect, ensureBridgeSchema, grantReader, migrate } from './db.ts'
 import { createBridgeServer } from './http.ts'
 import { SessionManager } from './sessions.ts'
 
@@ -14,13 +14,22 @@ catch (error) {
 
 const sql = connect(config.databaseUrl)
 
-const applied = await migrate(sql)
-if (applied.length > 0) console.info(`[db] applied ${applied.join(', ')}`)
+try {
+  await ensureBridgeSchema(sql)
+}
+catch (error) {
+  console.error((error as Error).message)
+  await sql.end({ timeout: 5 })
+  process.exit(1)
+}
 
-if (!(await grantReader(sql, config.readerRole))) {
+const applied = await migrate(sql)
+if (applied.length > 0) console.info(`[db] applied ${applied.join(', ')} in schema ${BRIDGE_SCHEMA}`)
+
+if (config.readerRole && !(await grantReader(sql, config.readerRole))) {
   console.warn(
-    `[db] reader role "${config.readerRole}" does not exist. The app cannot read synced Telegram data until it does; `
-    + 'see apps/telegram-bridge/db-init.sh.',
+    `[db] TELEGRAM_READER_ROLE names "${config.readerRole}", which does not exist. Create it with LOGIN and no other `
+    + 'privileges, then restart the bridge to have it granted read access to synced data.',
   )
 }
 

@@ -39,7 +39,7 @@ Run from the repo root — root scripts delegate with `pnpm --filter web`:
 pnpm install          # postinstall runs `nuxt prepare` in apps/web
 pnpm services:up      # pocketbase only (compose)
 pnpm services:up:whatsapp   # + postgres, redis, evolution
-pnpm services:up:telegram   # + postgres, telegram-db-init, telegram-bridge
+pnpm services:up:telegram   # + postgres, telegram-bridge
 pnpm bridge:dev       # the Telegram bridge on the host, http://localhost:8095
 pnpm dev              # Nuxt on the host, http://localhost:3000
 pnpm typecheck        # nuxt typecheck across app + server
@@ -410,7 +410,7 @@ Pending invitations are admin-only on `/api/org`; the member roster is not, beca
 
 ## Telegram bridge
 
-`apps/telegram-bridge` is Telegram's counterpart to Evolution: a separate Node service, and the only thing in the repo that speaks MTProto. Personal accounts link by QR code through `teleproto` (the maintained GramJS fork, pinned), and their chats are synced into the bridge's own database; the bridge also lists chats, resolves a username or phone number, and sends text. **It is not wired into the app yet** — there is no `telegram` value on `instances.kind`, no tool and no UI; those land in later PRs.
+`apps/telegram-bridge` is Telegram's counterpart to Evolution: a separate Node service, and the only thing in the repo that speaks MTProto. Personal accounts link by QR code through `teleproto` (the maintained GramJS fork, pinned), and their chats are synced into a `telegram` schema of the database Evolution uses; the bridge also lists chats, resolves a username or phone number, and sends text. The app reads it and exposes it over MCP (below); creating a Telegram connection from the UI, its dashboard and its disconnect alerts land in later PRs.
 
 Node runs `src/*.ts` directly (type stripping, Node ≥ 22.18), so there is no build step and `erasableSyntaxOnly` is on: no enums, namespaces or parameter properties. `pnpm typecheck` does not cover it — use `pnpm bridge:typecheck`, or `cd apps/telegram-bridge && node_modules/.bin/tsc --noEmit`.
 
@@ -424,7 +424,7 @@ Node runs `src/*.ts` directly (type stripping, Node ≥ 22.18), so there is no b
 
 **Keys.** The global `TELEGRAM_BRIDGE_ADMIN_KEY` creates and deletes sessions and opens nothing else; each session has its own bearer key, stored only as a SHA-256 hash, which is the only credential for its other routes. Session strings and webhook headers are sealed with AES-256-GCM under `TELEGRAM_SESSION_ENCRYPTION_KEY`, with the row id as additional data so a sealed value moved to another row does not open. Losing that key unlinks every account.
 
-**Database isolation.** The bridge has its own `telegram` database, owned by the non-superuser `telegram_bridge`, by default on the same Postgres server as Evolution (`db-init.sh`, run as the compose job `telegram-db-init`). `telegram_reader` is re-granted on every boot from an explicit column allowlist (`grantReader` in `db.ts`): never `sessions`, never `access_hash` or `phone`, and a new column stays hidden until it is added there. CONNECT is deliberately **not** revoked from PUBLIC on Evolution's database — Evolution's existing read-only role depends on it — and the Telegram roles see no Evolution table there because none is granted to PUBLIC.
+**The bridge shares Evolution's database and credential, and keeps to its own schema.** On Railway that is one Postgres service, one database and its superuser URL, for both. On boot the bridge creates a `telegram` schema (`ensureBridgeSchema`) and sets `search_path` to `telegram, public` **on its own connections** — never on the role, because the role is Evolution's too and a role default would repoint Evolution's queries. Every bridge query is unqualified and finds its tables only through that setting, so boot refuses to continue unless `current_schema()` is `telegram`: a connection whose search path did not take would create every table beside Evolution's. The app does not rely on a search path at all — `telegram-db.ts` names `telegram.<table>` explicitly — so `NUXT_TELEGRAM_DATABASE_URL` can be the same URL. **This is a deliberate trade for simplicity:** that credential reads every WhatsApp message in the database, so a compromised bridge is a compromised Evolution. A least-privilege reader for the app remains possible: set `TELEGRAM_READER_ROLE` to an existing LOGIN role and the bridge re-grants it on every start from an explicit column allowlist (`grantReader`) — never `sessions`, never `access_hash` or `phone`, and a new column stays hidden until it is added there.
 
 **`chat_id` is the Bot API marked id**, stored as `bigint`: a user is positive, a basic group `-id`, a channel or supergroup `-(10^12 + id)`. Compute it with `markedId` / `channelChatId` in `sync/convert.ts` and **never** teleproto's `utils.getPeerId`, which concatenates `"-100"` onto the id and so is right only for a ten-digit id — and rebuild teleproto's `_entities` map on an update (keyed with `getPeerId`) with `entityMap` before looking anything up in it. `messages.in_channel` is derived from it by a CHECK, and the partial unique index on `(session_id, message_id) WHERE NOT in_channel` is what will let a deletion that arrives with ids and no chat resolve — private chats and basic groups share one message-id counter per account. If Telegram ever breaks that, inserts fail loudly rather than a deletion hitting the wrong chat.
 
@@ -443,6 +443,24 @@ Node runs `src/*.ts` directly (type stripping, Node ≥ 22.18), so there is no b
 **One session's data belongs to one Telegram account.** `sessions.data_user_id` records whose; pairing a different account wipes it, logout wipes it, and revocation keeps it, because the likeliest next step is the same person scanning again.
 
 **Sending never parses formatting** (`parseMode: false`), so text a model writes goes out verbatim instead of being reinterpreted as Markdown, and a group upgraded to a supergroup answers 409 naming the new id rather than sending into a dead chat. `/qr` returns the `tg://login` URL beside the PNG; it is exactly as sensitive as the image.
+
+### In the app (`server/utils/telegram.ts`, `telegram-db.ts`, `server/mcp/tools/telegram/`)
+
+The same split as WhatsApp — `telegram.ts` talks to the bridge over HTTP, `telegram-db.ts` reads the bridge's database — under the same rules, restated only where they differ.
+
+**Credentials.** A `telegram` row reuses `base_url` (the bridge), `api_key` (the bridge's per-session key), `instance_id` (the bridge session id) and `admin_key` (a bring-your-own bridge's global key). `telegramCredentialsForInstance()` picks the first three and nothing else — `admin_key` is not in its type, and there is no fallback to `NUXT_TELEGRAM_ADMIN_KEY`. A URL that is not `NUXT_TELEGRAM_URL` is user-supplied and host-guarded on every request. `onDeploymentBridge()` is the one test for "our bridge".
+
+**Where chats are read.** `telegramDbUrlFor()` is the precedence rule, as `messageDbUrlFor()` is for Evolution: the row's hidden `telegram_db_url` (guarded), else `NUXT_TELEGRAM_DATABASE_URL` for a connection on our bridge (unguarded — our own infrastructure), else 501. Every query carries `session_id = instance_id`. Chat scope is `chat_id = ANY(...)` in the SQL for listing and searching, and an assertion before reading one chat.
+
+**`chat_jids` holds Telegram marked ids on a Telegram token.** The column's name is WhatsApp's; a token is bound to one connection of one kind, so its meaning is per kind. `scopedTelegramChatIds()` refuses a non-numeric entry with a 409 rather than letting it match nothing. **`chatId` is a string everywhere** — in tool inputs, outputs and SQL binds — because a JS number rounds a 64-bit id into a different chat.
+
+**Tables are schema-qualified and columns are named.** Every query names `telegram.<table>` rather than depending on a search path, which the shared database cannot be trusted to provide, and lists its columns: with a restricted `TELEGRAM_READER_ROLE`, `chats` and `users` are granted column by column, so `SELECT *` or `access_hash` fails with a permission error.
+
+**Reads report what sync could not see.** `read-telegram-messages` excludes deleted and service messages in SQL, so `hasMore` and `totalMatching` describe the same set, and reports `deletedExcluded` / `serviceMessagesExcluded` counted over the whole window. It carries `history` from the chat row and says in `note` when `hasMore: false` is the oldest *synced* message rather than the start of the chat — the Telegram form of "a page must say it is a page", and the one paging cannot fix. A migrated basic group stays readable, since its old messages live there, and names `migratedTo`; sending to it is refused by the bridge with the new id.
+
+**Sending resolves before it checks scope, and fails closed.** A `username` goes through the bridge's resolve first, so a scoped token cannot reach by name a chat it could not reach by id, and an unreachable bridge refuses the send rather than skipping the check. The bridge's 4xx bodies are written for callers and pass through `relayBridgeError()`; anything else is logged and answered 503.
+
+**Tool names carry `telegram`** (`read-telegram-messages`, …) because tool basenames are global across groups.
 
 ## PocketBase
 

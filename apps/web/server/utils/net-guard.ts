@@ -180,6 +180,8 @@ async function ownTargets(): Promise<OwnTarget[]> {
   if (config.pocketbaseUrl) sources.push({ raw: config.pocketbaseUrl, what: 'this app\'s PocketBase', defaultPort: 80 })
   if (config.evolutionUrl) sources.push({ raw: config.evolutionUrl, what: 'this app\'s Evolution server', defaultPort: 80 })
   if (config.evolutionDatabaseUrl) sources.push({ raw: config.evolutionDatabaseUrl, what: 'Evolution\'s database', defaultPort: 5432 })
+  if (config.telegramUrl) sources.push({ raw: config.telegramUrl, what: 'this app\'s Telegram bridge', defaultPort: 80 })
+  if (config.telegramDatabaseUrl) sources.push({ raw: config.telegramDatabaseUrl, what: 'the Telegram bridge\'s database', defaultPort: 5432 })
 
   const targets: OwnTarget[] = []
   let complete = true

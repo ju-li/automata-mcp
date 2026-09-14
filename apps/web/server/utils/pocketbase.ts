@@ -329,6 +329,12 @@ export interface AppInstance {
   admin_key?: string
   base_url?: string
   evolution_db_url?: string
+  /**
+   * Telegram only: a read-only URL for a bring-your-own bridge's database. Empty
+   * means NUXT_TELEGRAM_DATABASE_URL, for a connection on the deployment's bridge.
+   * See `telegramDbUrlFor` in telegram-db.ts.
+   */
+  telegram_db_url?: string
   dsn?: string
   pg_host?: string
   pg_port?: number

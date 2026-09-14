@@ -91,6 +91,17 @@ export default defineNuxtConfig({
     // README "Reading and searching messages".
     evolutionDatabaseUrl: '',
 
+    // The *default* Telegram bridge (apps/telegram-bridge), for Telegram
+    // connections that did not bring their own. Optional, like Evolution's.
+    telegramUrl: '',
+    // That bridge's admin key. Creates and deletes sessions only; never used to
+    // read or send on a user's behalf — see server/utils/telegram.ts.
+    telegramAdminKey: '',
+    // Read-only connection to that bridge's database as telegram_reader, behind
+    // list-, read- and search-telegram-messages. Unset, those fail for
+    // connections on the default bridge (announced at startup).
+    telegramDatabaseUrl: '',
+
     // Let a user-supplied Postgres DSN or Evolution URL point at a private or
     // loopback address. Correct for a single-tenant, self-hosted deployment;
     // wrong for anything shared, where it lets one user's connection reach this

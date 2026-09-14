@@ -814,6 +814,7 @@ function settingsBody(current: EvolutionSettings | null, overrides: Partial<Evol
 export type ConnectionStateReport =
   | { state: ConnectionState, detail?: string, error?: string }
   | InstanceStatus
+  | TelegramStatus
 
 export async function connectionState(
   instance: AppInstance,
@@ -829,9 +830,9 @@ export async function connectionState(
       if (!options.tolerant) return await getInstanceStatus(instance)
       return await getInstanceStatus(instance).catch(() => unknownStatus())
     case 'telegram':
-      // `unknown`, not `close`, for the reason given above: this build cannot
-      // establish the state, which is not the same as the account being unpaired.
-      return { state: 'unknown', error: 'Telegram connections are not supported by this build yet.' }
+      // Never throws: a bridge that cannot be asked answers `unknown`, for the
+      // reason given above.
+      return await getTelegramStatus(instance)
     default:
       return assertNever(kind, 'connection kind')
   }

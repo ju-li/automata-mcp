@@ -4,6 +4,7 @@ import type { H3Event } from 'h3'
 import type { AppInstance, AppInstanceAssignment, AppMembership, AppUser } from './pocketbase'
 import type { McpScope } from './mcp-scope'
 import type { EvolutionCredentials } from './evolution'
+import type { TelegramCredentials } from './telegram'
 
 /**
  * Auth for the MCP surface — and ONLY the MCP surface.
@@ -44,6 +45,7 @@ interface McpAuthBase {
 export type McpAuth =
   | (McpAuthBase & { kind: 'whatsapp', evolution: EvolutionCredentials })
   | (McpAuthBase & { kind: 'postgres' })
+  | (McpAuthBase & { kind: 'telegram', telegram: TelegramCredentials })
 
 interface McpTokenRecord {
   id: string
@@ -261,11 +263,15 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
       auth = { ...base, kind: 'whatsapp', evolution }
       break
     }
-    case 'telegram':
-      // Recognised so that it can never fall through to the Evolution branch
-      // above, but not served by this build: there are no Telegram tools yet.
-      console.error(`[mcp-auth] instance ${instance.id} is kind=telegram, which this build does not serve; token ${record.id} refused`)
-      return undefined
+    case 'telegram': {
+      const telegram = telegramCredentialsForInstance(instance)
+      if (!telegram) {
+        console.error(`[mcp-auth] instance ${instance.id} has no Telegram bridge credentials; token ${record.id} refused`)
+        return undefined
+      }
+      auth = { ...base, kind: 'telegram', telegram }
+      break
+    }
     default:
       return assertNever(kind, 'connection kind')
   }
