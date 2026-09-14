@@ -15,7 +15,7 @@ const schema = z.object({
   TELEGRAM_BRIDGE_ADMIN_KEY: z.string().min(24, 'use at least 24 characters (openssl rand -hex 24)'),
   TELEGRAM_SESSION_ENCRYPTION_KEY: z.string().min(1),
   TELEGRAM_BRIDGE_DATABASE_URL: z.string().min(1),
-  TELEGRAM_READER_ROLE: z.string().regex(/^[a-z_][a-z0-9_]{0,62}$/).default('telegram_reader'),
+  TELEGRAM_READER_ROLE: z.string().regex(/^[a-z_][a-z0-9_]{0,62}$/).optional(),
   TELEGRAM_TEST_SERVERS: z.enum(['true', 'false']).default('false'),
   TELEGRAM_BACKFILL_MAX_PER_CHAT: z.coerce.number().int().min(0).default(2000),
   TELEGRAM_BACKFILL_DAYS: z.coerce.number().int().min(0).default(365),
@@ -34,8 +34,11 @@ export interface BridgeConfig {
   /** 32 bytes. Seals stored sessions and webhook headers. */
   sealKey: Buffer
   databaseUrl: string
-  /** The SELECT-only role the app reads synced data with. */
-  readerRole: string
+  /**
+   * An optional SELECT-only role for the app, re-granted at every start. Unset when
+   * the app reads with the same credential as the bridge.
+   */
+  readerRole?: string
   testServers: boolean
   backfill: BackfillOptions
   port: number

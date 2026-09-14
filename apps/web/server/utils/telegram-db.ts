@@ -6,10 +6,11 @@ import type { McpScope } from './mcp-scope'
  * Read-only access to a Telegram bridge's database — every Telegram message this
  * app reads. The counterpart of `evolution-db.ts`, and bound by the same rules:
  *
- *   1. The role is `telegram_reader`, which the bridge grants SELECT on
- *      `messages` and on an explicit column list of `chats` and `users` — never
- *      `sessions`, `access_hash` or `phone`. **Name columns;** `SELECT *` on
- *      `chats` fails with a permission error.
+ *   1. Every table is named with its schema, `telegram.<table>`. The bridge
+ *      shares a database with Evolution, and nothing here may depend on a search
+ *      path. Columns are named too: a restricted reader (`TELEGRAM_READER_ROLE`
+ *      on the bridge) is granted `chats` and `users` column by column — never
+ *      `access_hash` or `phone` — so `SELECT *` would fail for it.
  *   2. Every query carries `session_id = <this connection's bridge session>`.
  *      `sessionIdOf` throws rather than widening when a row has none.
  *   3. Chat scope is a predicate in the SQL for listing and searching, and an
@@ -234,7 +235,7 @@ export async function listTelegramChats(
 
   const rows = await guarded('list chats', () => sql<ChatDbRow[]>`
     SELECT ${chatColumns(sql)}
-    FROM chats
+    FROM telegram.chats
     WHERE session_id = ${sessionId}
       ${options.allowedChatIds ? sql`AND chat_id = ANY(${options.allowedChatIds}::bigint[])` : sql``}
     ORDER BY last_message_at DESC NULLS LAST, chat_id DESC
@@ -249,7 +250,7 @@ export async function telegramChat(instance: AppInstance, chatId: string): Promi
   const sql = await telegramDbFor(instance)
   const sessionId = sessionIdOf(instance)
   const [row] = await guarded('read a chat', () => sql<ChatDbRow[]>`
-    SELECT ${chatColumns(sql)} FROM chats WHERE session_id = ${sessionId} AND chat_id = ${chatId}`)
+    SELECT ${chatColumns(sql)} FROM telegram.chats WHERE session_id = ${sessionId} AND chat_id = ${chatId}`)
   return row ? toChatSummary(row) : undefined
 }
 
@@ -317,9 +318,9 @@ export async function listTelegramMessagesPage(
              m.fwd_from, m.service_action, m.grouped_id::text AS grouped_id, m.reactions, m.deleted_at,
              u.first_name, u.last_name, u.username AS user_username, sc.title AS sender_chat_title,
              COUNT(*) OVER () AS total
-      FROM messages m
-      LEFT JOIN users u ON u.session_id = m.session_id AND u.user_id = m.sender_id
-      LEFT JOIN chats sc ON sc.session_id = m.session_id AND sc.chat_id = m.sender_id AND m.sender_id < 0
+      FROM telegram.messages m
+      LEFT JOIN telegram.users u ON u.session_id = m.session_id AND u.user_id = m.sender_id
+      LEFT JOIN telegram.chats sc ON sc.session_id = m.session_id AND sc.chat_id = m.sender_id AND m.sender_id < 0
       WHERE m.session_id = ${sessionId} AND m.chat_id = ${options.chatId}
         ${window}
         ${options.includeDeleted ? sql`` : sql`AND m.deleted_at IS NULL`}
@@ -331,7 +332,7 @@ export async function listTelegramMessagesPage(
       : guarded('count excluded messages', () => sql<Array<{ deleted: string, service: string }>>`
           SELECT count(*) FILTER (WHERE m.deleted_at IS NOT NULL) AS deleted,
                  count(*) FILTER (WHERE m.deleted_at IS NULL AND m.service_action IS NOT NULL) AS service
-          FROM messages m
+          FROM telegram.messages m
           WHERE m.session_id = ${sessionId} AND m.chat_id = ${options.chatId}
             ${window}`),
   ])
@@ -384,10 +385,10 @@ export async function searchTelegramMessages(
     SELECT m.chat_id::text AS chat_id, c.title AS chat_title,
            m.message_id::text AS message_id, m.sender_id::text AS sender_id, m.from_me, m.date, m.edit_date,
            m.text, u.first_name, u.last_name, u.username AS user_username, sc.title AS sender_chat_title
-    FROM messages m
-    JOIN chats c ON c.session_id = m.session_id AND c.chat_id = m.chat_id
-    LEFT JOIN users u ON u.session_id = m.session_id AND u.user_id = m.sender_id
-    LEFT JOIN chats sc ON sc.session_id = m.session_id AND sc.chat_id = m.sender_id AND m.sender_id < 0
+    FROM telegram.messages m
+    JOIN telegram.chats c ON c.session_id = m.session_id AND c.chat_id = m.chat_id
+    LEFT JOIN telegram.users u ON u.session_id = m.session_id AND u.user_id = m.sender_id
+    LEFT JOIN telegram.chats sc ON sc.session_id = m.session_id AND sc.chat_id = m.sender_id AND m.sender_id < 0
     WHERE m.session_id = ${sessionId}
       AND m.deleted_at IS NULL
       AND m.text ILIKE ALL (${patterns}::text[])
