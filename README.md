@@ -5,12 +5,16 @@ A Nuxt app that serves two surfaces from one Nitro server:
 1. **Web UI** — users create *connections* and mint connector tokens for them.
 2. **MCP endpoint** — Claude connects to `/mcp` as a custom connector.
 
-A connection is one of two kinds, and a connector token reaches exactly one
+A connection is one of three kinds, and a connector token reaches exactly one
 connection:
 
 - **WhatsApp**, through [Evolution API](https://doc.evolution-api.com/). Paired
   by QR. Uses the Evolution server this app is configured with, or one the user
   supplies.
+- **Telegram**, through the Telegram bridge in `apps/telegram-bridge`. A
+  personal account linked by QR code, its chats synced into Postgres. Uses the
+  bridge this app is configured with, or one the user supplies. See "Telegram
+  connections".
 - **PostgreSQL**, through a connection string the user supplies. Read-only
   unless a token is explicitly granted the write tool.
 
@@ -19,27 +23,33 @@ credentials). Evolution API, its Postgres and its Redis are dependencies you run
 **only if you want WhatsApp connections** — they sit behind a compose profile,
 and `NUXT_EVOLUTION_URL` / `NUXT_EVOLUTION_ADMIN_KEY` are optional. If you do
 want them, `NUXT_EVOLUTION_DATABASE_URL` is **required** — both WhatsApp read
-tools go through it. See "Reading and searching messages".
+tools go through it. See "Reading and searching messages". The Telegram bridge
+is the same kind of dependency: run it **only if you want Telegram
+connections**, and every `TELEGRAM_*` / `NUXT_TELEGRAM_*` variable is optional
+until you do.
 
-> **Status.** Sign-up, both connection kinds (WhatsApp paired by QR with its
-> history imported, Postgres by connection string), the per-connection
-> dashboard, and connector token provisioning with per-chat and per-table
-> scoping all work. Ten MCP tools, five per kind — see "MCP tools". A WhatsApp
-> connection that drops emails the people who use it, and emails them again when it comes
-> back — see "Connection alerts".
+> **Status.** Sign-up, all three connection kinds (WhatsApp paired by QR with
+> its history imported, Telegram linked by QR with its chats synced, Postgres by
+> connection string), the per-connection dashboard, and connector token
+> provisioning with per-chat and per-table scoping all work. Fifteen MCP tools,
+> five per kind — see "MCP tools". A WhatsApp or Telegram connection that drops
+> emails the people who use it, and emails them again when it comes back — see
+> "Connection alerts".
 
 ## Layout
 
 ```
 apps/web/                    Nuxt 4 + TypeScript. Own Dockerfile, built from the repo root.
+apps/telegram-bridge/        Node + teleproto. Links Telegram accounts, syncs chats to Postgres.
+                             Own Dockerfile, built from the repo root.
   app/pages/                 login, signup, instances/{index,new,[id]}
   app/components/            app components + ui/ (shadcn-vue)
   app/composables/           session, connection state, token scope, API actions
   modules/                   local Nuxt modules (registers /mcp/:token)
   shared/                    types used by both the app and the server
-  server/api/                auth, instances, tokens, Evolution webhook
+  server/api/                auth, instances, tokens, Evolution and Telegram webhooks
   server/mcp/index.ts        MCP handler + auth middleware
-  server/mcp/tools/<kind>/   one file per tool: whatsapp/, postgres/
+  server/mcp/tools/<kind>/   one file per tool: whatsapp/, telegram/, postgres/
   server/plugins/            token redaction, per-kind instructions, startup check
   server/utils/              PocketBase, auth, instances, tokens, Evolution client and
                              message database, mentions, outbound host guard,
@@ -67,9 +77,17 @@ be filled in for that to come up. If you want WhatsApp connections as well:
 pnpm services:up:whatsapp     # + postgres, redis, evolution
 ```
 
+For Telegram connections, fill in the Telegram section of `.env` first (your own
+`api_id` / `api_hash` and two generated keys — see "Telegram connections"), then:
+
+```bash
+pnpm services:up:telegram     # + postgres, telegram-bridge
+```
+
 Postgres, Redis and Evolution sit behind a `whatsapp` compose profile because
-they exist only to serve WhatsApp connections. `services:down`, `:logs` and
-`:ps` always pass `--profile whatsapp`, so they cover everything either way.
+they exist only to serve WhatsApp connections; Postgres and the bridge sit behind
+`telegram`. `services:down`, `:logs` and `:ps` always pass both profiles, so they
+cover everything either way.
 
 The PocketBase superuser is created for you from `NUXT_POCKETBASE_ADMIN_EMAIL`
 and `NUXT_POCKETBASE_ADMIN_PASSWORD` — the container upserts it on every boot, so
@@ -82,7 +100,7 @@ Then start Nuxt **on the host** (it is deliberately not in compose, so you keep 
 pnpm dev                      # http://localhost:3000
 ```
 
-Admin UI: <http://localhost:8090/_/> · Evolution (WhatsApp profile): <http://localhost:8080> · Nuxt: <http://localhost:3000>
+Admin UI: <http://localhost:8090/_/> · Evolution (WhatsApp profile): <http://localhost:8080> · Telegram bridge (Telegram profile): <http://localhost:8095/health> · Nuxt: <http://localhost:3000>
 
 There is no `predev` hook — bring the services up yourself.
 
@@ -95,7 +113,10 @@ There is no `predev` hook — bring the services up yourself.
 | `pnpm typecheck` | `nuxt typecheck` across app + server — the only automated check |
 | `pnpm services:up` | PocketBase only |
 | `pnpm services:up:whatsapp` | + Evolution, its Postgres and Redis |
-| `pnpm services:down` / `:logs` / `:ps` | the whole stack, profile included |
+| `pnpm services:up:telegram` | + Postgres and the Telegram bridge |
+| `pnpm services:down` / `:logs` / `:ps` | the whole stack, profiles included |
+| `pnpm bridge:dev` | the Telegram bridge on the host instead of in compose |
+| `pnpm bridge:typecheck` | `tsc` for the bridge — `pnpm typecheck` does not cover it |
 
 ## Networking
 
@@ -106,15 +127,19 @@ Traffic crosses the host/container boundary in both directions.
 | Nuxt (host) | Evolution | `http://localhost:8080` |
 | Nuxt (host) | PocketBase | `http://localhost:8090` |
 | Nuxt (host) | Evolution's Postgres | `localhost:5432` (read-only role, see below) |
+| Nuxt (host) | Telegram bridge | `http://localhost:8095` |
 | Evolution (container) | Nuxt webhook | `http://host.docker.internal:3000/api/webhook/evolution` |
+| Telegram bridge (container) | Nuxt webhook | `http://host.docker.internal:3000/api/webhook/telegram` |
 
-Postgres (`5432`), Redis (`6379`) and Evolution (`8080`) publish on `127.0.0.1`
-only: their dev credentials have defaults, and between them they hold — and can
+Postgres (`5432`), Redis (`6379`), Evolution (`8080`) and the Telegram bridge
+(`8095`) publish on `127.0.0.1` only: their dev credentials have defaults, and between them they hold — and can
 send from — every paired account. PocketBase publishes `8090` on every
 interface.
 
 `host.docker.internal` is not resolvable in Linux containers by default, so the
-evolution service declares `extra_hosts: ["host.docker.internal:host-gateway"]`.
+evolution and telegram-bridge services declare
+`extra_hosts: ["host.docker.internal:host-gateway"]`. The firewall rule below
+covers both, since they share the compose subnet and the port.
 
 The webhook URL comes from `WEBHOOK_URL` / `NUXT_WEBHOOK_URL`, so dev and prod
 differ by configuration only — no code change.
@@ -215,12 +240,16 @@ through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
 ### Using it
 
 1. Sign up at <http://localhost:3000>.
-2. Create a connection: pick **WhatsApp account** or **PostgreSQL database**, and
-   name it.
+2. Create a connection: pick **WhatsApp account**, **Telegram account** or
+   **PostgreSQL database**, and name it.
 3. **WhatsApp:** continue to the QR code and scan it — WhatsApp → Settings →
    Linked devices → Link a device. To use an Evolution server other than this
    app's, tick **Use my own Evolution API server** first (see "Bring your own
    Evolution server").
+   **Telegram:** on the connection's page press **Show QR code** and scan it —
+   Telegram → Settings → Devices → Link Desktop Device. An account with two-step
+   verification is then asked for its password, which goes to Telegram and is
+   stored nowhere. Chats start syncing as soon as it links.
    **Postgres:** paste a connection string. It is proved by connecting before
    anything is saved (see "Database connections").
 4. On the connection's dashboard, create a **New connector token**: a name, an
@@ -248,6 +277,11 @@ comes back.
 | `read-messages` | WhatsApp | read | One chat, newest first, 1–200 per page (default 50), optional `since` / `until`; reports `hasMore`, `nextPage`, `covered` and `totalMatching` |
 | `search-messages` | WhatsApp | read | Messages containing every word of `query`, across chats in scope or one `jid`; optional date range and `fromMe`; up to 100 matches (default 20) |
 | `send-text-message` | WhatsApp | **write** | Send text to a number in international format |
+| `get-telegram-status` | Telegram | read | Whether the account is linked and online, who it is signed in as, and how far sync has got |
+| `list-telegram-chats` | Telegram | read | Synced chats in scope — private, groups, supergroups, channels — most recently active first, with the `chatId` other tools take |
+| `read-telegram-messages` | Telegram | read | One chat, newest first, with the same paging envelope as `read-messages`; optional forum `topicId`; says when older history was never synced |
+| `search-telegram-messages` | Telegram | read | Messages containing every word of `query` (text and captions), across chats in scope or one `chatId` |
+| `send-telegram-message` | Telegram | **write** | Send plain text to a `chatId` or an @username |
 | `get-database-info` | Postgres | read | Server version, database, connecting role, and what this token is scoped to |
 | `list-tables` | Postgres | read | Tables in scope, filterable by schema and name, paged (1–500, default 100) |
 | `describe-table` | Postgres | read | Columns, keys, constraints, indexes and comments for one table |
@@ -544,6 +578,104 @@ credentials are reached through `useMcpAuth()`, `useEvolutionClient()` and
 `pgFor()`, which all go through `useEvent()`. That is why
 `nitro.experimental.asyncContext` is enabled in `nuxt.config.ts` — do not turn it off.
 
+## Telegram connections
+
+`apps/telegram-bridge` is to Telegram what Evolution is to WhatsApp: a separate
+service that holds each linked account's session, keeps its chats in Postgres,
+and answers the app over HTTP. Nothing off the shelf does this for a *personal*
+account linked by QR code, so it lives in this repo. It is built on
+[teleproto](https://www.npmjs.com/package/teleproto), the maintained GramJS fork.
+
+> ⚠️ **Read Telegram's terms before offering this to anyone.** Telegram's API
+> Terms of Service and its content-licensing terms forbid using data from the
+> platform for artificial intelligence, with an exception only where everyone in
+> a chat has consented. Accounts that sign in through unofficial clients are also
+> watched more closely than official ones, and one that breaks the terms can be
+> restricted or banned. This project ships the integration and does not make
+> that risk go away.
+
+### Setting it up
+
+1. **Get your own API credentials** at <https://my.telegram.org> → API
+   development tools, and put them in `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`.
+   Never reuse a pair from an example or another project — Telegram refuses
+   published ones.
+2. **Generate the two keys:** `TELEGRAM_BRIDGE_ADMIN_KEY` (`openssl rand -hex
+   24`) and `TELEGRAM_SESSION_ENCRYPTION_KEY` (`openssl rand -hex 32`). Set
+   `NUXT_TELEGRAM_ADMIN_KEY` to the same value as the admin key.
+3. **Point the app at it:** `NUXT_TELEGRAM_URL` and
+   `NUXT_TELEGRAM_DATABASE_URL`. `.env.example` has working development values.
+4. `pnpm services:up:telegram`, restart `pnpm dev`, and create a **Telegram
+   account** connection. Until `NUXT_TELEGRAM_URL` and `NUXT_TELEGRAM_ADMIN_KEY`
+   are both set, creating one is refused with "No Telegram bridge is available"
+   unless the user supplies their own bridge.
+
+**The encryption key is the most sensitive value the bridge has.** Every stored
+session is sealed with it, and each session is full access to that Telegram
+account. Losing or changing it unlinks every account; leaking it together with a
+database backup hands every account over.
+
+### Where the data lives
+
+In the **same Postgres database Evolution uses**, in its own `telegram` schema.
+The bridge creates the schema and its tables on first start and never touches
+`public`, where Evolution's tables are, so the two cannot collide. On Railway that
+means one Postgres service for both.
+
+The bridge connects with the database's owner credential — the same URL
+Evolution has. That is a deliberate trade for a simpler setup: the credential can
+read every WhatsApp message in that database, so a compromised bridge is a
+compromised Evolution. If you want the app to read Telegram data with less, create
+a role with `LOGIN` and nothing else, set `TELEGRAM_READER_ROLE` to its name on
+the bridge (it re-grants `SELECT` on synced data, column by column, at every
+start — never on sessions, access hashes or phone numbers), and use that role in
+`NUXT_TELEGRAM_DATABASE_URL`.
+
+### What syncs
+
+Private chats, bots, groups, supergroups (including forum topics) and channels —
+live, plus older history fetched in the background. Edits replace the message
+text, reactions are counted on the message, and a deleted message loses its
+text rather than staying readable.
+
+Backfill is **slow on purpose**: one page of 100 messages at a time with a pause
+between pages, newest chats first, stopping at `TELEGRAM_BACKFILL_MAX_PER_CHAT`
+messages or `TELEGRAM_BACKFILL_DAYS` days per chat, and skipping broadcast
+channels unless `TELEGRAM_BACKFILL_BROADCAST=true`. An unofficial client that
+hammers history is how an account gets restricted. The read tools say when a
+chat's history stops at what was synced rather than at its first message.
+
+**Secret chats are never visible.** They exist only on the devices that took
+part in them and cannot be synced by any client.
+
+**Unlinking deletes the synced chats**, whether through **Unlink** on the
+dashboard or by deleting the connection. A session ended from Telegram → Devices
+keeps them, because the likeliest next step is linking the same account again.
+
+### One bridge process at a time
+
+Two processes using the same Telegram session make Telegram kill it, which costs
+a QR scan. The bridge takes a Postgres advisory lock per session, so a second
+process waits rather than connecting, and takes the session over within about 30
+seconds of the first one stopping. Run it as **one instance**, and do not give it
+a deployment overlap: while two copies run, the one without the lock reports those
+connections as held elsewhere. A short overlap is harmless — alerts wait ten
+minutes for that state — but it buys nothing.
+
+### Bring your own bridge
+
+Like Evolution, a user can tick **Use my own Telegram bridge** and give its URL,
+admin key and, optionally, a database URL for reading its chats. The URL passes
+the same outbound host guard as a user's Evolution server, this deployment's
+admin key is never sent to it, and theirs is never sent to ours.
+
+### Developing against Telegram's test servers
+
+`TELEGRAM_TEST_SERVERS=true` points the bridge at Telegram's separate test
+environment, where accounts use numbers of the form `99966XYYYY`. That
+environment is separate from the real one: an account from one does not exist in
+the other, so link a test bridge only from a test account.
+
 ## PocketBase schema
 
 `users` holds accounts; an account can read only its own record. `instances`
@@ -600,8 +732,8 @@ That resets everything, including the superuser, and re-applies every migration.
 
 ## Connection alerts
 
-A WhatsApp connection that stops working emails everyone who can reach it, and
-emails them again once it recovers. Always on, no setting; it needs SMTP
+A WhatsApp or Telegram connection that stops working emails everyone who can
+reach it, and emails them again once it recovers. Always on, no setting; it needs SMTP
 configured on the pocketbase service (`PB_SMTP_*`) and nothing else.
 
 The same SMTP settings deliver organization invitations: the invitation-link
@@ -621,8 +753,8 @@ Two things feed it, and they are not redundant.
 
 | | What it catches | Latency |
 |---|---|---|
-| Per-connection webhook | logout, ban, session replaced, QR limit | seconds |
-| Hourly sweep | everything, including a socket that died and never came back | up to an hour |
+| Per-connection webhook | logout, ban, session replaced, QR limit; for Telegram, any state change the bridge sees | seconds |
+| Hourly sweep | everything, including a socket that died and never came back, and a Telegram bridge that is down | up to an hour |
 
 The sweep is not a backstop for a flaky webhook. In Evolution 2.3.7 a close that
 Evolution intends to **retry** emits no `connection.update` at all — it rebuilds
@@ -652,13 +784,35 @@ What it will and will not send:
   unlinked account asks for a QR scan. Sending someone to scan a code they did
   not need to costs a real phone.
 
+**Telegram** follows the same rules, with four failures told apart:
+
+| What happened | What the mail says |
+|---|---|
+| The connection to Telegram dropped | Press **Reconnect**; no scan |
+| The session was ended from Telegram → Settings → Devices, or by Telegram | Link again by QR code; synced chats are kept |
+| The bridge could not be reached | Nothing to scan; check the bridge service |
+| Another bridge process holds the session | Nothing to scan; run the bridge as one instance |
+
+A Telegram connection counts as linked from its first link until someone presses
+**Unlink**. It keeps counting through a dropped connection or a revoked session,
+so those alert, and an unlink closes an open outage without mailing anyone. A
+bridge that cannot be reached is treated as an outage even for a connection that
+was never linked, because the app cannot tell the two apart from outside.
+
+The bridge posts to `/api/webhook/telegram` with the same `x-webhook-secret`, and
+the route reads the live state back from the bridge before acting, exactly like
+Evolution's. Deliveries go to `NUXT_TELEGRAM_WEBHOOK_URL` if it is set, and
+otherwise to `NUXT_PUBLIC_APP_URL` + `/api/webhook/telegram` — so on Railway
+there is nothing to set, and in development `.env.example` points it at
+`host.docker.internal`.
+
 The sweep runs in-process on the `alerts:sweep` scheduled task, so keep the web
 service to a single replica or it mails twice. In development the tasks are
 reachable by hand at `/_nitro/tasks/alerts:sweep`.
 
 Registration is re-asserted on every sweep, which is what picks up a connection
-created before this existed, or one whose Evolution server was rebuilt. It uses
-the instance's own token, not a global key.
+created before this existed, or one whose Evolution server or Telegram bridge was
+rebuilt. It uses the connection's own key, not a global one.
 
 **Configuring SMTP also switches on PocketBase's own login alerts.** The web
 server signs in as the superuser, so that account gets a "Login from a new
@@ -742,21 +896,28 @@ docker compose -f docker-compose.dev.yml down     # no -v
 
 ## Deploying to Railway
 
-Up to five services. Two are built from this repo; the other three you provision
-only if you want WhatsApp connections. A deployment that serves database
-connections alone is **pocketbase** and **web**.
+Up to six services. Three are built from this repo; Redis and evolution you
+provision only for WhatsApp, the Telegram bridge only for Telegram, and Postgres
+for either. A deployment that serves database connections alone is
+**pocketbase** and **web**.
 
 | Service | Source | Target port | Volume |
 |---|---|---|---|
-| **Postgres** *(WhatsApp only)* | Railway template | — | managed |
+| **Postgres** *(WhatsApp or Telegram)* | Railway template | — | managed |
 | **Redis** *(WhatsApp only)* | Railway template | — | managed |
 | **evolution** *(WhatsApp only)* | image `evoapicloud/evolution-api:v2.3.7` | 8080 | `/evolution/instances` |
+| **telegram-bridge** *(Telegram only)* | this repo, root directory `/`, Dockerfile path `/apps/telegram-bridge/Dockerfile` | 8095 | — |
 | **pocketbase** | this repo, root directory `services/pocketbase` | 8090 | `/pb_data` |
 | **web** | this repo, root directory `/`, Dockerfile path `apps/web/Dockerfile` | 3000 | — |
 
-The web service builds from the **repo root**, not `apps/web` — the lockfile and
-workspace manifest live there. Set its Dockerfile path rather than its root
-directory.
+The web service and the Telegram bridge build from the **repo root**, not their
+`apps/` directory — the lockfile and workspace manifest live there. Leave the root
+directory at `/` and set the Dockerfile path. A root directory of
+`/apps/telegram-bridge` fails the build with `"/pnpm-workspace.yaml": not found`.
+If you use watch paths, the bridge needs `/apps/telegram-bridge/**` and
+`/pnpm-lock.yaml`.
+
+The bridge needs no volume: its sessions and chats are in Postgres.
 
 > **The volumes are not optional.** Without `/evolution/instances`, every deploy
 > unpairs every WhatsApp account and forces a fresh QR scan on each one. Without
@@ -780,6 +941,7 @@ Set these explicitly so nothing depends on Railway's default:
 |---|---|
 | pocketbase | `PORT=8090` |
 | evolution | `SERVER_PORT=8080` (Evolution reads this, not `PORT`) |
+| telegram-bridge | `TELEGRAM_BRIDGE_PORT=8095` (it follows `PORT` only when this is unset) |
 | web | nothing — it is the public service, let Railway assign it |
 
 Then the internal URLs below match, and each service's target port matches the
@@ -830,6 +992,24 @@ Evolution checks it in the `messaging-history.set` handler and silently drops th
 whole payload if it is false — with no way to ask for the history again short of
 disconnecting and re-scanning the QR. See "Importing existing history" above.
 
+**telegram-bridge** *(Telegram only)*
+
+```
+TELEGRAM_BRIDGE_PORT=8095
+TELEGRAM_API_ID=<from my.telegram.org>
+TELEGRAM_API_HASH=<from my.telegram.org>
+TELEGRAM_BRIDGE_ADMIN_KEY=<openssl rand -hex 24>
+TELEGRAM_SESSION_ENCRYPTION_KEY=<openssl rand -hex 32>
+TELEGRAM_BRIDGE_DATABASE_URL=${{Postgres.DATABASE_URL}}
+```
+
+The database URL is the same one Evolution uses; the bridge keeps to its own
+`telegram` schema — see "Where the data lives". The backfill variables in
+`.env.example` are optional. **Keep this service at one replica and leave
+`RAILWAY_DEPLOYMENT_OVERLAP_SECONDS` unset (it defaults to 0)** — see "One bridge
+process at a time". Losing `TELEGRAM_SESSION_ENCRYPTION_KEY` unlinks every
+account, so keep a copy somewhere other than Railway.
+
 **pocketbase** — the superuser it upserts at boot, and the SMTP settings it sends
 mail with. Both admin values must be identical to the web service's; use a Railway
 variable reference so they cannot drift:
@@ -872,8 +1052,16 @@ NUXT_EVOLUTION_URL=http://evolution.railway.internal:8080    # matches SERVER_PO
 NUXT_EVOLUTION_ADMIN_KEY=${{evolution.AUTHENTICATION_API_KEY}}
 NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:<password>@<postgres-private-host>:<port>/<database>
 NUXT_WEBHOOK_URL=https://<web-domain>/api/webhook/evolution
-NUXT_WEBHOOK_SECRET=<openssl rand -hex 32>
+NUXT_WEBHOOK_SECRET=<openssl rand -hex 32>   # used by Telegram's webhook too
+
+# Telegram only
+NUXT_TELEGRAM_URL=http://<telegram-bridge-service>.railway.internal:8095   # matches TELEGRAM_BRIDGE_PORT
+NUXT_TELEGRAM_ADMIN_KEY=${{telegram-bridge.TELEGRAM_BRIDGE_ADMIN_KEY}}
+NUXT_TELEGRAM_DATABASE_URL=${{Postgres.DATABASE_URL}}
 ```
+
+`NUXT_TELEGRAM_WEBHOOK_URL` is not needed here: the bridge posts to
+`NUXT_PUBLIC_APP_URL` + `/api/webhook/telegram`.
 
 `NUXT_PUBLIC_APP_URL` is what connector URLs are built from. Get it wrong and
 every token you hand out points at the wrong host.
@@ -926,7 +1114,7 @@ Then open the web service's domain and sign up.
 - **`host.docker.internal` does not exist here.** The webhook uses the public
   HTTPS URL instead, which is the only thing that differs between dev and prod —
   and it differs by configuration, not code.
-- Both containers bind `::`, which accepts IPv4 and IPv6. Railway environments
+- All three containers built from this repo bind `::`, which accepts IPv4 and IPv6. Railway environments
   created before 16 October 2025 route the private network over IPv6 only, where
   binding `0.0.0.0` is unreachable internally.
 - `docker-compose.dev.yml` is for local development only. Nothing in it is used

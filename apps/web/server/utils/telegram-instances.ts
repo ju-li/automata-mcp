@@ -56,9 +56,10 @@ export async function provisionTelegramInstance(actor: Actor, input: TelegramPro
     throw createError({ statusCode: 502, statusMessage: 'Could not reach the Telegram bridge to create the connection.' })
   }
 
+  let record: AppInstance
   try {
     const pb = await pocketbaseAdmin()
-    return await pb.collection('instances').create<AppInstance>({
+    record = await pb.collection('instances').create<AppInstance>({
       org: actor.org.id,
       created_by: actor.user.id,
       kind: 'telegram',
@@ -77,6 +78,63 @@ export async function provisionTelegramInstance(actor: Actor, input: TelegramPro
     await admin.deleteSession(session.id).catch(() => {})
     throw error
   }
+
+  // Outside the block above, as in provisionWhatsappInstance: a missing alert
+  // subscription is not worth tearing down a working connection, and the hourly
+  // sweep re-asserts it.
+  await registerTelegramWebhook(record).catch((error) => {
+    console.error(`[telegram] could not register the webhook for ${record.id} (${record.name}): ${httpStatusOf(error) ?? (error as Error | undefined)?.message}`)
+  })
+
+  return record
+}
+
+let webhookUrlWarned = false
+
+/**
+ * Where this deployment's bridge deliveries should land: `NUXT_TELEGRAM_WEBHOOK_URL`
+ * when set, else the public app URL. The override exists for development, where
+ * a bridge in a container cannot reach `localhost` on the host.
+ */
+function telegramWebhookUrl(): string | undefined {
+  const config = useRuntimeConfig()
+  if (config.telegramWebhookUrl) return config.telegramWebhookUrl
+  const appUrl = config.public.appUrl
+  return appUrl ? `${appUrl.replace(/\/+$/, '')}/api/webhook/telegram` : undefined
+}
+
+/**
+ * Subscribe this connection's bridge session to its state changes.
+ *
+ * The bridge's counterpart to `registerConnectionWebhook`, with the same
+ * contract: idempotent, called at provision time and again on every sweep, and
+ * made with the session's own key. The bridge seals the headers at rest and
+ * re-sends the current state only when the URL changes, so the hourly call is
+ * quiet.
+ *
+ * The secret goes to a bring-your-own bridge as well, exactly as it goes to a
+ * bring-your-own Evolution server. That is survivable for the same reason: the
+ * route treats every delivery as a hint and reads the live state before acting.
+ */
+export async function registerTelegramWebhook(instance: AppInstance): Promise<void> {
+  const url = telegramWebhookUrl()
+  if (!url) {
+    if (!webhookUrlWarned) {
+      webhookUrlWarned = true
+      console.warn(
+        '[telegram] neither NUXT_TELEGRAM_WEBHOOK_URL nor NUXT_PUBLIC_APP_URL is set, so Telegram '
+        + 'connections are not subscribed to bridge events. Disconnect alerts still work, '
+        + 'but only as fast as the hourly sweep.',
+      )
+    }
+    return
+  }
+
+  const creds = telegramCredentialsForInstance(instance)
+  if (!creds) return
+
+  const { webhookSecret } = useRuntimeConfig()
+  await createTelegramBridge(creds).webhook(url, webhookSecret ? { 'x-webhook-secret': webhookSecret } : {})
 }
 
 /**

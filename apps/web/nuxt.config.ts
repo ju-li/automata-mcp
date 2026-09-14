@@ -101,6 +101,10 @@ export default defineNuxtConfig({
     // list-, read- and search-telegram-messages. Unset, those fail for
     // connections on the default bridge (announced at startup).
     telegramDatabaseUrl: '',
+    // Where the bridge posts connection events for alerting. Unset, the public
+    // app URL + /api/webhook/telegram; set it where the bridge cannot reach that
+    // (in development, http://host.docker.internal:3000/api/webhook/telegram).
+    telegramWebhookUrl: '',
 
     // Let a user-supplied Postgres DSN or Evolution URL point at a private or
     // loopback address. Correct for a single-tenant, self-hosted deployment;
