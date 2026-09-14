@@ -170,6 +170,7 @@ export function createTelegramBridge(creds: TelegramCredentials) {
     logout: () => client<BridgeSessionState>(`${session}/logout`, { method: 'POST' }),
     resolve: (query: string) => client<BridgeResolved>(`${session}/resolve`, { method: 'POST', body: { query } }),
     send: (chatId: string, text: string) => client<BridgeSent>(`${session}/send`, { method: 'POST', body: { chatId, text } }),
+    webhook: (url: string, headers: Record<string, string>) => client(`${session}/webhook`, { method: 'PUT', body: { url, headers } }),
   }
 }
 
@@ -236,6 +237,8 @@ export type TelegramStatus = {
   /** Telegram ended the session (Telegram → Devices, or the account). Link again by QR. */
   revoked?: boolean
   pairing?: 'qr' | 'password'
+  /** Another bridge process holds this session, so this one cannot say how it is. */
+  heldElsewhere?: boolean
   telegramUserId?: string
   profileName?: string
   username?: string
@@ -271,6 +274,7 @@ export async function getTelegramStatus(instance: AppInstance): Promise<Telegram
     ...(bridge.sessionLost && { sessionLost: true }),
     ...(bridge.revoked && { revoked: true }),
     ...(bridge.pairing && { pairing: bridge.pairing }),
+    ...(bridge.heldElsewhere && { heldElsewhere: true }),
     ...(bridge.me && {
       telegramUserId: bridge.me.id,
       profileName: bridge.me.name,

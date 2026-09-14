@@ -372,15 +372,18 @@ export class SessionManager {
   }
 
   async setWebhook(id: string, url: string | null, headers: Record<string, string>): Promise<void> {
-    await this.row(id)
+    const previous = await this.row(id)
     const sealed = url && Object.keys(headers).length > 0
       ? seal(this.config.sealKey, JSON.stringify(headers), webhookContext(id))
       : null
     await this.sql`
       UPDATE sessions SET webhook_url = ${url}, webhook_headers_enc = ${sealed}, updated_at = now()
       WHERE id = ${id}`
+    // A new destination gets the current state even if it has not changed. The
+    // same destination does not: the app re-registers every hour, and a delivery
+    // per re-registration would run a second health check beside its own sweep.
+    if (previous.webhook_url === url) return
     const rt = this.runtime(id)
-    // Send the current state to the new destination, even if it has not changed.
     rt.lastPublished = undefined
     this.publish(rt)
   }
