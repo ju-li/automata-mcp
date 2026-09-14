@@ -1,6 +1,6 @@
 import { assertNever } from '#shared/connection'
 import type { McpAuth } from '../utils/mcp-auth'
-import { POSTGRES_INSTRUCTIONS, WHATSAPP_INSTRUCTIONS } from '../utils/mcp-instructions'
+import { POSTGRES_INSTRUCTIONS, TELEGRAM_INSTRUCTIONS, WHATSAPP_INSTRUCTIONS } from '../utils/mcp-instructions'
 
 /**
  * Give each connection kind its own MCP server instructions.
@@ -38,6 +38,9 @@ export default defineNitroPlugin((nitro) => {
         break
       case 'whatsapp':
         config.instructions = WHATSAPP_INSTRUCTIONS
+        break
+      case 'telegram':
+        config.instructions = TELEGRAM_INSTRUCTIONS
         break
       default:
         assertNever(auth, 'MCP auth kind')
