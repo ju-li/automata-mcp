@@ -58,7 +58,7 @@ const READER_COLUMNS = {
   chats: [
     'session_id', 'chat_id', 'type', 'title', 'username', 'is_forum', 'participant_count',
     'top_message_id', 'last_message_at', 'unread_count', 'migrated_to', 'backfill_complete',
-    'oldest_synced_at', 'gap_since', 'updated_at',
+    'backfill_stopped', 'oldest_synced_at', 'gap_since', 'archived', 'updated_at',
   ],
   users: ['session_id', 'user_id', 'first_name', 'last_name', 'username', 'is_bot', 'updated_at'],
 }

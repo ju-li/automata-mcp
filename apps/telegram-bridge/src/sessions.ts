@@ -5,6 +5,9 @@ import { digestsEqual, hashKey, mintKey, seal, sessionContext, unseal, webhookCo
 import type { Sql } from './db.ts'
 import { HttpError, describeError } from './http-error.ts'
 import { SessionLocks } from './locks.ts'
+import { chatRow, entityId, inputPeerFor, markedId, usersOf } from './sync/convert.ts'
+import { type ChatListing, SyncStore } from './sync/store.ts'
+import { SessionSync, type SyncStatus } from './sync/syncer.ts'
 import { deliverWebhook } from './webhook.ts'
 
 /**
@@ -21,9 +24,10 @@ import { deliverWebhook } from './webhook.ts'
  *   unlinked  no session_enc. `pair()` starts a QR flow.
  *   pairing   a QR flow is running (phase `qr`, then `password` if the account
  *             has two-step verification). Bounded by PAIRING_WINDOW_MS.
- *   linked    session_enc set; this process holds its lock and runs a client.
+ *   linked    session_enc set; this process holds its lock, runs a client and
+ *             syncs its chats (sync/syncer.ts).
  *   revoked   Telegram refused the session. session_enc is cleared; only a new
- *             pairing brings it back.
+ *             pairing brings it back. Synced chats are kept for that pairing.
  *
  * Stopping the process disconnects clients and never logs them out: a redeploy
  * must not unlink anybody.
@@ -50,10 +54,17 @@ export interface SessionState {
   me?: { id: string, username?: string, name?: string, phone?: string }
   lastError?: string
   stats: { chats: number, messages: number }
+  sync: SyncStatus & {
+    dialogsSyncedAt?: string
+    /** Chats whose older history is still to be fetched. */
+    pendingBackfill: number
+  }
 }
 
 export interface PairingQr {
-  /** A PNG data URL of `tg://login?token=…`. */
+  /** `tg://login?token=…` — what the QR code encodes. As sensitive as the image. */
+  url: string
+  /** A PNG data URL of `url`. */
   dataUrl: string
   expiresAt: string
 }
@@ -71,6 +82,7 @@ interface PairingFlow {
 interface Runtime {
   id: string
   client?: TelegramClient
+  sync?: SessionSync
   /** The last probe of the client answered. */
   healthy: boolean
   revoked: boolean
@@ -91,7 +103,19 @@ interface SessionRow {
   revoked_at: Date | null
   webhook_url: string | null
   webhook_headers_enc: string | null
+  update_pts: number | null
+  update_qts: number | null
+  update_date: number | null
+  update_seq: number | null
+  data_user_id: string | null
+  dialogs_synced_at: Date | null
 }
+
+const SESSION_COLUMNS = [
+  'id', 'session_enc', 'me_id', 'me_username', 'me_name', 'me_phone', 'revoked_at', 'webhook_url',
+  'webhook_headers_enc', 'update_pts', 'update_qts', 'update_date', 'update_seq', 'data_user_id',
+  'dialogs_synced_at',
+]
 
 /** How long a QR flow may wait for a scan (and a password) before it is abandoned. */
 const PAIRING_WINDOW_MS = 5 * 60_000
@@ -116,6 +140,9 @@ const REVOKED = new Set([
   'USER_DEACTIVATED',
   'USER_DEACTIVATED_BAN',
 ])
+
+/** Telegram's answers meaning "no such user or chat", as opposed to "you may not". */
+const NOT_FOUND = new Set(['USERNAME_NOT_OCCUPIED', 'USERNAME_INVALID', 'PHONE_NOT_OCCUPIED'])
 
 export class SessionManager {
   private readonly sql: Sql
@@ -174,13 +201,15 @@ export class SessionManager {
 
   async state(id: string): Promise<SessionState> {
     const row = await this.row(id)
-    const [counts] = await this.sql<{ chats: string, messages: string }[]>`
+    const [counts] = await this.sql<{ chats: string, messages: string, pending: string }[]>`
       SELECT (SELECT count(*) FROM chats WHERE session_id = ${id}) AS chats,
-             (SELECT count(*) FROM messages WHERE session_id = ${id} AND deleted_at IS NULL) AS messages`
-    return describe(this.runtime(id), row, {
+             (SELECT count(*) FROM messages WHERE session_id = ${id} AND deleted_at IS NULL) AS messages,
+             (SELECT count(*) FROM chats WHERE session_id = ${id} AND backfill_stopped IS NULL) AS pending`
+    const rt = this.runtime(id)
+    return describe(rt, row, {
       chats: Number(counts?.chats ?? 0),
       messages: Number(counts?.messages ?? 0),
-    })
+    }, Number(counts?.pending ?? 0))
   }
 
   /**
@@ -244,7 +273,9 @@ export class SessionManager {
   }
 
   /**
-   * Unlink: log out on Telegram's side where possible, then forget the session.
+   * Unlink: log out on Telegram's side where possible, then forget the session
+   * **and everything synced for it** — logging out is the owner saying this
+   * account should no longer be reachable from here.
    *
    * Forgetting happens even if Telegram could not be reached. The alternative is
    * a session nobody can remove; what is left over is an entry in the account's
@@ -276,6 +307,7 @@ export class SessionManager {
             rt.client = this.newClient(new sessions.StringSession(saved))
             await withTimeout(rt.client.connect(), PROBE_TIMEOUT_MS)
           }
+          rt.sync?.stop()
           await withTimeout(rt.client.logOut(), PROBE_TIMEOUT_MS)
         }
         catch (error) {
@@ -286,7 +318,8 @@ export class SessionManager {
       }
     }
 
-    await this.dispose(rt)
+    await this.dispose(rt, { saveState: false })
+    await new SyncStore(this.sql, id).wipe()
     await this.sql`
       UPDATE sessions
       SET session_enc = NULL, authorized_at = NULL, revoked_at = NULL,
@@ -318,7 +351,7 @@ export class SessionManager {
     rt.heldElsewhere = false
 
     await this.dispose(rt)
-    void this.resume(rt, row).finally(() => this.publish(rt))
+    void this.resume(rt, await this.row(id)).finally(() => this.publish(rt))
     return await this.state(id)
   }
 
@@ -352,6 +385,90 @@ export class SessionManager {
     this.publish(rt)
   }
 
+  /** Synced chats, most recently active first. Served from the database; works while disconnected. */
+  async chats(id: string, take: number, skip: number): Promise<{ chats: ChatListing[], hasMore: boolean }> {
+    await this.row(id)
+    return await new SyncStore(this.sql, id).listChats(take, skip)
+  }
+
+  /**
+   * Find a chat by @username, t.me link or phone number.
+   *
+   * Resolving is not joining: a user found here is remembered (so a message can
+   * be sent to them), but a chat row appears only once there are messages. A
+   * phone number resolves only where that person's privacy settings allow it.
+   */
+  async resolve(id: string, query: string): Promise<{
+    chatId: string
+    type: string
+    title: string | null
+    username: string | null
+    known: boolean
+  }> {
+    await this.row(id)
+    const client = this.connectedClient(this.runtime(id))
+    const target = parseResolveQuery(query)
+    if (!target) throw new HttpError(400, 'Expected an @username, a t.me link, or a phone number.')
+
+    let result: Api.contacts.ResolvedPeer
+    try {
+      result = await client.invoke('username' in target
+        ? new Api.contacts.ResolveUsername({ username: target.username })
+        : new Api.contacts.ResolvePhone({ phone: target.phone }))
+    }
+    catch (error) {
+      throw toHttpError(error)
+    }
+
+    const store = new SyncStore(this.sql, id)
+    const entities = [...result.users, ...result.chats]
+    await store.upsertUsers(usersOf(entities))
+
+    const chatId = markedId(result.peer)
+    const row = chatRow(entities.find(entity => entityId(entity) === chatId))
+    if (row) await store.refreshKnownChats([row])
+    const known = await store.chat(chatId)
+
+    return {
+      chatId,
+      type: row?.type ?? known?.type ?? 'private',
+      title: row?.title ?? known?.title ?? null,
+      username: row?.username ?? known?.username ?? null,
+      known: known !== undefined,
+    }
+  }
+
+  /**
+   * Send plain text. Formatting is **never** parsed: text written by a model goes
+   * out exactly as written, not reinterpreted as Markdown.
+   */
+  async send(id: string, chatId: string, text: string): Promise<{ chatId: string, messageId: number, date: string }> {
+    await this.row(id)
+    const rt = this.runtime(id)
+    const client = this.connectedClient(rt)
+    const store = new SyncStore(this.sql, id)
+
+    const chat = await store.chat(chatId)
+    if (chat?.migrated_to) {
+      throw new HttpError(409, `This group was upgraded to a supergroup. Send to ${chat.migrated_to} instead.`)
+    }
+    const accessHash = chat?.access_hash ?? (BigInt(chatId) > 0n ? await store.userAccessHash(chatId) : null)
+    const peer = chat || accessHash ? inputPeerFor(chatId, accessHash) : undefined
+    if (!peer) {
+      throw new HttpError(404, 'This chat is not known to the bridge. List chats, or resolve the user first.')
+    }
+
+    let message: Api.Message
+    try {
+      message = await client.sendMessage(peer, { message: text, parseMode: false })
+    }
+    catch (error) {
+      throw toHttpError(error)
+    }
+    await rt.sync?.saveMessages([message])
+    return { chatId, messageId: message.id, date: new Date(message.date * 1000).toISOString() }
+  }
+
   // ── lifecycle ──────────────────────────────────────────────────────────────
 
   private async runPairing(rt: Runtime, flow: PairingFlow): Promise<void> {
@@ -368,6 +485,7 @@ export class SessionManager {
           qrCode: async ({ token, expires }) => {
             const url = `tg://login?token=${token.toString('base64url')}`
             flow.qr = {
+              url,
               dataUrl: await QRCode.toDataURL(url, { errorCorrectionLevel: 'M', margin: 1, width: 320 }),
               expiresAt: new Date(expires * 1000).toISOString(),
             }
@@ -400,13 +518,18 @@ export class SessionManager {
         SET session_enc = ${seal(this.config.sealKey, session.save(), sessionContext(rt.id))},
             authorized_at = now(), revoked_at = NULL, updated_at = now()
         WHERE id = ${rt.id}`
-      await this.recordMe(rt.id, user)
+      const meId = await this.recordMe(rt.id, user)
+      await this.claimData(rt.id, meId)
 
+      const sync = new SessionSync(client, this.sql, rt.id, meId, this.config.backfill)
+      sync.attach()
       rt.client = client
+      rt.sync = sync
       rt.healthy = true
       rt.revoked = false
       rt.lastError = undefined
       console.info(`[sessions] ${rt.id}: linked`)
+      void sync.start()
     }
     catch (error) {
       await destroyClient(client)
@@ -422,7 +545,7 @@ export class SessionManager {
     }
   }
 
-  /** Connect a linked session from its stored string. */
+  /** Connect a linked session from its stored string, and resume syncing it. */
   private async resume(rt: Runtime, row: SessionRow): Promise<void> {
     if (rt.client || rt.pairing || !row.session_enc || this.stopping) return
     if (!(await this.locks.acquire(rt.id))) {
@@ -442,13 +565,29 @@ export class SessionManager {
     }
 
     const client = this.newClient(new sessions.StringSession(saved))
+    // Seeded before connect: teleproto fetches a fresh state on connect only when
+    // it has none, and a fresh state would skip everything missed while down.
+    if (row.update_pts !== null && row.update_qts !== null && row.update_date !== null && row.update_seq !== null) {
+      client.updateManager.refreshFromState({
+        pts: row.update_pts,
+        qts: row.update_qts,
+        date: row.update_date,
+        seq: row.update_seq,
+      })
+    }
+    // Attached before connect, so the catch-up difference has somewhere to go.
+    const sync = new SessionSync(client, this.sql, rt.id, row.me_id, this.config.backfill)
+    sync.attach()
     rt.client = client
+    rt.sync = sync
+
     try {
       await withTimeout(client.connect(), PROBE_TIMEOUT_MS)
       const me = await withTimeout(client.getMe(), PROBE_TIMEOUT_MS)
       rt.healthy = true
       rt.lastError = undefined
       await this.recordMe(rt.id, me)
+      void sync.start()
     }
     catch (error) {
       if (isRevocation(error)) {
@@ -459,7 +598,7 @@ export class SessionManager {
       // again, and this process is still the one entitled to.
       rt.lastError = describeError(error)
       console.error(`[sessions] ${rt.id}: could not connect: ${rt.lastError}`)
-      await this.dispose(rt)
+      await this.dispose(rt, { saveState: false })
     }
   }
 
@@ -470,6 +609,7 @@ export class SessionManager {
       await withTimeout(client.invoke(new Api.updates.GetState()), PROBE_TIMEOUT_MS)
       rt.healthy = true
       rt.lastError = undefined
+      await this.saveUpdateState(rt)
     }
     catch (error) {
       if (isRevocation(error)) return await this.markRevoked(rt, error)
@@ -481,7 +621,7 @@ export class SessionManager {
   private async markRevoked(rt: Runtime, error: unknown): Promise<void> {
     const reason = describeError(error)
     console.error(`[sessions] ${rt.id}: Telegram no longer accepts this session (${reason}); it must be paired again`)
-    await this.dispose(rt)
+    await this.dispose(rt, { saveState: false })
     await this.sql`UPDATE sessions SET session_enc = NULL, revoked_at = now(), updated_at = now() WHERE id = ${rt.id}`
     rt.revoked = true
     rt.lastError = reason
@@ -498,16 +638,14 @@ export class SessionManager {
     if (this.ticking || this.stopping) return
     this.ticking = true
     try {
-      const rows = await this.sql<SessionRow[]>`
-        SELECT id, session_enc, me_id, me_username, me_name, me_phone, revoked_at, webhook_url, webhook_headers_enc
-        FROM sessions`
+      const rows = await this.sql<SessionRow[]>`SELECT ${this.sql(SESSION_COLUMNS)} FROM sessions`
       const byId = new Map(rows.map(row => [row.id, row]))
 
       for (const rt of [...this.runtimes.values()]) {
         const row = byId.get(rt.id)
         if (row?.session_enc || rt.pairing) continue
         // Deleted, or logged out by another process.
-        if (rt.client) await this.dispose(rt)
+        if (rt.client) await this.dispose(rt, { saveState: false })
         await this.locks.release(rt.id)
         if (!row) this.runtimes.delete(rt.id)
       }
@@ -551,12 +689,17 @@ export class SessionManager {
 
   private async row(id: string): Promise<SessionRow> {
     const row = UUID.test(id)
-      ? (await this.sql<SessionRow[]>`
-          SELECT id, session_enc, me_id, me_username, me_name, me_phone, revoked_at, webhook_url, webhook_headers_enc
-          FROM sessions WHERE id = ${id}`)[0]
+      ? (await this.sql<SessionRow[]>`SELECT ${this.sql(SESSION_COLUMNS)} FROM sessions WHERE id = ${id}`)[0]
       : undefined
     if (!row) throw new HttpError(404, 'No such session.')
     return row
+  }
+
+  private connectedClient(rt: Runtime): TelegramClient {
+    if (!rt.client?.connected || !rt.healthy) {
+      throw new HttpError(409, 'This session is not connected to Telegram right now.')
+    }
+    return rt.client
   }
 
   private openSession(id: string, sealed: string): string {
@@ -582,20 +725,54 @@ export class SessionManager {
     })
   }
 
-  private async dispose(rt: Runtime): Promise<void> {
+  /**
+   * Stop syncing and drop the client. The update state is saved first by default,
+   * so the next connect catches up from here rather than from the last heartbeat.
+   */
+  private async dispose(rt: Runtime, options: { saveState?: boolean } = {}): Promise<void> {
     const client = rt.client
+    const sync = rt.sync
+    if (options.saveState !== false) await this.saveUpdateState(rt)
     rt.client = undefined
+    rt.sync = undefined
     rt.healthy = false
+    sync?.stop()
     if (client) await destroyClient(client)
   }
 
-  private async recordMe(id: string, user: unknown): Promise<void> {
-    if (!(user instanceof Api.User)) return
+  private async saveUpdateState(rt: Runtime): Promise<void> {
+    const state = rt.sync?.updateState()
+    if (!state) return
+    await new SyncStore(this.sql, rt.id).saveUpdateState(state)
+      .catch(error => console.error(`[sessions] ${rt.id}: could not save update state: ${describeError(error)}`))
+  }
+
+  private async recordMe(id: string, user: unknown): Promise<string | null> {
+    if (!(user instanceof Api.User)) return null
     const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || null
+    const meId = user.id.toString()
     await this.sql`
       UPDATE sessions
-      SET me_id = ${user.id.toString()}, me_username = ${user.username ?? null},
+      SET me_id = ${meId}, me_username = ${user.username ?? null},
           me_name = ${name}, me_phone = ${user.phone ?? null}, updated_at = now()
+      WHERE id = ${id}`
+    return meId
+  }
+
+  /**
+   * Chats synced for one Telegram account are that account's. Linking a
+   * different one discards them instead of mixing two people's chats under one
+   * connection. The same account scanning again (after a revocation) keeps them.
+   */
+  private async claimData(id: string, meId: string | null): Promise<void> {
+    const [row] = await this.sql<{ data_user_id: string | null }[]>`SELECT data_user_id FROM sessions WHERE id = ${id}`
+    if (row?.data_user_id && row.data_user_id !== meId) {
+      console.info(`[sessions] ${id}: a different Telegram account was linked; discarding the chats synced for the previous one`)
+      await new SyncStore(this.sql, id).wipe()
+    }
+    await this.sql`
+      UPDATE sessions SET data_user_id = ${meId},
+        update_pts = NULL, update_qts = NULL, update_date = NULL, update_seq = NULL
       WHERE id = ${id}`
   }
 
@@ -603,12 +780,10 @@ export class SessionManager {
   private publish(rt: Runtime): void {
     void (async () => {
       try {
-        const [row] = await this.sql<SessionRow[]>`
-          SELECT id, session_enc, me_id, me_username, me_name, me_phone, revoked_at, webhook_url, webhook_headers_enc
-          FROM sessions WHERE id = ${rt.id}`
+        const [row] = await this.sql<SessionRow[]>`SELECT ${this.sql(SESSION_COLUMNS)} FROM sessions WHERE id = ${rt.id}`
         if (!row?.webhook_url) return
 
-        const state = describe(rt, row, { chats: 0, messages: 0 })
+        const state = describe(rt, row, { chats: 0, messages: 0 }, 0)
         const signature = [state.state, state.sessionLost, state.revoked, state.pairing ?? ''].join('|')
         if (signature === rt.lastPublished) return
         rt.lastPublished = signature
@@ -631,13 +806,18 @@ export class SessionManager {
   }
 }
 
-function describe(rt: Runtime, row: SessionRow, stats: SessionState['stats']): SessionState {
+function describe(rt: Runtime, row: SessionRow, stats: SessionState['stats'], pendingBackfill: number): SessionState {
   const base = {
     sessionLost: false,
     revoked: rt.revoked || row.revoked_at !== null,
     heldElsewhere: rt.heldElsewhere,
     lastError: rt.lastError,
     stats,
+    sync: {
+      ...(rt.sync?.status() ?? { backfilling: false }),
+      dialogsSyncedAt: row.dialogs_synced_at?.toISOString(),
+      pendingBackfill,
+    },
     me: row.me_id
       ? {
           id: row.me_id,
@@ -661,6 +841,33 @@ function describe(rt: Runtime, row: SessionRow, stats: SessionState['stats']): S
   if (rt.heldElsewhere) return { ...base, state: 'unknown' }
   if (rt.client?.connected && rt.healthy) return { ...base, state: 'open' }
   return { ...base, state: 'connecting', sessionLost: true }
+}
+
+/** `@name`, `name`, `t.me/name` (with or without https://), or a phone number. */
+function parseResolveQuery(query: string): { username: string } | { phone: string } | undefined {
+  const value = query.trim()
+  const link = /^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([A-Za-z][A-Za-z0-9_]{3,31})\/?$/i.exec(value)
+  if (link?.[1]) return { username: link[1] }
+  const username = /^@?([A-Za-z][A-Za-z0-9_]{3,31})$/.exec(value)
+  if (username?.[1]) return { username: username[1] }
+  const phone = /^\+?(\d[\d\s-]{5,20}\d)$/.exec(value)
+  if (phone?.[1]) return { phone: phone[1].replace(/\D/g, '') }
+  return undefined
+}
+
+/**
+ * A Telegram RPC failure as an HTTP answer the caller can act on: 429 for a flood
+ * wait, 404 for "no such user", 422 for any other refusal, carrying Telegram's
+ * code. Anything that is not an RPC error is rethrown and becomes a 500.
+ */
+function toHttpError(error: unknown): HttpError {
+  const code = describeError(error)
+  if (/^FLOOD_(PREMIUM_)?WAIT/.test(code)) {
+    return new HttpError(429, `Telegram asked to slow down (${code}). Try again later.`)
+  }
+  if (NOT_FOUND.has(code)) return new HttpError(404, `Telegram found nothing for that (${code}).`)
+  if (/^[A-Z][A-Z0-9_]+$/.test(code)) return new HttpError(422, `Telegram refused the request: ${code}.`)
+  throw error
 }
 
 function isRevocation(error: unknown): boolean {
