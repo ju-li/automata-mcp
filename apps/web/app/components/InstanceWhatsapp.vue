@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useIntervalFn } from '@vueuse/core'
-import { ArrowLeftIcon, MessagesSquareIcon, SmartphoneIcon } from '@lucide/vue'
+import { ArrowLeftIcon, BookUserIcon, MessageSquareTextIcon, MessagesSquareIcon, SmartphoneIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
 /**
@@ -122,6 +122,8 @@ async function saveDbUrl() {
   )
 }
 const chatsOpen = ref(false)
+const messagesOpen = ref(false)
+const contactsOpen = ref(false)
 
 // ── pairing ────────────────────────────────────────────────────────────────
 // Polling the QR endpoint is what drives pairing: Evolution starts the
@@ -415,7 +417,19 @@ const importHistory = () => backToPairing(
           </CardContent>
         </Card>
 
-        <StatCard label="Messages" :value="data?.stats.messages ?? 0" />
+        <!--
+          Messages is clickable only where the table behind it can answer.
+          Reading goes to the Evolution server's own Postgres, and a connection
+          that has not been given one would open onto a guaranteed refusal — the
+          same fact the amber card below explains at length.
+        -->
+        <StatCard
+          label="Messages"
+          :value="data?.stats.messages ?? 0"
+          :icon="MessageSquareTextIcon"
+          :clickable="data?.instance.canReadMessages !== false"
+          @click="messagesOpen = true"
+        />
         <StatCard
           label="Chats"
           :value="data?.stats.chats ?? 0"
@@ -423,7 +437,13 @@ const importHistory = () => backToPairing(
           clickable
           @click="chatsOpen = true"
         />
-        <StatCard label="Contacts" :value="data?.stats.contacts ?? 0" />
+        <StatCard
+          label="Contacts"
+          :value="data?.stats.contacts ?? 0"
+          :icon="BookUserIcon"
+          clickable
+          @click="contactsOpen = true"
+        />
       </div>
 
       <ChatsDialog
@@ -431,6 +451,18 @@ const importHistory = () => backToPairing(
         :instance-id="id"
         kind="whatsapp"
         :total="data?.stats.chats ?? 0"
+      />
+
+      <MessagesDialog
+        v-model:open="messagesOpen"
+        :instance-id="id"
+        kind="whatsapp"
+        :total="data?.stats.messages ?? 0"
+      />
+
+      <ContactsDialog
+        v-model:open="contactsOpen"
+        :instance-id="id"
       />
 
       <!-- The last sentence points at a section a member does not have, and
