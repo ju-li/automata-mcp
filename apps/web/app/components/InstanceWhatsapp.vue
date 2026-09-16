@@ -393,26 +393,28 @@ const importHistory = () => backToPairing(
         </Button>
       </div>
 
-      <Card>
-        <CardContent class="flex items-center gap-4 pt-6">
-          <img
-            v-if="data?.profilePicUrl"
-            :src="data.profilePicUrl"
-            alt=""
-            class="size-12 rounded-full object-cover"
-          >
-          <div class="min-w-0">
-            <p class="truncate font-medium">
-              {{ data?.profileName || 'WhatsApp' }}
-            </p>
-            <p class="truncate text-sm text-muted-foreground tabular-nums">
-              {{ data?.number || '—' }}
-            </p>
-          </div>
-        </CardContent>
-      </Card>
+      <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <!-- The profile sits in the same row as the counts, so it stretches to
+             their height and centres its contents rather than riding the top. -->
+        <Card>
+          <CardContent class="flex flex-1 items-center gap-4 pt-6">
+            <img
+              v-if="data?.profilePicUrl"
+              :src="data.profilePicUrl"
+              alt=""
+              class="size-12 shrink-0 rounded-full object-cover"
+            >
+            <div class="min-w-0">
+              <p class="truncate font-medium">
+                {{ data?.profileName || 'WhatsApp' }}
+              </p>
+              <p class="truncate text-sm text-muted-foreground tabular-nums">
+                {{ data?.number || '—' }}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
 
-      <div class="grid gap-4 sm:grid-cols-3">
         <StatCard label="Messages" :value="data?.stats.messages ?? 0" />
         <StatCard
           label="Chats"
