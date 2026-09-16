@@ -280,7 +280,8 @@ async function create() {
                   Use my own Telegram bridge
                 </Label>
                 <p class="text-xs text-muted-foreground">
-                  Leave this off to use the bridge this app is configured with.
+                  Bring your own bridge for more privacy. Leave it off to use the
+                  one this app is configured with.
                 </p>
               </div>
             </div>
@@ -341,7 +342,8 @@ async function create() {
                   Use my own Evolution API server
                 </Label>
                 <p class="text-xs text-muted-foreground">
-                  Leave this off to use the server this app is configured with.
+                  Bring your own server for more privacy. Leave it off to use the
+                  one this app is configured with.
                 </p>
               </div>
             </div>
