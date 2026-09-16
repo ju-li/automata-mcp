@@ -310,11 +310,14 @@ const importHistory = () => backToPairing(
         All connections
       </NuxtLink>
 
-      <div class="mt-2 flex items-start justify-between gap-4">
+      <div class="group/title mt-2 flex items-start justify-between gap-4">
         <div class="min-w-0">
-          <h1 class="truncate font-heading text-2xl font-semibold">
-            {{ data?.instance.label }}
-          </h1>
+          <InstanceTitle
+            :id="id"
+            :label="data?.instance.label"
+            :can-manage="canManage"
+            @renamed="refresh()"
+          />
           <!--
             `describeState`'s hints are written for someone who can act on them
             — "reconnect", "scan a QR code" — and a member can do neither. The
