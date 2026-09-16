@@ -309,50 +309,7 @@ export async function searchMessages(
                ) AS "editOf",
                ${bestNamed(sql)} AS named, m.id AS "rowId"
         FROM "Message" m
-        CROSS JOIN LATERAL (
-          SELECT COALESCE(
-            m.message->>'conversation',
-            m.message->'extendedTextMessage'->>'text',
-            m.message->'imageMessage'->>'caption',
-            m.message->'videoMessage'->>'caption',
-            m.message->'documentMessage'->>'caption',
-            m.message->'documentWithCaptionMessage'->'message'->'documentMessage'->>'caption',
-            m.message->>'speechToText',
-            m.message->'reactionMessage'->>'text',
-            -- Album media and captioned video from an official WhatsApp client
-            -- arrive wrapped: associatedChildMessage is a FutureProofMessage,
-            -- a transparent { message: Message }, which the rc.9 Baileys that
-            -- 2.3.7 pins does not unwrap. Explicit paths only — a $.** recursive
-            -- jsonb path would also match contextInfo.quotedMessage.conversation
-            -- and make a reply findable by the text it quoted, which is
-            -- misattribution by construction.
-            m.message->'associatedChildMessage'->'message'->>'conversation',
-            m.message->'associatedChildMessage'->'message'->'extendedTextMessage'->>'text',
-            m.message->'associatedChildMessage'->'message'->'imageMessage'->>'caption',
-            m.message->'associatedChildMessage'->'message'->'videoMessage'->>'caption',
-            m.message->'associatedChildMessage'->'message'->'documentMessage'->>'caption',
-            -- A plaintext edit (protocolMessage.type = 14). In history-synced
-            -- data this row is the ONLY copy of the edited text — nothing patches
-            -- the original — so without these arms the new wording is unfindable.
-            m.message->'protocolMessage'->'editedMessage'->>'conversation',
-            m.message->'protocolMessage'->'editedMessage'->'extendedTextMessage'->>'text',
-            m.message->'protocolMessage'->'editedMessage'->'imageMessage'->>'caption',
-            m.message->'protocolMessage'->'editedMessage'->'videoMessage'->>'caption',
-            m.message->'protocolMessage'->'editedMessage'->'documentMessage'->>'caption',
-            -- Both at once: a caption edit on an album item.
-            m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->>'conversation',
-            m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'extendedTextMessage'->>'text',
-            m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'imageMessage'->>'caption',
-            m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'videoMessage'->>'caption',
-            m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'documentMessage'->>'caption'
-            -- speechToText and reactionMessage are not repeated in the nested
-            -- groups: Evolution writes the first at top level only, and a reaction
-            -- is never an album child or an edit target. COALESCE short-circuits,
-            -- so an ordinary text row still stops at the first arm — the extra
-            -- lookups are paid only by rows that produce no body at all, which
-            -- this scan already touches and discards.
-          ) AS body
-        ) t
+        ${messageBodyJoin(sql)}
         WHERE m."instanceId" = ${instanceId}
           AND t.body IS NOT NULL
           AND t.body ILIKE ALL (${patterns}::text[])
@@ -410,14 +367,30 @@ export async function searchMessages(
 }
 
 export interface MessagePageOptions {
-  /** The one chat to read. A predicate in the SQL, never a filter over rows read. */
-  jid: string
+  /**
+   * The one chat to read. A predicate in the SQL, never a filter over rows read.
+   *
+   * Absent means the whole account, which exists for the **session** surface —
+   * the dashboard's message table — and is unreachable from MCP: every tool goes
+   * through `listMessages()` in `chats.ts`, which takes `remoteJid` as a required
+   * positional argument, so no tool can widen to every chat by omitting a field.
+   * `instanceId` below is unconditional either way.
+   */
+  jid?: string
   limit: number
   /** 1-based, counting back from the newest. */
   page: number
   since?: string
   until?: string
   includeReactions?: boolean
+  /**
+   * Every term must appear in the message body. Already split, not yet escaped —
+   * matched against the same `messageBodyJoin` expression `searchMessages` uses,
+   * so a listing and a search agree on what the text of a message is.
+   */
+  terms?: string[]
+  /** Which end of the range the first page comes from. Defaults to newest first. */
+  order?: 'newest' | 'oldest'
 }
 
 /**
@@ -474,6 +447,18 @@ export async function listMessagesPage(
   const take = options.limit + 1
   const skip = (options.page - 1) * options.limit
 
+  // Joined only when there is something to match, so an ordinary read pays
+  // nothing for it. The body expression is shared with `searchMessages`.
+  const terms = options.terms?.length ? options.terms : undefined
+  const patterns = terms?.map(term => `%${escapeLike(term)}%`)
+
+  // The tiebreaker travels with the direction. Evolution's own ordering has
+  // none, and rows sharing a timestamp then land on two pages or on neither —
+  // reversing one half of the pair would reintroduce exactly that.
+  const ordering = options.order === 'oldest'
+    ? sql`"messageTimestamp" ASC, key->>'id' ASC`
+    : sql`"messageTimestamp" DESC, key->>'id' DESC`
+
   let rows: MessagePageRow[]
   try {
     rows = await sql<MessagePageRow[]>`
@@ -483,8 +468,10 @@ export async function listMessagesPage(
                m."contextInfo"->'mentionedJid' AS mentioned,
                ${bestNamed(sql)} AS named, m.id AS "rowId"
         FROM "Message" m
+        ${patterns ? messageBodyJoin(sql) : sql``}
         WHERE m."instanceId" = ${instanceId}
-          AND m.key->>'remoteJid' = ${options.jid}
+          ${options.jid === undefined ? sql`` : sql`AND m.key->>'remoteJid' = ${options.jid}`}
+          ${patterns === undefined ? sql`` : sql`AND t.body ILIKE ALL (${patterns}::text[])`}
           ${since === undefined ? sql`` : sql`AND m."messageTimestamp" >= ${since}`}
           ${until === undefined ? sql`` : sql`AND m."messageTimestamp" <= ${until}`}
           ${options.includeReactions ? sql`` : sql`AND m.message->'reactionMessage' IS NULL`}
@@ -493,7 +480,7 @@ export async function listMessagesPage(
       SELECT key, "pushName", "messageType", "messageTimestamp", message, mentioned,
              COUNT(*) OVER () AS total
       FROM deduped
-      ORDER BY "messageTimestamp" DESC, key->>'id' DESC
+      ORDER BY ${ordering}
       LIMIT ${take} OFFSET ${skip}
     `
   }
@@ -519,6 +506,64 @@ export async function listMessagesPage(
     hasMore: rows.length > options.limit,
     total: Number.isFinite(total) ? total : undefined,
   }
+}
+
+/**
+ * The readable text of a message, as a `CROSS JOIN LATERAL ... AS t` yielding
+ * `t.body` — null for a row that carries nothing renderable.
+ *
+ * One authority for what counts as a body, shared by `searchMessages` (which
+ * matches on it) and `listMessagesPage` (which joins it only when there are
+ * terms to match). Two copies of this COALESCE would drift, and a search that
+ * reads one definition while a listing reads another is a set of results that
+ * cannot be paged.
+ */
+function messageBodyJoin(sql: Sql) {
+  return sql`
+    CROSS JOIN LATERAL (
+      SELECT COALESCE(
+        m.message->>'conversation',
+        m.message->'extendedTextMessage'->>'text',
+        m.message->'imageMessage'->>'caption',
+        m.message->'videoMessage'->>'caption',
+        m.message->'documentMessage'->>'caption',
+        m.message->'documentWithCaptionMessage'->'message'->'documentMessage'->>'caption',
+        m.message->>'speechToText',
+        m.message->'reactionMessage'->>'text',
+        -- Album media and captioned video from an official WhatsApp client
+        -- arrive wrapped: associatedChildMessage is a FutureProofMessage,
+        -- a transparent { message: Message }, which the rc.9 Baileys that
+        -- 2.3.7 pins does not unwrap. Explicit paths only — a $.** recursive
+        -- jsonb path would also match contextInfo.quotedMessage.conversation
+        -- and make a reply findable by the text it quoted, which is
+        -- misattribution by construction.
+        m.message->'associatedChildMessage'->'message'->>'conversation',
+        m.message->'associatedChildMessage'->'message'->'extendedTextMessage'->>'text',
+        m.message->'associatedChildMessage'->'message'->'imageMessage'->>'caption',
+        m.message->'associatedChildMessage'->'message'->'videoMessage'->>'caption',
+        m.message->'associatedChildMessage'->'message'->'documentMessage'->>'caption',
+        -- A plaintext edit (protocolMessage.type = 14). In history-synced
+        -- data this row is the ONLY copy of the edited text — nothing patches
+        -- the original — so without these arms the new wording is unfindable.
+        m.message->'protocolMessage'->'editedMessage'->>'conversation',
+        m.message->'protocolMessage'->'editedMessage'->'extendedTextMessage'->>'text',
+        m.message->'protocolMessage'->'editedMessage'->'imageMessage'->>'caption',
+        m.message->'protocolMessage'->'editedMessage'->'videoMessage'->>'caption',
+        m.message->'protocolMessage'->'editedMessage'->'documentMessage'->>'caption',
+        -- Both at once: a caption edit on an album item.
+        m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->>'conversation',
+        m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'extendedTextMessage'->>'text',
+        m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'imageMessage'->>'caption',
+        m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'videoMessage'->>'caption',
+        m.message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'documentMessage'->>'caption'
+        -- speechToText and reactionMessage are not repeated in the nested
+        -- groups: Evolution writes the first at top level only, and a reaction
+        -- is never an album child or an edit target. COALESCE short-circuits,
+        -- so an ordinary text row still stops at the first arm — the extra
+        -- lookups are paid only by rows that produce no body at all, which
+        -- this scan already touches and discards.
+      ) AS body
+    ) t`
 }
 
 /**
