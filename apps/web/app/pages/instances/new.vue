@@ -1,5 +1,15 @@
 <script setup lang="ts">
-import { DatabaseIcon, MessageCircleIcon, SendIcon } from '@lucide/vue'
+import type { Component } from 'vue'
+import {
+  AppleIcon,
+  CloudIcon,
+  DatabaseIcon,
+  HardDriveIcon,
+  LeafIcon,
+  MessageCircleIcon,
+  SendIcon,
+  SmartphoneIcon,
+} from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
 /**
@@ -13,6 +23,91 @@ import { toast } from 'vue-sonner'
 const kind = ref<InstanceKind | undefined>()
 const label = ref('')
 const busy = ref(false)
+
+interface KindCard {
+  title: string
+  description: string
+  icon: Component
+}
+
+/**
+ * The picker's copy for the kinds that exist, keyed on `InstanceKind` rather
+ * than listed in an array on purpose: adding a member to that union then fails
+ * to compile here, the same reason every per-kind branch is a `switch` ending in
+ * `assertNever`. A card silently missing from the picker is a kind nobody can
+ * create.
+ */
+const kindCards: Record<InstanceKind, KindCard> = {
+  whatsapp: {
+    title: 'WhatsApp account',
+    description: 'Pair a phone by scanning a QR code. Claude can read and send messages.',
+    icon: MessageCircleIcon,
+  },
+  telegram: {
+    title: 'Telegram account',
+    description: 'Link your account by scanning a QR code. Claude can read and send messages.',
+    icon: SendIcon,
+  },
+  postgres: {
+    title: 'PostgreSQL database',
+    description: 'Point Claude at a database with a connection string. Read-only by default.',
+    icon: DatabaseIcon,
+  },
+}
+
+/**
+ * Presentation order, which the record above does not carry, plus the kinds that
+ * do not exist yet. Those are listed so the answer to "can it do MySQL?" is on
+ * the page rather than inferred from an absence — no dates are promised.
+ */
+const groups: {
+  heading: string
+  kinds: InstanceKind[]
+  soon: KindCard[]
+}[] = [
+  {
+    heading: 'Messaging apps',
+    kinds: ['whatsapp', 'telegram'],
+    soon: [
+      {
+        title: 'iMessage',
+        description: 'Read and send from the Messages account on a Mac.',
+        icon: AppleIcon,
+      },
+      {
+        title: 'SMS',
+        description: 'Read and send text messages through an SMS provider.',
+        icon: SmartphoneIcon,
+      },
+    ],
+  },
+  {
+    heading: 'Databases',
+    kinds: ['postgres'],
+    soon: [
+      {
+        title: 'MySQL',
+        description: 'Point Claude at a MySQL or MariaDB database with a connection string.',
+        icon: DatabaseIcon,
+      },
+      {
+        title: 'SQLite',
+        description: 'Point Claude at a SQLite database file.',
+        icon: HardDriveIcon,
+      },
+      {
+        title: 'MongoDB',
+        description: 'Point Claude at a MongoDB deployment with a connection string.',
+        icon: LeafIcon,
+      },
+      {
+        title: 'DynamoDB',
+        description: 'Point Claude at DynamoDB tables in an AWS account.',
+        icon: CloudIcon,
+      },
+    ],
+  },
+]
 
 // WhatsApp and Telegram: bring-your-own server (an Evolution server, or a Telegram
 // bridge). All or nothing — half of it is not completed from our configuration,
@@ -85,48 +180,53 @@ async function create() {
     </div>
 
     <!-- ── kind ─────────────────────────────────────────────────────────── -->
-    <div v-if="!kind" class="grid gap-3">
-      <button
-        type="button"
-        class="flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-accent"
-        @click="kind = 'whatsapp'"
-      >
-        <MessageCircleIcon class="mt-0.5 size-5 shrink-0 text-muted-foreground" />
-        <span>
-          <span class="block font-medium">WhatsApp account</span>
-          <span class="block text-sm text-muted-foreground">
-            Pair a phone by scanning a QR code. Claude can read and send messages.
-          </span>
-        </span>
-      </button>
+    <div v-if="!kind" class="space-y-6">
+      <section v-for="group in groups" :key="group.heading" class="space-y-3">
+        <h2 class="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          {{ group.heading }}
+        </h2>
 
-      <button
-        type="button"
-        class="flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-accent"
-        @click="kind = 'telegram'"
-      >
-        <SendIcon class="mt-0.5 size-5 shrink-0 text-muted-foreground" />
-        <span>
-          <span class="block font-medium">Telegram account</span>
-          <span class="block text-sm text-muted-foreground">
-            Link your account by scanning a QR code. Claude can read and send messages.
-          </span>
-        </span>
-      </button>
+        <div class="grid gap-3">
+          <button
+            v-for="available in group.kinds"
+            :key="available"
+            type="button"
+            class="flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-accent"
+            @click="kind = available"
+          >
+            <component :is="kindCards[available].icon" class="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+            <span>
+              <span class="block font-medium">{{ kindCards[available].title }}</span>
+              <span class="block text-sm text-muted-foreground">
+                {{ kindCards[available].description }}
+              </span>
+            </span>
+          </button>
 
-      <button
-        type="button"
-        class="flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-accent"
-        @click="kind = 'postgres'"
-      >
-        <DatabaseIcon class="mt-0.5 size-5 shrink-0 text-muted-foreground" />
-        <span>
-          <span class="block font-medium">PostgreSQL database</span>
-          <span class="block text-sm text-muted-foreground">
-            Point Claude at a database with a connection string. Read-only by default.
-          </span>
-        </span>
-      </button>
+          <!--
+            Nothing to press, so not a control at all: a disabled button still
+            reads as one that should work.
+          -->
+          <div
+            v-for="card in group.soon"
+            :key="card.title"
+            class="flex items-start gap-3 rounded-lg border border-dashed p-4 opacity-60"
+          >
+            <component :is="card.icon" class="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="font-medium">{{ card.title }}</span>
+                <Badge variant="secondary">
+                  Coming soon
+                </Badge>
+              </div>
+              <span class="block text-sm text-muted-foreground">
+                {{ card.description }}
+              </span>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
 
     <!-- ── the form for the chosen kind ─────────────────────────────────── -->
