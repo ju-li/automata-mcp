@@ -92,11 +92,14 @@ async function saveDsn() {
         All connections
       </NuxtLink>
 
-      <div class="mt-2 flex items-start justify-between gap-4">
+      <div class="group/title mt-2 flex items-start justify-between gap-4">
         <div class="min-w-0">
-          <h1 class="truncate font-heading text-2xl font-semibold">
-            {{ data?.instance.label }}
-          </h1>
+          <InstanceTitle
+            :id="id"
+            :label="data?.instance.label"
+            :can-manage="canManage"
+            @renamed="refresh()"
+          />
           <p class="truncate font-mono text-sm text-muted-foreground">
             {{ data?.instance.target || 'No connection string stored' }}
           </p>
