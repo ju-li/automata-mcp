@@ -25,7 +25,7 @@ PocketBase is the app's database (users, sessions, connections and their credent
 - `whatsapp`: `get-connection-status`, `list-chats`, `read-messages`, `search-messages`, `send-text-message`
 - `postgres`: `get-database-info`, `list-tables`, `describe-table`, `run-query`, `run-statement` (write)
 
-A WhatsApp connection that drops emails everyone who can reach it and emails them again on recovery — see "Disconnect alerts".
+A WhatsApp or Telegram connection that drops emails everyone who can reach it and emails them again on recovery — see "Disconnect alerts".
 
 An organization may hold **several** connections of either kind. Each is a row in `instances`, owned by the organization rather than by a person, and each MCP token is bound to exactly one of them and issued to exactly one member. See "Organizations and roles".
 
@@ -343,6 +343,10 @@ Three rules in `evaluateConnectionHealth` that are easy to undo:
 - **A live `close` alerts immediately; everything else serves the grace period.** Evolution reports `close` live only once it has given up, so waiting on it adds nothing. `connecting` and `unknown` are the states that routinely resolve themselves.
 - **`alerted_at` is written only after a mail actually went out.** A broken SMTP configuration then delays an alert instead of losing it. Same for the recovery mail clearing the fields.
 
+**Telegram goes through the same function.** `readConnectionHealth()` dispatches on kind and returns one shape, so the grace period, `alerted_at` bookkeeping and recipients are shared; only "paired" and the mail wording differ. For Telegram, paired is the bridge's stored identity (`me`), which survives a dropped connection and a revocation and is cleared only by logout — so an unlink is `knownUnlinked` and closes an open outage **without** a mail, since "connected again" after a later re-link would describe an outage long over. A bridge that cannot be asked answers `unknown` with no identity and is counted as paired: that is the deployment's bridge going down, which is the thing worth hearing about, at the cost of one true-but-unneeded mail for a never-linked connection. WhatsApp keeps `ownerJid` and never sets `knownUnlinked`, because an unreachable Evolution also loses `ownerJid` and clearing on it would re-alert when Evolution returns.
+
+The Telegram webhook (`api/webhook/telegram.post.ts`) resolves the row by `instance_id` = the bridge's `sessionId` **and** `kind = 'telegram'`, with the same secret, cooldown and live read as Evolution's. `registerTelegramWebhook()` (`telegram-instances.ts`) runs at provision and on every sweep; its URL is `NUXT_TELEGRAM_WEBHOOK_URL`, else `NUXT_PUBLIC_APP_URL` + `/api/webhook/telegram`. The bridge re-sends the current state on `PUT /webhook` **only when the URL changes** — re-sending on every hourly re-registration would start a second evaluation beside the sweep's own. `evaluateConnectionHealth` also shares one in-flight evaluation per connection, because a webhook and a sweep that both read `alerted_at` empty would both mail.
+
 The sweep is in-process, so **more than one replica mails more than once**. `nitro.scheduledTasks` needs `nitro.experimental.tasks`; both are in `nuxt.config.ts`.
 
 PocketBase is the mailer because it has no generic send-email REST endpoint at all — every mail route it ships is auth-flow bound — so `pb_hooks/mail.pb.js` registers `POST /api/app/send-email` behind `$apis.requireSuperuserAuth()` and applies the SMTP settings from `PB_SMTP_*` on boot. **Turning SMTP on also turns on PocketBase's own login-alert mail**, so the superuser gets a "Login from a new location" message whenever the Nuxt server signs in from a new client — which is every restart. Disable the auth alert on `_superusers` in the admin UI if that noise matters; it is not disabled in code, because silently turning off a security notification is worse than the noise.
@@ -410,7 +414,7 @@ Pending invitations are admin-only on `/api/org`; the member roster is not, beca
 
 ## Telegram bridge
 
-`apps/telegram-bridge` is Telegram's counterpart to Evolution: a separate Node service, and the only thing in the repo that speaks MTProto. Personal accounts link by QR code through `teleproto` (the maintained GramJS fork, pinned), and their chats are synced into a `telegram` schema of the database Evolution uses; the bridge also lists chats, resolves a username or phone number, and sends text. The app creates and links Telegram connections, reads them and exposes them over MCP (below); disconnect alerts land in a later PR.
+`apps/telegram-bridge` is Telegram's counterpart to Evolution: a separate Node service, and the only thing in the repo that speaks MTProto. Personal accounts link by QR code through `teleproto` (the maintained GramJS fork, pinned), and their chats are synced into a `telegram` schema of the database Evolution uses; the bridge also lists chats, resolves a username or phone number, and sends text. The app creates and links Telegram connections, reads them, exposes them over MCP and alerts on them (below, and "Disconnect alerts").
 
 Node runs `src/*.ts` directly (type stripping, Node ≥ 22.18), so there is no build step and `erasableSyntaxOnly` is on: no enums, namespaces or parameter properties. `pnpm typecheck` does not cover it — use `pnpm bridge:typecheck`, or `cd apps/telegram-bridge && node_modules/.bin/tsc --noEmit`.
 
