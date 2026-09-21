@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { PlusIcon } from '@lucide/vue'
-import { assertNever } from '#shared/connection'
+import { assertNever, connectionFamily } from '#shared/connection'
 
 const props = withDefaults(defineProps<{
   instanceId: string
@@ -22,6 +22,17 @@ const props = withDefaults(defineProps<{
 const { user } = useSession()
 
 /**
+ * Asked as a family, not as `kind === 'postgres'`.
+ *
+ * This boolean decides whether the tool catalogue is fetched at all, and a new
+ * database kind falling off the wrong side of it is not a cosmetic miss: the
+ * catalogue never loads, `initialScope()` returns no tool names, and
+ * `scopeSchema` then refuses Create with "Select at least one action" — a
+ * validation error the user did nothing to cause.
+ */
+const isDatabase = computed(() => connectionFamily(props.kind) === 'database')
+
+/**
  * A new token's starting scope depends on the kind.
  *
  * A WhatsApp token starts open, as it always has. A Postgres token starts
@@ -31,13 +42,13 @@ const { user } = useSession()
  *
  * The read tools come from the server, since only it knows which exist.
  */
-// Only a Postgres token needs this, and only to seed its default scope — a
+// Only a database token needs this, and only to seed its default scope — a
 // WhatsApp dashboard was fetching it on every load and discarding the answer.
 // The explicit key is shared with TokenScopeFields, which renders the same list:
 // Nuxt keys per call site by default, so the two were fetching it twice.
 const { data: toolCatalogue } = await useFetch<{ tools: McpToolInfo[] }>(
   () => `/api/instances/${props.instanceId}/mcp-tools`,
-  { key: `mcp-tools-${props.instanceId}`, lazy: true, immediate: props.kind === 'postgres' },
+  { key: `mcp-tools-${props.instanceId}`, lazy: true, immediate: isDatabase.value },
 )
 
 function initialScope(): TokenScope {
@@ -63,7 +74,7 @@ function initialScope(): TokenScope {
  * user did nothing to cause.
  */
 watch(toolCatalogue, (catalogue) => {
-  if (!createOpen.value || props.kind !== 'postgres' || !catalogue) return
+  if (!createOpen.value || !isDatabase.value || !catalogue) return
   if (newScope.value.all_tools || newScope.value.tool_names.length > 0) return
   newScope.value = initialScope()
 })

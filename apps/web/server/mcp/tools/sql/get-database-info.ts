@@ -5,7 +5,8 @@
  */
 export default defineKindTool({
   name: 'get-database-info',
-  kind: 'postgres',
+  kind: ['postgres'],
+  group: 'sql',
   title: 'Check the database connection',
   description:
     'Report whether this connector can reach its database, which server version '

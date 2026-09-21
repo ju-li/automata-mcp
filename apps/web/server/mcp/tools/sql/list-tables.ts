@@ -7,7 +7,8 @@ import { z } from 'zod'
  */
 export default defineKindTool({
   name: 'list-tables',
-  kind: 'postgres',
+  kind: ['postgres'],
+  group: 'sql',
   title: 'List database tables',
   description:
     'List the tables, views and materialized views this connector can reach, '

@@ -12,7 +12,8 @@ import { z } from 'zod'
  */
 export default defineKindTool({
   name: 'run-statement',
-  kind: 'postgres',
+  kind: ['postgres'],
+  group: 'sql',
   title: 'Run a data-modifying SQL statement',
   description:
     'Run one INSERT, UPDATE, DELETE or MERGE and report how many rows it changed. '

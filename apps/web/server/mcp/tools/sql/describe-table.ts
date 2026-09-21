@@ -12,7 +12,8 @@ import { z } from 'zod'
  */
 export default defineKindTool({
   name: 'describe-table',
-  kind: 'postgres',
+  kind: ['postgres'],
+  group: 'sql',
   title: 'Describe a database table',
   description:
     'Show one table\'s columns — name, type, nullability, default, identity — plus '

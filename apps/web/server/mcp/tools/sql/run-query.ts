@@ -10,7 +10,8 @@ import { z } from 'zod'
  */
 export default defineKindTool({
   name: 'run-query',
-  kind: 'postgres',
+  kind: ['postgres'],
+  group: 'sql',
   title: 'Run a read-only SQL query',
   description:
     'Run one read-only SQL statement and return its rows. Exactly one statement — '
