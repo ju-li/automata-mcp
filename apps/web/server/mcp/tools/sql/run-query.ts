@@ -46,7 +46,7 @@ export default defineKindTool({
   handler: async ({ sql, maxRows, timeoutMs }) => {
     const { instance, scope } = useMcpAuth()
 
-    const result = await runReadQuery(instance, scope, sql.trim(), { maxRows, timeoutMs })
+    const result = await runSqlRead(instance, scope, sql.trim(), { maxRows, timeoutMs })
 
     return {
       columns: result.columns,

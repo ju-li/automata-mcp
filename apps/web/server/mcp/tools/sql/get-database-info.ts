@@ -25,11 +25,13 @@ export default defineKindTool({
   handler: async () => {
     const { instance, scope } = useMcpAuth()
 
-    const identity = await pgIdentity(await pgFor(instance))
+    const identity = await sqlIdentity(instance)
 
     return {
       connected: true,
-      serverVersion: identity?.serverVersion ?? 'unknown',
+      // Carries the engine's own name, because this tool serves more than one
+      // and writing "PostgreSQL" here would be a lie on any other connection.
+      serverVersion: identity?.server ?? 'unknown',
       database: identity?.database ?? instance.db_database ?? 'unknown',
       role: identity?.currentUser ?? 'unknown',
       host: instance.db_host,

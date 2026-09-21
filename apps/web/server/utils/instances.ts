@@ -368,10 +368,12 @@ export async function getPostgresHealth(instance: AppInstance): Promise<Connecti
   if (!instance.dsn) return { state: 'unknown', error: 'No connection string is stored for this database.' }
 
   try {
-    const identity = await pgIdentity(await pgFor(instance))
+    const identity = await sqlIdentity(instance)
     return {
       state: 'open',
-      detail: identity ? `PostgreSQL ${identity.serverVersion} · ${identity.database}` : undefined,
+      // `identity.server` already names the engine, so this line reads
+      // correctly for whichever one answered.
+      detail: identity ? `${identity.server} · ${identity.database}` : undefined,
     }
   }
   catch (cause) {
@@ -460,7 +462,7 @@ export async function updatePostgresDsn(instance: AppInstance, dsn: string): Pro
 
   // Drop the pool so the change takes effect now rather than at the next
   // fingerprint check. Belt and braces — `pgFor` would notice on its own.
-  await closePgPool(instance.id)
+  await closeSqlPool(instance)
 
   return updated
 }
@@ -692,7 +694,7 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
     await deleteTelegramSession(instance)
   }
   else if (kind === 'postgres') {
-    await closePgPool(instance.id)
+    await closeSqlPool(instance)
   }
   else if (kind === 'whatsapp') {
     // A connection on its own server may hold a pool onto that server's message

@@ -37,7 +37,7 @@ export default defineKindTool({
   handler: async ({ schema, name }) => {
     const { instance, scope } = useMcpAuth()
 
-    const table = await describePgTable(instance, scope, schema, name)
+    const table = await describeSqlTable(instance, scope, schema, name)
 
     if (!table) {
       throw createError({

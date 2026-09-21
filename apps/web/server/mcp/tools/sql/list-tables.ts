@@ -37,7 +37,7 @@ export default defineKindTool({
   handler: async ({ schema, search, limit, page }) => {
     const { instance, scope } = useMcpAuth()
 
-    const { tables, hasMore } = await listPgTables(instance, scope, { schema, search, limit, page })
+    const { tables, hasMore } = await listSqlTables(instance, scope, { schema, search, limit, page })
 
     return {
       count: tables.length,
