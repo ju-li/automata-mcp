@@ -335,10 +335,21 @@ export interface AppInstance {
    * See `telegramDbUrlFor` in telegram-db.ts.
    */
   telegram_db_url?: string
+  /**
+   * A database connection's connection string. Hidden, and shared by every SQL
+   * kind — the name says nothing about an engine, and each engine's parser
+   * refuses the others' schemes, so a DSN reaching the wrong reader fails at
+   * parse rather than attempting a connection.
+   */
   dsn?: string
-  pg_host?: string
-  pg_port?: number
-  pg_database?: string
+  /**
+   * Display-only mirrors of what `dsn` points at, so the dashboard and the
+   * connection list can say where a connection goes without reading the secret.
+   * Written once when the DSN is accepted; never consulted to connect.
+   */
+  db_host?: string
+  db_port?: number
+  db_database?: string
   label?: string
   created?: string
   /**

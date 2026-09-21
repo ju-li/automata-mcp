@@ -684,8 +684,10 @@ holds one row per connection, with a `kind` of `whatsapp` or `postgres`:
 - **WhatsApp** — the Evolution instance's `name` and `instance_id`, its
   `base_url`, and the per-instance `api_key`. A bring-your-own connection also
   carries its server's `admin_key` and, once supplied, `evolution_db_url`.
-- **Postgres** — the `dsn`, plus `pg_host`, `pg_port` and `pg_database` for
-  display.
+- **Postgres** — the `dsn`, plus `db_host`, `db_port` and `db_database` for
+  display. Those four are shared by every database kind rather than named for
+  one engine; nothing connects through the display three, and each engine's DSN
+  parser refuses the other engines' schemes.
 
 `mcp_tokens` holds hashed connector tokens — `token_hash`, `label`,
 `last_used_at`, `expires_at`, `revoked` and six scope columns — each bound to one

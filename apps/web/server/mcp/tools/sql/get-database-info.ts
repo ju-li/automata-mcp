@@ -30,10 +30,10 @@ export default defineKindTool({
     return {
       connected: true,
       serverVersion: identity?.serverVersion ?? 'unknown',
-      database: identity?.database ?? instance.pg_database ?? 'unknown',
+      database: identity?.database ?? instance.db_database ?? 'unknown',
       role: identity?.currentUser ?? 'unknown',
-      host: instance.pg_host,
-      port: instance.pg_port,
+      host: instance.db_host,
+      port: instance.db_port,
       allTables: scope.allTables,
       ...(!scope.allTables && { tablesInScope: scope.tableNames }),
       canWrite: scope.allTools || scope.toolNames.includes('run-statement'),

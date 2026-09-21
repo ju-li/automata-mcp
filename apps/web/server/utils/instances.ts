@@ -78,8 +78,8 @@ export function toPublicInstance(instance: AppInstance): PublicInstance {
       return {
         ...base,
         label: instance.label || 'Database',
-        target: [instance.pg_host, instance.pg_port].filter(Boolean).join(':')
-          + (instance.pg_database ? `/${instance.pg_database}` : ''),
+        target: [instance.db_host, instance.db_port].filter(Boolean).join(':')
+          + (instance.db_database ? `/${instance.db_database}` : ''),
       }
     case 'whatsapp':
       return {
@@ -444,9 +444,9 @@ async function postgresFields(dsn: string) {
     probe,
     fields: {
       dsn,
-      pg_host: target.host,
-      pg_port: target.port,
-      pg_database: probe.database,
+      db_host: target.host,
+      db_port: target.port,
+      db_database: probe.database,
     },
   }
 }
