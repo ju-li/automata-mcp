@@ -49,11 +49,12 @@ apps/telegram-bridge/        Node + teleproto. Links Telegram accounts, syncs ch
   shared/                    types used by both the app and the server
   server/api/                auth, instances, tokens, Evolution and Telegram webhooks
   server/mcp/index.ts        MCP handler + auth middleware
-  server/mcp/tools/<kind>/   one file per tool: whatsapp/, telegram/, postgres/
+  server/mcp/tools/<group>/  one file per tool: whatsapp/, telegram/, sql/
   server/plugins/            token redaction, per-kind instructions, startup check
   server/utils/              PocketBase, auth, instances, tokens, Evolution client and
                              message database, mentions, outbound host guard,
-                             Postgres pool / plan guard / runner / catalog
+                             keyed handle cache, row serialisation, SQL engine
+                             seam, Postgres pool / plan guard / runner / catalog
 services/pocketbase/         pinned PocketBase image + committed schema
 docker-compose.dev.yml       services only — NOT Nuxt
 .zed/                        tasks + language server config
@@ -542,7 +543,7 @@ removes the row and its tokens, and logs the instance left behind on that server
 
 ### Adding tools
 
-Drop a file in `apps/web/server/mcp/tools/<kind>/` — it is discovered
+Drop a file in `apps/web/server/mcp/tools/<group>/` — it is discovered
 automatically — and define it with `defineKindTool` from
 `server/utils/mcp-kind-tool.ts` rather than `defineMcpTool` directly:
 
@@ -563,15 +564,25 @@ connection of that kind and only for a token whose scope allows it. Declaring th
 kind once is what makes a WhatsApp tool unreachable from a Postgres token. An
 optional `available()` adds a deployment-level prerequisite.
 
+`kind` also takes an **array**, for a tool that means exactly the same thing on
+more than one kind — the `sql/` set, where the engine behind the call is absorbed
+by `server/utils/sql-engine.ts` and anything a model needs to know about the
+difference is in that kind's `instructions`. A multi-kind tool must state its
+`group` too, since there is no single kind to infer it from. Do **not** use it to
+share a tool whose arguments differ: that is why Telegram has
+`read-telegram-messages` rather than a second kind on `read-messages`.
+
 Keep the basename globally unique: collisions are detected across groups, and two
-tools with one name make the MCP server throw. Give every tool an explicit
+tools with one name make the MCP server throw. One shared file for several kinds
+satisfies that rather than straining it. Give every tool an explicit
 `name`, a `title` and accurate `readOnlyHint` / `destructiveHint`; see
-`whatsapp/get-connection-status.ts` (read) and `postgres/run-statement.ts`
+`whatsapp/get-connection-status.ts` (read) and `sql/run-statement.ts`
 (write) for the pattern. `enabled` cannot see arguments, so anything that
 depends on them belongs in the handler: enforce chat scope there if the tool
-touches a conversation, and run SQL through `server/utils/pg-run.ts`, which
-applies the table checks. Existing scoped tokens will not be granted the new
-tool — they list the tools they were given, so new tools are denied by default.
+touches a conversation, and run SQL through `server/utils/sql-engine.ts`, which
+dispatches to the engine's runner and applies the table checks. Existing scoped
+tokens will not be granted the new tool — they list the tools they were given, so
+new tools are denied by default.
 
 Tool handlers get the MCP SDK's `RequestHandlerExtra`, not an H3 event, so
 credentials are reached through `useMcpAuth()`, `useEvolutionClient()` and

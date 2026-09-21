@@ -67,11 +67,14 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
   modules/mcp-token-route.ts local Nuxt module — registers /mcp/:token
   server/api/                auth/, org/, invites/, instances/, tokens/
   server/mcp/index.ts        default MCP handler (auth middleware)
-  server/mcp/tools/<kind>/    one file per tool, auto-discovered; the directory
-                              sets `group`, which is what gates a tool to a kind
+  server/mcp/tools/<group>/   one file per tool, auto-discovered. A group is
+                              usually a kind; `sql/` is the exception and serves
+                              every SQL kind. `defineKindTool` is what gates a
+                              tool, not the directory
   server/utils/              pocketbase, session, auth-cookie, org, invites,
                              mcp-auth, instances, tokens, evolution, evolution-db,
-                             mentions, redact, net-guard, pg-pool, pg-guard,
+                             mentions, redact, net-guard, keyed-resource,
+                             db-rows, sql-engine, pg-pool, pg-guard,
                              pg-run, pg-catalog
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              own Postgres database. See "Telegram bridge".
@@ -109,15 +112,20 @@ Three things enforce it:
 
 Built on `@nuxtjs/mcp-toolkit` (**pinned to 0.19.0**). It auto-imports `defineMcpHandler` / `defineMcpTool` and configures the server via the `mcp` key in `nuxt.config.ts`.
 
-**Adding a tool:** drop a file in `apps/web/server/mcp/tools/<kind>/` — discovery is automatic and recursive, no registration. Give every tool an explicit `name`, an explicit `group`, a `title` (shown in client UI), a `description` written for the model, and accurate `readOnlyHint` / `destructiveHint`. Copy `whatsapp/get-connection-status.ts` (read) or `postgres/run-statement.ts` (write).
+**Adding a tool:** drop a file in `apps/web/server/mcp/tools/<group>/` — discovery is automatic and recursive, no registration — and define it with `defineKindTool` from `server/utils/mcp-kind-tool.ts`, never `defineMcpTool` directly. Give every tool an explicit `name`, a `title` (shown in client UI), a `description` written for the model, and accurate `readOnlyHint` / `destructiveHint`. Copy `whatsapp/get-connection-status.ts` (read) or `sql/run-statement.ts` (write).
 
 **Every tool is gated on kind as well as scope.** `isToolAllowed(event, name, kind)` checks both, and both fail closed. The kind half is not decoration: a Postgres token minted with `all_tools` would otherwise register `send-text-message`, whose handler calls `useEvolutionClient()` on a row with no Evolution credentials. Which tools *exist* is a property of the connection; which of those a token may call is a property of the token, and that is the only order that composes.
 
-Three facts about discovery, verified against 0.19.0 and worth not rediscovering:
+**A tool declares one kind, or several.** `defineKindTool`'s `kind` takes an array for a tool whose meaning is genuinely identical across engines — the `sql/` set, whose arguments and promises do not change with the engine behind them, because `sql-engine.ts` absorbs the difference and the per-kind `instructions` carry whatever a model needs to know about it. It is **not** the way to share a tool whose arguments differ: that is why Telegram has `read-telegram-messages` rather than a second kind on `read-messages`, and that reasoning still stands. A multi-kind tool must state its `group` explicitly, since there is no single kind to infer it from.
 
-- **A tool's name comes from the file's basename, never the directory.** `_meta.filename` is set with `path.split('/').pop()` (`loaders/utils.js:94-96`), and the fallback in `definitions/utils.js:13-16` kebab-cases only that. Moving a tool between group directories therefore cannot rename it — which is what made the `tools/` → `tools/whatsapp/` move safe for every `tool_names` row already minted. Every tool sets `name` explicitly anyway.
-- **`group` is exactly the directory segment** (`loaders/utils.js:167-178`), read back as `def.group ?? def._meta?.group`. It is also stated explicitly on each tool, so a future move cannot silently re-gate one.
-- **Basename collisions are global, not per-group.** `loaders/index.js:19-34` only warns, and `McpServer.registerTool` then throws on the duplicate. Keep every basename unique across groups.
+**`group` no longer names a kind, and nothing may assume it does.** It is now only a directory label — `sql/` serves every SQL kind. The mapping from tool to kinds lives in `TOOL_KINDS` in `mcp-kind-tool.ts`, written by the same call that installs the `enabled` gate, and read back through `kindsForTool()` / `toolServesKind()`. `api/instances/[id]/mcp-tools.get.ts` is the one consumer, and it must keep using that rather than `group`: it renders the scope picker, and a picker that matches nothing offers no tools, which mints a token that can call none.
+
+Four facts about discovery, verified against 0.19.0 and worth not rediscovering:
+
+- **A tool's name comes from the file's basename, never the directory.** `_meta.filename` is set with `path.split('/').pop()` (`loaders/utils.js:94-96`), and the fallback in `definitions/utils.js:13-16` kebab-cases only that. Moving a tool between group directories therefore cannot rename it — which is what made the `tools/` → `tools/whatsapp/` move safe, and later the `tools/postgres/` → `tools/sql/` one, for every `tool_names` row already minted. Every tool sets `name` explicitly anyway.
+- **`group` is exactly the directory segment** (`loaders/utils.js:167-178`), read back as `def.group ?? def._meta?.group`. It is used only by `filterRawDefinitions` (`definitions/listings.js:29-32`) when a caller passes an explicit group filter — which this app never does — and as `_meta` on the listing. It is cosmetic here, which is what makes a group that is not a kind safe.
+- **Basename collisions are global, not per-group.** `loaders/index.js:19-34` only warns, and `McpServer.registerTool` then throws on the duplicate. Keep every basename unique across groups. (One shared file for several kinds satisfies this rather than straining it — which is the other reason `sql/` is one directory and not two.)
+- **`filterByEnabled` runs before registration** (`utils.js:36` then `:73`), so a tool disabled for a request is never registered at all. That is what makes the kind gate real enforcement rather than hiding.
 
 **`enabled` is evaluated twice per request per tool** — once in `filterRawDefinitions` via `handler.js:12`, once again in the toolkit's own `filterByEnabled` (`utils.js:17-24`). Keep it a synchronous property read.
 
@@ -169,6 +177,8 @@ The connection is far wider than anything else the app holds (every user's messa
 
 `pg-pool.ts` connects, `pg-guard.ts` decides what a statement may touch, `pg-run.ts` composes the two, `pg-catalog.ts` introspects. The honest summary, which belongs in front of every change here: **the table allowlist keeps a model inside the tables it was pointed at; the security boundary is the database role on the DSN.** README carries the `GRANT` recipe.
 
+**`sql-engine.ts` is the seam in front of all four**, and it is dispatch functions over a `switch … assertNever`, not an adapter interface. The reason is this section: an interface would make each method's doc comment the union of every engine's contract and put the guard reasoning behind a boundary where a reader at the call site can no longer see which checks ran — and the argument below is written for Postgres and cannot be written once for two engines. A second engine gets its own guard module and its own composition function with its own header, and the differences are told to the model through the per-kind `instructions` rather than hidden behind a shared tool name. `sqlKindOf()` follows `alertableKind()` in `alerts.ts`, this repo's existing idiom for "the kinds that share a capability".
+
 **Four checks, and each closes something the obvious design leaves open.** All verified against Postgres 16.
 
 1. **One statement, enforced by the protocol.** `sql.unsafe(text)` with no parameters defaults to `simple: true` (`postgres/src/index.js:119-126`) — the *simple* query protocol, which runs everything after a semicolon: `SELECT 1; DROP TABLE t` executes both. `unsafeSingle()` forces the extended protocol, where Postgres itself answers 42601 to a second statement. It exists as one function precisely so no call site can write the options inline and be one `simple` away from a bypass. `simple` is honoured at runtime but missing from postgres.js's `UnsafeQueryOptions`, hence the cast.
@@ -195,6 +205,10 @@ The connection is far wider than anything else the app holds (every user's messa
 **Deliberate holes, documented rather than papered over.** Triggers are invisible to `EXPLAIN` without `ANALYZE`, so a write to an allowed table can cascade anywhere. `postgres_fdw`/`dblink` name the local foreign table, not the remote object. `pg_catalog` and `information_schema` stay readable, so schema names leak regardless of the allowlist. A superuser DSN makes all of it best-effort — `probePgConnection` detects that so the UI can say so.
 
 **The pool cache is keyed on the connection id, not the DSN.** A DSN-keyed Map holds every user's database password as a live string in something that shows up in a heap snapshot; the id finds the pool and a fingerprint notices a rotation. Eviction runs on acquire, not on a timer — an interval outlives nothing useful in a worker the platform stops and starts. `onnotice` is silenced because a `RAISE NOTICE` in a trigger can carry row data into the process log, which is the one place this must not leak to.
+
+Those mechanics now live in **`keyed-resource.ts`**, which is engine-independent: the id keying, the secret fingerprint, the 60s re-approval TTL, the background drain on rotation and the LRU sweep are all about *when* a handle lives, and none of it is about a protocol. `pg-pool.ts` supplies the Postgres half through `build` / `destroy` / `reguard`, and `keyedPool()` keeps its old signature so `evolution-db.ts` and `telegram-db.ts` are unaffected. **The `guard` asymmetry is now the presence or absence of `reguard`** rather than a flag the cache has to understand. One consequence worth knowing: `MAX_POOLS` is a **process-wide** budget shared across engines, not one ceiling per driver.
+
+**`db-rows.ts` holds the cell serialisation**, shared for the same reason `pg-catalog.ts` shares one query between the scope picker and the tool listing: two tools with the same name must clip at the same length and lose precision in the same places, or a caller cannot carry what it learned from one response to the other. Only the binary label (`bytea`, `blob`) is per-engine. Note what it *cannot* fix — a driver that returns a rounded `number` where the column was a 64-bit integer has already lost the precision before the value arrives, so that belongs in the driver options, not here.
 
 **A DSN change does not invalidate tokens, on purpose.** Tokens name the *connection*, not the credential. Making an owner reissue them because a password rotated would be a reason not to rotate it.
 
