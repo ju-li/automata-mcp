@@ -30,6 +30,6 @@ export default defineEventHandler(async (event) => {
 
   const params = await getValidatedQuery(event, q => query.parse(q))
 
-  const { tables, hasMore } = await listPgTables(instance, OPEN_SCOPE, params)
+  const { tables, hasMore } = await listSqlTables(instance, OPEN_SCOPE, params)
   return { tables, hasMore }
 })

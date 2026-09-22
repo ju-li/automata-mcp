@@ -25,6 +25,36 @@
 export type InstanceKind = 'whatsapp' | 'postgres' | 'telegram'
 
 /**
+ * What sort of thing a kind is.
+ *
+ * Several branches in both surfaces are not really per-kind at all — they are
+ * per-family. `describeKind()` answers "database" for every SQL engine;
+ * `describeScope()` picks the table axis or the chat axis; `TokenScopeFields`
+ * and `McpTokens` decide which axis to fetch. Written as a kind check, each of
+ * those is a boolean that a new kind silently falls off the wrong side of
+ * (`kind === 'postgres'` is `false` for MySQL, so the scope dialog would ask a
+ * database for its chats). Written as a family check, they keep working.
+ *
+ * Deliberately a `switch` over the kind rather than a lookup table, for the
+ * reason `assertNever` exists: a new kind must fail to compile here until
+ * somebody has decided which family it joins. That decision is exactly the one
+ * that then answers four call sites at once.
+ */
+export type ConnectionFamily = 'messaging' | 'database'
+
+export function connectionFamily(kind: InstanceKind): ConnectionFamily {
+  switch (kind) {
+    case 'whatsapp':
+    case 'telegram':
+      return 'messaging'
+    case 'postgres':
+      return 'database'
+    default:
+      return assertNever(kind, 'connection kind')
+  }
+}
+
+/**
  * How a connection is doing, in four values that mean the same thing for every
  * kind so a badge needs no branching: a database that answers is `open`, one
  * that does not is `close`, and a row with no credential at all is `unknown`.

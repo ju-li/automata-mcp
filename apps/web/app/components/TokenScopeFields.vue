@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { PlusIcon, SearchIcon, UsersIcon, XIcon } from '@lucide/vue'
+import { connectionFamily } from '#shared/connection'
 
 /**
  * The scope editor, shared by the create and edit dialogs so the two cannot
@@ -8,7 +9,16 @@ import { PlusIcon, SearchIcon, UsersIcon, XIcon } from '@lucide/vue'
 const props = defineProps<{ instanceId: string, kind: InstanceKind }>()
 const scope = defineModel<TokenScope>({ required: true })
 
-const isPostgres = computed(() => props.kind === 'postgres')
+/**
+ * Which axis this connection has, asked as a family rather than as
+ * `kind === 'postgres'`.
+ *
+ * A kind check here is a boolean a new database kind falls off the wrong side
+ * of: it would read as "not a database", fetch `/chats` (404), and render the
+ * chat axis for something that has no chats. `connectionFamily` fails to
+ * compile until the new kind has been placed, which is the whole point.
+ */
+const isDatabase = computed(() => connectionFamily(props.kind) === 'database')
 
 // Deliberately not awaited. A top-level await makes setup() async, and Vue then
 // withholds the entire component until every fetch settles — so the chats call,
@@ -24,11 +34,11 @@ const { data: toolData, status: toolStatus } = useFetch<{ tools: McpToolInfo[] }
 // and a 404 in the console on every open reads as a bug.
 const { data: chatData, status: chatStatus } = useFetch<{ chats: ScopedChat[] }>(
   () => `/api/instances/${props.instanceId}/chats`,
-  { lazy: true, immediate: !isPostgres.value },
+  { lazy: true, immediate: !isDatabase.value },
 )
 const { data: tableData, status: tableStatus } = useFetch<{ tables: ScopedTable[], hasMore: boolean }>(
   () => `/api/instances/${props.instanceId}/tables`,
-  { lazy: true, immediate: isPostgres.value, query: { limit: 500 } },
+  { lazy: true, immediate: isDatabase.value, query: { limit: 500 } },
 )
 
 // Chats picked by JID may not be in the fetched list — a number added by hand,
@@ -212,7 +222,7 @@ async function addByNumber() {
     <Separator />
 
     <!-- ── tables (databases only) ─────────────────────────────────────── -->
-    <section v-if="isPostgres" class="space-y-3">
+    <section v-if="isDatabase" class="space-y-3">
       <div>
         <h3 class="text-sm font-medium">
           Tables

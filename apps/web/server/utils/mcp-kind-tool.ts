@@ -11,7 +11,38 @@ type ToolDefinition<I extends ZodRawShape | undefined, O extends ZodRawShape>
   = Parameters<typeof defineMcpTool<I, O>>[0]
 
 /**
- * Define an MCP tool that belongs to one kind of connection.
+ * Which connection kinds each tool serves, by tool name.
+ *
+ * **This registry is the answer to a question the toolkit cannot answer for
+ * us.** A tool's `group` used to double as "which kind this belongs to", which
+ * worked only while the two were the same string. They are not any more: the
+ * SQL tools sit in `tools/sql/` and serve every SQL kind, so `group` is `'sql'`
+ * and names no kind at all.
+ *
+ * `api/instances/[id]/mcp-tools.get.ts` needs the mapping to render the scope
+ * picker, and reading it off the toolkit's own definition meant an untyped cast
+ * through `group ?? _meta.group` — which did not typecheck, and which would
+ * have silently returned an empty catalogue the moment `group` stopped being a
+ * kind. A picker that offers no tools mints a token that can call nothing.
+ *
+ * Populated as each tool module evaluates. Every tool module is imported by the
+ * toolkit's generated `tools.mjs`, and the route imports that, so by the time
+ * any request is served every `defineKindTool` call has run.
+ */
+const TOOL_KINDS = new Map<string, readonly InstanceKind[]>()
+
+/** The kinds a tool serves, or `undefined` for a tool this build does not know. */
+export function kindsForTool(name: string): readonly InstanceKind[] | undefined {
+  return TOOL_KINDS.get(name)
+}
+
+/** Whether a tool exists for a connection of this kind. */
+export function toolServesKind(name: string, kind: InstanceKind): boolean {
+  return TOOL_KINDS.get(name)?.includes(kind) ?? false
+}
+
+/**
+ * Define an MCP tool that belongs to one or more kinds of connection.
  *
  * **Why this exists rather than three separate declarations.** A tool's kind was
  * being asserted three times per file — by the directory it sits in, by an
@@ -21,6 +52,18 @@ type ToolDefinition<I extends ZodRawShape | undefined, O extends ZodRawShape>
  * `send-text-message`, whose handler calls `useEvolutionClient()` on a row that
  * has no Evolution credentials. Declaring the kind once makes the mismatch
  * unrepresentable.
+ *
+ * **`kinds` (plural) is for a tool whose meaning is genuinely identical across
+ * engines**, which today means the SQL tools: `run-query` takes the same
+ * argument and promises the same thing whether the connection is Postgres or
+ * another SQL engine, and the differences live behind `sql-engine.ts` and in the
+ * per-kind `instructions`. It is *not* the way to share a tool whose arguments
+ * differ — that is why Telegram has `read-telegram-messages` rather than a
+ * two-kind `read-messages`, and that reasoning still stands.
+ *
+ * Basenames must stay unique across groups regardless: the loader warns on a
+ * collision and `McpServer.registerTool` throws on a duplicate registered name.
+ * A single shared file satisfies that rule rather than straining it.
  *
  * `available` is the second half of the old `enabled` expression, kept for the
  * one tool that has a prerequisite beyond its kind. It takes no event because a
@@ -32,19 +75,35 @@ export function defineKindTool<
 >(
   definition: ToolDefinition<InputSchema, OutputSchema> & {
     name: string
-    kind: InstanceKind
+    /** One kind, or several for a tool that means the same thing on each. */
+    kind: InstanceKind | readonly [InstanceKind, ...InstanceKind[]]
+    /**
+     * The directory this tool sits in, when that is not simply its kind.
+     * Required for a multi-kind tool, since there is no single kind to infer it
+     * from; stated so a move cannot silently change what the listing reports.
+     */
+    group?: string
     available?: () => boolean
   },
 ): ToolDefinition<InputSchema, OutputSchema> {
-  const { kind, available, ...rest } = definition
+  const { kind, group, available, ...rest } = definition
+  const kinds: readonly InstanceKind[] = Array.isArray(kind) ? kind : [kind as InstanceKind]
+
+  TOOL_KINDS.set(rest.name, kinds)
 
   return defineMcpTool<InputSchema, OutputSchema>({
     ...rest,
     // Inferred from the directory too; stated so a move cannot silently change
-    // which connections the tool belongs to.
-    group: kind,
-    // Two gates, both fail closed — see `isToolAllowed`. Kept synchronous: the
-    // toolkit evaluates `enabled` twice per request per tool.
-    enabled: event => isToolAllowed(event, rest.name, kind) && (available?.() ?? true),
+    // which connections the tool belongs to. For a single-kind tool the group
+    // *is* the kind, which is what every existing tool relies on.
+    group: group ?? (kinds.length === 1 ? kinds[0]! : undefined),
+    // Two gates, both fail closed — see `isToolAllowed`. `some` rather than a
+    // single check because a multi-kind tool is allowed when the caller's kind
+    // is any of its kinds; `isToolAllowed` still compares against the resolved
+    // `auth.kind`, so exactly one of these can ever be true for a given request.
+    // Kept synchronous: the toolkit evaluates `enabled` twice per request per
+    // tool.
+    enabled: event =>
+      kinds.some(k => isToolAllowed(event, rest.name, k)) && (available?.() ?? true),
   })
 }

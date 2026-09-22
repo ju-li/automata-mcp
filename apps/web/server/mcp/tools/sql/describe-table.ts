@@ -12,7 +12,8 @@ import { z } from 'zod'
  */
 export default defineKindTool({
   name: 'describe-table',
-  kind: 'postgres',
+  kind: ['postgres'],
+  group: 'sql',
   title: 'Describe a database table',
   description:
     'Show one table\'s columns — name, type, nullability, default, identity — plus '
@@ -36,7 +37,7 @@ export default defineKindTool({
   handler: async ({ schema, name }) => {
     const { instance, scope } = useMcpAuth()
 
-    const table = await describePgTable(instance, scope, schema, name)
+    const table = await describeSqlTable(instance, scope, schema, name)
 
     if (!table) {
       throw createError({

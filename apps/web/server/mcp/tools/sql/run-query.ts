@@ -10,7 +10,8 @@ import { z } from 'zod'
  */
 export default defineKindTool({
   name: 'run-query',
-  kind: 'postgres',
+  kind: ['postgres'],
+  group: 'sql',
   title: 'Run a read-only SQL query',
   description:
     'Run one read-only SQL statement and return its rows. Exactly one statement — '
@@ -45,7 +46,7 @@ export default defineKindTool({
   handler: async ({ sql, maxRows, timeoutMs }) => {
     const { instance, scope } = useMcpAuth()
 
-    const result = await runReadQuery(instance, scope, sql.trim(), { maxRows, timeoutMs })
+    const result = await runSqlRead(instance, scope, sql.trim(), { maxRows, timeoutMs })
 
     return {
       columns: result.columns,

@@ -13,6 +13,15 @@ import { tools } from '#nuxt-mcp-toolkit/tools.mjs'
  * offering a Postgres token a `send-text-message` checkbox would grant nothing
  * and invite a misunderstanding.
  *
+ * **Which kinds a tool serves comes from `kindsForTool()`, not from `group`.**
+ * The two were the same string only while every group was a kind, and the SQL
+ * tools broke that: they sit in `tools/sql/` and serve every SQL kind. Reading
+ * `group` here would have matched nothing and returned an empty catalogue —
+ * which is not a cosmetic failure, because a scope picker offering no tools
+ * mints a token that can call none. The registry in `mcp-kind-tool.ts` is
+ * populated by the same call that sets the tool's `enabled` gate, so the picker
+ * and the gate cannot disagree about which kinds a tool belongs to.
+ *
  * It deliberately does NOT filter on a tool's runtime prerequisites. Both
  * WhatsApp read tools need `NUXT_EVOLUTION_DATABASE_URL`, and they stay
  * registered and fail loudly when it is missing rather than disappearing — see
@@ -28,7 +37,7 @@ export default defineEventHandler(async (event) => {
 
   const available = tools
     .filter(tool => typeof tool.name === 'string' && tool.name.length > 0)
-    .filter(tool => (tool.group ?? (tool._meta as { group?: string } | undefined)?.group) === kind)
+    .filter(tool => toolServesKind(tool.name!, kind))
 
   return {
     tools: available
