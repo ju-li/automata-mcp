@@ -50,7 +50,7 @@ const kindCards: Record<InstanceKind, KindCard> = {
   },
   postgres: {
     title: 'PostgreSQL database',
-    description: 'Point Claude at a database with a connection string. Read-only by default.',
+    description: 'Point Claude at a database with a connection string or its parameters. Read-only by default.',
     icon: DatabaseIcon,
   },
 }
@@ -250,14 +250,7 @@ async function create() {
           <template v-if="kind === 'postgres'">
             <Separator />
             <div class="space-y-2">
-              <Label for="dsn">Connection string</Label>
-              <Input
-                id="dsn"
-                v-model="dsn"
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="postgres://user:password@host:5432/database"
-              />
+              <PostgresDsnInput v-model="dsn" id-prefix="dsn" />
               <p class="text-xs text-muted-foreground">
                 Checked by actually connecting before it is saved, and never shown
                 again afterwards. It is stored so this app can reconnect, so treat
