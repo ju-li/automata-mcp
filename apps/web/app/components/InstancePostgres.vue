@@ -222,14 +222,7 @@ async function saveDsn() {
         </h2>
 
         <div v-if="editingDsn" class="max-w-xl space-y-2 rounded-md border p-4">
-          <Label for="new-dsn">New connection string</Label>
-          <Input
-            id="new-dsn"
-            v-model="newDsn"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="postgres://user:password@host:5432/database"
-          />
+          <PostgresDsnInput v-model="newDsn" id-prefix="new-dsn" />
           <p class="text-xs text-muted-foreground">
             Checked by connecting before it is saved. Every connector token for this
             connection keeps working — they name the connection, not the credential.
