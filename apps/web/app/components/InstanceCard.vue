@@ -38,14 +38,14 @@ const secondary = computed(() => {
   <NuxtLink :to="`/instances/${instance.id}`" class="block">
     <Card class="transition-colors hover:border-foreground/20">
       <CardHeader>
-        <div class="flex items-start justify-between gap-3">
+        <div class="flex min-w-0 items-start justify-between gap-3">
           <div class="min-w-0">
             <CardTitle class="flex items-center gap-2 truncate">
               <component :is="kindIcon" class="size-4 shrink-0 text-muted-foreground" />
               {{ instance.label }}
             </CardTitle>
-            <CardDescription class="truncate" :class="isPostgres && 'font-mono text-xs'">
-              {{ secondary }}
+            <CardDescription :class="isPostgres && 'font-mono text-xs'">
+              <ScrollOnHover :text="secondary" />
             </CardDescription>
           </div>
           <ConnectionBadge :state="instance.state" :kind="instance.kind" :lost="instance.sessionLost" />
