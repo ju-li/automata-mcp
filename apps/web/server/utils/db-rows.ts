@@ -13,15 +13,18 @@
  * the type differs (`bytea`, `blob`). Everything else is shared.
  */
 
-/** How much of one cell is ever returned. A bytea column would otherwise blow the response. */
+/**
+ * How much of one cell is returned by default. A caller that needs a long value
+ * whole passes `fullValues` — clipped is the default because one wide page of
+ * large text or jsonb cells is otherwise enough to blow the response.
+ */
 export const MAX_CELL_CHARS = 2000
-
-/** How many RETURNING rows a write reports. */
-export const MAX_RETURNING_ROWS = 100
 
 export interface SerialiseOptions {
   /** What this engine calls a binary column, for the placeholder object. */
   binaryLabel: string
+  /** Return every cell whole instead of clipping at `MAX_CELL_CHARS`. */
+  fullValues?: boolean
 }
 
 /**
@@ -53,7 +56,9 @@ export function serialiseRows(
  * `bigint` becomes a string because JSON loses precision above 2^53 —
  * silently, which is the worst way to lose an id. A `Buffer` is described
  * rather than returned: a binary column is not something a model can use and is
- * very much something that can exceed the response limit on its own.
+ * very much something that can exceed the response limit on its own. Those
+ * three are serialisation and apply whatever `fullValues` says; only the
+ * clipping of long strings and objects is switched off by it.
  *
  * **A driver that hands back a rounded number instead of a `bigint` defeats
  * this, and the fix belongs at the driver, not here.** postgres.js returns
@@ -71,6 +76,8 @@ export function serialiseCell(
   if (Buffer.isBuffer(value)) {
     return { value: { type: options.binaryLabel, bytes: value.length }, truncated: false }
   }
+
+  if (options.fullValues) return { value, truncated: false }
 
   if (typeof value === 'string') {
     if (value.length <= MAX_CELL_CHARS) return { value, truncated: false }

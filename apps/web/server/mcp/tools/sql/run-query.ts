@@ -6,7 +6,8 @@ import { z } from 'zod'
  * Four gates, in `pg-run.ts` and `pg-guard.ts`: the extended protocol (one
  * statement), the plan walk against the table allowlist, the function gate, and
  * a read-only transaction. `DECLARE CURSOR` does the statement-kind check by
- * Postgres's own grammar, which is also where the row cap comes from.
+ * Postgres's own grammar, and the same cursor gives the row cap (FETCH) and
+ * paging (MOVE) without ever wrapping the statement.
  */
 export default defineKindTool({
   name: 'run-query',
@@ -24,11 +25,13 @@ export default defineKindTool({
     + 'table named. Functions this connector cannot see inside — anything outside '
     + 'pg_catalog — are refused too, so a query calling a helper function must be '
     + 'rewritten against the tables directly. Prefer describe-table over SELECT * '
-    + 'on a wide table. The result is ONE PAGE capped at `maxRows`: when `hasMore` '
-    + 'is true you have NOT seen the whole result, and because a query without '
-    + 'ORDER BY has no stable order you cannot page it with OFFSET — add an ORDER '
-    + 'BY on a unique column and a keyset predicate (WHERE id > <last id>), or '
-    + 'narrow the query. Never summarise a `hasMore: true` result as if it were '
+    + 'on a wide table. The result is ONE PAGE of at most `maxRows` rows: when '
+    + '`hasMore` is true you have NOT seen the whole result — call again with '
+    + '`page: nextPage`. Each page re-runs the query, so pages only line up when '
+    + 'it has an ORDER BY on a unique column; add one before paging. For very deep '
+    + 'results a keyset predicate (WHERE id > <last id>) is cheaper than a high '
+    + 'page number. Long cells are clipped at 2000 characters unless you pass '
+    + '`fullValues: true`. Never summarise a `hasMore: true` result as if it were '
     + 'the full answer.',
   annotations: {
     readOnlyHint: true,
@@ -41,12 +44,21 @@ export default defineKindTool({
   inputSchema: {
     sql: z.string().min(1).max(20_000).describe('One SQL query: SELECT, WITH … SELECT, VALUES or TABLE. Not a write.'),
     maxRows: z.number().int().min(1).max(1000).default(200).describe('Hard cap on rows returned. The query is stopped at this many rather than truncated afterwards.'),
+    page: z.number().int().min(1).default(1).describe(
+      '1-based page of `maxRows` rows. Walk it up with nextPage while hasMore is true; '
+      + 'pages are consistent only under an ORDER BY on a unique column.',
+    ),
     timeoutMs: z.number().int().min(500).max(30_000).default(10_000).describe('Server-side statement timeout, in milliseconds'),
+    fullValues: z.boolean().default(false).describe(
+      'Return every cell whole instead of clipping each at 2000 characters. Set it '
+      + 'only when you need a long text or JSON value in full: a page of large cells '
+      + 'can make a very large response.',
+    ),
   },
-  handler: async ({ sql, maxRows, timeoutMs }) => {
+  handler: async ({ sql, maxRows, page, timeoutMs, fullValues }) => {
     const { instance, scope } = useMcpAuth()
 
-    const result = await runSqlRead(instance, scope, sql.trim(), { maxRows, timeoutMs })
+    const result = await runSqlRead(instance, scope, sql.trim(), { maxRows, page, timeoutMs, fullValues })
 
     return {
       columns: result.columns,
@@ -54,18 +66,20 @@ export default defineKindTool({
       // Same rule as read-messages: wrong only in the safe direction. A page
       // that came back full reports true even when it happened to be the last.
       hasMore: result.hasMore,
+      ...(result.hasMore && { nextPage: page + 1 }),
+      page,
       maxRows,
       elapsedMs: result.elapsedMs,
       ...(result.hasMore && {
-        note: `Truncated at maxRows=${maxRows}; there is at least one more row. `
-          + 'This query has no guaranteed order, so paging it with OFFSET would not be reproducible — '
-          + 'add ORDER BY on a unique column and a keyset predicate (WHERE id > <last id>) instead.',
+        note: `Page ${page} of at most ${maxRows} rows; there is at least one more row. `
+          + 'Call again with page: nextPage. Pages line up only if the query has an ORDER BY on a unique column — '
+          + 'without one, rows can repeat or be skipped between pages.',
       }),
       // A second kind of truncation needs a second announcement: a clipped cell
       // that says nothing reads as the real value.
       ...(result.truncatedValues > 0 && {
         truncatedValues: result.truncatedValues,
-        truncatedValuesNote: 'Some values were too long to return in full and end with an ellipsis. Select a substring or an aggregate if you need the whole value.',
+        truncatedValuesNote: 'Some values were clipped at 2000 characters and end with an ellipsis. Pass fullValues: true to get them whole, or select a substring or an aggregate.',
       }),
       ...(!scope.allTables && { scopedToAllowlist: true }),
       rows: result.rows,

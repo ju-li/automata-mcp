@@ -3,7 +3,7 @@ import type { InstanceKind } from '#shared/connection'
 import type { AppInstance } from './pocketbase'
 import type { McpScope } from './mcp-scope'
 import type { ListTablesOptions, PgTable, PgTablePage, PgTableDescription } from './pg-catalog'
-import type { ReadQueryOptions, ReadQueryResult, WriteStatementResult } from './pg-run'
+import type { ReadQueryOptions, ReadQueryResult, WriteStatementOptions, WriteStatementResult } from './pg-run'
 
 /**
  * The one place that decides which SQL engine a connection speaks.
@@ -82,8 +82,8 @@ export type SqlTable = PgTable
 export type SqlTablePage = PgTablePage
 export type SqlTableDescription = PgTableDescription
 
-// `ListTablesOptions`, `ReadQueryOptions`, `ReadQueryResult` and
-// `WriteStatementResult` are deliberately NOT re-exported under the same
+// `ListTablesOptions`, `ReadQueryOptions`, `ReadQueryResult`,
+// `WriteStatementOptions` and `WriteStatementResult` are deliberately NOT re-exported under the same
 // names. Nuxt auto-imports server utils by export name, so a second module
 // exporting a name it already has makes the resolution order decide which one
 // a call site gets — it warns, picks one, and nothing in the source says
@@ -145,7 +145,7 @@ export async function runSqlWrite(
   instance: Pick<AppInstance, 'id' | 'kind' | 'dsn'>,
   scope: McpScope,
   statement: string,
-  options: { maxRows: number, timeoutMs: number, allowWholeTable?: boolean },
+  options: WriteStatementOptions,
 ): Promise<WriteStatementResult> {
   const kind = requireSqlKind(instance)
   switch (kind) {

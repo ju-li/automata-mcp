@@ -44,7 +44,8 @@ export default defineKindTool({
       page,
       limit,
       // Ordering is `schema, name`, which live traffic cannot reshuffle, so
-      // OFFSET paging here really is stable — unlike run-query, where it is not.
+      // OFFSET paging here really is stable — unlike run-query, whose pages line
+      // up only when the caller's own SQL orders on a unique key.
       hasMore,
       ...(hasMore && { nextPage: page + 1 }),
       ...(hasMore && {

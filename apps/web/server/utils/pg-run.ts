@@ -32,7 +32,11 @@ async function planFacts(tx: TransactionSql, statement: string): Promise<PlanFac
 
 export interface ReadQueryOptions {
   maxRows: number
+  /** 1-based page of `maxRows` rows. */
+  page: number
   timeoutMs: number
+  /** Return every cell whole instead of clipping at `MAX_CELL_CHARS`. */
+  fullValues: boolean
 }
 
 export interface ReadQueryResult {
@@ -138,6 +142,14 @@ export async function runReadQuery(
     // see them at all.
     await unsafeSingle(tx, `DECLARE _mcp NO SCROLL CURSOR FOR ${statement}`)
 
+    // Paging moves the same cursor, never wraps the statement in OFFSET: a wrap
+    // would reopen everything DECLARE CURSOR closes above. Each page is its own
+    // transaction and re-runs the query, so pages line up only under an ORDER BY
+    // on a unique key, and MOVE still reads every row it skips.
+    if (options.page > 1) {
+      await unsafeSingle(tx, `MOVE FORWARD ${(options.page - 1) * options.maxRows} FROM _mcp`)
+    }
+
     // One row past the cap, so `hasMore` is "the page came back full" rather
     // than a count that could be wrong — the same rule as MessagePage.
     const fetched = await unsafeSingle(tx, `FETCH FORWARD ${options.maxRows + 1} FROM _mcp`)
@@ -146,7 +158,7 @@ export async function runReadQuery(
     const hasMore = raw.length > options.maxRows
     const kept = raw.slice(0, options.maxRows)
 
-    const { rows, truncatedValues } = serialiseRows(kept, PG_SERIALISE)
+    const { rows, truncatedValues } = serialiseRows(kept, { ...PG_SERIALISE, fullValues: options.fullValues })
 
     return {
       columns: raw.columns?.map(c => c.name) ?? Object.keys(kept[0] ?? {}),
@@ -163,17 +175,24 @@ export interface WriteStatementResult {
   command: string
   rowCount: number
   returning: Array<Record<string, unknown>>
-  returningTruncated: boolean
   /** Cells clipped at the length cap, so a shortened value is never silent. */
   truncatedValues: number
   elapsedMs: number
+}
+
+export interface WriteStatementOptions {
+  maxRows: number
+  timeoutMs: number
+  /** Return every cell whole instead of clipping at `MAX_CELL_CHARS`. */
+  fullValues: boolean
+  allowWholeTable?: boolean
 }
 
 export async function runWriteStatement(
   instance: Pick<AppInstance, 'id' | 'dsn'>,
   scope: McpScope,
   statement: string,
-  options: { maxRows: number, timeoutMs: number, allowWholeTable?: boolean },
+  options: WriteStatementOptions,
 ): Promise<WriteStatementResult> {
   return await withGuardedStatement(instance, scope, statement, {
     readOnly: false,
@@ -199,14 +218,13 @@ export async function runWriteStatement(
       })
     }
 
-    const serialised = serialiseRows([...rows].slice(0, MAX_RETURNING_ROWS), PG_SERIALISE)
+    const serialised = serialiseRows([...rows], { ...PG_SERIALISE, fullValues: options.fullValues })
 
     return {
       command: rows.command,
       rowCount: rows.count,
       returning: serialised.rows,
       truncatedValues: serialised.truncatedValues,
-      returningTruncated: rows.length > MAX_RETURNING_ROWS,
       elapsedMs: Date.now() - startedAt,
     }
   })
