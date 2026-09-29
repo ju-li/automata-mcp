@@ -285,8 +285,8 @@ comes back.
 | `get-database-info` | Postgres | read | Server version, database, connecting role, and what this token is scoped to |
 | `list-tables` | Postgres | read | Tables in scope, filterable by schema and name, paged (1–500, default 100) |
 | `describe-table` | Postgres | read | Columns, keys, constraints, indexes and comments for one table |
-| `run-query` | Postgres | read | One `SELECT` / `WITH` / `VALUES` / `TABLE` in a read-only transaction; stops at `maxRows` (≤ 1000, default 200); 10 s timeout by default, 30 s max |
-| `run-statement` | Postgres | **write, destructive** | One `INSERT` / `UPDATE` / `DELETE` / `MERGE`; rolled back whole if it would change more than `maxRows` (default 100); no `WHERE` refused without `allowWholeTable`; 15 s timeout by default, 60 s max |
+| `run-query` | Postgres | read | One `SELECT` / `WITH` / `VALUES` / `TABLE` in a read-only transaction; pages of `maxRows` rows (≤ 1000, default 200) walked with `page`; cells clipped at 2000 chars unless `fullValues`; 10 s timeout by default, 30 s max |
+| `run-statement` | Postgres | **write, destructive** | One `INSERT` / `UPDATE` / `DELETE` / `MERGE`; rolled back whole if it would change more than `maxRows` (default 100, no ceiling); no `WHERE` refused without `allowWholeTable`; 15 s timeout by default, 60 s max |
 
 `read-messages` and `search-messages` leave reactions out unless called with
 `includeReactions: true`, and say so with `reactionsExcluded`.

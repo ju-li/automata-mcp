@@ -25,7 +25,8 @@ export default defineKindTool({
     + 'than as a limit to raise blindly. An UPDATE or DELETE with no WHERE clause '
     + 'is refused unless you pass `allowWholeTable: true`, which is deliberately '
     + 'a separate decision from the SQL. Add RETURNING when you need to see what '
-    + 'changed. This tool cannot see '
+    + 'changed; returned cells are clipped at 2000 characters unless you pass '
+    + '`fullValues: true`. This tool cannot see '
     + 'inside triggers: a write to an allowed table may cascade to tables outside '
     + 'the allowlist, and the allowlist cannot stop that. Confirm destructive '
     + 'changes with the user before calling this.',
@@ -37,17 +38,22 @@ export default defineKindTool({
   },
   inputSchema: {
     sql: z.string().min(1).max(20_000).describe('One INSERT, UPDATE, DELETE or MERGE statement'),
-    maxRows: z.number().int().min(1).max(10_000).default(100).describe('Roll the whole statement back if it would affect more rows than this'),
+    maxRows: z.number().int().min(1).default(100).describe('Roll the whole statement back if it would affect more rows than this'),
     timeoutMs: z.number().int().min(500).max(60_000).default(15_000).describe('Server-side statement timeout, in milliseconds'),
     allowWholeTable: z.boolean().default(false).describe(
       'Permit an UPDATE or DELETE with no WHERE clause. Off by default: a missing '
       + 'WHERE is far more often a mistake than an intention. `maxRows` still applies.',
     ),
+    fullValues: z.boolean().default(false).describe(
+      'Return every cell whole instead of clipping each at 2000 characters. Set it '
+      + 'only when you need a long text or JSON value in full: a page of large cells '
+      + 'can make a very large response.',
+    ),
   },
-  handler: async ({ sql, maxRows, timeoutMs, allowWholeTable }) => {
+  handler: async ({ sql, maxRows, timeoutMs, allowWholeTable, fullValues }) => {
     const { instance, scope } = useMcpAuth()
 
-    const result = await runWriteStatement(instance, scope, sql.trim(), { maxRows, timeoutMs, allowWholeTable })
+    const result = await runWriteStatement(instance, scope, sql.trim(), { maxRows, timeoutMs, allowWholeTable, fullValues })
 
     return {
       command: result.command,
@@ -57,11 +63,7 @@ export default defineKindTool({
       ...(result.returning.length > 0 && { returning: result.returning }),
       ...(result.truncatedValues > 0 && {
         truncatedValues: result.truncatedValues,
-        truncatedValuesNote: 'Some returned values were too long to include in full and end with an ellipsis.',
-      }),
-      ...(result.returningTruncated && {
-        returningTruncated: true,
-        note: 'More rows were returned than are shown here. `rowCount` is the real number changed.',
+        truncatedValuesNote: 'Some returned values were clipped at 2000 characters and end with an ellipsis. Pass fullValues: true to get them whole.',
       }),
       ...(!scope.allTables && { scopedToAllowlist: true }),
     }

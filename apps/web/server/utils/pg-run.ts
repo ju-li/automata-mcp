@@ -12,9 +12,12 @@ import type { McpScope } from './mcp-scope'
  * exists and what is still open.
  */
 
-/** How much of one cell is ever returned. A bytea column would otherwise blow the response. */
+/**
+ * How much of one cell is returned by default. A caller that needs a long value
+ * whole passes `fullValues` — clipped is the default because one wide page of
+ * large text or jsonb cells is otherwise enough to blow the response.
+ */
 const MAX_CELL_CHARS = 2000
-const MAX_RETURNING_ROWS = 100
 
 /**
  * EXPLAIN the statement and read the facts the guards need.
@@ -33,7 +36,7 @@ async function planFacts(tx: TransactionSql, statement: string): Promise<PlanFac
  * Shared so the write path reports truncation too: it used to re-implement the
  * loop without the counter, so a clipped RETURNING value came back silently.
  */
-function serialiseRows(rows: Array<Record<string, unknown>>): {
+function serialiseRows(rows: Array<Record<string, unknown>>, fullValues: boolean): {
   rows: Array<Record<string, unknown>>
   truncatedValues: number
 } {
@@ -41,7 +44,7 @@ function serialiseRows(rows: Array<Record<string, unknown>>): {
   const out = rows.map((row) => {
     const serialised: Record<string, unknown> = {}
     for (const [key, value] of Object.entries(row)) {
-      const cell = serialiseCell(value)
+      const cell = serialiseCell(value, fullValues)
       if (cell.truncated) truncatedValues += 1
       serialised[key] = cell.value
     }
@@ -52,7 +55,11 @@ function serialiseRows(rows: Array<Record<string, unknown>>): {
 
 export interface ReadQueryOptions {
   maxRows: number
+  /** 1-based page of `maxRows` rows. */
+  page: number
   timeoutMs: number
+  /** Return every cell whole instead of clipping at `MAX_CELL_CHARS`. */
+  fullValues: boolean
 }
 
 export interface ReadQueryResult {
@@ -158,6 +165,14 @@ export async function runReadQuery(
     // see them at all.
     await unsafeSingle(tx, `DECLARE _mcp NO SCROLL CURSOR FOR ${statement}`)
 
+    // Paging moves the same cursor, never wraps the statement in OFFSET: a wrap
+    // would reopen everything DECLARE CURSOR closes above. Each page is its own
+    // transaction and re-runs the query, so pages line up only under an ORDER BY
+    // on a unique key, and MOVE still reads every row it skips.
+    if (options.page > 1) {
+      await unsafeSingle(tx, `MOVE FORWARD ${(options.page - 1) * options.maxRows} FROM _mcp`)
+    }
+
     // One row past the cap, so `hasMore` is "the page came back full" rather
     // than a count that could be wrong — the same rule as MessagePage.
     const fetched = await unsafeSingle(tx, `FETCH FORWARD ${options.maxRows + 1} FROM _mcp`)
@@ -166,7 +181,7 @@ export async function runReadQuery(
     const hasMore = raw.length > options.maxRows
     const kept = raw.slice(0, options.maxRows)
 
-    const { rows, truncatedValues } = serialiseRows(kept)
+    const { rows, truncatedValues } = serialiseRows(kept, options.fullValues)
 
     return {
       columns: raw.columns?.map(c => c.name) ?? Object.keys(kept[0] ?? {}),
@@ -183,7 +198,6 @@ export interface WriteStatementResult {
   command: string
   rowCount: number
   returning: Array<Record<string, unknown>>
-  returningTruncated: boolean
   /** Cells clipped at the length cap, so a shortened value is never silent. */
   truncatedValues: number
   elapsedMs: number
@@ -193,7 +207,7 @@ export async function runWriteStatement(
   instance: Pick<AppInstance, 'id' | 'dsn'>,
   scope: McpScope,
   statement: string,
-  options: { maxRows: number, timeoutMs: number, allowWholeTable?: boolean },
+  options: { maxRows: number, timeoutMs: number, fullValues: boolean, allowWholeTable?: boolean },
 ): Promise<WriteStatementResult> {
   return await withGuardedStatement(instance, scope, statement, {
     readOnly: false,
@@ -219,14 +233,13 @@ export async function runWriteStatement(
       })
     }
 
-    const serialised = serialiseRows([...rows].slice(0, MAX_RETURNING_ROWS))
+    const serialised = serialiseRows([...rows], options.fullValues)
 
     return {
       command: rows.command,
       rowCount: rows.count,
       returning: serialised.rows,
       truncatedValues: serialised.truncatedValues,
-      returningTruncated: rows.length > MAX_RETURNING_ROWS,
       elapsedMs: Date.now() - startedAt,
     }
   })
@@ -238,13 +251,17 @@ export async function runWriteStatement(
  * `bigint` becomes a string because JSON loses precision above 2^53 — silently,
  * which is the worst way to lose an id. A `Buffer` is described rather than
  * returned: a bytea column is not something a model can use and is very much
- * something that can exceed the response limit on its own.
+ * something that can exceed the response limit on its own. Those three are
+ * serialisation and apply whatever `fullValues` says; only the clipping of long
+ * strings and objects is switched off by it.
  */
-function serialiseCell(value: unknown): { value: unknown, truncated: boolean } {
+function serialiseCell(value: unknown, fullValues: boolean): { value: unknown, truncated: boolean } {
   if (value === null || value === undefined) return { value: null, truncated: false }
   if (typeof value === 'bigint') return { value: value.toString(), truncated: false }
   if (value instanceof Date) return { value: value.toISOString(), truncated: false }
   if (Buffer.isBuffer(value)) return { value: { type: 'bytea', bytes: value.length }, truncated: false }
+
+  if (fullValues) return { value, truncated: false }
 
   if (typeof value === 'string') {
     if (value.length <= MAX_CELL_CHARS) return { value, truncated: false }
