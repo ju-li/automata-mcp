@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useIntervalFn } from '@vueuse/core'
-import { ArrowLeftIcon, MessagesSquareIcon, SendIcon } from '@lucide/vue'
+import { ArrowLeftIcon, MessageSquareTextIcon, MessagesSquareIcon, SendIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
 /**
@@ -85,6 +85,7 @@ const needsDbUrl = computed(() =>
 )
 const dbUrl = ref('')
 const chatsOpen = ref(false)
+const messagesOpen = ref(false)
 
 const { busy, run } = useApiAction()
 const { busy: passwordBusy, run: runPassword } = useApiAction()
@@ -256,11 +257,14 @@ const count = new Intl.NumberFormat()
         All connections
       </NuxtLink>
 
-      <div class="mt-2 flex items-start justify-between gap-4">
+      <div class="group/title mt-2 flex items-start justify-between gap-4">
         <div class="min-w-0">
-          <h1 class="truncate font-heading text-2xl font-semibold">
-            {{ data?.instance.label }}
-          </h1>
+          <InstanceTitle
+            :id="id"
+            :label="data?.instance.label"
+            :can-manage="canManage"
+            @renamed="refresh()"
+          />
           <p class="text-sm text-muted-foreground">
             {{ canManage ? display.hint : `Telegram account · ${display.label.toLowerCase()}` }}
           </p>
@@ -414,7 +418,13 @@ const count = new Intl.NumberFormat()
       </Card>
 
       <div class="grid gap-4 sm:grid-cols-2">
-        <StatCard label="Messages" :value="data?.stats?.messages ?? 0" />
+        <StatCard
+          label="Messages"
+          :value="data?.stats?.messages ?? 0"
+          :icon="MessageSquareTextIcon"
+          :clickable="data?.instance.canReadMessages !== false"
+          @click="messagesOpen = true"
+        />
         <StatCard
           label="Chats"
           :value="data?.stats?.chats ?? 0"
@@ -429,6 +439,13 @@ const count = new Intl.NumberFormat()
         :instance-id="id"
         kind="telegram"
         :total="data?.stats?.chats ?? 0"
+      />
+
+      <MessagesDialog
+        v-model:open="messagesOpen"
+        :instance-id="id"
+        kind="telegram"
+        :total="data?.stats?.messages ?? 0"
       />
 
       <p class="text-xs text-muted-foreground">

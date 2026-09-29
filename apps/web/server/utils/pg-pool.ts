@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import type { Sql } from 'postgres'
 import postgres from 'postgres'
 import type { AppInstance } from './pocketbase'
@@ -11,7 +10,10 @@ import type { AppInstance } from './pocketbase'
  * invalidation that notices a rotated URL, the idle sweep and the LRU ceiling
  * exist once rather than twice: the address usually comes from a user, there is
  * one pool per connection row, a DSN can be rotated at any time, and a busy
- * server holds many at once.
+ * server holds many at once. Those mechanics now live in `keyed-resource.ts`,
+ * which is engine-independent; what stays here is everything that is actually
+ * about Postgres — parsing a DSN, guarding and pinning the host, and the driver
+ * options.
  *
  * The *only* asymmetry between the two callers is the `guard` flag, which
  * `KeyedPoolOptions` documents: true for anything a user typed, false for this
@@ -27,31 +29,9 @@ import type { AppInstance } from './pocketbase'
  * through `$fetch`, which resolves for itself) cannot close today.
  */
 
-const MAX_POOLS = 32
-const POOL_IDLE_MS = 10 * 60_000
 const PER_POOL_MAX = 3
 const CONNECT_TIMEOUT_S = 5
 const DEFAULT_STATEMENT_TIMEOUT_MS = 10_000
-/** How long a host stays approved before the guard is re-run on it. */
-const GUARD_TTL_MS = 60_000
-
-interface Entry {
-  sql: Sql
-  /** Hash of the DSN this pool was opened with. Rotating the DSN rebuilds it. */
-  dsnHash: string
-  /** When the host guard last approved this pool's target. */
-  guardedAt: number
-  lastUsed: number
-}
-
-/**
- * Keyed on the connection id, not on the DSN.
- *
- * A Map keyed on a DSN holds every user's database password as a live string in
- * a structure that shows up in a heap snapshot and in a debugger. The id is
- * enough to find the pool; a hash is enough to notice the DSN changed.
- */
-const pools = new Map<string, Entry>()
 
 export interface PgTarget {
   /** Hostname as written in the DSN. Display, and TLS servername. */
@@ -176,10 +156,6 @@ function canPin(target: PgTarget): boolean {
   return target.address !== '' && !target.address.includes(':')
 }
 
-function hashDsn(dsn: string): string {
-  return createHash('sha256').update(dsn).digest('hex')
-}
-
 export interface KeyedPoolOptions {
   /**
    * Run the host guard and dial the address it approved.
@@ -197,79 +173,46 @@ export interface KeyedPoolOptions {
 }
 
 /**
- * The pool for one `key`, building it if needed.
+ * The Postgres pool for one `key`, building it if needed.
  *
- * `key` namespaces the caller (`pg:<id>`, `evo:<id>`, `evo:default`) so two
- * purposes cannot collide on one instance id, and so a caller can evict its own
- * pool without knowing about anyone else's.
- *
- * Eviction runs here rather than on a timer: an interval outlives nothing
- * useful in a worker the platform stops and starts, and sweeping on the path
- * that already runs is deterministic and needs no lifecycle hook.
+ * The caching, fingerprinting, re-approval timer and eviction are
+ * `keyedResource`'s; this supplies the three Postgres-shaped pieces — how to
+ * open a pool, how to close one, and how to re-check the host. `key`
+ * namespaces the caller (`pg:<id>`, `evo:<id>`, `evo:default`) so two purposes
+ * cannot collide on one instance id.
  */
 export async function keyedPool(key: string, dsn: string, options: KeyedPoolOptions): Promise<Sql> {
-  sweep()
+  return keyedResource<Sql>(key, dsn, {
+    build: async () => {
+      // Unguarded means unpinned: with no approved address there is nothing to
+      // substitute for the hostname, so postgres.js resolves it as usual.
+      const target = options.guard
+        ? await resolvePgTarget(dsn)
+        : { ...describeDsn(dsn), address: '' }
 
-  const dsnHash = hashDsn(dsn)
-  const existing = pools.get(key)
-
-  if (existing && existing.dsnHash === dsnHash) {
-    // Re-approve the host on a timer, not on every call.
-    //
-    // **Not a shortcut — resolving per call would buy nothing.** The pool keeps
-    // established sockets for up to `max_lifetime`, all of them dialled at the
-    // address approved when it was built, so a fresh lookup does not move any
-    // traffic. What re-approving does buy is noticing that a hostname has since
-    // been re-pointed somewhere it may not go, and a minute is soon enough for
-    // that; `assertPublicTarget` throws here if so.
-    //
-    // The address is also deliberately NOT part of the identity. A host with
-    // several A records (Neon, Supabase, any round-robin) returns them in a
-    // different order per query — `verbatim: true` preserves that — so keying on
-    // `resolved[0]` tore down and rebuilt the pool, TLS handshake and all, on
-    // essentially every call to exactly the hosts people point at.
-    if (options.guard && Date.now() - existing.guardedAt > GUARD_TTL_MS) {
-      await resolvePgTarget(dsn)
-      existing.guardedAt = Date.now()
-    }
-    existing.lastUsed = Date.now()
-    return existing.sql
-  }
-
-  // Unguarded means unpinned: with no approved address there is nothing to
-  // substitute for the hostname, so postgres.js resolves it as usual.
-  const target = options.guard
-    ? await resolvePgTarget(dsn)
-    : { ...describeDsn(dsn), address: '' }
-
-  if (existing) {
-    // The DSN was rotated. Drain the old pool in the background: ending it
-    // synchronously would kill queries still in flight on this request and on
-    // any concurrent one.
-    pools.delete(key)
-    void existing.sql.end({ timeout: 5 }).catch(() => {})
-  }
-
-  const sql = postgres(dsn, {
-    ...driverOptions(target, {
-      guard: options.guard,
-      max: options.max ?? PER_POOL_MAX,
-      statementTimeoutMs: options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
-    }),
-    idle_timeout: 30,
-    max_lifetime: 60 * 30,
+      return postgres(dsn, {
+        ...driverOptions(target, {
+          guard: options.guard,
+          max: options.max ?? PER_POOL_MAX,
+          statementTimeoutMs: options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
+        }),
+        idle_timeout: 30,
+        max_lifetime: 60 * 30,
+      })
+    },
+    destroy: sql => sql.end({ timeout: 5 }),
+    // Only a user-supplied address is re-approved; omitting this for our own
+    // configured URL is the `guard` asymmetry above, expressed as the absence
+    // of a callback rather than as a flag `keyed-resource.ts` would have to
+    // understand. `resolvePgTarget` throws if the host has since been
+    // re-pointed somewhere it may not go.
+    ...(options.guard && { reguard: async () => { await resolvePgTarget(dsn) } }),
   })
-
-  pools.set(key, { sql, dsnHash, guardedAt: Date.now(), lastUsed: Date.now() })
-  return sql
 }
 
 /** Drop one pool by key. */
-export async function closeKeyedPool(key: string): Promise<void> {
-  const entry = pools.get(key)
-  if (!entry) return
-  pools.delete(key)
-  await entry.sql.end({ timeout: 5 }).catch(() => {})
+export function closeKeyedPool(key: string): Promise<void> {
+  return closeKeyedResource(key)
 }
 
 /** The pool for a Postgres *connection* — the kind a user configured as one. */
@@ -288,26 +231,6 @@ export function closePgPool(instanceId: string): Promise<void> {
   return closeKeyedPool(`pg:${instanceId}`)
 }
 
-function sweep(): void {
-  const now = Date.now()
-
-  for (const [id, entry] of pools) {
-    if (now - entry.lastUsed > POOL_IDLE_MS) {
-      pools.delete(id)
-      void entry.sql.end({ timeout: 5 }).catch(() => {})
-    }
-  }
-
-  while (pools.size > MAX_POOLS) {
-    let oldest: [string, Entry] | undefined
-    for (const entry of pools) {
-      if (!oldest || entry[1].lastUsed < oldest[1].lastUsed) oldest = entry
-    }
-    if (!oldest) break
-    pools.delete(oldest[0])
-    void oldest[1].sql.end({ timeout: 5 }).catch(() => {})
-  }
-}
 
 /** What a connection says about itself. One query, three callers. */
 export interface PgIdentity {

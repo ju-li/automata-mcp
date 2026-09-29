@@ -92,11 +92,14 @@ async function saveDsn() {
         All connections
       </NuxtLink>
 
-      <div class="mt-2 flex items-start justify-between gap-4">
+      <div class="group/title mt-2 flex items-start justify-between gap-4">
         <div class="min-w-0">
-          <h1 class="truncate font-heading text-2xl font-semibold">
-            {{ data?.instance.label }}
-          </h1>
+          <InstanceTitle
+            :id="id"
+            :label="data?.instance.label"
+            :can-manage="canManage"
+            @renamed="refresh()"
+          />
           <p class="truncate font-mono text-sm text-muted-foreground">
             {{ data?.instance.target || 'No connection string stored' }}
           </p>
@@ -219,14 +222,7 @@ async function saveDsn() {
         </h2>
 
         <div v-if="editingDsn" class="max-w-xl space-y-2 rounded-md border p-4">
-          <Label for="new-dsn">New connection string</Label>
-          <Input
-            id="new-dsn"
-            v-model="newDsn"
-            autocomplete="off"
-            spellcheck="false"
-            placeholder="postgres://user:password@host:5432/database"
-          />
+          <PostgresDsnInput v-model="newDsn" id-prefix="new-dsn" />
           <p class="text-xs text-muted-foreground">
             Checked by connecting before it is saved. Every connector token for this
             connection keeps working — they name the connection, not the credential.

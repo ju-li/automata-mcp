@@ -57,6 +57,10 @@ export type TelegramChatSummary = {
 
 export type TelegramMessage = {
   id: number
+  /** Which chat the message is in. Only on an account-wide read, which spans several. */
+  chatId?: string
+  /** That chat's title, when it has one. Only on an account-wide read. */
+  chatTitle?: string
   fromMe: boolean
   /** The sender's name. Absent for your own messages (see `fromMe`) and where it is unknown. */
   author?: string
@@ -222,26 +226,84 @@ function toChatSummary(row: ChatDbRow): TelegramChatSummary {
   }
 }
 
+/** Which column the chats table is ordered by. Named for the shared UI, not for the schema. */
+export type TelegramChatSortKey = 'name' | 'number' | 'type' | 'last'
+
+export interface TelegramChatListOptions {
+  take: number
+  skip: number
+  allowedChatIds?: string[]
+  /** Matched against title, username and id. A predicate in the SQL, never a post-filter. */
+  q?: string
+  sort?: TelegramChatSortKey
+  dir?: 'asc' | 'desc'
+}
+
 /**
- * Synced chats, most recently active first. `hasMore` comes from over-fetching
- * one row, never from a count, like every other listing here.
+ * Synced chats, most recently active first by default.
+ *
+ * `hasMore` comes from over-fetching one row, never from a count, like every
+ * other listing here — `total` rides along beside it for a table that wants to
+ * say how many matched, and is absent for a page past the end.
+ *
+ * Search and ordering are predicates in this query rather than work done on rows
+ * already read: the same rule chat scope follows, and what lets a page be one
+ * page of the whole account rather than of whatever happened to be fetched.
  */
 export async function listTelegramChats(
   instance: AppInstance,
-  options: { take: number, skip: number, allowedChatIds?: string[] },
-): Promise<{ chats: TelegramChatSummary[], hasMore: boolean }> {
+  options: TelegramChatListOptions,
+): Promise<{ chats: TelegramChatSummary[], hasMore: boolean, total?: number }> {
   const sql = await telegramDbFor(instance)
   const sessionId = sessionIdOf(instance)
 
-  const rows = await guarded('list chats', () => sql<ChatDbRow[]>`
-    SELECT ${chatColumns(sql)}
+  const needle = options.q?.trim()
+  const pattern = needle ? `%${escapeLike(needle)}%` : undefined
+
+  const rows = await guarded('list chats', () => sql<Array<ChatDbRow & { total: string }>>`
+    SELECT ${chatColumns(sql)}, COUNT(*) OVER () AS total
     FROM telegram.chats
     WHERE session_id = ${sessionId}
       ${options.allowedChatIds ? sql`AND chat_id = ANY(${options.allowedChatIds}::bigint[])` : sql``}
-    ORDER BY last_message_at DESC NULLS LAST, chat_id DESC
+      ${pattern === undefined
+        ? sql``
+        : sql`AND (title ILIKE ${pattern} OR username ILIKE ${pattern} OR chat_id::text ILIKE ${pattern})`}
+    ORDER BY ${telegramChatOrdering(sql, options.sort, options.dir)}
     LIMIT ${options.take + 1} OFFSET ${options.skip}`)
 
-  return { chats: rows.slice(0, options.take).map(toChatSummary), hasMore: rows.length > options.take }
+  const total = Number(rows[0]?.total)
+
+  return {
+    chats: rows.slice(0, options.take).map(toChatSummary),
+    hasMore: rows.length > options.take,
+    total: Number.isFinite(total) ? total : undefined,
+  }
+}
+
+/**
+ * The ORDER BY for the chats table.
+ *
+ * `NULLS LAST` in **both** directions on purpose: a row with nothing in the
+ * sorted column sinks either way, because flipping a sort to bring the blanks to
+ * the top is never what anyone wanted. The `chat_id` tiebreaker is what stops a
+ * row sharing a sort value from landing on two pages or on neither.
+ */
+function telegramChatOrdering(sql: Sql, sort: TelegramChatSortKey = 'last', dir: 'asc' | 'desc' = sort === 'last' ? 'desc' : 'asc') {
+  const direction = dir === 'asc' ? sql`ASC` : sql`DESC`
+
+  switch (sort) {
+    case 'name':
+      // The displayed name, not the column: the picker falls back to the
+      // username and then to the id, and sorting on a bare title would scatter
+      // every untitled chat away from where it is shown.
+      return sql`lower(coalesce(title, username, chat_id::text)) ${direction} NULLS LAST, chat_id DESC`
+    case 'number':
+      return sql`username ${direction} NULLS LAST, chat_id DESC`
+    case 'type':
+      return sql`(type NOT IN ('private', 'bot')) ${direction} NULLS LAST, chat_id DESC`
+    case 'last':
+      return sql`last_message_at ${direction} NULLS LAST, chat_id DESC`
+  }
 }
 
 /** One synced chat, or undefined. The caller has already checked scope. */
@@ -271,11 +333,12 @@ export type TelegramPickerChat = {
 
 export async function listTelegramChatsForPicker(
   instance: AppInstance,
-  options: { take: number, skip: number },
-): Promise<{ chats: TelegramPickerChat[], hasMore: boolean }> {
-  const { chats, hasMore } = await listTelegramChats(instance, options)
+  options: TelegramChatListOptions,
+): Promise<{ chats: TelegramPickerChat[], hasMore: boolean, total?: number }> {
+  const { chats, hasMore, total } = await listTelegramChats(instance, options)
   return {
     hasMore,
+    total,
     chats: chats.map(chat => ({
       jid: chat.chatId,
       name: chat.title || (chat.username ? `@${chat.username}` : chat.chatId),
@@ -289,7 +352,17 @@ export async function listTelegramChatsForPicker(
 }
 
 export interface TelegramPageOptions {
-  chatId: string
+  /**
+   * The one chat to read.
+   *
+   * Absent means every synced chat, which exists for the **session** surface —
+   * the dashboard's message table. Every MCP tool passes one: `chat_id` is the
+   * scope predicate, and a token scoped to a set of chats resolves them through
+   * `scopedTelegramChatIds` before it gets here.
+   */
+  chatId?: string
+  /** The only chats this token may reach. Omit for an all-chats token. */
+  allowedChatIds?: string[]
   limit: number
   /** 1-based, counting back from the newest. */
   page: number
@@ -298,10 +371,16 @@ export interface TelegramPageOptions {
   topicId?: number
   includeDeleted: boolean
   includeService: boolean
+  /** Every term must appear in the text. Already split, not yet escaped. */
+  terms?: string[]
+  /** Which end of the range the first page comes from. Defaults to newest first. */
+  order?: 'newest' | 'oldest'
 }
 
 interface MessageDbRow {
   message_id: string
+  chat_id?: string
+  chat_title?: string | null
   sender_id: string | null
   from_me: boolean
   date: Date
@@ -334,32 +413,51 @@ export async function listTelegramMessagesPage(
   instance: AppInstance,
   options: TelegramPageOptions,
 ): Promise<{ messages: TelegramMessage[], hasMore: boolean, total?: number, excluded: { deleted: number, service: number } }> {
-  assertTelegramChatId(options.chatId)
+  if (options.chatId !== undefined) assertTelegramChatId(options.chatId)
   const sql = await telegramDbFor(instance)
   const sessionId = sessionIdOf(instance)
   const since = parseDateBound(options.since, 'since')
   const until = parseDateBound(options.until, 'until')
 
+  const patterns = options.terms?.length
+    ? options.terms.map(term => `%${escapeLike(term)}%`)
+    : undefined
+
+  // Everything that bounds the set, shared by the page and the excluded counts
+  // so the two describe the same window — the scope predicates included, because
+  // a count taken over a wider set than the page is a number about someone
+  // else's messages.
   const window = sql`
+    ${options.chatId === undefined ? sql`` : sql`AND m.chat_id = ${options.chatId}`}
+    ${options.allowedChatIds ? sql`AND m.chat_id = ANY(${options.allowedChatIds}::bigint[])` : sql``}
+    ${patterns === undefined ? sql`` : sql`AND m.text ILIKE ALL (${patterns}::text[])`}
     ${since ? sql`AND m.date >= ${since}` : sql``}
     ${until ? sql`AND m.date <= ${until}` : sql``}
     ${options.topicId === undefined ? sql`` : sql`AND m.topic_id = ${options.topicId}`}`
 
+  // The tiebreaker travels with the direction; reversing one half of the pair
+  // puts a row sharing a timestamp on two pages or on neither.
+  const ordering = options.order === 'oldest'
+    ? sql`m.date ASC, m.message_id ASC`
+    : sql`m.date DESC, m.message_id DESC`
+
   const [rows, counts] = await Promise.all([
     guarded('read messages', () => sql<Array<MessageDbRow & { total: string }>>`
-      SELECT m.message_id::text AS message_id, m.sender_id::text AS sender_id, m.from_me, m.date, m.edit_date,
+      SELECT m.chat_id::text AS chat_id, c.title AS chat_title,
+             m.message_id::text AS message_id, m.sender_id::text AS sender_id, m.from_me, m.date, m.edit_date,
              m.text, m.media_type, m.reply_to_id::text AS reply_to_id, m.topic_id::text AS topic_id,
              m.fwd_from, m.service_action, m.grouped_id::text AS grouped_id, m.reactions, m.deleted_at,
              u.first_name, u.last_name, u.username AS user_username, sc.title AS sender_chat_title,
              COUNT(*) OVER () AS total
       FROM telegram.messages m
+      LEFT JOIN telegram.chats c ON c.session_id = m.session_id AND c.chat_id = m.chat_id
       LEFT JOIN telegram.users u ON u.session_id = m.session_id AND u.user_id = m.sender_id
       LEFT JOIN telegram.chats sc ON sc.session_id = m.session_id AND sc.chat_id = m.sender_id AND m.sender_id < 0
-      WHERE m.session_id = ${sessionId} AND m.chat_id = ${options.chatId}
+      WHERE m.session_id = ${sessionId}
         ${window}
         ${options.includeDeleted ? sql`` : sql`AND m.deleted_at IS NULL`}
         ${options.includeService ? sql`` : sql`AND m.service_action IS NULL`}
-      ORDER BY m.date DESC, m.message_id DESC
+      ORDER BY ${ordering}
       LIMIT ${options.limit + 1} OFFSET ${(options.page - 1) * options.limit}`),
     options.includeDeleted && options.includeService
       ? Promise.resolve([{ deleted: '0', service: '0' }])
@@ -367,7 +465,7 @@ export async function listTelegramMessagesPage(
           SELECT count(*) FILTER (WHERE m.deleted_at IS NOT NULL) AS deleted,
                  count(*) FILTER (WHERE m.deleted_at IS NULL AND m.service_action IS NOT NULL) AS service
           FROM telegram.messages m
-          WHERE m.session_id = ${sessionId} AND m.chat_id = ${options.chatId}
+          WHERE m.session_id = ${sessionId}
             ${window}`),
   ])
 
@@ -453,6 +551,10 @@ function toMessage(row: MessageDbRow): TelegramMessage {
   const forward = row.fwd_from
   return {
     id: Number(row.message_id),
+    // Only the account-wide read selects these; one chat's page already knows
+    // which chat it asked for and does not repeat it on every row.
+    ...(row.chat_id && { chatId: row.chat_id }),
+    ...(row.chat_title && { chatTitle: row.chat_title }),
     fromMe: row.from_me,
     ...authorOf(row),
     ...(row.sender_id && { senderId: row.sender_id }),

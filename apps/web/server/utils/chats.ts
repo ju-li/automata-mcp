@@ -1,7 +1,7 @@
 import type { AppInstance } from './pocketbase'
 import type { EvolutionClient } from './evolution'
 import type { MentionDirectory } from './mentions'
-import { applyMentions, authorName, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
+import { applyMentions, authorName, contactsToDirectory, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
 import { listMessagesPage, senderOf } from './evolution-db'
 
 /**
@@ -106,7 +106,75 @@ export interface ChatPage {
 }
 
 /**
- * Recent conversations, newest activity first.
+ * The account's whole conversation listing, memoised per account.
+ *
+ * Evolution's `findChats` takes no search term and no ordering, so a table that
+ * searches and sorts the *whole* account cannot push either down to it. The
+ * listing is therefore walked once into this cache and filtered, sorted and
+ * sliced here — which is also strictly cheaper than what paging used to cost:
+ * naming the rows pulls Evolution's entire contact table, and that was paid once
+ * per page while walking `skip`. Now it is paid once per listing.
+ *
+ * Successes only, as `contactDirectory()` does, and concurrent callers share one
+ * walk — a dashboard opening its chats table while the scope picker loads would
+ * otherwise start two.
+ *
+ * The TTL is short because the order is "last activity", which live traffic
+ * reshuffles: long enough that paging and re-sorting cost nothing, short enough
+ * that a new conversation appears without a reload.
+ */
+const CHAT_LISTING_TTL_MS = 60_000
+/** One request to Evolution. Large on purpose — see `listChats`. */
+const CHAT_LISTING_PAGE = 2000
+/**
+ * The most rows the walk will hold. A ceiling on memory and on how long a cold
+ * cache can take, not a statement about the account: hitting it sets
+ * `truncated`, which the caller must report rather than present as the end.
+ */
+const CHAT_LISTING_CAP = 10_000
+
+interface ChatListing {
+  chats: ChatSummary[]
+  /**
+   * The walk stopped at its cap: the account holds more conversations than this.
+   *
+   * Deliberately separate from `failed` below — "more than I will hold" and "I
+   * could not finish asking" need different words in front of a user, and one
+   * flag covering both would have to pick the wrong one half the time.
+   */
+  truncated: boolean
+  /** A request to Evolution failed, so the listing may be short. Never cached. */
+  failed: boolean
+}
+
+const chatListingCache = new Map<string, { expiresAt: number, listing: ChatListing }>()
+const chatListingFetches = new Map<string, Promise<{ listing: ChatListing, cacheable: boolean }>>()
+
+async function chatListing(instance: AppInstance): Promise<ChatListing> {
+  const cached = chatListingCache.get(instance.id)
+  if (cached && Date.now() < cached.expiresAt) return cached.listing
+
+  const inFlight = chatListingFetches.get(instance.id)
+  if (inFlight) return (await inFlight).listing
+
+  const fetching = buildChatListing(instance)
+    .then((result) => {
+      if (result.cacheable) {
+        chatListingCache.set(instance.id, {
+          expiresAt: Date.now() + CHAT_LISTING_TTL_MS,
+          listing: result.listing,
+        })
+      }
+      return result
+    })
+    .finally(() => chatListingFetches.delete(instance.id))
+
+  chatListingFetches.set(instance.id, fetching)
+  return (await fetching).listing
+}
+
+/**
+ * Walk `findChats` to the end, then name what came back.
  *
  * Evolution builds this listing from its own tables, which are seeded by the
  * history WhatsApp hands over at pairing and then kept current by live traffic.
@@ -114,48 +182,61 @@ export interface ChatPage {
  * shows only conversations active since — which is one reason the UI also lets a
  * number be added by hand. Returning nothing is never an error.
  *
- * The listing alone cannot name a chat (see `EvolutionChatRow`), so names are
- * enriched from Evolution's contact table and, when a group would otherwise
- * render as a raw id, from its group listing. **That enrichment is the cost of a
- * page, not of a row:** `fetchContacts` pulls Evolution's entire contact table
- * every call, because the endpoint filters to one JID and not to a set. Paging in
- * small increments therefore costs far more than one large page — prefer raising
- * `take` over walking `skip`.
+ * The order is `updatedAt DESC`, which live traffic reshuffles between requests,
+ * so pages are deduped by JID rather than trusted to be disjoint — the same rule
+ * the dialog used to apply in the browser.
  *
- * 2.3.7 maps `take` to `LIMIT` and `skip` to `OFFSET` on the raw query behind
- * `findChats`, and its route validator passes both through. The order is
- * `updatedAt DESC`, which live traffic reshuffles, so a caller accumulating pages
- * has to dedupe by JID rather than trust the offsets to be disjoint.
+ * A failure is never cached: the first page failing is indistinguishable from a
+ * freshly paired account and must not break the picker, and a later page failing
+ * leaves a short listing that would otherwise be served as complete for a minute.
  */
-export async function listChats(instance: AppInstance, query: ChatQuery = {}): Promise<ChatPage> {
+async function buildChatListing(instance: AppInstance): Promise<{ listing: ChatListing, cacheable: boolean }> {
   const evolution = evolutionClientForInstance(instance)
 
-  const { take = 200, skip = 0 } = query
+  interface ChatDraft {
+    jid: string
+    localPart: string
+    isGroup: boolean
+    chatName?: string
+    profilePicUrl?: string
+    updatedAt?: string
+    lastMessageAt?: string
+    unreadCount: number
+    lastMessagePreview?: string
+  }
 
-  const rows = await evolution<EvolutionChatRow[]>(
-    `/chat/findChats/${encodeURIComponent(instance.name)}`,
-    { method: 'POST', body: { take, skip } },
-  ).catch((error) => {
-    // The first page must not break the picker or the MCP tool when Evolution is
-    // down — an empty list is already the honest answer for a freshly paired
-    // account. A later page was asked for by a deliberate click, and swallowing
-    // that failure would render as the end of the list instead.
-    if (skip > 0) throw error
-    return [] as EvolutionChatRow[]
-  })
+  const byJid = new Map<string, ChatDraft>()
+  let truncated = false
+  let failed = false
 
-  if (!Array.isArray(rows)) return { chats: [], hasMore: false }
+  for (let skip = 0; ; skip += CHAT_LISTING_PAGE) {
+    let rows: EvolutionChatRow[] | undefined
+    try {
+      rows = await evolution<EvolutionChatRow[]>(
+        `/chat/findChats/${encodeURIComponent(instance.name)}`,
+        { method: 'POST', body: { take: CHAT_LISTING_PAGE, skip } },
+      )
+    }
+    catch (error) {
+      console.error('[chats] could not list conversations:', error)
+      rows = undefined
+    }
 
-  // Counted before the filter below: a row dropped for want of a JID must not be
-  // able to report a full page as the end of the listing.
-  const hasMore = rows.length >= take
+    if (!Array.isArray(rows)) {
+      // Keep whatever earlier pages produced and do not cache it. Callers decide
+      // what a short listing means: the table says so and shows what it has, and
+      // `listChats` refuses a page past the first rather than letting a failure
+      // read as the end of the list.
+      failed = true
+      break
+    }
 
-  const drafts = rows
-    .filter(row => typeof row?.remoteJid === 'string')
-    .map((row) => {
-      const jid = row.remoteJid!
+    for (const row of rows) {
+      if (typeof row?.remoteJid !== 'string') continue
+      const jid = row.remoteJid
+      if (byJid.has(jid)) continue
       const localPart = jid.split('@')[0]!
-      return {
+      byJid.set(jid, {
         jid,
         localPart,
         isGroup: jid.endsWith('@g.us'),
@@ -168,8 +249,17 @@ export async function listChats(instance: AppInstance, query: ChatQuery = {}): P
         // edited caption previews as blank otherwise. A control record has no
         // payload once classified, so it previews blank either way.
         lastMessagePreview: previewOf(classifyContent(row.lastMessage?.message).payload),
-      }
-    })
+      })
+    }
+
+    if (rows.length < CHAT_LISTING_PAGE) break
+    if (byJid.size >= CHAT_LISTING_CAP) {
+      truncated = true
+      break
+    }
+  }
+
+  const drafts = [...byJid.values()]
 
   // Only pay for the group listing when it can change an answer — every group
   // that the chat rows alone already name is a round trip per group we skip.
@@ -205,7 +295,132 @@ export async function listChats(instance: AppInstance, query: ChatQuery = {}): P
     }
   })
 
-  return { chats, hasMore }
+  return { listing: { chats, truncated, failed }, cacheable: !failed }
+}
+
+/**
+ * Recent conversations, newest activity first.
+ *
+ * Kept for the token scope picker and the `list-chats` tool, which page with
+ * `take`/`skip` and want Evolution's own order. A slice of the memoised listing,
+ * so it and the dashboard's table can never disagree about what exists.
+ */
+export async function listChats(instance: AppInstance, query: ChatQuery = {}): Promise<ChatPage> {
+  const { take = 200, skip = 0 } = query
+  const { chats, failed } = await chatListing(instance)
+
+  // An empty first page is already the honest answer for a freshly paired
+  // account, and must not break the picker or the MCP tool when Evolution is
+  // down. A page past the first was asked for by a deliberate click, and a short
+  // listing served there would render as the end of the list instead.
+  if (failed && skip > 0) {
+    throw createError({
+      statusCode: 503,
+      statusMessage: 'Listing conversations is temporarily unavailable',
+    })
+  }
+
+  return {
+    chats: chats.slice(skip, skip + take),
+    hasMore: skip + take < chats.length,
+  }
+}
+
+/** Which column the chats table is ordered by. */
+export type ChatSortKey = 'name' | 'number' | 'type' | 'last'
+
+export interface ChatTableQuery {
+  /** Matched against name, JID and number. Case-insensitive, substring. */
+  q?: string
+  sort?: ChatSortKey
+  dir?: 'asc' | 'desc'
+  limit?: number
+  /** 1-based. */
+  page?: number
+}
+
+export interface ChatTablePage extends ChatPage {
+  /** Conversations matching `q`, across the whole listing — not on this page. */
+  total: number
+  /**
+   * The listing itself is capped — the account holds more than it will hold.
+   *
+   * Deliberately separate from `hasMore`: "there is another page of what I
+   * have" and "there is more than I have" are different statements, and
+   * collapsing them offers a next page that comes back empty.
+   */
+  truncated: boolean
+  /**
+   * Evolution could not be asked for all of it, so the table may be short.
+   *
+   * Not the same as the request failing — the page in hand is real. It is the
+   * difference between "this is everything" and "this is what I could get".
+   */
+  incomplete: boolean
+}
+
+/**
+ * One page of the chats table: searched, sorted and sliced over the whole
+ * listing, here rather than in the browser.
+ */
+export async function listChatsPage(instance: AppInstance, query: ChatTableQuery = {}): Promise<ChatTablePage> {
+  const { q, sort = 'last', dir = sort === 'last' ? 'desc' : 'asc', limit = 100, page = 1 } = query
+
+  const { chats, truncated, failed } = await chatListing(instance)
+
+  const needle = q?.trim().toLowerCase()
+  const matching = needle
+    ? chats.filter(chat =>
+        chat.name.toLowerCase().includes(needle)
+        || chat.jid.toLowerCase().includes(needle)
+        || (chat.number?.toLowerCase().includes(needle) ?? false),
+      )
+    : chats
+
+  const sorted = [...matching].sort(chatComparator(sort, dir))
+  const skip = (page - 1) * limit
+
+  return {
+    chats: sorted.slice(skip, skip + limit),
+    hasMore: skip + limit < sorted.length,
+    total: sorted.length,
+    truncated,
+    incomplete: failed,
+  }
+}
+
+/**
+ * Rows with nothing in the sorted column sink to the bottom in **both**
+ * directions. Flipping the sort to bring the blanks to the top is never what
+ * anyone wanted.
+ */
+function missingLast<T>(a: T | undefined, b: T | undefined, cmp: (x: T, y: T) => number, dir: number): number {
+  if (a === undefined && b === undefined) return 0
+  if (a === undefined) return 1
+  if (b === undefined) return -1
+  return dir * cmp(a, b)
+}
+
+function chatComparator(sort: ChatSortKey, dir: 'asc' | 'desc'): (a: ChatSummary, b: ChatSummary) => number {
+  const sign = dir === 'asc' ? 1 : -1
+  const byName = (a: ChatSummary, b: ChatSummary) => a.name.localeCompare(b.name)
+  const activity = (chat: ChatSummary) => {
+    const iso = chat.lastMessageAt ?? chat.updatedAt
+    if (!iso) return undefined
+    const ms = Date.parse(iso)
+    return Number.isNaN(ms) ? undefined : ms
+  }
+
+  switch (sort) {
+    case 'name':
+      return (a, b) => sign * byName(a, b)
+    case 'number':
+      return (a, b) => missingLast(a.number, b.number, (x, y) => x.localeCompare(y, undefined, { numeric: true }), sign) || byName(a, b)
+    case 'type':
+      return (a, b) => sign * (Number(a.isGroup) - Number(b.isGroup)) || byName(a, b)
+    case 'last':
+      return (a, b) => missingLast(activity(a), activity(b), (x, y) => x - y, sign) || byName(a, b)
+  }
 }
 
 export interface MessageQuery {
@@ -363,6 +578,155 @@ export async function listMessages(
   }
 }
 
+/** One message on the account-wide table, carrying the chat it belongs to. */
+export interface AccountMessage extends ChatMessage {
+  chatJid: string
+  chatName: string
+}
+
+export interface AccountMessageQuery {
+  /** Page size. */
+  limit?: number
+  /** 1-based, counting back from the newest. */
+  page?: number
+  /** Every term must appear in the body. Matched in SQL, across the account. */
+  terms?: string[]
+  /** Which end to start from. The only ordering this table offers — see below. */
+  order?: 'newest' | 'oldest'
+}
+
+export interface AccountMessagePage {
+  messages: AccountMessage[]
+  hasMore: boolean
+  total?: number
+  protocolMessagesExcluded: number
+  /** Always true. Stated rather than assumed — see `listAccountMessages`. */
+  reactionsExcluded: boolean
+}
+
+/**
+ * Every message on the account, newest first, as one searchable page.
+ *
+ * The dashboard's table. Search and paging are SQL, across the whole account —
+ * a message table can hold six figures of rows, so neither can be done over a
+ * loaded pool. Ordering is by time only, and that is a limit rather than an
+ * omission: a sender's and a chat's *name* are resolved after the query, from
+ * Evolution's contact table and its group subjects, so an ORDER BY can only
+ * reach the raw JID and a name sort would quietly order one page.
+ *
+ * Reactions are left out, as the read tools leave them out: Evolution stores
+ * every emoji as its own `Message` row, and in an active account they are a
+ * large share of the table and almost never what someone is looking for. Said
+ * out loud in `reactionsExcluded`, because a table that silently drops a class
+ * of row reads as a complete one.
+ *
+ * Naming is best effort and deliberately cheap: contacts and group subjects,
+ * both already memoised, and **no** per-group participant lookup. A page of a
+ * hundred rows can span a hundred groups, and `search-messages` already
+ * documents that pass as the expensive one. An unresolved sender falls back to
+ * `pushName` through `authorName`, which still refuses a number or a JID as a
+ * name.
+ */
+export async function listAccountMessages(
+  instance: AppInstance,
+  query: AccountMessageQuery = {},
+): Promise<AccountMessagePage> {
+  const { limit = 100, page = 1, terms, order = 'newest' } = query
+
+  const { records, hasMore, total } = await listMessagesPage(instance, {
+    limit,
+    page,
+    terms,
+    order,
+    includeReactions: false,
+  })
+
+  const classified = records.map(row => ({
+    row,
+    content: classifyContent(row.message, row.messageType ?? undefined),
+  }))
+  const protocolMessagesExcluded = classified.filter(({ content }) => content.noise).length
+
+  const drafts = classified
+    .filter(({ content }) => !content.noise)
+    .map(({ row, content }) => ({
+      id: row.key?.id,
+      chatJid: row.key?.remoteJid ?? '',
+      fromMe: Boolean(row.key?.fromMe),
+      sender: senderOf(row),
+      timestamp: isoFromEpochSeconds(row.messageTimestamp),
+      type: content.type ?? undefined,
+      text: previewOf(content.payload),
+      editOf: content.editOf,
+      unreadable: content.unreadable,
+      mentioned: row.mentioned?.length
+        ? mentionedJidsOf(row.mentioned)
+        : mentionedJidsOf(nestedContextInfo(content.payload)),
+    }))
+
+  const names = await accountNames(instance, drafts.map(draft => draft.chatJid))
+
+  return {
+    messages: drafts.map(draft => ({
+      id: draft.id,
+      chatJid: draft.chatJid,
+      chatName: names.chatName(draft.chatJid),
+      fromMe: draft.fromMe,
+      author: authorName({ fromMe: draft.fromMe, ...draft.sender }, names.directory),
+      timestamp: draft.timestamp,
+      type: draft.type,
+      text: names.directory ? applyMentions(draft.text, draft.mentioned, names.directory) : draft.text,
+      ...(draft.editOf && { editOf: draft.editOf }),
+      ...(draft.unreadable && { unreadable: draft.unreadable }),
+    })),
+    hasMore,
+    total,
+    protocolMessagesExcluded,
+    reactionsExcluded: true,
+  }
+}
+
+/**
+ * Chat labels and a mention directory for a page that spans many chats.
+ *
+ * Both halves come from caches this account already keeps warm, and both
+ * degrade: a disconnected account resolves nothing and must still return its
+ * messages, with a bare JID as the label. A raw id is honest; a wrong name is
+ * the failure `mentions.ts` exists to prevent.
+ */
+async function accountNames(
+  instance: AppInstance,
+  chatJids: string[],
+): Promise<{ chatName: (jid: string) => string, directory?: MentionDirectory }> {
+  const localPart = (jid: string) => jid.split('@')[0] || jid
+
+  try {
+    const evolution = evolutionClientForInstance(instance)
+    const needsGroups = chatJids.some(jid => jid.endsWith('@g.us'))
+
+    const [contacts, groups] = await Promise.all([
+      contactDirectory(instance, evolution),
+      needsGroups ? fetchGroups(instance, evolution) : Promise.resolve(emptyGroups),
+    ])
+
+    return {
+      directory: contactsToDirectory(contacts),
+      // Same precedence as `listChats`: a group's subject is authoritative, a
+      // person's saved contact name is what they expect to read.
+      chatName: (jid) => {
+        const contact = contacts.get(jid)
+        return jid.endsWith('@g.us')
+          ? groups.get(jid)?.subject ?? contact?.name ?? localPart(jid)
+          : contact?.name ?? localPart(jid)
+      },
+    }
+  }
+  catch (error) {
+    console.error('[messages] could not resolve names:', error)
+    return { chatName: localPart }
+  }
+}
+
 /**
  * Names for everyone a page refers to — senders and mentions together.
  *
@@ -437,6 +801,97 @@ export async function contactDirectory(
 
   contactFetches.set(instance.id, fetching)
   return fetching
+}
+
+/** One row of the contacts table. */
+export interface ContactSummary {
+  jid: string
+  name: string
+  /** Bare phone number of a personal contact. Groups and LIDs do not have one. */
+  number?: string
+  isGroup: boolean
+  profilePicUrl?: string
+}
+
+export type ContactSortKey = 'name' | 'number'
+
+export interface ContactTableQuery {
+  /** Matched against name, JID and number. Case-insensitive, substring. */
+  q?: string
+  sort?: ContactSortKey
+  dir?: 'asc' | 'desc'
+  limit?: number
+  /** 1-based. */
+  page?: number
+}
+
+export interface ContactTablePage {
+  contacts: ContactSummary[]
+  hasMore: boolean
+  /** Contacts matching `q`, across the whole table — not on this page. */
+  total: number
+}
+
+/**
+ * One page of the account's contacts: searched, sorted and sliced over the
+ * whole table.
+ *
+ * `findContacts` has no filter for a set of JIDs and no ordering, so it returns
+ * everything or nothing — which is why `contactDirectory()` memoises it, and why
+ * searching and sorting happen here. No second fetch path: this reads the same
+ * cached map every name lookup in the app already reads.
+ *
+ * Unlike the chats listing, the number on the dashboard card and this table count
+ * the same Evolution table, so a shortfall here is not expected and is not
+ * explained away.
+ */
+export async function listContacts(
+  instance: AppInstance,
+  query: ContactTableQuery = {},
+): Promise<ContactTablePage> {
+  const { q, sort = 'name', dir = 'asc', limit = 100, page = 1 } = query
+
+  const evolution = evolutionClientForInstance(instance)
+  const contacts = await contactDirectory(instance, evolution)
+
+  const rows: ContactSummary[] = [...contacts].map(([jid, info]) => {
+    const localPart = jid.split('@')[0] || jid
+    return {
+      jid,
+      name: info.name ?? localPart,
+      // Only a real phone-number JID carries a number. A LID is a per-user
+      // identity with no country code to read off it, and presenting one as a
+      // phone number is the misattribution `mentions.ts` exists to prevent.
+      number: jid.endsWith('@s.whatsapp.net') ? localPart : undefined,
+      isGroup: jid.endsWith('@g.us'),
+      profilePicUrl: info.profilePicUrl,
+    }
+  })
+
+  const needle = q?.trim().toLowerCase()
+  const matching = needle
+    ? rows.filter(row =>
+        row.name.toLowerCase().includes(needle)
+        || row.jid.toLowerCase().includes(needle)
+        || (row.number?.includes(needle) ?? false),
+      )
+    : rows
+
+  const sign = dir === 'asc' ? 1 : -1
+  const byName = (a: ContactSummary, b: ContactSummary) => a.name.localeCompare(b.name)
+  const sorted = [...matching].sort((a, b) =>
+    sort === 'number'
+      ? missingLast(a.number, b.number, (x, y) => x.localeCompare(y, undefined, { numeric: true }), sign) || byName(a, b)
+      : sign * byName(a, b),
+  )
+
+  const skip = (page - 1) * limit
+
+  return {
+    contacts: sorted.slice(skip, skip + limit),
+    hasMore: skip + limit < sorted.length,
+    total: sorted.length,
+  }
 }
 
 /**

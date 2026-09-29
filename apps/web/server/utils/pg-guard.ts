@@ -73,6 +73,17 @@ const CATALOG_DENYLIST = new Set([
   'pg_logical_slot_get_changes', 'pg_logical_slot_peek_changes',
   'pg_create_logical_replication_slot', 'pg_drop_replication_slot',
   'set_config', 'pg_sleep', 'pg_sleep_for', 'pg_sleep_until',
+  // Session-scoped locks outlive the request. `pg-pool.ts` hands the same
+  // connection to the next caller, so a `pg_advisory_lock` taken here is still
+  // held by whoever gets that socket next — indefinitely, since nothing in this
+  // app ever unlocks it. The `_xact_` variants release at commit and would be
+  // harmless, but they are denied too: telling the two apart in expression text
+  // is exactly the kind of near-miss this list exists to avoid.
+  'pg_advisory_lock', 'pg_advisory_lock_shared',
+  'pg_advisory_xact_lock', 'pg_advisory_xact_lock_shared',
+  'pg_try_advisory_lock', 'pg_try_advisory_lock_shared',
+  'pg_try_advisory_xact_lock', 'pg_try_advisory_xact_lock_shared',
+  'pg_advisory_unlock', 'pg_advisory_unlock_shared', 'pg_advisory_unlock_all',
   'dblink', 'dblink_exec', 'dblink_connect',
   'query_to_xml', 'query_to_xml_and_xmlschema', 'database_to_xml',
 ])

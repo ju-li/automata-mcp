@@ -12,7 +12,8 @@ import { z } from 'zod'
  */
 export default defineKindTool({
   name: 'run-statement',
-  kind: 'postgres',
+  kind: ['postgres'],
+  group: 'sql',
   title: 'Run a data-modifying SQL statement',
   description:
     'Run one INSERT, UPDATE, DELETE or MERGE and report how many rows it changed. '
@@ -53,7 +54,7 @@ export default defineKindTool({
   handler: async ({ sql, maxRows, timeoutMs, allowWholeTable, fullValues }) => {
     const { instance, scope } = useMcpAuth()
 
-    const result = await runWriteStatement(instance, scope, sql.trim(), { maxRows, timeoutMs, allowWholeTable, fullValues })
+    const result = await runSqlWrite(instance, scope, sql.trim(), { maxRows, timeoutMs, allowWholeTable, fullValues })
 
     return {
       command: result.command,

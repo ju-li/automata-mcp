@@ -5,7 +5,8 @@
  */
 export default defineKindTool({
   name: 'get-database-info',
-  kind: 'postgres',
+  kind: ['postgres'],
+  group: 'sql',
   title: 'Check the database connection',
   description:
     'Report whether this connector can reach its database, which server version '
@@ -24,15 +25,17 @@ export default defineKindTool({
   handler: async () => {
     const { instance, scope } = useMcpAuth()
 
-    const identity = await pgIdentity(await pgFor(instance))
+    const identity = await sqlIdentity(instance)
 
     return {
       connected: true,
-      serverVersion: identity?.serverVersion ?? 'unknown',
-      database: identity?.database ?? instance.pg_database ?? 'unknown',
+      // Carries the engine's own name, because this tool serves more than one
+      // and writing "PostgreSQL" here would be a lie on any other connection.
+      serverVersion: identity?.server ?? 'unknown',
+      database: identity?.database ?? instance.db_database ?? 'unknown',
       role: identity?.currentUser ?? 'unknown',
-      host: instance.pg_host,
-      port: instance.pg_port,
+      host: instance.db_host,
+      port: instance.db_port,
       allTables: scope.allTables,
       ...(!scope.allTables && { tablesInScope: scope.tableNames }),
       canWrite: scope.allTools || scope.toolNames.includes('run-statement'),

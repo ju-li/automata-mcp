@@ -7,7 +7,8 @@ import { z } from 'zod'
  */
 export default defineKindTool({
   name: 'list-tables',
-  kind: 'postgres',
+  kind: ['postgres'],
+  group: 'sql',
   title: 'List database tables',
   description:
     'List the tables, views and materialized views this connector can reach, '
@@ -36,7 +37,7 @@ export default defineKindTool({
   handler: async ({ schema, search, limit, page }) => {
     const { instance, scope } = useMcpAuth()
 
-    const { tables, hasMore } = await listPgTables(instance, scope, { schema, search, limit, page })
+    const { tables, hasMore } = await listSqlTables(instance, scope, { schema, search, limit, page })
 
     return {
       count: tables.length,

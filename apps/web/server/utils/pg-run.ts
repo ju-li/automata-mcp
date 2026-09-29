@@ -13,11 +13,11 @@ import type { McpScope } from './mcp-scope'
  */
 
 /**
- * How much of one cell is returned by default. A caller that needs a long value
- * whole passes `fullValues` — clipped is the default because one wide page of
- * large text or jsonb cells is otherwise enough to blow the response.
+ * What Postgres calls a binary column. The only per-engine part of
+ * `db-rows.ts`; everything else about serialising a cell is shared, so the two
+ * SQL tool sets cannot clip or lose precision differently.
  */
-const MAX_CELL_CHARS = 2000
+const PG_SERIALISE = { binaryLabel: 'bytea' } as const
 
 /**
  * EXPLAIN the statement and read the facts the guards need.
@@ -28,29 +28,6 @@ const MAX_CELL_CHARS = 2000
 async function planFacts(tx: TransactionSql, statement: string): Promise<PlanFacts> {
   const explained = await unsafeSingle(tx, `EXPLAIN (FORMAT JSON, VERBOSE) ${statement}`)
   return readPlan((explained as unknown as Array<Record<string, unknown>>)[0]?.['QUERY PLAN'])
-}
-
-/**
- * Serialise every cell of every row, counting what had to be clipped.
- *
- * Shared so the write path reports truncation too: it used to re-implement the
- * loop without the counter, so a clipped RETURNING value came back silently.
- */
-function serialiseRows(rows: Array<Record<string, unknown>>, fullValues: boolean): {
-  rows: Array<Record<string, unknown>>
-  truncatedValues: number
-} {
-  let truncatedValues = 0
-  const out = rows.map((row) => {
-    const serialised: Record<string, unknown> = {}
-    for (const [key, value] of Object.entries(row)) {
-      const cell = serialiseCell(value, fullValues)
-      if (cell.truncated) truncatedValues += 1
-      serialised[key] = cell.value
-    }
-    return serialised
-  })
-  return { rows: out, truncatedValues }
 }
 
 export interface ReadQueryOptions {
@@ -181,7 +158,7 @@ export async function runReadQuery(
     const hasMore = raw.length > options.maxRows
     const kept = raw.slice(0, options.maxRows)
 
-    const { rows, truncatedValues } = serialiseRows(kept, options.fullValues)
+    const { rows, truncatedValues } = serialiseRows(kept, { ...PG_SERIALISE, fullValues: options.fullValues })
 
     return {
       columns: raw.columns?.map(c => c.name) ?? Object.keys(kept[0] ?? {}),
@@ -203,11 +180,19 @@ export interface WriteStatementResult {
   elapsedMs: number
 }
 
+export interface WriteStatementOptions {
+  maxRows: number
+  timeoutMs: number
+  /** Return every cell whole instead of clipping at `MAX_CELL_CHARS`. */
+  fullValues: boolean
+  allowWholeTable?: boolean
+}
+
 export async function runWriteStatement(
   instance: Pick<AppInstance, 'id' | 'dsn'>,
   scope: McpScope,
   statement: string,
-  options: { maxRows: number, timeoutMs: number, fullValues: boolean, allowWholeTable?: boolean },
+  options: WriteStatementOptions,
 ): Promise<WriteStatementResult> {
   return await withGuardedStatement(instance, scope, statement, {
     readOnly: false,
@@ -233,7 +218,7 @@ export async function runWriteStatement(
       })
     }
 
-    const serialised = serialiseRows([...rows], options.fullValues)
+    const serialised = serialiseRows([...rows], { ...PG_SERIALISE, fullValues: options.fullValues })
 
     return {
       command: rows.command,
@@ -245,40 +230,3 @@ export async function runWriteStatement(
   })
 }
 
-/**
- * Make one cell safe to put in a JSON response.
- *
- * `bigint` becomes a string because JSON loses precision above 2^53 — silently,
- * which is the worst way to lose an id. A `Buffer` is described rather than
- * returned: a bytea column is not something a model can use and is very much
- * something that can exceed the response limit on its own. Those three are
- * serialisation and apply whatever `fullValues` says; only the clipping of long
- * strings and objects is switched off by it.
- */
-function serialiseCell(value: unknown, fullValues: boolean): { value: unknown, truncated: boolean } {
-  if (value === null || value === undefined) return { value: null, truncated: false }
-  if (typeof value === 'bigint') return { value: value.toString(), truncated: false }
-  if (value instanceof Date) return { value: value.toISOString(), truncated: false }
-  if (Buffer.isBuffer(value)) return { value: { type: 'bytea', bytes: value.length }, truncated: false }
-
-  if (fullValues) return { value, truncated: false }
-
-  if (typeof value === 'string') {
-    if (value.length <= MAX_CELL_CHARS) return { value, truncated: false }
-    return { value: `${value.slice(0, MAX_CELL_CHARS)}…`, truncated: true }
-  }
-
-  if (typeof value === 'object') {
-    // Stringified only to measure it. The object itself is returned so a jsonb
-    // column reaches the caller as JSON rather than as an escaped string, which
-    // does mean Nitro serialises it again on the way out — a deliberate trade,
-    // since a model reading `"{\"a\":1}"` is worse off than one reading `{a:1}`.
-    const json = JSON.stringify(value)
-    if (json === undefined) return { value: null, truncated: false }
-    return json.length > MAX_CELL_CHARS
-      ? { value: `${json.slice(0, MAX_CELL_CHARS)}…`, truncated: true }
-      : { value, truncated: false }
-  }
-
-  return { value, truncated: false }
-}

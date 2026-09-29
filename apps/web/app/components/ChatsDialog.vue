@@ -2,7 +2,7 @@
 import { ArrowUpDownIcon, ChevronDownIcon, ChevronUpIcon, SearchIcon, UserIcon, UsersIcon } from '@lucide/vue'
 
 /**
- * Every conversation on the account, as a table.
+ * Every conversation on the account, as a paged table.
  *
  * Opened from the dashboard's "Chats" stat card. The two numbers do not measure
  * the same thing and must not be subtracted from one another: the card is
@@ -10,8 +10,13 @@ import { ArrowUpDownIcon, ChevronDownIcon, ChevronUpIcon, SearchIcon, UserIcon, 
  * `DISTINCT ON (remoteJid)` over `"Message"`. History sync records a chat for
  * every conversation the phone lists but keeps only the messages it was actually
  * sent, so a shortfall here is usually conversations with nothing stored to show
- * — not a page boundary. `hasMore` from the endpoint is the only thing that says
- * whether another page exists.
+ * — not a page boundary.
+ *
+ * Searching, sorting and paging all happen on the server, over the whole
+ * account. They used to happen here over whatever had been fetched, which meant
+ * a search answered about the loaded pool rather than about the account — and
+ * the pool was capped. The server now walks the listing once into a short-lived
+ * cache and answers from it, so a page is a page of everything.
  */
 const props = defineProps<{
   instanceId: string
@@ -24,196 +29,83 @@ const props = defineProps<{
 
 const emit = defineEmits<{ 'update:open': [boolean] }>()
 
-/**
- * One page, big. Each request re-reads Evolution's whole contact table to name
- * the rows, so the cost is per page rather than per row and a second page is a
- * genuine expense — hence a large `take` and an explicit button rather than
- * paging on scroll.
- */
-const TAKE = 2000
+type SortKey = 'name' | 'number' | 'type' | 'last'
 
 interface ChatPageResponse {
   chats: ScopedChat[]
   hasMore: boolean
+  total?: number
+  /** WhatsApp only: the cached listing is capped. */
+  truncated?: boolean
+  /** WhatsApp only: Evolution could not be asked for all of it. */
+  incomplete?: boolean
 }
 
-/**
- * Pages accumulate here rather than in a `useFetch` binding: a reactive URL
- * *replaces* `data`, and appending is the whole point. Same accumulator shape the
- * scope picker uses for hand-added numbers.
- */
-const rows = ref<ScopedChat[]>([])
-const hasMore = ref(false)
-/**
- * Offset for the next request: rows Evolution has handed over, not rows kept.
- * The dedupe below can drop one, and paging from the kept count would walk
- * backwards over ground already covered.
- */
-const nextSkip = ref(0)
-/**
- * Which open the in-flight request belongs to. Closing and reopening resets the
- * accumulator, and a page still in flight from the previous open would otherwise
- * land in it and set `hasMore` and `nextSkip` from a run that no longer exists.
- */
-const generation = ref(0)
-const loadingFirst = ref(true)
-const loadingMore = ref(false)
-const loadFailed = ref(false)
+const truncated = ref(false)
+const incomplete = ref(false)
 
 /**
- * Deliberately deferred, for the same reason as the token scope picker: this call
- * can spend eight seconds inside Evolution's group lookup, and awaiting it in
+ * Deferred, for the same reason as the token scope picker: a cold listing can
+ * spend seconds inside Evolution's contact and group lookups, and awaiting it in
  * setup would hold the whole dialog off the screen — which reads as a click that
  * did nothing. Nothing is fetched until the dialog is actually opened.
  */
-async function loadPage(skip: number) {
-  const mine = generation.value
-  loadFailed.value = false
-  if (skip === 0) loadingFirst.value = true
-  else loadingMore.value = true
-
-  try {
-    const page = await $fetch<ChatPageResponse>(
+const table = useTablePage<ScopedChat, SortKey>({
+  sort: 'last',
+  dir: 'desc',
+  descendingFirst: ['last'],
+  async load({ page, limit, q, sort, dir }) {
+    const response = await $fetch<ChatPageResponse>(
       `/api/instances/${props.instanceId}/chats`,
-      { query: { take: TAKE, skip } },
+      { query: { page, limit, q, sort, dir } },
     )
 
-    if (mine !== generation.value) return
+    truncated.value = response.truncated === true
+    incomplete.value = response.incomplete === true
 
-    // Deduped by JID: Evolution orders this listing by last activity, so a
-    // message arriving between two requests shifts a row across the offset and
-    // the same chat comes back twice.
-    const byJid = new Map(rows.value.map(chat => [chat.jid, chat]))
-    for (const chat of page.chats) byJid.set(chat.jid, chat)
+    return { rows: response.chats, hasMore: response.hasMore, total: response.total }
+  },
+})
 
-    rows.value = [...byJid.values()]
-    hasMore.value = page.hasMore
-    nextSkip.value = skip + page.chats.length
-  }
-  catch (error) {
-    if (mine !== generation.value) return
-    console.error('[chats] could not load page:', error)
-    // Leave `hasMore` alone. A failed page that clears it would read as the end
-    // of the list, which is the one thing this must never claim wrongly.
-    loadFailed.value = true
-  }
-  finally {
-    if (mine === generation.value) {
-      loadingFirst.value = false
-      loadingMore.value = false
-    }
-  }
-}
+watch(() => props.open, (open) => {
+  if (!open) return
+  truncated.value = false
+  incomplete.value = false
+  table.reset()
+})
 
 /**
  * The list is short and there is no next page — so the missing conversations are
  * ones Evolution cannot list, not ones behind an offset.
+ *
+ * `total` has to have been measured for this to mean anything. Read as `?? 0` it
+ * is true on every first render, which put "showing 0 conversations" under a
+ * table that was still loading.
  */
 const unlistable = computed(() =>
-  !hasMore.value && rows.value.length < (props.total ?? 0),
+  !table.loading.value && table.total.value !== undefined
+  && !table.hasMore.value && !truncated.value && !incomplete.value
+  && !table.q.value.trim()
+  && table.total.value < (props.total ?? 0),
 )
-
-// ── search ─────────────────────────────────────────────────────────────────
-const search = ref('')
-
-watch(() => props.open, (open) => {
-  if (!open) return
-  search.value = ''
-  generation.value++
-  rows.value = []
-  hasMore.value = false
-  nextSkip.value = 0
-  loadFailed.value = false
-  loadPage(0)
-})
-
-const filtered = computed(() => {
-  const q = search.value.trim().toLowerCase()
-  if (!q) return rows.value
-  return rows.value.filter(c =>
-    c.name.toLowerCase().includes(q)
-    || c.jid.toLowerCase().includes(q)
-    || (secondaryId(c)?.toLowerCase().includes(q) ?? false),
-  )
-})
 
 /** The identifier shown beside a chat's name: a phone number, or a Telegram @username. */
 function secondaryId(chat: ScopedChat): string | undefined {
   return props.kind === 'telegram' ? chat.username : chat.number
 }
 
-// ── sorting ────────────────────────────────────────────────────────────────
-// Sorted here rather than trusted from the server: Evolution decides the order of
-// its own listing and nothing downstream re-sorts it.
-type SortKey = 'name' | 'number' | 'type' | 'last'
-
-const sortKey = ref<SortKey>('last')
-const sortDir = ref<'asc' | 'desc'>('desc')
-
-const columns = computed<{ key: SortKey, label: string, class?: string }[]>(() => [
+const columns = computed<{ key: SortKey, label: string }[]>(() => [
   { key: 'name', label: 'Name' },
   { key: 'number', label: props.kind === 'telegram' ? 'Username' : 'Number' },
   { key: 'type', label: 'Type' },
   { key: 'last', label: 'Last message' },
 ])
 
-function toggleSort(key: SortKey) {
-  if (sortKey.value === key) {
-    sortDir.value = sortDir.value === 'asc' ? 'desc' : 'asc'
-    return
-  }
-  sortKey.value = key
-  // Newest-first and A–Z are the useful starting points for their columns.
-  sortDir.value = key === 'last' ? 'desc' : 'asc'
-}
-
-function ariaSort(key: SortKey) {
-  if (sortKey.value !== key) return 'none'
-  return sortDir.value === 'asc' ? 'ascending' : 'descending'
-}
-
-/** The timestamp shown in the last column, and sorted on. */
+/** The timestamp shown in the last column. */
 function lastActivity(chat: ScopedChat): string | undefined {
   return chat.lastMessageAt ?? chat.updatedAt
 }
 
-function lastActivityMs(chat: ScopedChat): number | undefined {
-  const iso = lastActivity(chat)
-  if (!iso) return undefined
-  const ms = Date.parse(iso)
-  return Number.isNaN(ms) ? undefined : ms
-}
-
-/**
- * Rows with nothing in the sorted column sink to the bottom in both directions.
- * Flipping the sort to bring the blanks to the top is never what anyone wanted.
- */
-function missingLast<T>(a: T | undefined, b: T | undefined, cmp: (x: T, y: T) => number, dir: number): number {
-  if (a === undefined && b === undefined) return 0
-  if (a === undefined) return 1
-  if (b === undefined) return -1
-  return dir * cmp(a, b)
-}
-
-const sorted = computed(() => {
-  const dir = sortDir.value === 'asc' ? 1 : -1
-  const byName = (a: ScopedChat, b: ScopedChat) => a.name.localeCompare(b.name)
-
-  return [...filtered.value].sort((a, b) => {
-    switch (sortKey.value) {
-      case 'name':
-        return dir * byName(a, b)
-      case 'number':
-        return missingLast(secondaryId(a), secondaryId(b), (x, y) => x.localeCompare(y, undefined, { numeric: true }), dir) || byName(a, b)
-      case 'type':
-        return dir * (Number(Boolean(a.isGroup)) - Number(Boolean(b.isGroup))) || byName(a, b)
-      case 'last':
-        return missingLast(lastActivityMs(a), lastActivityMs(b), (x, y) => x - y, dir) || byName(a, b)
-    }
-  })
-})
-
-// ── formatting ─────────────────────────────────────────────────────────────
 const count = new Intl.NumberFormat()
 const stamp = new Intl.DateTimeFormat(undefined, {
   day: '2-digit',
@@ -224,8 +116,10 @@ const stamp = new Intl.DateTimeFormat(undefined, {
 })
 
 function formatLastActivity(chat: ScopedChat): string {
-  const ms = lastActivityMs(chat)
-  return ms === undefined ? '—' : stamp.format(ms)
+  const iso = lastActivity(chat)
+  if (!iso) return '—'
+  const ms = Date.parse(iso)
+  return Number.isNaN(ms) ? '—' : stamp.format(ms)
 }
 </script>
 
@@ -246,7 +140,11 @@ function formatLastActivity(chat: ScopedChat): string {
 
       <div class="relative">
         <SearchIcon class="absolute top-1/2 left-2 size-4 -translate-y-1/2 text-muted-foreground" />
-        <Input v-model="search" :placeholder="kind === 'telegram' ? 'Search by name or username' : 'Search by name or number'" class="pl-8" />
+        <Input
+          v-model="table.q.value"
+          :placeholder="kind === 'telegram' ? 'Search by name or username' : 'Search by name or number'"
+          class="pl-8"
+        />
       </div>
 
       <!--
@@ -261,16 +159,16 @@ function formatLastActivity(chat: ScopedChat): string {
               <TableHead
                 v-for="column in columns"
                 :key="column.key"
-                :aria-sort="ariaSort(column.key)"
+                :aria-sort="table.ariaSort(column.key)"
               >
                 <button
                   type="button"
                   class="flex w-full cursor-pointer items-center gap-1.5 rounded-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
-                  @click="toggleSort(column.key)"
+                  @click="table.toggleSort(column.key)"
                 >
                   {{ column.label }}
-                  <ChevronUpIcon v-if="sortKey === column.key && sortDir === 'asc'" class="size-3.5" />
-                  <ChevronDownIcon v-else-if="sortKey === column.key" class="size-3.5" />
+                  <ChevronUpIcon v-if="table.sort.value === column.key && table.dir.value === 'asc'" class="size-3.5" />
+                  <ChevronDownIcon v-else-if="table.sort.value === column.key" class="size-3.5" />
                   <ArrowUpDownIcon v-else class="size-3.5 text-muted-foreground/50" />
                 </button>
               </TableHead>
@@ -278,7 +176,7 @@ function formatLastActivity(chat: ScopedChat): string {
           </TableHeader>
 
           <TableBody>
-            <template v-if="loadingFirst">
+            <template v-if="table.loading.value">
               <TableRow v-for="n in 6" :key="n">
                 <TableCell>
                   <div class="flex items-center gap-3">
@@ -292,7 +190,13 @@ function formatLastActivity(chat: ScopedChat): string {
               </TableRow>
             </template>
 
-            <TableRow v-else-if="!rows.length">
+            <TableRow v-else-if="!table.rows.value.length && table.q.value.trim()">
+              <TableCell colspan="4" class="py-8 text-center text-sm text-muted-foreground">
+                Nothing matches “{{ table.q.value }}”.
+              </TableCell>
+            </TableRow>
+
+            <TableRow v-else-if="!table.rows.value.length">
               <TableCell colspan="4" class="py-8 text-center text-sm text-muted-foreground">
                 <template v-if="kind === 'telegram'">
                   No chats synced yet. They appear here once the account is linked and
@@ -305,16 +209,10 @@ function formatLastActivity(chat: ScopedChat): string {
               </TableCell>
             </TableRow>
 
-            <TableRow v-else-if="!sorted.length">
-              <TableCell colspan="4" class="py-8 text-center text-sm text-muted-foreground">
-                Nothing matches “{{ search }}”.
-              </TableCell>
-            </TableRow>
-
             <!-- v-for and v-else cannot share an element: v-if wins the priority
                  contest and the v-else loses its adjacent branch. -->
             <template v-else>
-              <TableRow v-for="chat in sorted" :key="chat.jid">
+              <TableRow v-for="chat in table.rows.value" :key="chat.jid">
                 <TableCell class="max-w-[18rem]">
                   <div class="flex items-center gap-3">
                     <img
@@ -340,7 +238,7 @@ function formatLastActivity(chat: ScopedChat): string {
                     {{ chat.username ? `@${chat.username}` : '—' }}
                   </template>
                   <template v-else>
-                    {{ chat.number ? `+${chat.number}` : '—' }}
+                    {{ secondaryId(chat) ? `+${secondaryId(chat)}` : '—' }}
                   </template>
                 </TableCell>
 
@@ -360,46 +258,36 @@ function formatLastActivity(chat: ScopedChat): string {
       </div>
 
       <!--
-        The button sits out here rather than in a TableFooter: the scrolling
-        element is the table's own container, so a footer row would scroll out of
-        sight exactly when it is needed.
+        Out here rather than in a TableFooter: the scrolling element is the
+        table's own container, so a footer row would scroll out of sight exactly
+        when it is needed.
       -->
-      <div class="flex items-center justify-between gap-3">
-        <p class="text-xs text-muted-foreground">
-          <template v-if="loadingFirst">
-            Loading conversations…
-          </template>
-          <!-- Search first: the shortfall line below is true permanently on most
-               accounts, and would otherwise mask the match count for good. -->
-          <template v-else-if="search.trim()">
-            {{ count.format(sorted.length) }} of {{ count.format(rows.length) }} chats match.
-          </template>
-          <template v-else-if="hasMore">
-            Showing {{ count.format(rows.length) }}<template v-if="total"> of {{ count.format(total) }}</template> chats.
-          </template>
-          <template v-else-if="unlistable">
-            Showing {{ count.format(rows.length) }} conversations with recorded
-            messages. The Chats card counts {{ count.format(total ?? 0) }} chat
-            records; the rest have no messages stored, so there is nothing to list.
-          </template>
-          <template v-else>
-            {{ count.format(rows.length) }} {{ rows.length === 1 ? 'chat' : 'chats' }}.
-          </template>
-          <span v-if="loadFailed" class="text-destructive">
-            That page could not be loaded. Try again.
-          </span>
-        </p>
+      <div class="space-y-2">
+        <TablePagination
+          :page="table.page.value"
+          :page-size="table.pageSize"
+          :row-count="table.rows.value.length"
+          :total="table.total.value"
+          :has-more="table.hasMore.value"
+          :loading="table.loading.value"
+          noun="chats"
+          @update:page="value => table.page.value = value"
+        />
 
-        <Button
-          v-if="hasMore && !loadingFirst"
-          variant="outline"
-          size="sm"
-          class="shrink-0"
-          :disabled="loadingMore"
-          @click="loadPage(nextSkip)"
-        >
-          {{ loadingMore ? 'Loading…' : 'Load more' }}
-        </Button>
+        <p v-if="table.failed.value" class="text-xs text-destructive">
+          That page could not be loaded. Try again.
+        </p>
+        <p v-else-if="incomplete" class="text-xs text-muted-foreground">
+          Evolution could not be asked for the whole list, so this may be short.
+        </p>
+        <p v-else-if="truncated" class="text-xs text-muted-foreground">
+          This account has more conversations than this list holds.
+        </p>
+        <p v-else-if="unlistable" class="text-xs text-muted-foreground">
+          Showing {{ count.format(table.total.value ?? 0) }} conversations with recorded
+          messages. The Chats card counts {{ count.format(total ?? 0) }} chat
+          records; the rest have no messages stored, so there is nothing to list.
+        </p>
       </div>
     </DialogContent>
   </Dialog>
