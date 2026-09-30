@@ -43,7 +43,11 @@ export default defineKindTool({
   },
   inputSchema: {
     sql: z.string().min(1).max(20_000).describe('One SQL query: SELECT, WITH … SELECT, VALUES or TABLE. Not a write.'),
-    maxRows: z.number().int().min(1).max(1000).default(200).describe('Hard cap on rows returned. The query is stopped at this many rather than truncated afterwards.'),
+    maxRows: z.number().int().min(1).max(1000).default(200).describe(
+      'Rows per page, at most 1000. For more rows, keep this and walk `page` with nextPage '
+      + '— add an ORDER BY on a unique column first so the pages line up. The query is '
+      + 'stopped at this many rather than truncated afterwards.',
+    ),
     page: z.number().int().min(1).default(1).describe(
       '1-based page of `maxRows` rows. Walk it up with nextPage while hasMore is true; '
       + 'pages are consistent only under an ORDER BY on a unique column.',
