@@ -159,9 +159,16 @@ async function addByNumber() {
 </script>
 
 <template>
-  <div class="space-y-6">
+  <!--
+    Fills its dialog. From md up, actions and the table/chat axis sit side by
+    side, so the list gets nearly the dialog's full height and scrolls inside
+    itself — stacked, five tool descriptions leave it a row or two and the whole
+    dialog scrolls instead. Every min-w-0 on the way down is what lets a long
+    table name truncate rather than widen the dialog.
+  -->
+  <div class="flex min-h-0 min-w-0 flex-1 flex-col gap-6 md:flex-row">
     <!-- ── actions ─────────────────────────────────────────────────────── -->
-    <section class="space-y-3">
+    <section class="shrink-0 space-y-3 md:min-h-0 md:min-w-0 md:flex-1 md:shrink md:overflow-y-auto">
       <div>
         <h3 class="text-sm font-medium">
           Actions
@@ -203,7 +210,7 @@ async function addByNumber() {
               class="mt-0.5"
               @update:model-value="toggle('tool_names', tool.name, $event === true)"
             />
-            <div class="min-w-0">
+            <div class="min-w-0 flex-1">
               <Label :for="`tool-${tool.name}`" class="flex items-center gap-2 font-normal">
                 {{ tool.title }}
                 <Badge :variant="tool.readOnly ? 'secondary' : 'outline'" class="text-[10px]">
@@ -219,11 +226,11 @@ async function addByNumber() {
       </div>
     </section>
 
-    <Separator />
+    <Separator class="shrink-0 md:hidden" />
 
     <!-- ── tables (databases only) ─────────────────────────────────────── -->
-    <section v-if="isDatabase" class="space-y-3">
-      <div>
+    <section v-if="isDatabase" class="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+      <div class="shrink-0">
         <h3 class="text-sm font-medium">
           Tables
         </h3>
@@ -235,6 +242,7 @@ async function addByNumber() {
       </div>
 
       <ScopeModeRadio
+        class="shrink-0"
         :model-value="scope.all_tables"
         name="tables"
         all-label="All tables the connection can read"
@@ -242,22 +250,23 @@ async function addByNumber() {
         @update:model-value="scope = { ...scope, all_tables: $event }"
       />
 
-      <div v-if="!scope.all_tables" class="space-y-3 rounded-md border p-3">
-        <div v-if="scope.table_names.length" class="flex flex-wrap gap-1.5">
+      <div v-if="!scope.all_tables" class="flex min-h-0 min-w-0 flex-1 flex-col gap-3 rounded-md border p-3">
+        <div v-if="scope.table_names.length" class="flex max-h-20 shrink-0 flex-wrap gap-1.5 overflow-y-auto">
           <Badge
             v-for="qname in scope.table_names"
             :key="qname"
             variant="secondary"
-            class="gap-1 font-mono text-[10px]"
+            class="max-w-full gap-1 font-mono text-[10px]"
+            :title="qname"
           >
-            {{ qname }}
-            <button type="button" aria-label="Remove table" @click="toggle('table_names', qname, false)">
+            <span class="truncate">{{ qname }}</span>
+            <button type="button" class="shrink-0" aria-label="Remove table" @click="toggle('table_names', qname, false)">
               <XIcon class="size-3" />
             </button>
           </Badge>
         </div>
 
-        <div class="relative">
+        <div class="relative shrink-0">
           <SearchIcon class="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
           <Input v-model="tableSearch" placeholder="Search tables" class="pl-8" />
         </div>
@@ -272,7 +281,7 @@ async function addByNumber() {
           it connects as has no SELECT grant on anything.
         </p>
 
-        <div v-else class="max-h-64 space-y-1 overflow-y-auto">
+        <div v-else class="min-h-28 flex-1 space-y-1 overflow-y-auto">
           <div
             v-for="table in visibleTables"
             :key="table.qname"
@@ -284,22 +293,22 @@ async function addByNumber() {
               class="mt-0.5"
               @update:model-value="toggle('table_names', table.qname, $event === true)"
             />
-            <Label :for="`table-${table.qname}`" class="min-w-0 font-normal">
+            <Label :for="`table-${table.qname}`" class="block min-w-0 flex-1 font-normal" :title="table.qname">
               <span class="block truncate font-mono text-xs">{{ table.qname }}</span>
               <span class="block text-xs text-muted-foreground">{{ table.kind }}</span>
             </Label>
           </div>
         </div>
 
-        <p v-if="tableData?.hasMore" class="text-xs text-muted-foreground">
+        <p v-if="tableData?.hasMore" class="shrink-0 text-xs text-muted-foreground">
           More tables exist than are listed. Search to narrow the list.
         </p>
       </div>
     </section>
 
     <!-- ── chats (WhatsApp and Telegram) ───────────────────────────────── -->
-    <section v-else class="space-y-3">
-      <div>
+    <section v-else class="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
+      <div class="shrink-0">
         <h3 class="text-sm font-medium">
           Chats
         </h3>
@@ -309,6 +318,7 @@ async function addByNumber() {
       </div>
 
       <ScopeModeRadio
+        class="shrink-0"
         :model-value="scope.all_chats"
         name="chats"
         all-label="All chats"
@@ -316,27 +326,28 @@ async function addByNumber() {
         @update:model-value="scope = { ...scope, all_chats: $event }"
       />
 
-      <div v-if="!scope.all_chats" class="space-y-3 rounded-md border p-3">
-        <div v-if="selectedChats.length" class="flex flex-wrap gap-1.5">
+      <div v-if="!scope.all_chats" class="flex min-h-0 min-w-0 flex-1 flex-col gap-3 rounded-md border p-3">
+        <div v-if="selectedChats.length" class="flex max-h-20 shrink-0 flex-wrap gap-1.5 overflow-y-auto">
           <Badge
             v-for="chat in selectedChats"
             :key="chat.jid"
             variant="secondary"
-            class="gap-1"
+            class="max-w-full gap-1"
+            :title="chat.name"
           >
-            {{ chat.name }}
-            <button type="button" :aria-label="`Remove ${chat.name}`" @click="toggle('chat_jids', chat.jid, false)">
+            <span class="truncate">{{ chat.name }}</span>
+            <button type="button" class="shrink-0" :aria-label="`Remove ${chat.name}`" @click="toggle('chat_jids', chat.jid, false)">
               <XIcon class="size-3" />
             </button>
           </Badge>
         </div>
 
-        <div class="relative">
+        <div class="relative shrink-0">
           <SearchIcon class="absolute top-1/2 left-2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input v-model="search" placeholder="Search conversations" class="pl-8" />
         </div>
 
-        <div class="max-h-52 space-y-1 overflow-y-auto">
+        <div class="min-h-28 flex-1 space-y-1 overflow-y-auto">
           <div v-if="chatsLoading" class="space-y-1" aria-busy="true" aria-live="polite">
             <span class="sr-only">Loading conversations…</span>
             <div v-for="n in 4" :key="n" class="flex items-center gap-3 px-2 py-1.5">
@@ -390,7 +401,7 @@ async function addByNumber() {
           </label>
         </div>
 
-        <div class="space-y-1 border-t pt-3">
+        <div class="shrink-0 space-y-1 border-t pt-3">
           <Label for="manual-number" class="text-xs">{{ kind === 'telegram' ? 'Add by @username or t.me link' : 'Add by phone number' }}</Label>
           <div class="flex gap-2">
             <Input
