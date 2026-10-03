@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
-import { ArrowLeftIcon, DatabaseIcon, TableIcon } from '@lucide/vue'
+import { ArrowLeftIcon, ArrowUpDownIcon, ChevronDownIcon, ChevronUpIcon, DatabaseIcon, SearchIcon, TableIcon } from '@lucide/vue'
+
+/**
+ * How many tables the dashboard asks for in its one request. Equal to
+ * `MAX_TABLE_PAGE` in `server/utils/pg-catalog.ts`, which is server-only — the
+ * endpoint refuses anything larger.
+ */
+const TABLE_FETCH_LIMIT = 1000
 
 /**
  * The dashboard for a database connection.
@@ -39,11 +46,95 @@ const { data, refresh } = await useFetch<StatusResponse>(() => `/api/instances/$
 const { data: tableData, status: tableStatus, refresh: refreshTables } = await useFetch<{
   tables: ScopedTable[]
   hasMore: boolean
-}>(() => `/api/instances/${id.value}/tables`, { lazy: true, query: { limit: 200 } })
+}>(() => `/api/instances/${id.value}/tables`, { lazy: true, query: { limit: TABLE_FETCH_LIMIT } })
 
 const state = computed<ConnectionState>(() => data.value?.state ?? 'unknown')
 const connected = computed(() => state.value === 'open')
 const tablesLoading = computed(() => tableStatus.value === 'idle' || tableStatus.value === 'pending')
+
+// ── table list: search, schema filter, sort and paging, all in the browser ──
+//
+// Unlike the WhatsApp tables, this one is a catalog listing fetched whole in a
+// single request, so filtering it locally answers about the database rather
+// than about a page of it — up to the fetch ceiling. Past that ceiling the
+// template says so, because a search over the first thousand tables that reads
+// as a search over all of them is the failure a page must never hide.
+type TableSort = 'name' | 'kind' | 'rows'
+
+const PAGE_SIZE = 25
+const ALL_SCHEMAS = '__all__' // reka's Select refuses an empty-string value
+
+const tables = computed(() => tableData.value?.tables ?? [])
+const q = ref('')
+const schemaFilter = ref(ALL_SCHEMAS)
+const sort = ref<TableSort>('name')
+const dir = ref<'asc' | 'desc'>('asc')
+const page = ref(1)
+
+const schemas = computed(() => [...new Set(tables.value.map(t => t.schema))].sort())
+
+const filtered = computed(() => {
+  const needle = q.value.trim().toLowerCase()
+  return tables.value.filter(t =>
+    (schemaFilter.value === ALL_SCHEMAS || t.schema === schemaFilter.value)
+    && (!needle || t.qname.toLowerCase().includes(needle) || t.comment?.toLowerCase().includes(needle)),
+  )
+})
+
+const sorted = computed(() => {
+  const sign = dir.value === 'asc' ? 1 : -1
+  return [...filtered.value].sort((a, b) => {
+    let order = 0
+    if (sort.value === 'kind') {
+      order = sign * a.kind.localeCompare(b.kind)
+    }
+    else if (sort.value === 'rows') {
+      // An unanalysed table has no estimate. It goes last in either direction:
+      // sorting it as zero would list it as the smallest table, which it may
+      // not be.
+      const ra = a.estimatedRows ?? null
+      const rb = b.estimatedRows ?? null
+      if (ra === null || rb === null) order = ra === rb ? 0 : ra === null ? 1 : -1
+      else order = sign * (ra - rb)
+    }
+    else {
+      return sign * a.qname.localeCompare(b.qname)
+    }
+    return order || a.qname.localeCompare(b.qname)
+  })
+})
+
+const paged = computed(() => sorted.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE))
+const isFiltered = computed(() => q.value.trim() !== '' || schemaFilter.value !== ALL_SCHEMAS)
+
+// Page 7 of a different question is not a page.
+watch([q, schemaFilter, sort, dir], () => { page.value = 1 })
+
+// A rotated DSN can point at a database without the schema being filtered on.
+watch(schemas, (list) => {
+  if (schemaFilter.value !== ALL_SCHEMAS && !list.includes(schemaFilter.value)) schemaFilter.value = ALL_SCHEMAS
+})
+
+function toggleSort(key: TableSort) {
+  if (sort.value === key) {
+    dir.value = dir.value === 'asc' ? 'desc' : 'asc'
+    return
+  }
+  sort.value = key
+  // Biggest first is the useful starting point for a row count.
+  dir.value = key === 'rows' ? 'desc' : 'asc'
+}
+
+function ariaSort(key: TableSort) {
+  if (sort.value !== key) return 'none'
+  return dir.value === 'asc' ? 'ascending' : 'descending'
+}
+
+const sortColumns: { key: TableSort, label: string, class?: string }[] = [
+  { key: 'name', label: 'Table' },
+  { key: 'kind', label: 'Kind' },
+  { key: 'rows', label: 'Rows (estimate)', class: 'justify-end' },
+]
 
 const { busy, run } = useApiAction()
 const newDsn = ref('')
@@ -136,8 +227,11 @@ async function saveDsn() {
         <h2 class="font-heading text-lg font-semibold">
           Tables
         </h2>
-        <p v-if="tableData?.tables?.length" class="text-sm text-muted-foreground">
-          {{ tableData.tables.length }}{{ tableData.hasMore ? '+' : '' }} reachable
+        <p v-if="tables.length" class="text-sm text-muted-foreground tabular-nums">
+          <template v-if="isFiltered">
+            {{ filtered.length.toLocaleString() }} of
+          </template>
+          {{ tables.length.toLocaleString() }}{{ tableData?.hasMore ? '+' : '' }} reachable
         </p>
       </div>
 
@@ -158,44 +252,98 @@ async function saveDsn() {
         on anything.
       </p>
 
-      <div v-else class="rounded-md border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Table</TableHead>
-              <TableHead>Kind</TableHead>
-              <TableHead class="text-right">
-                Rows (estimate)
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            <TableRow v-for="table in tableData.tables" :key="table.qname">
-              <TableCell class="font-mono text-xs">
-                <div class="flex items-center gap-2">
-                  <TableIcon class="size-3.5 shrink-0 text-muted-foreground" />
-                  {{ table.qname }}
-                </div>
-                <p v-if="table.comment" class="mt-1 line-clamp-1 font-sans text-xs text-muted-foreground">
-                  {{ table.comment }}
-                </p>
-              </TableCell>
-              <TableCell class="text-sm text-muted-foreground">
-                {{ table.kind }}
-              </TableCell>
-              <TableCell class="text-right text-sm text-muted-foreground">
-                <!-- reltuples is a planner statistic. Labelled an estimate in the
-                     column header so it is never quoted back as a count. -->
-                {{ table.estimatedRows === null || table.estimatedRows === undefined ? '—' : table.estimatedRows.toLocaleString() }}
-              </TableCell>
-            </TableRow>
-          </TableBody>
-        </Table>
-      </div>
+      <template v-else>
+        <div class="flex flex-wrap gap-2">
+          <div class="relative min-w-48 flex-1">
+            <SearchIcon class="absolute top-1/2 left-2 size-4 -translate-y-1/2 text-muted-foreground" />
+            <Input v-model="q" placeholder="Search by name or description" class="pl-8" />
+          </div>
 
-      <p v-if="tableData?.hasMore" class="text-xs text-muted-foreground">
-        More tables exist than are shown here.
-      </p>
+          <!-- One schema has nothing to choose between. -->
+          <Select v-if="schemas.length > 1" v-model="schemaFilter">
+            <SelectTrigger class="w-48" aria-label="Filter by schema">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem :value="ALL_SCHEMAS">
+                All schemas
+              </SelectItem>
+              <SelectItem v-for="schema in schemas" :key="schema" :value="schema" class="font-mono text-xs">
+                {{ schema }}
+              </SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        <div class="rounded-md border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead
+                  v-for="column in sortColumns"
+                  :key="column.key"
+                  :aria-sort="ariaSort(column.key)"
+                >
+                  <button
+                    type="button"
+                    class="flex w-full cursor-pointer items-center gap-1.5 rounded-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                    :class="column.class"
+                    @click="toggleSort(column.key)"
+                  >
+                    {{ column.label }}
+                    <ChevronUpIcon v-if="sort === column.key && dir === 'asc'" class="size-3.5" />
+                    <ChevronDownIcon v-else-if="sort === column.key" class="size-3.5" />
+                    <ArrowUpDownIcon v-else class="size-3.5 text-muted-foreground/50" />
+                  </button>
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              <TableRow v-if="!paged.length">
+                <TableCell colspan="3" class="py-8 text-center text-sm text-muted-foreground">
+                  No tables match these filters.
+                </TableCell>
+              </TableRow>
+              <TableRow v-for="table in paged" :key="table.qname">
+                <TableCell class="font-mono text-xs">
+                  <div class="flex items-center gap-2">
+                    <TableIcon class="size-3.5 shrink-0 text-muted-foreground" />
+                    {{ table.qname }}
+                  </div>
+                  <p v-if="table.comment" class="mt-1 line-clamp-1 font-sans text-xs text-muted-foreground">
+                    {{ table.comment }}
+                  </p>
+                </TableCell>
+                <TableCell class="text-sm text-muted-foreground">
+                  {{ table.kind }}
+                </TableCell>
+                <TableCell class="text-right text-sm text-muted-foreground">
+                  <!-- reltuples is a planner statistic. Labelled an estimate in the
+                       column header so it is never quoted back as a count. -->
+                  {{ table.estimatedRows === null || table.estimatedRows === undefined ? '—' : table.estimatedRows.toLocaleString() }}
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        </div>
+
+        <TablePagination
+          v-if="filtered.length > PAGE_SIZE"
+          :page="page"
+          :page-size="PAGE_SIZE"
+          :row-count="paged.length"
+          :total="filtered.length"
+          :has-more="page * PAGE_SIZE < filtered.length"
+          noun="tables"
+          @update:page="page = $event"
+        />
+
+        <p v-if="tableData?.hasMore" class="text-xs text-muted-foreground">
+          This database has more than {{ TABLE_FETCH_LIMIT.toLocaleString() }} reachable
+          tables. Search, filters and sorting cover the first
+          {{ TABLE_FETCH_LIMIT.toLocaleString() }}, taken alphabetically by schema and name.
+        </p>
+      </template>
     </section>
 
     <Separator />
