@@ -429,16 +429,21 @@ function statusOf(token: TokenRow) {
     </Card>
 
     <Dialog v-model:open="createOpen">
-      <DialogContent class="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <DialogHeader>
+      <DialogContent class="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-2xl md:max-w-5xl">
+        <DialogHeader class="shrink-0">
           <DialogTitle>New connector token</DialogTitle>
           <DialogDescription>
             Name it after where you will use it, so you know which to revoke later.
           </DialogDescription>
         </DialogHeader>
 
-        <div class="space-y-4">
-          <div class="space-y-2">
+        <!--
+          The body takes the height left between header and footer, and the
+          scope list inside it absorbs the slack — so the dialog itself does
+          not scroll. overflow-y-auto here only bites on a very short viewport.
+        -->
+        <div class="flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto">
+          <div class="shrink-0 space-y-2">
             <Label for="token-label">Name</Label>
             <Input id="token-label" v-model="newLabel" placeholder="Claude desktop" />
           </div>
@@ -450,7 +455,7 @@ function statusOf(token: TokenRow) {
             "Active". Assigning the connection is a separate, deliberate act —
             see AssignConnectionDialog.
           -->
-          <div v-if="assigneeOptions.length > 1" class="space-y-2">
+          <div v-if="assigneeOptions.length > 1" class="shrink-0 space-y-2">
             <Label for="token-assignee">Issue to</Label>
             <Select v-model="newAssignee">
               <SelectTrigger id="token-assignee">
@@ -472,7 +477,7 @@ function statusOf(token: TokenRow) {
             </p>
           </div>
 
-          <div class="space-y-2">
+          <div class="shrink-0 space-y-2">
             <Label for="token-expiry">Expires</Label>
             <Select v-model="newExpiry">
               <SelectTrigger id="token-expiry">
@@ -495,12 +500,12 @@ function statusOf(token: TokenRow) {
             </Select>
           </div>
 
-          <Separator />
+          <Separator class="shrink-0" />
 
           <TokenScopeFields v-model="newScope" :instance-id="instanceId" :kind="kind" />
         </div>
 
-        <DialogFooter>
+        <DialogFooter class="shrink-0">
           <Button variant="ghost" @click="createOpen = false">
             Cancel
           </Button>
@@ -512,8 +517,8 @@ function statusOf(token: TokenRow) {
     </Dialog>
 
     <Dialog :open="Boolean(editing)" @update:open="value => { if (!value) editing = null }">
-      <DialogContent class="max-h-[85vh] overflow-y-auto sm:max-w-lg">
-        <DialogHeader>
+      <DialogContent class="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-2xl md:max-w-5xl">
+        <DialogHeader class="shrink-0">
           <DialogTitle>Edit “{{ editing?.label }}”</DialogTitle>
           <DialogDescription>
             Changes apply from the next request. The connector already set up in
@@ -521,9 +526,11 @@ function statusOf(token: TokenRow) {
           </DialogDescription>
         </DialogHeader>
 
-        <TokenScopeFields v-model="editScope" :instance-id="instanceId" :kind="kind" />
+        <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
+          <TokenScopeFields v-model="editScope" :instance-id="instanceId" :kind="kind" />
+        </div>
 
-        <DialogFooter>
+        <DialogFooter class="shrink-0">
           <Button variant="ghost" @click="editing = null">
             Cancel
           </Button>
