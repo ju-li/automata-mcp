@@ -208,6 +208,52 @@ export function useTelegramBridge(): TelegramBridge {
 }
 
 /**
+ * The bridge's refusal when it runs without Telegram's API credentials — the
+ * one `code` in its error bodies, and the contract with `http-error.ts` there.
+ *
+ * Keyed on the code rather than the 503 it rides on: the status alone reads as
+ * an outage, and this is a setting someone has to make.
+ */
+const TELEGRAM_NOT_CONFIGURED = 'telegram_not_configured'
+
+export function isTelegramNotConfigured(error: unknown): boolean {
+  return (error as { data?: { code?: unknown } } | undefined)?.data?.code === TELEGRAM_NOT_CONFIGURED
+}
+
+/** Written for whoever can act on it, which is whoever runs the bridge. */
+export function telegramNotConfiguredMessage(action?: string): string {
+  return `${action ? `Could not ${action}: ` : ''}Telegram is not set up on this deployment yet. `
+    + 'Create an app at my.telegram.org (API development tools), set TELEGRAM_API_ID and '
+    + 'TELEGRAM_API_HASH on the Telegram bridge service and redeploy it.'
+}
+
+/**
+ * Whether this deployment's own bridge can serve Telegram, for the create page
+ * to say so before anyone clicks.
+ *
+ * `absent` means no default bridge is configured at all; `unconfigured` means it
+ * runs without API credentials. Only ever asks `NUXT_TELEGRAM_URL` — a bridge a
+ * user supplied is probed when they create on it, not from here — and only its
+ * public `/health`, so no key is sent. A bridge from before credentials became
+ * optional answers `{ ok: true }` with no `telegram` field; it could not have
+ * started without them, so that reads as ready.
+ */
+export type BridgeReadiness = 'absent' | 'ready' | 'unconfigured' | 'unreachable'
+
+export async function deploymentBridgeReadiness(): Promise<BridgeReadiness> {
+  const creds = telegramAdminCredentials()
+  if (!creds) return 'absent'
+  try {
+    const health = await $fetch<{ telegram?: unknown }>('/health', { baseURL: creds.baseUrl, retry: 0, timeout: 5_000 })
+    return health?.telegram === 'unconfigured' ? 'unconfigured' : 'ready'
+  }
+  catch (error) {
+    console.error(`[telegram] the deployment bridge did not answer /health: ${httpStatusOf(error) ?? (error as Error | undefined)?.message}`)
+    return 'unreachable'
+  }
+}
+
+/**
  * Turn a failed bridge call into an answer a caller can act on.
  *
  * The bridge's 4xx bodies are written for callers — "not connected", "send to
@@ -218,6 +264,10 @@ export function useTelegramBridge(): TelegramBridge {
  */
 export function relayBridgeError(error: unknown, action: string): never {
   const status = httpStatusOf(error)
+  if (isTelegramNotConfigured(error)) {
+    console.error(`[telegram] could not ${action}: the bridge has no TELEGRAM_API_ID / TELEGRAM_API_HASH`)
+    throw createError({ statusCode: 503, message: telegramNotConfiguredMessage(action) })
+  }
   const message = (error as { data?: { error?: unknown } } | undefined)?.data?.error
   if (status !== undefined && [400, 404, 409, 422, 429].includes(status) && typeof message === 'string') {
     throw createError({ statusCode: status, message })

@@ -627,7 +627,11 @@ account linked by QR code, so it lives in this repo. It is built on
 1. **Get your own API credentials** at <https://my.telegram.org> → API
    development tools, and put them in `TELEGRAM_API_ID` / `TELEGRAM_API_HASH`.
    Never reuse a pair from an example or another project — Telegram refuses
-   published ones.
+   published ones. Both are optional, together: with neither set the bridge
+   still starts, `/health` reports `"telegram": "unconfigured"`, and the app's
+   **Add a connection** page says what to set instead of offering Telegram.
+   Setting both later and restarting the bridge is all it takes to turn it on.
+   One without the other refuses to start, so a typo cannot pass for "off".
 2. **Generate the two keys:** `TELEGRAM_BRIDGE_ADMIN_KEY` (`openssl rand -hex
    24`) and `TELEGRAM_SESSION_ENCRYPTION_KEY` (`openssl rand -hex 32`). Set
    `NUXT_TELEGRAM_ADMIN_KEY` to the same value as the admin key.
@@ -1029,12 +1033,17 @@ disconnecting and re-scanning the QR. See "Importing existing history" above.
 
 ```
 TELEGRAM_BRIDGE_PORT=8095
-TELEGRAM_API_ID=<from my.telegram.org>
-TELEGRAM_API_HASH=<from my.telegram.org>
+TELEGRAM_API_ID=<from my.telegram.org, or empty>
+TELEGRAM_API_HASH=<from my.telegram.org, or empty>
 TELEGRAM_BRIDGE_ADMIN_KEY=<openssl rand -hex 24>
 TELEGRAM_SESSION_ENCRYPTION_KEY=<openssl rand -hex 32>
 TELEGRAM_BRIDGE_DATABASE_URL=${{Postgres.DATABASE_URL}}
 ```
+
+`TELEGRAM_API_ID` / `TELEGRAM_API_HASH` may be left empty (both of them) on a
+deployment that does not need Telegram yet: the bridge runs without it and the
+app tells an admin what to set. Setting both redeploys the service on Railway,
+and Telegram is available from then on.
 
 The database URL is the same one Evolution uses; the bridge keeps to its own
 `telegram` schema — see "Where the data lives". The backfill variables in

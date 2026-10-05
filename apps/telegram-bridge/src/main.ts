@@ -39,6 +39,12 @@ const server = createBridgeServer(manager, config)
 // :: accepts IPv6 and IPv4. Legacy Railway private networking is IPv6-only.
 await new Promise<void>(resolve => server.listen(config.port, '::', resolve))
 console.info(`[bridge] listening on :${config.port}${config.testServers ? ' — Telegram TEST servers' : ''}`)
+if (!config.telegram) {
+  console.warn(
+    '[bridge] TELEGRAM_API_ID / TELEGRAM_API_HASH are not set — running without Telegram. '
+    + 'Create an app at my.telegram.org and set both to enable it.',
+  )
+}
 
 await manager.start()
 
