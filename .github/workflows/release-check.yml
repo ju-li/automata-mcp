@@ -1,0 +1,49 @@
+# Required check on every PR into prod. A release is cut by merging main into
+# prod, and release.yml publishes whatever version package.json then names, so
+# this is where a bad version or a broken image has to be caught — after the
+# merge it is already on the release branch.
+name: release-check
+
+on:
+  pull_request:
+    branches: [prod]
+    # `edited` so retargeting an open PR onto prod runs the check too.
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate package.json version
+        run: .github/scripts/release-version.sh
+
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: automata-mcp-web
+            dockerfile: apps/web/Dockerfile
+          - image: automata-mcp-telegram-bridge
+            dockerfile: apps/telegram-bridge/Dockerfile
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      # Same context and Dockerfile as release.yml, built and discarded. Both
+      # Dockerfiles need the repo root: the lockfile and workspace manifest are there.
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=${{ matrix.image }}

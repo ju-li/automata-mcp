@@ -128,7 +128,7 @@ Traffic crosses the host/container boundary in both directions.
 |---|---|---|
 | Nuxt (host) | Evolution | `http://localhost:8080` |
 | Nuxt (host) | Postgres — the app's own tables | `localhost:5432` (`NUXT_DATABASE_URL`) |
-| Nuxt (host) | Postgres — Evolution's messages | `localhost:5432` (read-only role, see below) |
+| Nuxt (host) | Postgres — Evolution's messages | `localhost:5432` (read-only sessions, see below) |
 | Nuxt (host) | Telegram bridge | `http://localhost:8095` |
 | Evolution (container) | Nuxt webhook | `http://host.docker.internal:3000/api/webhook/evolution` |
 | Telegram bridge (container) | Nuxt webhook | `http://host.docker.internal:3000/api/webhook/telegram` |
@@ -385,10 +385,25 @@ subtype, and excluding `protocolMessage` wholesale would delete every message ed
 along with the bookkeeping — so those are dropped after the rows are read and
 counted back to the caller as `protocolMessagesExcluded`.
 
-**Give it a role that can do nothing else.** Every other credential in this app is
-scoped to a single account; this connection can reach every user's messages in
-every instance. The app never writes and never runs DDL, so the one grant below
-serves both reading and searching:
+**Which credential.** The same URL as `NUXT_DATABASE_URL` works, and it is what
+the Railway setup below uses. Every query the app sends here is fixed SQL with
+bound parameters — nothing a model or a user writes reaches this connection as
+SQL — and the pool opens each session with `default_transaction_read_only`, so a
+write fails even under a superuser. That setting is a backstop, not a boundary: a
+superuser can switch it off, but only through SQL, and the app never sends any it
+did not write.
+
+```bash
+NUXT_EVOLUTION_DATABASE_URL=postgres://evolution:change-me@localhost:5432/evolution
+```
+
+**Optional hardening: a role that can do nothing else.** This connection reaches
+every user's messages in every instance. A dedicated role does not protect them
+from a compromised web service — that process already holds `NUXT_DATABASE_URL`,
+the database's owner — but it does contain a bug in the app's own message queries
+to reading `"Message"`, where under the owner such a bug would reach every stored
+credential in the `app` schema. If you want that, the one grant below serves both
+reading and searching:
 
 ```sql
 CREATE ROLE wamcp_search LOGIN PASSWORD 'change-me';
@@ -400,8 +415,6 @@ GRANT SELECT ON "Message" TO wamcp_search;
 ```bash
 NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:change-me@localhost:5432/evolution
 ```
-
-In development you can point it at `POSTGRES_USER` instead; in production do not.
 
 Evolution ships `@@index([instanceId])` and nothing else — no index on
 `messageTimestamp`, none on the `key` JSONB — so reading and searching are both a
@@ -920,10 +933,13 @@ connections alone is **Postgres** and **web**.
 | **Postgres** | Railway template | — | managed |
 | **Redis** *(WhatsApp only)* | Railway template | — | managed |
 | **evolution** *(WhatsApp only)* | image `evoapicloud/evolution-api:v2.3.7` | 8080 | `/evolution/instances` |
-| **telegram-bridge** *(Telegram only)* | this repo, root directory `/`, Dockerfile path `/apps/telegram-bridge/Dockerfile` | 8095 | — |
-| **web** | this repo, root directory `/`, Dockerfile path `apps/web/Dockerfile` | 3000 | — |
+| **telegram-bridge** *(Telegram only)* | image `ghcr.io/ju-li/automata-mcp-telegram-bridge:1`, or this repo, root directory `/`, Dockerfile path `/apps/telegram-bridge/Dockerfile` | 8095 | — |
+| **web** | image `ghcr.io/ju-li/automata-mcp-web:1`, or this repo, root directory `/`, Dockerfile path `apps/web/Dockerfile` | 3000 | — |
 
-The web service and the Telegram bridge build from the **repo root**, not their
+The published images are the simpler route and the one a Railway template uses —
+see "Releases" below. Building from the repo is for running unreleased code.
+
+When built from the repo, the web service and the Telegram bridge build from the **repo root**, not their
 `apps/` directory — the lockfile and workspace manifest live there. Leave the root
 directory at `/` and set the Dockerfile path. A root directory of
 `/apps/telegram-bridge` fails the build with `"/pnpm-workspace.yaml": not found`.
@@ -1046,7 +1062,7 @@ NUXT_MAIL_FROM_NAME=Automata MCP
 # WhatsApp only
 NUXT_EVOLUTION_URL=http://evolution.railway.internal:8080    # matches SERVER_PORT above
 NUXT_EVOLUTION_ADMIN_KEY=${{evolution.AUTHENTICATION_API_KEY}}
-NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:<password>@<postgres-private-host>:<port>/<database>
+NUXT_EVOLUTION_DATABASE_URL=${{Postgres.DATABASE_URL}}
 NUXT_WEBHOOK_URL=https://<web-domain>/api/webhook/evolution
 NUXT_WEBHOOK_SECRET=<openssl rand -hex 32>   # used by Telegram's webhook too
 
@@ -1070,10 +1086,10 @@ every token you hand out points at the wrong host.
 `NUXT_EVOLUTION_ADMIN_KEY` is the most sensitive value in the deployment: it can
 create, read and delete every user's WhatsApp connection.
 
-`NUXT_EVOLUTION_DATABASE_URL` points at the same Postgres service Evolution uses,
-but as the read-only role from "Reading and searching messages" — create it
-there first. Do not reference `${{Postgres.DATABASE_URL}}`: that is the
-database's owner, and this connection reaches every user's messages.
+`NUXT_EVOLUTION_DATABASE_URL` points at the same Postgres service Evolution uses.
+The owner's URL is fine — the app only sends its own parameterised SELECTs there,
+in sessions opened read-only. To narrow it to a SELECT-only role instead, create
+`wamcp_search` from "Reading and searching messages" and use its URL here.
 
 **Set `NUXT_WEBHOOK_SECRET`.** The app registers a webhook per connection and
 attaches it as `x-webhook-secret`; per-instance webhooks are the only ones
@@ -1086,6 +1102,44 @@ in-process, so a second replica means a second sweep and duplicate alert emails.
 
 **Leave `NUXT_ALLOW_PRIVATE_TARGETS` unset.** It defaults to off, which is right
 for any deployment more than one person uses — see "Database connections".
+
+### Releases
+
+The two images built from this repo are published to GHCR when `main` is merged
+into `prod`:
+
+| Image | Built from |
+|---|---|
+| `ghcr.io/ju-li/automata-mcp-web` | `apps/web/Dockerfile` |
+| `ghcr.io/ju-li/automata-mcp-telegram-bridge` | `apps/telegram-bridge/Dockerfile` |
+
+Each release is tagged `X.Y.Z`, `X.Y`, `X`, `latest` and `sha-<commit>`, for
+`linux/amd64`. **Point a service or a template at the major tag (`:1`), not
+`:latest`.** The web service migrates its schema at boot and migrations only go
+forward, so a major release reaching a deployment on its next restart is not
+something to opt into by accident.
+
+The version lives in one place — `"version"` in the root `package.json` — and is
+always three-part. To cut a release:
+
+1. Bump `"version"` on `main`, through an ordinary PR.
+2. Open a PR from `main` into `prod`. The `release-check` workflow refuses it
+   unless the version is `X.Y.Z`, is not already released and is above the
+   latest release, and it builds both images to prove they still build.
+3. Merge it with **Create a merge commit** — never squash, or `prod` stops being
+   an ancestor of `main` and every later release PR shows old commits again.
+   The `release` workflow then pushes both images and only after that creates
+   the `vX.Y.Z` git tag and the GitHub Release, so a tag always means its images
+   exist.
+
+One-time setup on GitHub, which no workflow can do for you:
+
+- Create the `prod` branch from `main`, and protect it: require a pull request
+  and the `release-check` jobs (`version`, `build`).
+- After the first release, open each package under the repository's
+  **Packages** and set its visibility to **Public**. GHCR creates packages
+  private, and Railway — or anyone deploying a template — cannot pull a private
+  image without credentials.
 
 ### First run
 

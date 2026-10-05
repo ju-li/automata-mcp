@@ -169,7 +169,9 @@ Pooling is delegated to `keyedPool()` in `pg-pool.ts`, shared with the Postgres 
 
 `probePgConnection(url, { requireTable: '"Message"' })` proves a user-supplied URL before it is stored. The `requireTable` half is not belt-and-braces: a URL with the right host, user and password but the wrong *database* connects happily and then matches no rows, which reads as an account with no messages — the same silent-empty answer this whole arrangement exists to prevent, one layer down.
 
-The connection is far wider than anything else the app holds (every user's messages, every instance — and for a user's own server, every account on it, which may include accounts that are not theirs if they share it), so four things are load-bearing: the role is `SELECT`-only on `"Message"` and the app never writes or runs DDL; every query carries `"instanceId" = <this account>`, which neither `searchMessages()` nor `listMessagesPage()` can be called without; chat scope is a **predicate in the SQL**, not a filter applied to rows after they are read; and the module returns rows, never rendered messages — naming a sender and previewing a payload belong to `chats.ts`, which is what keeps the import one-directional. `resolveEvolutionInstanceId()` throws rather than querying without an id — `createInstance()` can store `''`, and an empty id would mean a query with no account predicate at all.
+The connection is far wider than anything else the app holds (every user's messages, every instance — and for a user's own server, every account on it, which may include accounts that are not theirs if they share it), so four things are load-bearing: the module issues only fixed, parameterised `SELECT`s and never writes or runs DDL; every query carries `"instanceId" = <this account>`, which neither `searchMessages()` nor `listMessagesPage()` can be called without; chat scope is a **predicate in the SQL**, not a filter applied to rows after they are read; and the module returns rows, never rendered messages — naming a sender and previewing a payload belong to `chats.ts`, which is what keeps the import one-directional. `resolveEvolutionInstanceId()` throws rather than querying without an id — `createInstance()` can store `''`, and an empty id would mean a query with no account predicate at all.
+
+**The credential is not assumed to be narrow.** The default deployment (and the Railway template) points `NUXT_EVOLUTION_DATABASE_URL` at the database's owner, the same URL as `NUXT_DATABASE_URL`, because a one-click deploy cannot run the `GRANT`s for a dedicated role. That is a deliberate trade: the web process already holds the owner credential, so a SELECT-only `wamcp_search` role only contains a bug in this module's own queries — README keeps it as optional hardening. What replaces it as a backstop is `readOnly: true` on the pool (`KeyedPoolOptions` in `pg-pool.ts`), which opens every session with `default_transaction_read_only` so a write fails with 25006 even under a superuser. A superuser can turn that off, but only through SQL — which is why the first load-bearing rule above is now the real control: no `.unsafe()`, no string-built SQL, nothing a caller sends reaching this connection as text. `telegram-db.ts` passes `readOnly` for the same reason; the Postgres connection kind never does, because `run-statement` must write.
 
 **One message is stored more than once, and the app must collapse it.** 2.3.7 dedupes a history import against an in-memory `Set` of `key.id` rebuilt from the database at the top of each `messaging-history.set`, and the `createMany` behind it passes `skipDuplicates` — inert, because the only unique constraint on `Message` is a `@default(cuid())` primary key that can never collide. Nothing in the schema stops a second write, so two batches in flight together, or an import racing live traffic, both insert; `enableFullHistorySync()` is what puts them in flight. The copies disagree about the sender, each carrying whatever `pushName` was on the wire — a real name, a bare LID, a LID JID, or the sender's own device-locale self-label (`Você`). Reported raw, one message reads as three from three different people, a range reports triple its true size, and pages come back ragged. Collapsing after the fact cannot fix it: `skip`/`take` are applied upstream to the duplicate rows, so the page boundaries are already drawn in the wrong place. Hence `DISTINCT ON (m.key->>'id')` inside a CTE with `LIMIT`/`OFFSET` outside it, on **both** queries. `bestNamed()` decides which copy survives and must stay deterministic — otherwise an identical second call returns a different author.
 
@@ -306,7 +308,7 @@ The column rule below holds for top-level content only: a message nested inside 
 arrives with `messageType: "conversation"`. The mentions survive in the dedicated
 `Message.contextInfo` column, which both queries in `evolution-db.ts` select as
 `contextInfo->'mentionedJid'` — still a column of `"Message"`, so inside the
-existing read-only grant.
+optional `wamcp_search` grant.
 
 **Names come from group participants first, contacts second.** Evolution's
 `Contact` rows are written keyed on `key.remoteJid`, which for a group message is
@@ -552,6 +554,17 @@ cd apps/web && pnpx shadcn-vue@latest add <component>
 Every image tag in `docker-compose.dev.yml` is pinned. Do not relax one to `latest`.
 
 **`DROP SCHEMA app` is the local reset**, and it deletes every user, connection and token — the next boot recreates the schema empty. Never point that at a deployment's database: the Evolution sessions those connections name keep running with nothing recording them.
+
+## Releases
+
+Merging `main` into `prod` publishes `ghcr.io/ju-li/automata-mcp-web` and `ghcr.io/ju-li/automata-mcp-telegram-bridge`, tagged with the version in the **root `package.json`** — the only place a version lives; `apps/*/package.json` stay unversioned. README "Releases" is the operator's procedure.
+
+- **`.github/scripts/release-version.sh`** is the one version rule: three-part `X.Y.Z`, no existing `vX.Y.Z` tag, strictly above the latest. Both workflows call it, so the check on the PR and the guard on the push cannot drift.
+- **`release-check.yml`** (PRs into `prod`) runs that and builds both images without pushing — after the merge a bad version or a broken Dockerfile is already on the release branch.
+- **`release.yml`** (push to `prod`) re-runs the version guard, pushes both images, then creates the tag and GitHub Release **last**, so a tag means its images exist. Everything is in one workflow because a tag pushed with `GITHUB_TOKEN` does not trigger another.
+- **`main → prod` is a merge commit, never a squash.** A squash leaves `prod` off `main`'s history and every later release PR re-shows old commits or conflicts.
+
+Templates pin the major tag, not `latest`: migrations run at boot and are append-only, so an image rollback after one is not a clean undo.
 
 ## Container ports
 
