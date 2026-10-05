@@ -29,10 +29,7 @@ export default defineEventHandler(async (event) => {
   // The right database, not merely a reachable one.
   if (dbUrl) await probePgConnection(dbUrl, { requireTable: 'telegram.messages' })
 
-  const pb = await pocketbaseAdmin()
-  const updated = await pb.collection('instances').update<AppInstance>(instance.id, {
-    telegram_db_url: dbUrl,
-  })
+  const updated = await updateRow<AppInstance>('instances', instance.id, { telegram_db_url: dbUrl })
   await closeKeyedPool(`tg:${instance.id}`)
 
   return { instance: toPublicInstance(updated) }

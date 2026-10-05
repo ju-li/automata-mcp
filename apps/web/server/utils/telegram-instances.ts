@@ -1,4 +1,4 @@
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 import type { Actor } from './org'
 
 /**
@@ -58,8 +58,7 @@ export async function provisionTelegramInstance(actor: Actor, input: TelegramPro
 
   let record: AppInstance
   try {
-    const pb = await pocketbaseAdmin()
-    record = await pb.collection('instances').create<AppInstance>({
+    record = await insertRow<AppInstance>('instances', {
       org: actor.org.id,
       created_by: actor.user.id,
       kind: 'telegram',

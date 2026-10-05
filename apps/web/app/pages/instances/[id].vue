@@ -3,7 +3,7 @@
  * Which panel a connection gets is decided by its kind, and nothing else on
  * this page knows anything about either kind.
  *
- * The summary fetch is deliberately the cheap one — a PocketBase read with no
+ * The summary fetch is deliberately the cheap one — an app-database read with no
  * Evolution call and no database connection — because the panel it chooses then
  * makes the expensive one itself. Deciding here from a full status fetch would
  * mean two of those.

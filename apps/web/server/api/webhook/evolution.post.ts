@@ -1,4 +1,4 @@
-import type { AppInstance } from '~~/server/utils/pocketbase'
+import type { AppInstance } from '~~/server/utils/app-db'
 
 /**
  * Inbound webhook from Evolution API.
@@ -87,27 +87,22 @@ export default defineEventHandler(async (event) => {
 })
 
 /**
- * Name is unique on `instances` (`idx_instances_name`), and it is Evolution's
+ * Name is unique on `instances` (`instances_name_key`), and it is Evolution's
  * own identifier for the account, so it is the only thing a delivery can be
- * matched on.
- *
- * The admin client is required rather than convenient: `api_key` is a hidden
- * field, and without it there is nothing to read Evolution's live state with.
- * The filter is bound with `pb.filter()` — the name arrives from the network and
- * must never be concatenated into a filter string.
+ * matched on. It arrives from the network, so it is only ever a bind parameter.
  */
 async function findInstanceByName(name: string): Promise<AppInstance | undefined> {
   try {
-    const pb = await pocketbaseAdmin()
+    const sql = await appDb()
     // Kind-filtered: only a WhatsApp connection has an Evolution instance, so a
     // delivery naming any other row is forged or misrouted and must not trigger
     // a health check against it.
-    return await pb.collection('instances').getFirstListItem<AppInstance>(
-      pb.filter('name = {:name} && kind = {:kind}', { name, kind: 'whatsapp' }),
-    )
+    const [row] = await sql<AppInstance[]>`
+      SELECT * FROM app.instances WHERE name = ${name} AND kind = 'whatsapp'
+    `
+    return row
   }
   catch (error) {
-    if (isPocketBaseNotFound(error)) return undefined
     console.error('[webhook] could not resolve the connection for a delivery:', error)
     return undefined
   }

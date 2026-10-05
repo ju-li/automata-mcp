@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import type { AppInstance } from '~~/server/utils/pocketbase'
+import type { AppInstance } from '~~/server/utils/app-db'
 import type { MessageSearchHit } from '~~/server/utils/evolution-db'
 import type { MentionDirectory } from '~~/server/utils/mentions'
 

@@ -1,6 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
-import type { AppInvitation, AppUser, OrgRole } from './pocketbase'
+import type { AppInvitation, AppUser, Db, OrgRole } from './app-db'
 import type { Actor } from './org'
 
 /**
@@ -49,7 +49,7 @@ export function inviteExpiry(): string {
   return new Date(Date.now() + INVITE_TTL_MS).toISOString()
 }
 
-/** Emails are stored and compared lower-cased; PocketBase has no transform. */
+/** Emails are stored and compared lower-cased and trimmed. `app.users` enforces it with a CHECK. */
 export function normaliseEmail(email: string): string {
   return email.trim().toLowerCase()
 }
@@ -73,21 +73,21 @@ export function toInviteView(invite: AppInvitation): InviteView {
 
 /** Pending means: not revoked, not accepted, not expired. */
 export async function listPendingInvites(orgId: string): Promise<InviteView[]> {
-  const pb = await pocketbaseAdmin()
-  const rows = await pb.collection('invitations').getFullList<AppInvitation>({
-    filter: pb.filter('org = {:org} && revoked != true && accepted_at = ""', { org: orgId }),
-    sort: '-created',
-  })
-  return rows.filter(row => !isExpired(row)).map(toInviteView)
+  const sql = await appDb()
+  const rows = await sql<AppInvitation[]>`
+    SELECT * FROM app.invitations
+    WHERE org = ${orgId} AND NOT revoked AND accepted_at IS NULL
+      AND (expires_at IS NULL OR expires_at > now())
+    ORDER BY created DESC
+  `
+  return rows.map(toInviteView)
 }
 
 /**
  * Create an invitation, replacing any pending one for the same address.
  *
- * "One pending invitation per (org, email)" is enforced here rather than by a
- * partial unique index: such an index would have to encode PocketBase's
- * empty-date (`''`) and boolean (`0`) representations in raw SQL, which is a
- * sharp edge for no gain. Superseding rather than refusing is also the kinder
+ * "One pending invitation per (org, email)" is enforced here, in one
+ * transaction with the insert. Superseding rather than refusing is the kinder
  * behaviour — an admin re-inviting someone almost always means "the last link
  * got lost", and the old code stops working the moment the new one is made.
  */
@@ -97,28 +97,21 @@ export async function createInvite(
   email: string,
   role: OrgRole,
 ): Promise<{ code: string, invite: InviteView }> {
-  const pb = await pocketbaseAdmin()
+  const sql = await appDb()
   const address = normaliseEmail(email)
-
-  const existing = await pb.collection('invitations').getFullList<AppInvitation>({
-    filter: pb.filter('org = {:org} && email = {:email} && revoked != true && accepted_at = ""', {
-      org: orgId,
-      email: address,
-    }),
-  })
-  for (const row of existing) {
-    await pb.collection('invitations').update(row.id, { revoked: true })
-  }
-
   const { code, hash } = mintInviteCode()
-  const invite = await pb.collection('invitations').create<AppInvitation>({
-    org: orgId,
-    email: address,
-    role,
-    code_hash: hash,
-    invited_by: invitedBy.id,
-    expires_at: inviteExpiry(),
-    revoked: false,
+
+  const invite = await sql.begin(async (tx) => {
+    await tx`
+      UPDATE app.invitations SET revoked = true, updated = now()
+      WHERE org = ${orgId} AND email = ${address} AND NOT revoked AND accepted_at IS NULL
+    `
+    const [row] = await tx<AppInvitation[]>`
+      INSERT INTO app.invitations (org, email, role, code_hash, invited_by, expires_at)
+      VALUES (${orgId}, ${address}, ${role}, ${hash}, ${invitedBy.id}, ${inviteExpiry()})
+      RETURNING *
+    `
+    return row!
   })
 
   return { code, invite: toInviteView(invite) }
@@ -136,22 +129,17 @@ export type InviteProblem = 'not-found' | 'revoked' | 'expired' | 'accepted'
  * knows it existed, so distinguishing "expired" from "never existed" leaks
  * nothing and saves a support round-trip.
  *
- * A lookup miss is `not-found`; a backend fault throws. `firstOrNone` is what
- * keeps those apart — see its own comment.
+ * A lookup miss is `not-found`; a backend fault throws.
  */
 export async function resolveInvite(
   code: string,
 ): Promise<{ invite?: AppInvitation, problem?: InviteProblem }> {
   if (!code || !code.startsWith(CODE_PREFIX)) return { problem: 'not-found' }
 
-  const pb = await pocketbaseAdmin()
+  const sql = await appDb()
   const hash = hashInviteCode(code)
 
-  const invite = await firstOrNone<AppInvitation>(
-    pb,
-    'invitations',
-    pb.filter('code_hash = {:hash}', { hash }),
-  )
+  const [invite] = await sql<AppInvitation[]>`SELECT * FROM app.invitations WHERE code_hash = ${hash}`
   if (!invite) return { problem: 'not-found' }
 
   // Defence in depth: the lookup already proves equality, but compare explicitly
@@ -306,10 +294,17 @@ export async function sendInviteEmail(
   return sendAppEmail({ to: invite.email, subject: mail.subject, text: mail.text })
 }
 
-export async function markInviteAccepted(inviteId: string, userId: string): Promise<void> {
-  const pb = await pocketbaseAdmin()
-  await pb.collection('invitations').update(inviteId, {
-    accepted_at: new Date().toISOString(),
-    accepted_by: userId,
-  })
+/**
+ * Spend an invitation, inside the transaction that acts on it. Conditional on
+ * it still being usable, so two acceptances racing on one code cannot both
+ * succeed: the second finds nothing to update and its transaction rolls back.
+ */
+export async function markInviteAccepted(tx: Db, inviteId: string, userId: string): Promise<void> {
+  const result = await tx`
+    UPDATE app.invitations SET accepted_at = now(), accepted_by = ${userId}, updated = now()
+    WHERE id = ${inviteId} AND accepted_at IS NULL AND NOT revoked
+  `
+  if (!result.count) {
+    throw createError({ statusCode: 409, statusMessage: inviteProblemMessage('accepted') })
+  }
 }

@@ -1,4 +1,4 @@
-import type { AppUser } from '~~/server/utils/pocketbase'
+import type { AppUser } from '~~/server/utils/app-db'
 
 /**
  * Accept an invitation as the signed-in account.
@@ -32,8 +32,14 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  const { movedFrom } = await acceptInviteInto(user, invite.org, invite.role)
-  await markInviteAccepted(invite.id, user.id)
+  // One transaction: the move and the invitation being spent happen together,
+  // and a second acceptance of the same code finds it already spent.
+  const sql = await appDb()
+  const { movedFrom } = await sql.begin(async (tx) => {
+    const moved = await acceptInviteInto(tx, user, invite.org, invite.role)
+    await markInviteAccepted(tx, invite.id, user.id)
+    return moved
+  })
 
   return { ok: true, role: invite.role, movedFrom }
 })

@@ -1,4 +1,4 @@
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 import type { McpScope } from './mcp-scope'
 
 /**

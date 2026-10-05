@@ -1,4 +1,4 @@
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 import type { McpAuth } from './mcp-auth'
 import type { ConnectionState } from '#shared/connection'
 
@@ -176,7 +176,7 @@ export function createTelegramBridge(creds: TelegramCredentials) {
 
 export type TelegramBridge = ReturnType<typeof createTelegramBridge>
 
-/** For management routes, where the instance came from `pocketbaseAdmin()`. */
+/** For management routes, where the instance was read from the app database. */
 export function telegramBridgeForInstance(instance: AppInstance): TelegramBridge {
   const creds = telegramCredentialsForInstance(instance)
   if (!creds) {

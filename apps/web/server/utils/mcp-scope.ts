@@ -1,5 +1,5 @@
 import type { H3Event } from 'h3'
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 import type { McpAuth } from './mcp-auth'
 import type { InstanceKind } from '#shared/connection'
 
@@ -25,13 +25,13 @@ import type { InstanceKind } from '#shared/connection'
 export type { InstanceKind }
 
 /**
- * A row written before `kind` existed is a WhatsApp account. PocketBase
- * materialises an unset SelectField as `''`, so this must not be `??`.
+ * A connection's kind, checked against what this build understands.
  *
- * **Only those two spellings default to WhatsApp.** Anything else this build
- * does not recognise throws. PocketBase and Nuxt deploy separately, so a row can
- * carry a kind the running code has never heard of — a migration that landed
- * first, a rollback, a fork — and treating it as WhatsApp would hand its
+ * The column is `NOT NULL` with a `CHECK`, so in the ordinary case this is a
+ * plain read. It still refuses a value it does not recognise rather than
+ * assuming one: a rollback to an older build after a migration added a kind
+ * leaves rows this code has never heard of, and treating one as WhatsApp would
+ * hand its
  * `base_url`/`api_key` to the Evolution client and authenticate its tokens as a
  * WhatsApp connection. A loud refusal is the only safe reading of a value we
  * cannot interpret.
@@ -39,10 +39,7 @@ export type { InstanceKind }
 export function instanceKind(instance: Pick<AppInstance, 'kind'>): InstanceKind {
   const kind = instance.kind as string | undefined
   switch (kind) {
-    case undefined:
-    case '':
     case 'whatsapp':
-      return 'whatsapp'
     case 'postgres':
     case 'telegram':
       return kind
@@ -88,15 +85,9 @@ export const OPEN_SCOPE: McpScope = {
 }
 
 /**
- * Read scope off a PocketBase token record.
- *
- * `!== false` rather than `=== true` so a genuinely missing key (a partial fetch,
- * a hand-written record) reads as open rather than as a token with no access.
- *
- * That is not a safety net for writes, though: **PocketBase materialises an unset
- * boolean field as `false`**, not as absent. A write path that forgets to set
- * these produces a token that can do nothing at all. Every write must be
- * explicit — see `createToken` in tokens.ts.
+ * Read scope off a token row. The columns are `NOT NULL` with defaults, so
+ * every row carries all six; `!== false` keeps a partial object (a hand-built
+ * record) reading as open rather than as a token with no access.
  */
 export function scopeFromRecord(record: {
   all_chats?: boolean

@@ -1,7 +1,7 @@
 import { assertNever } from '#shared/connection'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
-import type { AppInstance, AppInstanceAssignment, AppMembership, AppUser } from './pocketbase'
+import type { AppInstance, AppMcpToken, AppUser, OrgRole } from './app-db'
 import type { McpScope } from './mcp-scope'
 import type { EvolutionCredentials } from './evolution'
 import type { TelegramCredentials } from './telegram'
@@ -11,7 +11,7 @@ import type { TelegramCredentials } from './telegram'
  *
  * This module has no access to, and no fallback to, the browser session. A
  * request that fails token auth here fails outright; it never degrades into
- * "well, there is a PocketBase cookie, use that". See server/utils/session.ts
+ * "well, there is a session cookie, use that". See server/utils/session.ts
  * for the other, entirely separate path.
  *
  * Tokens are minted by this app. A token is bound to exactly one connected
@@ -47,20 +47,19 @@ export type McpAuth =
   | (McpAuthBase & { kind: 'postgres' })
   | (McpAuthBase & { kind: 'telegram', telegram: TelegramCredentials })
 
-interface McpTokenRecord {
-  id: string
-  /** The member the token was issued to. See `resolveMcpAuth`. */
-  assigned_to: string
-  instance: string
-  token_hash: string
-  expires_at: string
-  revoked: boolean
-  all_chats?: boolean
-  chat_jids?: unknown
-  all_tables?: boolean
-  table_names?: unknown
-  all_tools?: boolean
-  tool_names?: unknown
+/**
+ * One row per token, joined to everything that decides whether it still works.
+ * The joins are LEFT so a missing piece reads as a missing piece (and is logged
+ * as one) rather than as no such token.
+ */
+interface McpTokenFacts extends Pick<AppMcpToken,
+  'id' | 'assigned_to' | 'instance' | 'token_hash' | 'expires_at' | 'revoked'
+  | 'all_chats' | 'chat_jids' | 'all_tables' | 'table_names' | 'all_tools' | 'tool_names'> {
+  user_email?: string
+  user_name?: string
+  member_role?: OrgRole
+  member_org?: string
+  assigned: boolean
 }
 
 /** Mint a new token. The plaintext is returned once and never stored. */
@@ -103,37 +102,6 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   const token = extractToken(event)
   if (!token || !token.startsWith(TOKEN_PREFIX)) return undefined
 
-  const pb = await pocketbaseAdmin()
-
-  let record: McpTokenRecord
-  try {
-    // Exact match on the unique token_hash index — no scan, no user-controlled
-    // filter expression.
-    record = await pb.collection('mcp_tokens').getFirstListItem<McpTokenRecord>(
-      pb.filter('token_hash = {:hash}', { hash: hashMcpToken(token) }),
-    )
-  } catch (error) {
-    // 404 means no such token — that is a real auth failure. Anything else
-    // (PocketBase down, network error, 500) is our problem, not the caller's:
-    // answering 401 there would tell a client its valid token had been revoked
-    // and invite it to throw the token away.
-    if (isPocketBaseNotFound(error)) return undefined
-    throw backendUnavailable(error)
-  }
-
-  // Defence in depth: the lookup above already proves equality, but compare the
-  // stored hash explicitly so a future change to the query cannot weaken this.
-  const presented = Buffer.from(hashMcpToken(token))
-  const stored = Buffer.from(record.token_hash)
-  if (presented.length !== stored.length || !timingSafeEqual(presented, stored)) {
-    return undefined
-  }
-
-  if (record.revoked) return undefined
-  if (record.expires_at && new Date(record.expires_at).getTime() <= Date.now()) {
-    return undefined
-  }
-
   // ── who this token still reaches ─────────────────────────────────────────
   //
   // A token names a member and a connection. It authenticates only while that
@@ -145,70 +113,64 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   // exists to produce, and a copied `org` would go stale on every one of those
   // transitions.
   //
-  // Four independent reads, so one fan-out rather than four serial hops — two
-  // round-trips in total against a PocketBase on the same private network,
-  // fewer than the three this used to make. The assignment is fetched
-  // unconditionally and consulted only for a member: one wasted local query
-  // beats a second serial hop.
+  // One query for the token and the facts about its holder, then the instance
+  // row by primary key. Failure semantics, which are the point of this block:
   //
-  // `expand: 'instance,assigned_to'` is deliberately NOT used. `api_key`,
-  // `dsn`, `admin_key` and `evolution_db_url` are hidden PocketBase fields, and
-  // whether an expanded relation carries hidden fields for a superuser is
-  // precisely the kind of thing that appears to work and then yields
-  // `credentialsForInstance() === undefined` — a 401 on a valid token.
-  //
-  // Failure semantics, which are the point of this block:
-  //
-  //   membership read empty            → 401, logged   the holder is in no org
-  //   membership read THROWS           → 503           includes "collection does
-  //                                                    not exist yet" mid-rollout
+  //   no such token hash               → 401           not a credential
+  //   any read THROWS                  → 503           an outage, not a revocation
+  //   holder or instance row gone      → 401           a dead credential
+  //   no membership                    → 401, logged   the holder is in no org
   //   membership.org !== instance.org  → 401, logged   they left the org
-  //   instance.org empty               → 401, logged   fail closed, never match ''
-  //   assignment empty, role member    → 401, logged   assignment revoked
-  //   assignment read THROWS           → 503
+  //   no assignment, role member       → 401, logged   assignment revoked
   //   role admin                       → authorized, assignments not consulted
-  //
-  // `firstOrNone` is what keeps the two THROWS rows honest: `getFirstListItem`
-  // answers 404 for an empty result *and* for a missing collection, and
-  // `isPocketBaseNotFound` cannot tell them apart.
+  const hash = hashMcpToken(token)
+  let record: McpTokenFacts | undefined
   let instance: AppInstance | undefined
-  let user: AppUser | undefined
-  let membership: AppMembership | undefined
-  let assignment: AppInstanceAssignment | undefined
   try {
-    // The instance carries the Evolution credentials. `api_key` is a hidden
-    // PocketBase field, so this only works through the admin client.
-    ;[instance, user, membership, assignment] = await Promise.all([
-      getOneOrNone<AppInstance>(pb, 'instances', record.instance),
-      getOneOrNone<AppUser>(pb, 'users', record.assigned_to),
-      firstOrNone<AppMembership>(
-        pb,
-        'memberships',
-        pb.filter('user = {:uid}', { uid: record.assigned_to }),
-      ),
-      firstOrNone<AppInstanceAssignment>(
-        pb,
-        'instance_assignments',
-        pb.filter('user = {:uid} && instance = {:iid}', { uid: record.assigned_to, iid: record.instance }),
-      ),
-    ])
+    const sql = await appDb()
+    ;[record] = await sql<McpTokenFacts[]>`
+      SELECT t.id, t.assigned_to, t.instance, t.token_hash, t.expires_at, t.revoked,
+             t.all_chats, t.chat_jids, t.all_tables, t.table_names, t.all_tools, t.tool_names,
+             u.email AS user_email, u.name AS user_name,
+             m.role AS member_role, m.org AS member_org,
+             EXISTS (
+               SELECT 1 FROM app.instance_assignments a
+               WHERE a.user_id = t.assigned_to AND a.instance = t.instance
+             ) AS assigned
+      FROM app.mcp_tokens t
+      LEFT JOIN app.users u ON u.id = t.assigned_to
+      LEFT JOIN app.memberships m ON m.user_id = t.assigned_to
+      WHERE t.token_hash = ${hash}
+    `
+    if (record) instance = await getRow<AppInstance>('instances', record.instance)
   } catch (error) {
-    // Every throw that reaches here is a fault, never an absence: the two
-    // `getOneOrNone` reads swallow their own 404s and the two `firstOrNone`
-    // reads cannot produce one for an empty result.
-    throw backendUnavailable(error)
+    // Answering 401 here would tell a client its valid token had been revoked
+    // and invite it to throw the token away.
+    console.error('[mcp-auth] could not resolve a token against the app database:', error)
+    throw appDbUnavailable(error)
   }
 
-  // The token points at a row that is gone. A dead credential, not an outage.
-  if (!instance || !user) return undefined
+  if (!record) return undefined
 
-  if (!membership) {
-    console.error(`[mcp-auth] user ${record.assigned_to} is in no organization; token ${record.id} refused`)
+  // Defence in depth: the lookup above already proves equality, but compare the
+  // stored hash explicitly so a future change to the query cannot weaken this.
+  const presented = Buffer.from(hash)
+  const stored = Buffer.from(record.token_hash)
+  if (presented.length !== stored.length || !timingSafeEqual(presented, stored)) {
     return undefined
   }
 
-  if (!instance.org) {
-    console.error(`[mcp-auth] instance ${instance.id} has no organization; token ${record.id} refused`)
+  if (record.revoked) return undefined
+  if (record.expires_at && new Date(record.expires_at).getTime() <= Date.now()) {
+    return undefined
+  }
+
+  // The token points at a row that is gone. A dead credential, not an outage.
+  if (!instance || !record.user_email) return undefined
+  const user: AppUser = { id: record.assigned_to, email: record.user_email, name: record.user_name }
+
+  if (!record.member_role || !record.member_org) {
+    console.error(`[mcp-auth] user ${record.assigned_to} is in no organization; token ${record.id} refused`)
     return undefined
   }
 
@@ -216,12 +178,12 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   // the two surfaces cannot drift on who may reach what while still loading
   // their own facts through their own credential path.
   if (!authorizesInstance(
-    { role: membership.role, orgId: membership.org },
+    { role: record.member_role, orgId: record.member_org },
     instance.org,
-    Boolean(assignment),
+    record.assigned,
   )) {
     console.error(
-      `[mcp-auth] user ${user.id} (${membership.role}, org ${membership.org}) `
+      `[mcp-auth] user ${user.id} (${record.member_role}, org ${record.member_org}) `
       + `does not reach instance ${instance.id} (org ${instance.org}); token ${record.id} refused`,
     )
     return undefined
@@ -277,8 +239,8 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   }
 
   // Best-effort; a write failure must not fail an otherwise valid request.
-  void pb.collection('mcp_tokens')
-    .update(record.id, { last_used_at: new Date().toISOString() })
+  void appDb()
+    .then(sql => sql`UPDATE app.mcp_tokens SET last_used_at = now() WHERE id = ${record.id}`)
     .catch(() => {})
 
   return auth
@@ -298,14 +260,6 @@ export function useMcpAuth(): McpAuth {
     throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
   }
   return auth
-}
-
-function backendUnavailable(cause: unknown) {
-  return createError({
-    statusCode: 503,
-    statusMessage: 'Auth backend unavailable',
-    cause,
-  })
 }
 
 /**

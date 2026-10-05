@@ -1,4 +1,4 @@
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 import type { McpAuth } from './mcp-auth'
 
 /**
@@ -145,7 +145,7 @@ export function credentialsForInstance(instance: Pick<AppInstance, 'base_url' | 
   return { baseUrl, apiKey: instance.api_key, userSupplied: !sameEvolutionServer(baseUrl, configUrl) }
 }
 
-/** For UI API routes, where the instance came from `pocketbaseAdmin()`. */
+/** For UI API routes, where the instance was read from the app database. */
 export function evolutionClientForInstance(instance: AppInstance): EvolutionClient {
   const creds = credentialsForInstance(instance)
   if (!creds) {

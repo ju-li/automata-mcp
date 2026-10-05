@@ -20,7 +20,7 @@
  * given token.
  *
  * Read a row's kind through `instanceKind()` in `server/utils/mcp-scope.ts`,
- * never off the record: PocketBase materialises an unset SelectField as `''`.
+ * which refuses a value this build does not know rather than guessing.
  */
 export type InstanceKind = 'whatsapp' | 'postgres' | 'telegram'
 

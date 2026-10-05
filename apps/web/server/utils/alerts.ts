@@ -1,4 +1,4 @@
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 import { assertNever } from '#shared/connection'
 import type { ConnectionState, InstanceKind } from '#shared/connection'
 
@@ -173,7 +173,6 @@ async function evaluate(instance: AppInstance): Promise<void> {
   if (!kind) return
 
   const health = await readConnectionHealth(instance, kind)
-  const pb = await pocketbaseAdmin()
 
   if (!health.paired) {
     // Unlinked on purpose — a Telegram logout clears the account — while an
@@ -181,7 +180,7 @@ async function evaluate(instance: AppInstance): Promise<void> {
     // either, so neither mail is true; close the outage quietly, or linking
     // again later would send a "connected again" for an outage long over.
     if (health.knownUnlinked && (instance.down_since || instance.alerted_at)) {
-      await pb.collection('instances').update(instance.id, { down_since: '', alerted_at: '' })
+      await updateRow('instances', instance.id, { down_since: null, alerted_at: null })
     }
     return
   }
@@ -197,12 +196,12 @@ async function evaluate(instance: AppInstance): Promise<void> {
       if (!sent) return
     }
 
-    await pb.collection('instances').update(instance.id, { down_since: '', alerted_at: '' })
+    await updateRow('instances', instance.id, { down_since: null, alerted_at: null })
     return
   }
 
   if (!instance.down_since) {
-    await pb.collection('instances').update(instance.id, { down_since: new Date().toISOString() })
+    await updateRow('instances', instance.id, { down_since: new Date() })
     // Fall through to the grace check below rather than returning: a live
     // `close` is already definitive and should not wait an hour for the next
     // sweep to say so.
@@ -210,12 +209,12 @@ async function evaluate(instance: AppInstance): Promise<void> {
 
   if (instance.alerted_at) return
 
-  const downSince = parsePocketBaseDate(instance.down_since) ?? Date.now()
+  const downSince = instance.down_since ? Date.parse(instance.down_since) : Date.now()
   const definitive = health.state === 'close'
   if (!definitive && Date.now() - downSince < GRACE_MS) return
 
   const sent = await notifyWatchers(instance, canManage => outageMail(instance, health, canManage))
-  if (sent) await pb.collection('instances').update(instance.id, { alerted_at: new Date().toISOString() })
+  if (sent) await updateRow('instances', instance.id, { alerted_at: new Date() })
 }
 
 /**
@@ -232,16 +231,13 @@ async function evaluate(instance: AppInstance): Promise<void> {
  * users cannot use either. It costs one grace period before anything is sent.
  */
 export async function sweepConnectionAlerts(): Promise<{ checked: number, failed: number }> {
-  const pb = await pocketbaseAdmin()
+  const sql = await appDb()
 
-  // `kind` is backfilled and required (1787460000_polymorphic_instances.js), so
-  // filtering on it here cannot miss a pre-`kind` row the way reading the field
-  // directly could. Postgres connections have no liveness signal short of
-  // opening a connection on a timer, and are out of scope.
-  const instances = await pb.collection('instances').getFullList<AppInstance>({
-    filter: pb.filter('kind = {:whatsapp} || kind = {:telegram}', { whatsapp: 'whatsapp', telegram: 'telegram' }),
-    sort: 'created',
-  })
+  // Database connections have no liveness signal short of opening a connection
+  // on a timer, and are out of scope.
+  const instances = await sql<AppInstance[]>`
+    SELECT * FROM app.instances WHERE kind IN ('whatsapp', 'telegram') ORDER BY created
+  `
 
   let failed = 0
 
@@ -281,19 +277,6 @@ interface AlertRecipient {
   email: string
   /** An admin of the owning organization. Decides which fix the mail names. */
   canManage: boolean
-}
-
-/**
- * PocketBase serialises a date as `2026-09-12 10:00:00.000Z` — a space where
- * ISO 8601 wants a `T`. V8's fallback parser accepts it, but not by contract,
- * so it is normalised here rather than relied upon. An unparseable value answers
- * undefined and the caller treats the outage as starting now, which costs one
- * grace period and never an alert.
- */
-function parsePocketBaseDate(value: string | undefined): number | undefined {
-  if (!value) return undefined
-  const parsed = Date.parse(value.replace(' ', 'T'))
-  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 function connectionUrl(instance: AppInstance): string | undefined {

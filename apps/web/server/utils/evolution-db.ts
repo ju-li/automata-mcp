@@ -1,6 +1,6 @@
 import type { Sql } from 'postgres'
 import postgres from 'postgres'
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 import { mentionedJidsOf } from './mentions'
 
 /**
@@ -189,8 +189,7 @@ export async function resolveEvolutionInstanceId(instance: AppInstance): Promise
   // Best effort. Search works this time either way; the backfill just saves the
   // round trip next time.
   try {
-    const pb = await pocketbaseAdmin()
-    await pb.collection('instances').update(instance.id, { instance_id: id })
+    await updateRow('instances', instance.id, { instance_id: id })
   }
   catch (error) {
     console.error('[search] could not backfill instance_id:', error)

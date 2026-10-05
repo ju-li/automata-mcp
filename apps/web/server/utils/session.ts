@@ -1,58 +1,133 @@
+import { createHash, randomBytes } from 'node:crypto'
 import type { H3Event } from 'h3'
-import type { AppUser } from './pocketbase'
+import type { AppUser } from './app-db'
 
 /**
- * Auth for the browser UI — and ONLY the browser UI.
- *
- * PocketBase issues an auth cookie; this reads it, validates it against
- * PocketBase, and puts the user on `event.context.user`.
+ * Browser sessions — and ONLY the browser UI.
  *
  * Nothing here is reachable from the MCP surface: server/middleware/session.ts
  * returns early on /mcp before this ever runs, and MCP tools read
  * `event.context.mcpAuth` instead. Keep it that way — a shared "get current
  * user" helper across both surfaces is exactly the bug this split prevents.
+ *
+ * The cookie holds 32 random bytes; `app.sessions` holds only their SHA-256 —
+ * the same handling an MCP token gets, so a database read does not hand anyone
+ * a live session. A session lasts 14 days and is extended whenever it is used
+ * with less than half of that left, so an active user is never bounced to the
+ * login page mid-week.
  */
 
-export const PB_COOKIE = 'pb_auth'
+export const SESSION_COOKIE = 'automata_session'
 
-export async function getSessionUser(event: H3Event): Promise<AppUser | undefined> {
-  const cookie = getRequestHeader(event, 'cookie')
-  if (!cookie || !cookie.includes(`${PB_COOKIE}=`)) return undefined
+const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000
 
-  // A per-request client — the admin client's auth store must never be
-  // overwritten with a visitor's token.
-  const pb = pocketbaseForRequest()
-  pb.authStore.loadFromCookie(cookie, PB_COOKIE)
-
-  if (!pb.authStore.isValid) return undefined
-
-  try {
-    const { record } = await pb.collection('users').authRefresh<AppUser>()
-    // Note: `evolution_api_key` is a hidden field and is NOT present here. Use
-    // the admin client when you need it server-side.
-    return record
-  } catch (error) {
-    const status = (error as { status?: number })?.status
-
-    // The cookie really is no longer good: expired, revoked, user deleted.
-    if (status === 401 || status === 403 || status === 404) return undefined
-
-    // Anything else — PocketBase unreachable, 500, timeout — is our problem,
-    // not the visitor's. Returning undefined here would answer 401, which the
-    // client reads as "signed out": during an outage every signed-in user gets
-    // silently bounced to /login instead of being told the backend is down.
-    // Same distinction resolveMcpAuth makes for tokens; keep both surfaces
-    // honest about the difference.
-    console.error(`[pocketbase] could not validate a session against ${useRuntimeConfig().pocketbaseUrl}`, error)
-    throw createError({
-      statusCode: 503,
-      statusMessage: 'Auth backend unavailable',
-      cause: error,
-    })
-  }
+function hashSessionToken(token: string): string {
+  return createHash('sha256').update(token).digest('hex')
 }
 
-/** Throws 401 instead of returning undefined. For UI API routes. */
+function writeSessionCookie(event: H3Event, token: string, expiresAt: Date): void {
+  setCookie(event, SESSION_COOKIE, token, {
+    httpOnly: true,
+    secure: !import.meta.dev,
+    sameSite: 'lax',
+    path: '/',
+    expires: expiresAt,
+  })
+}
+
+export function clearSessionCookie(event: H3Event): void {
+  setCookie(event, SESSION_COOKIE, '', {
+    httpOnly: true,
+    secure: !import.meta.dev,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: 0,
+  })
+}
+
+/** Start a session for this user and set its cookie. */
+export async function startSession(event: H3Event, userId: string): Promise<void> {
+  const sql = await appDb()
+  const token = randomBytes(32).toString('base64url')
+  const expiresAt = new Date(Date.now() + SESSION_TTL_MS)
+
+  await sql`
+    INSERT INTO app.sessions (user_id, token_hash, expires_at)
+    VALUES (${userId}, ${hashSessionToken(token)}, ${expiresAt})
+  `
+  // Opportunistic cleanup, so expired rows do not accumulate with no timer.
+  void sql`DELETE FROM app.sessions WHERE user_id = ${userId} AND expires_at < now()`.catch(() => {})
+
+  writeSessionCookie(event, token, expiresAt)
+}
+
+/** End the session this request carries, if any, and clear the cookie. */
+export async function endSession(event: H3Event): Promise<void> {
+  const token = getCookie(event, SESSION_COOKIE)
+  clearSessionCookie(event)
+  if (!token) return
+
+  const sql = await appDb()
+  await sql`DELETE FROM app.sessions WHERE token_hash = ${hashSessionToken(token)}`
+}
+
+/**
+ * Every other session this user has, gone — after a password change, so a
+ * session someone else opened with the old password does not outlive it.
+ */
+export async function endOtherSessions(event: H3Event, userId: string): Promise<void> {
+  const token = getCookie(event, SESSION_COOKIE)
+  const sql = await appDb()
+  await sql`
+    DELETE FROM app.sessions
+    WHERE user_id = ${userId} AND token_hash <> ${token ? hashSessionToken(token) : ''}
+  `
+}
+
+interface SessionRow extends AppUser {
+  session_id: string
+  expires_at: string
+}
+
+/**
+ * The user this request's cookie belongs to, or `undefined`.
+ *
+ * `undefined` only for a cookie that is genuinely no good — absent, unknown,
+ * expired, or whose user is gone. A database fault is a **503**: answering 401
+ * there signs every user out in the middle of an outage, and the client reads
+ * it as "your session ended" rather than "the backend is down". Same
+ * distinction `resolveMcpAuth` makes for tokens.
+ */
+export async function getSessionUser(event: H3Event): Promise<AppUser | undefined> {
+  const token = getCookie(event, SESSION_COOKIE)
+  if (!token) return undefined
+
+  let row: SessionRow | undefined
+  try {
+    const sql = await appDb()
+    ;[row] = await sql<SessionRow[]>`
+      SELECT u.id, u.email, u.name, s.id AS session_id, s.expires_at
+      FROM app.sessions s JOIN app.users u ON u.id = s.user_id
+      WHERE s.token_hash = ${hashSessionToken(token)} AND s.expires_at > now()
+    `
+
+    // Sliding renewal, at most once per half-life rather than on every request.
+    if (row && new Date(row.expires_at).getTime() - Date.now() < SESSION_TTL_MS / 2) {
+      const expiresAt = new Date(Date.now() + SESSION_TTL_MS)
+      await sql`UPDATE app.sessions SET expires_at = ${expiresAt} WHERE id = ${row.session_id}`
+      writeSessionCookie(event, token, expiresAt)
+    }
+  }
+  catch (cause) {
+    console.error('[session] could not validate a session cookie against the app database:', cause)
+    throw appDbUnavailable(cause)
+  }
+
+  if (!row) return undefined
+  return { id: row.id, email: row.email, name: row.name }
+}
+
+/** The signed-in user, or 401. For UI API routes. */
 export async function requireSessionUser(event: H3Event): Promise<AppUser> {
   const user = event.context.user as AppUser | undefined ?? await getSessionUser(event)
   if (!user) {

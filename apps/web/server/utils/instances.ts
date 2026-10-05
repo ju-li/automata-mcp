@@ -1,6 +1,6 @@
 import { assertNever } from '#shared/connection'
 import { randomBytes } from 'node:crypto'
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 import type { Actor } from './org'
 import type { ConnectionState } from '#shared/connection'
 
@@ -125,40 +125,30 @@ export function generateInstanceName(): string {
  * surface: a member must not learn the size or the labels of the estate.
  */
 export async function listInstancesForActor(actor: Actor): Promise<AppInstance[]> {
-  const pb = await pocketbaseAdmin()
+  const sql = await appDb()
 
   if (actor.role === 'admin') {
-    return await pb.collection('instances').getFullList<AppInstance>({
-      filter: pb.filter('org = {:org}', { org: actor.org.id }),
-      sort: 'created',
-    })
+    return await sql<AppInstance[]>`
+      SELECT * FROM app.instances WHERE org = ${actor.org.id} ORDER BY created
+    `
   }
-
-  const assigned = await listAssignedInstanceIds(actor.user.id)
-  if (!assigned.length) return []
-
-  // Bindings, one per id — the admin client must never receive a filter string
-  // built by concatenating values.
-  const params: Record<string, string> = { org: actor.org.id }
-  const clauses = assigned.map((id, index) => {
-    params[`i${index}`] = id
-    return `id = {:i${index}}`
-  })
 
   // The organization predicate is kept even though every assignment already
   // implies it: an assignment left behind by a member who has since moved
   // organizations must not reach back into their old one.
-  return await pb.collection('instances').getFullList<AppInstance>({
-    filter: pb.filter(`org = {:org} && (${clauses.join(' || ')})`, params),
-    sort: 'created',
-  })
+  return await sql<AppInstance[]>`
+    SELECT i.* FROM app.instances i
+    JOIN app.instance_assignments a ON a.instance = i.id AND a.user_id = ${actor.user.id}
+    WHERE i.org = ${actor.org.id}
+    ORDER BY i.created
+  `
 }
 
 /**
  * Create an Evolution instance and record it.
  *
  * Two systems, so there is a window where they can disagree. Evolution is
- * written first; if the PocketBase write then fails we issue a compensating
+ * written first; if the database write then fails we issue a compensating
  * delete so no orphan instance is left holding a socket on the Evolution
  * server. That compensating call is best-effort by necessity — if it also
  * fails, the original error is still what the caller needs to see.
@@ -243,8 +233,7 @@ export async function provisionWhatsappInstance(
   let record: AppInstance
 
   try {
-    const pb = await pocketbaseAdmin()
-    record = await pb.collection('instances').create<AppInstance>({
+    record = await insertRow<AppInstance>('instances', {
       // The organization owns it; `created_by` is provenance and grants nothing.
       org: actor.org.id,
       created_by: actor.user.id,
@@ -418,8 +407,7 @@ export async function provisionPostgresInstance(
   const dsn = input.dsn.trim()
   const { fields, probe } = await postgresFields(dsn)
 
-  const pb = await pocketbaseAdmin()
-  return await pb.collection('instances').create<AppInstance>({
+  return await insertRow<AppInstance>('instances', {
     org: actor.org.id,
     created_by: actor.user.id,
     kind: 'postgres',
@@ -457,8 +445,7 @@ async function postgresFields(dsn: string) {
 export async function updatePostgresDsn(instance: AppInstance, dsn: string): Promise<AppInstance> {
   const { fields } = await postgresFields(dsn)
 
-  const pb = await pocketbaseAdmin()
-  const updated = await pb.collection('instances').update<AppInstance>(instance.id, fields)
+  const updated = await updateRow<AppInstance>('instances', instance.id, fields)
 
   // Drop the pool so the change takes effect now rather than at the next
   // fingerprint check. Belt and braces — `pgFor` would notice on its own.
@@ -673,7 +660,7 @@ export async function enableFullHistorySync(instance: AppInstance): Promise<void
 
 /**
  * Destroy the instance: the Evolution instance and everything it stored, plus
- * the PocketBase row. `mcp_tokens` rows cascade away with it, so every token
+ * the app's row. `mcp_tokens` rows cascade away with it, so every token
  * for this account stops authenticating.
  *
  * Evolution is torn down first — if that fails we keep the row, because a row
@@ -732,8 +719,8 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
     assertNever(kind, 'connection kind')
   }
 
-  const pb = await pocketbaseAdmin()
-  await pb.collection('instances').delete(instance.id)
+  const sql = await appDb()
+  await sql`DELETE FROM app.instances WHERE id = ${instance.id}`
 }
 
 // ── internals ──────────────────────────────────────────────────────────────
