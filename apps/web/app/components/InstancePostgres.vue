@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useDocumentVisibility, useIntervalFn } from '@vueuse/core'
-import { ArrowLeftIcon, ArrowUpDownIcon, ChevronDownIcon, ChevronUpIcon, DatabaseIcon, SearchIcon, TableIcon } from '@lucide/vue'
+import { ArrowUpDownIcon, ChevronDownIcon, ChevronUpIcon, DatabaseIcon, SearchIcon, TableIcon } from '@lucide/vue'
 
 /**
  * How many tables the dashboard asks for in its one request. Equal to
@@ -177,27 +177,18 @@ async function saveDsn() {
 
 <template>
   <div class="space-y-8">
-    <div>
-      <NuxtLink to="/instances" class="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeftIcon class="size-4" />
-        All connections
-      </NuxtLink>
-
-      <div class="group/title mt-2 flex items-start justify-between gap-4">
-        <div class="min-w-0">
-          <InstanceTitle
-            :id="id"
-            :label="data?.instance.label"
-            :can-manage="canManage"
-            @renamed="refresh()"
-          />
-          <p class="truncate font-mono text-sm text-muted-foreground">
-            {{ data?.instance.target || 'No connection string stored' }}
-          </p>
-        </div>
-        <ConnectionBadge :state="state" kind="postgres" />
-      </div>
-    </div>
+    <InstanceHeader
+      :id="id"
+      :label="data?.instance.label"
+      :can-manage="canManage"
+      :state="state"
+      kind="postgres"
+      @renamed="refresh()"
+    >
+      <p class="truncate font-mono text-sm text-muted-foreground">
+        {{ data?.instance.target || 'No connection string stored' }}
+      </p>
+    </InstanceHeader>
 
     <!-- ── health ──────────────────────────────────────────────────────── -->
     <Card>

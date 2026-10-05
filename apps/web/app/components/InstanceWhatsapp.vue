@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { useIntervalFn } from '@vueuse/core'
-import { ArrowLeftIcon, BookUserIcon, MessageSquareTextIcon, MessagesSquareIcon, SmartphoneIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
 /**
@@ -90,40 +89,12 @@ const pairingTimedOut = ref(false)
 const pairingStartedAt = ref(Date.now())
 
 const { busy, run } = useApiAction()
-const { busy: savingDbUrl, run: runSaveDbUrl } = useApiAction()
-const { busy: reconnectBusy, run: runReconnect } = useApiAction()
 
 // Reading goes to Evolution's own Postgres, so an account on a server the user
-// supplied needs that server's database URL. Surfaced here because otherwise the
-// first sign of it is a tool returning 501 mid-conversation.
+// supplied needs that server's database URL. `DbUrlNotice` asks for it.
 const needsDbUrl = computed(() =>
   data.value?.instance.ownServer === true && data.value?.instance.canReadMessages === false,
 )
-const dbUrl = ref('')
-
-async function saveDbUrl() {
-  if (!dbUrl.value.trim()) return
-
-  await runSaveDbUrl(
-    async () => {
-      await $fetch(`/api/instances/${id.value}/evolution-db`, {
-        method: 'PATCH',
-        body: { dbUrl: dbUrl.value.trim() },
-      })
-      dbUrl.value = ''
-      await refresh()
-    },
-    {
-      success: 'Claude can now read and search this account\'s messages.',
-      // The server's message names the actual failure — wrong database, refused
-      // host, missing SELECT — so it is worth more than a generic here.
-      failure: 'Could not save the database connection string',
-    },
-  )
-}
-const chatsOpen = ref(false)
-const messagesOpen = ref(false)
-const contactsOpen = ref(false)
 
 // ── pairing ────────────────────────────────────────────────────────────────
 // Polling the QR endpoint is what drives pairing: Evolution starts the
@@ -166,53 +137,20 @@ const { pause: pauseStatusPoll, resume: resumeStatusPoll } = useIntervalFn(
 )
 
 // ── reconnecting ───────────────────────────────────────────────────────────
-/**
- * How long to watch for the connection to come back after asking. Evolution
- * answers the request before the socket is up, and a healthy reconnect takes
- * seconds; a minute without one means it is not coming on its own.
- */
-const RECONNECT_WATCH_MS = 60_000
-
-const reconnecting = ref(false)
-const reconnectStalled = ref(false)
-const reconnectStartedAt = ref(0)
-
-const { pause: pauseReconnectPoll, resume: resumeReconnectPoll } = useIntervalFn(async () => {
-  await refresh()
-  if (mode.value === 'lost' && Date.now() - reconnectStartedAt.value > RECONNECT_WATCH_MS) {
-    pauseReconnectPoll()
-    reconnecting.value = false
-    reconnectStalled.value = true
-  }
-}, 3000, { immediate: false })
-
-/**
- * Ask once, then watch. Three ways out, and only the last needs this function:
- * the session comes back (`applyMode` sees `connected`), the credentials were
- * rejected and Evolution shows a QR instead (`applyMode` sees `pairing`), or
- * nothing happens within the window and the page says so.
- */
-async function reconnect() {
-  reconnectStalled.value = false
-
-  const asked = await runReconnect(
-    async () => {
-      await $fetch(`/api/instances/${id.value}/reconnect`, { method: 'POST' })
-      return true
-    },
-    { failure: 'Could not reconnect this account' },
-  )
-
-  if (!asked) {
-    reconnectStalled.value = true
-    return
-  }
-
-  reconnecting.value = true
-  reconnectStartedAt.value = Date.now()
-  await refresh()
-  if (mode.value === 'lost') resumeReconnectPoll()
-}
+// Three ways out: the session comes back (`applyMode` sees `connected`), the
+// credentials were rejected and Evolution shows a QR instead (`applyMode` sees
+// `pairing`), or nothing happens within the window and the notice says so.
+const {
+  busy: reconnectBusy,
+  reconnecting,
+  stalled: reconnectStalled,
+  reconnect,
+  reset: resetReconnect,
+} = useReconnect({
+  url: () => `/api/instances/${id.value}/reconnect`,
+  refresh,
+  lost: () => mode.value === 'lost',
+})
 
 // ── polling follows the mode ───────────────────────────────────────────────
 /**
@@ -237,11 +175,7 @@ function applyMode(next: Mode) {
     resumeStatusPoll()
   }
 
-  if (next !== 'lost') {
-    pauseReconnectPoll()
-    reconnecting.value = false
-    reconnectStalled.value = false
-  }
+  if (next !== 'lost') resetReconnect()
 
   if (next === 'connected') pairingRequested.value = false
 }
@@ -306,34 +240,26 @@ const importHistory = () => backToPairing(
 
 <template>
   <div class="space-y-8">
-    <div>
-      <NuxtLink to="/instances" class="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeftIcon class="size-4" />
-        All connections
-      </NuxtLink>
-
-      <div class="group/title mt-2 flex items-start justify-between gap-4">
-        <div class="min-w-0">
-          <InstanceTitle
-            :id="id"
-            :label="data?.instance.label"
-            :can-manage="canManage"
-            @renamed="refresh()"
-          />
-          <!--
-            `describeState`'s hints are written for someone who can act on them
-            — "reconnect", "scan a QR code" — and a member can do neither. The
-            banner below already says what is wrong and who fixes it, so for
-            them the subtitle says what the connection *is* instead of issuing
-            an instruction they cannot follow.
-          -->
-          <p class="text-sm text-muted-foreground">
-            {{ canManage ? display.hint : `WhatsApp account · ${display.label.toLowerCase()}` }}
-          </p>
-        </div>
-        <ConnectionBadge :state="state" kind="whatsapp" :lost="mode === 'lost'" />
-      </div>
-    </div>
+    <InstanceHeader
+      :id="id"
+      :label="data?.instance.label"
+      :can-manage="canManage"
+      :state="state"
+      kind="whatsapp"
+      :lost="mode === 'lost'"
+      @renamed="refresh()"
+    >
+      <!--
+        `describeState`'s hints are written for someone who can act on them
+        — "reconnect", "scan a QR code" — and a member can do neither. The
+        banner below already says what is wrong and who fixes it, so for
+        them the subtitle says what the connection *is* instead of issuing
+        an instruction they cannot follow.
+      -->
+      <p class="text-sm text-muted-foreground">
+        {{ canManage ? display.hint : `WhatsApp account · ${display.label.toLowerCase()}` }}
+      </p>
+    </InstanceHeader>
 
     <!-- ── pairing ─────────────────────────────────────────────────────── -->
     <Card v-if="mode === 'pairing'">
@@ -344,11 +270,7 @@ const importHistory = () => backToPairing(
         </CardDescription>
       </CardHeader>
       <CardContent class="flex flex-col items-center gap-4 pb-8">
-        <div class="flex size-64 items-center justify-center rounded-lg border bg-white p-2">
-          <img v-if="qr?.base64" :src="qr.base64" alt="WhatsApp pairing QR code" class="size-full">
-          <Skeleton v-else-if="!pairingTimedOut" class="size-full" />
-          <SmartphoneIcon v-else class="size-10 text-muted-foreground" />
-        </div>
+        <QrFrame :src="qr?.base64" alt="WhatsApp pairing QR code" :expired="pairingTimedOut" />
 
         <p v-if="qr?.pairingCode" class="text-sm text-muted-foreground">
           Or enter code <code class="font-mono font-medium">{{ qr.pairingCode }}</code> on your phone.
@@ -371,101 +293,31 @@ const importHistory = () => backToPairing(
         A dropped session keeps its profile and counts below: the phone is still
         linked, and everything stored up to the drop is still readable.
       -->
-      <div v-if="mode === 'lost'" class="space-y-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-4">
-        <div>
-          <p class="text-sm font-medium">
-            WhatsApp dropped this account's connection
-          </p>
-          <p v-if="canManage" class="mt-1 text-sm text-muted-foreground">
-            New messages are not arriving and nothing can be sent until it
-            reconnects. The phone is still linked, so reconnecting normally needs
-            no new QR code.
-          </p>
-          <p v-else class="mt-1 text-sm text-muted-foreground">
-            New messages are not arriving and nothing can be sent until it
-            reconnects. An admin of your organization can bring it back.
-          </p>
-        </div>
-
-        <p v-if="canManage && reconnectStalled" class="text-sm text-muted-foreground">
+      <SessionLostNotice
+        v-if="mode === 'lost'"
+        service="WhatsApp"
+        :can-manage="canManage"
+        :reconnecting="reconnecting"
+        :stalled="reconnectStalled"
+        :busy="reconnectBusy"
+        @reconnect="reconnect"
+      >
+        <template #hint>
+          The phone is still linked, so reconnecting normally needs no new QR code.
+        </template>
+        <template #stalled>
           Evolution did not bring the connection back. Its session for this account
           may be stuck — restarting {{ data?.instance.ownServer ? 'your Evolution server' : 'the Evolution server' }}
           usually reconnects it without a new scan.
-        </p>
+        </template>
+      </SessionLostNotice>
 
-        <Button v-if="canManage" size="sm" :disabled="reconnectBusy || reconnecting" @click="reconnect">
-          {{ reconnecting ? 'Reconnecting…' : reconnectStalled ? 'Try again' : 'Reconnect' }}
-        </Button>
-      </div>
-
-      <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <!-- The profile sits in the same row as the counts, so it stretches to
-             their height and centres its contents rather than riding the top. -->
-        <Card>
-          <CardContent class="flex flex-1 items-center gap-4 pt-6">
-            <img
-              v-if="data?.profilePicUrl"
-              :src="data.profilePicUrl"
-              alt=""
-              class="size-12 shrink-0 rounded-full object-cover"
-            >
-            <div class="min-w-0">
-              <p class="truncate font-medium">
-                {{ data?.profileName || 'WhatsApp' }}
-              </p>
-              <p class="truncate text-sm text-muted-foreground tabular-nums">
-                {{ data?.number || '—' }}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-
-        <!--
-          Messages is clickable only where the table behind it can answer.
-          Reading goes to the Evolution server's own Postgres, and a connection
-          that has not been given one would open onto a guaranteed refusal — the
-          same fact the amber card below explains at length.
-        -->
-        <StatCard
-          label="Messages"
-          :value="data?.stats.messages ?? 0"
-          :icon="MessageSquareTextIcon"
-          :clickable="data?.instance.canReadMessages !== false"
-          @click="messagesOpen = true"
-        />
-        <StatCard
-          label="Chats"
-          :value="data?.stats.chats ?? 0"
-          :icon="MessagesSquareIcon"
-          clickable
-          @click="chatsOpen = true"
-        />
-        <StatCard
-          label="Contacts"
-          :value="data?.stats.contacts ?? 0"
-          :icon="BookUserIcon"
-          clickable
-          @click="contactsOpen = true"
-        />
-      </div>
-
-      <ChatsDialog
-        v-model:open="chatsOpen"
-        :instance-id="id"
+      <MessagingOverview
+        :id="id"
         kind="whatsapp"
-        :total="data?.stats.chats ?? 0"
-      />
-
-      <MessagesDialog
-        v-model:open="messagesOpen"
-        :instance-id="id"
-        kind="whatsapp"
-        :total="data?.stats.messages ?? 0"
-      />
-
-      <ContactsDialog
-        v-model:open="contactsOpen"
-        :instance-id="id"
+        :profile="{ name: data?.profileName || 'WhatsApp', detail: data?.number || '—', picUrl: data?.profilePicUrl }"
+        :stats="data?.stats ?? { messages: 0, chats: 0, contacts: 0 }"
+        :can-read-messages="data?.instance.canReadMessages !== false"
       />
 
       <!-- The last sentence points at a section a member does not have, and
@@ -486,45 +338,7 @@ const importHistory = () => backToPairing(
 
     <Separator />
 
-    <!--
-      Shown only for an account on the user's own Evolution server that has no
-      database URL yet. Reading is the one capability missing, and it is not
-      obvious why, so the card says what and why rather than just offering a
-      field.
-    -->
-    <div v-if="needsDbUrl" class="space-y-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-4">
-      <div>
-        <p class="text-sm font-medium">
-          Claude cannot read this account's messages yet
-        </p>
-        <p class="mt-1 text-sm text-muted-foreground">
-          Reading and searching go to your Evolution server's own Postgres, because
-          Evolution's API cannot search message content. This app has the server's
-          URL but not its database. Pairing, listing chats and sending already work.
-        </p>
-      </div>
-
-      <div class="space-y-2">
-        <Label for="db-url">Database connection string</Label>
-        <Input
-          id="db-url"
-          v-model="dbUrl"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="postgres://reader:password@host:5432/evolution"
-          @keydown.enter="saveDbUrl"
-        />
-        <p class="text-xs text-muted-foreground">
-          Checked against your database before it is saved. A
-          <span class="font-mono">SELECT</span>-only role is enough — this app never
-          writes to it.
-        </p>
-      </div>
-
-      <Button size="sm" :disabled="savingDbUrl || !dbUrl.trim()" @click="saveDbUrl">
-        {{ savingDbUrl ? 'Checking…' : 'Enable reading' }}
-      </Button>
-    </div>
+    <DbUrlNotice v-if="needsDbUrl" :id="id" kind="whatsapp" @saved="refresh()" />
 
     <!--
       Always shown, including while disconnected. Hiding it would mean you
@@ -548,55 +362,32 @@ const importHistory = () => backToPairing(
         </h2>
 
         <div class="flex flex-wrap gap-3">
-          <AlertDialog v-if="connected">
-            <AlertDialogTrigger as-child>
-              <Button variant="outline" :disabled="busy">
-                Disconnect
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Disconnect this account?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  WhatsApp signs this device out. Your tokens and message history are
-                  kept, but nothing can send or receive until you scan a new QR code
-                  with the same phone.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction @click="disconnect">
-                  Disconnect
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+          <ConfirmAction
+            v-if="connected"
+            label="Disconnect"
+            title="Disconnect this account?"
+            confirm-label="Disconnect"
+            :disabled="busy"
+            @confirm="disconnect"
+          >
+            WhatsApp signs this device out. Your tokens and message history are
+            kept, but nothing can send or receive until you scan a new QR code
+            with the same phone.
+          </ConfirmAction>
 
-          <AlertDialog>
-            <AlertDialogTrigger as-child>
-              <Button variant="outline" :disabled="busy">
-                Import full history
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Import this account's full history?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  WhatsApp only hands over past conversations while a device is being
-                  linked, so this signs the device out and imports as you scan a new
-                  QR code with the same phone. Nothing already stored is lost, and
-                  nothing can send or receive until the scan completes. Repeatedly
-                  linking and unlinking a number risks it being banned by WhatsApp.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction @click="importHistory">
-                  Disconnect and import
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+          <ConfirmAction
+            label="Import full history"
+            title="Import this account's full history?"
+            confirm-label="Disconnect and import"
+            :disabled="busy"
+            @confirm="importHistory"
+          >
+            WhatsApp only hands over past conversations while a device is being
+            linked, so this signs the device out and imports as you scan a new
+            QR code with the same phone. Nothing already stored is lost, and
+            nothing can send or receive until the scan completes. Repeatedly
+            linking and unlinking a number risks it being banned by WhatsApp.
+          </ConfirmAction>
 
           <AssignConnectionDialog :id="id" kind="whatsapp" />
 
