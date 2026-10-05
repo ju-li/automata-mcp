@@ -123,11 +123,39 @@ const serverDbUrl = ref('')
 // Postgres
 const dsn = ref('')
 
+// Whether this deployment's own Telegram bridge can serve Telegram — asked when
+// Telegram is picked, so a bridge running without its API credentials says what
+// to set before the form is filled in rather than on the click. Re-asked on every
+// pick, so an operator who has just set the variables does not need a reload.
+type BridgeReadiness = 'absent' | 'ready' | 'unconfigured' | 'unreachable'
+const telegramReadiness = ref<BridgeReadiness>()
+
+watch(kind, async (picked) => {
+  if (picked !== 'telegram') return
+  telegramReadiness.value = undefined
+  try {
+    const { deploymentBridge } = await $fetch<{ deploymentBridge: BridgeReadiness }>('/api/telegram/readiness')
+    telegramReadiness.value = deploymentBridge
+  }
+  catch {
+    // Unknown is not a refusal: the create call still answers for itself.
+    telegramReadiness.value = undefined
+  }
+})
+
+// Only the deployment's bridge is blocked; a user's own bridge is theirs to set
+// up, and the create call reports its state.
+const telegramBlocked = computed(() =>
+  kind.value === 'telegram'
+  && !ownServer.value
+  && (telegramReadiness.value === 'unconfigured' || telegramReadiness.value === 'absent'),
+)
+
 const canSubmit = computed(() => {
   if (busy.value) return false
   if (kind.value === 'postgres') return dsn.value.trim().length > 0
   if (kind.value === 'whatsapp' || kind.value === 'telegram') {
-    if (!ownServer.value) return true
+    if (!ownServer.value) return !telegramBlocked.value
     return serverUrl.value.trim().length > 0 && serverKey.value.trim().length > 0
   }
   return false
@@ -278,6 +306,49 @@ async function create() {
                 </p>
               </div>
             </div>
+
+            <template v-if="!ownServer">
+              <NoticeCard
+                v-if="telegramReadiness === 'unconfigured'"
+                title="Telegram isn't set up on this deployment yet"
+              >
+                <template #description>
+                  <p class="mt-1 text-sm text-muted-foreground">
+                    Create an app at
+                    <a href="https://my.telegram.org" target="_blank" rel="noopener" class="underline">my.telegram.org</a>
+                    (API development tools), then set
+                    <span class="font-mono">TELEGRAM_API_ID</span> and
+                    <span class="font-mono">TELEGRAM_API_HASH</span> on the Telegram
+                    bridge service and redeploy it. If you don't run this deployment,
+                    ask whoever does — or use your own bridge.
+                  </p>
+                </template>
+              </NoticeCard>
+              <NoticeCard
+                v-else-if="telegramReadiness === 'absent'"
+                title="This deployment has no Telegram bridge"
+              >
+                <template #description>
+                  <p class="mt-1 text-sm text-muted-foreground">
+                    Set <span class="font-mono">NUXT_TELEGRAM_URL</span> and
+                    <span class="font-mono">NUXT_TELEGRAM_ADMIN_KEY</span> on the web
+                    service to use one, or use your own bridge.
+                  </p>
+                </template>
+              </NoticeCard>
+              <NoticeCard
+                v-else-if="telegramReadiness === 'unreachable'"
+                tone="error"
+                title="The Telegram bridge is not answering"
+              >
+                <template #description>
+                  <p class="mt-1 text-sm text-muted-foreground">
+                    It may still be starting. You can try anyway, or check the
+                    bridge service's logs.
+                  </p>
+                </template>
+              </NoticeCard>
+            </template>
 
             <div v-if="ownServer" class="space-y-4 rounded-md border p-3">
               <div class="space-y-2">

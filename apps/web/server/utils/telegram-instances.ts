@@ -53,6 +53,14 @@ export async function provisionTelegramInstance(actor: Actor, input: TelegramPro
     if (status === 401) {
       throw createError({ statusCode: 422, statusMessage: 'The Telegram bridge refused the admin key.' })
     }
+    if (isTelegramNotConfigured(error)) {
+      throw createError({
+        statusCode: 422,
+        statusMessage: creds.userSupplied
+          ? 'Telegram is not set up on your bridge: set TELEGRAM_API_ID and TELEGRAM_API_HASH on it and restart it.'
+          : telegramNotConfiguredMessage(),
+      })
+    }
     throw createError({ statusCode: 502, statusMessage: 'Could not reach the Telegram bridge to create the connection.' })
   }
 

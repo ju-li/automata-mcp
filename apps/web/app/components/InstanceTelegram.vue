@@ -253,8 +253,10 @@ const count = new Intl.NumberFormat()
         </CardDescription>
       </CardHeader>
       <CardContent v-if="canManage" class="space-y-4">
-        <p v-if="pairingError" class="text-sm text-destructive">
-          {{ pairingError }}
+        <!-- `data.error` is the bridge's own reason when it cannot link at all,
+             e.g. running without TELEGRAM_API_ID / TELEGRAM_API_HASH. -->
+        <p v-if="pairingError || data?.error" class="text-sm text-destructive">
+          {{ pairingError || data?.error }}
         </p>
         <Button :disabled="busy" @click="startPairing">
           <SendIcon class="size-4" />

@@ -5,13 +5,21 @@ import type { BackfillOptions } from './sync/syncer.ts'
 /**
  * Everything the bridge reads from its environment, validated once at boot.
  *
- * A bridge that started without its Telegram credentials or its encryption key
- * would come up healthy and then fail every pairing, so it refuses to start
- * instead. The error names each variable and never echoes a value.
+ * A bridge without its admin key, encryption key or database would come up
+ * healthy and then fail every request, so it refuses to start instead. The error
+ * names each variable and never echoes a value.
+ *
+ * **The Telegram credentials are the exception: both or neither.** A deployment
+ * that only wants WhatsApp still runs this service (the Railway template ships
+ * it), and should not have to register an app at my.telegram.org first. With
+ * neither set the bridge starts without Telegram — routes that need it answer
+ * `telegramNotConfigured()` and `/health` says so, which is what the app reads to
+ * tell an admin what to set. One without the other, or a malformed value, still
+ * refuses to start: a typo must fail loudly, not pass for "Telegram is off".
  */
 const schema = z.object({
-  TELEGRAM_API_ID: z.coerce.number().int().positive(),
-  TELEGRAM_API_HASH: z.string().regex(/^[0-9a-f]{32}$/i, 'expected the 32-character hex api_hash from my.telegram.org'),
+  TELEGRAM_API_ID: z.coerce.number().int().positive().optional(),
+  TELEGRAM_API_HASH: z.string().regex(/^[0-9a-f]{32}$/i, 'expected the 32-character hex api_hash from my.telegram.org').optional(),
   TELEGRAM_BRIDGE_ADMIN_KEY: z.string().min(24, 'use at least 24 characters (openssl rand -hex 24)'),
   TELEGRAM_SESSION_ENCRYPTION_KEY: z.string().min(1),
   TELEGRAM_BRIDGE_DATABASE_URL: z.string().min(1),
@@ -28,8 +36,11 @@ const schema = z.object({
 })
 
 export interface BridgeConfig {
-  apiId: number
-  apiHash: string
+  /**
+   * Telegram's app credentials, absent when the deployment runs without Telegram.
+   * Optional rather than two optional fields, so nothing can read half of it.
+   */
+  telegram?: { apiId: number, apiHash: string }
   adminKey: string
   /** 32 bytes. Seals stored sessions and webhook headers. */
   sealKey: Buffer
@@ -54,6 +65,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   }
 
   const e = parsed.data
+  if ((e.TELEGRAM_API_ID === undefined) !== (e.TELEGRAM_API_HASH === undefined)) {
+    const missing = e.TELEGRAM_API_ID === undefined ? 'TELEGRAM_API_ID' : 'TELEGRAM_API_HASH'
+    throw new Error(
+      'telegram-bridge cannot start. Fix these environment variables:\n'
+      + `  ${missing}: set it too — TELEGRAM_API_ID and TELEGRAM_API_HASH go together `
+      + '(leave both empty to run without Telegram)',
+    )
+  }
+
   let sealKey: Buffer
   try {
     sealKey = parseKey(e.TELEGRAM_SESSION_ENCRYPTION_KEY)
@@ -63,8 +83,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
   }
 
   return {
-    apiId: e.TELEGRAM_API_ID,
-    apiHash: e.TELEGRAM_API_HASH,
+    telegram: e.TELEGRAM_API_ID !== undefined && e.TELEGRAM_API_HASH !== undefined
+      ? { apiId: e.TELEGRAM_API_ID, apiHash: e.TELEGRAM_API_HASH }
+      : undefined,
     adminKey: e.TELEGRAM_BRIDGE_ADMIN_KEY,
     sealKey,
     databaseUrl: e.TELEGRAM_BRIDGE_DATABASE_URL,
