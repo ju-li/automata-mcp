@@ -177,7 +177,6 @@ async function ownTargets(): Promise<OwnTarget[]> {
   const config = useRuntimeConfig()
   const sources: Array<{ raw: string, what: string, defaultPort: number }> = []
 
-  if (config.pocketbaseUrl) sources.push({ raw: config.pocketbaseUrl, what: 'the PocketBase being imported from', defaultPort: 80 })
   if (config.databaseUrl) sources.push({ raw: config.databaseUrl, what: 'this app\'s own database', defaultPort: 5432 })
   if (config.evolutionUrl) sources.push({ raw: config.evolutionUrl, what: 'this app\'s Evolution server', defaultPort: 80 })
   if (config.evolutionDatabaseUrl) sources.push({ raw: config.evolutionDatabaseUrl, what: 'Evolution\'s database', defaultPort: 5432 })

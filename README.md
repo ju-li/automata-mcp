@@ -58,7 +58,6 @@ apps/telegram-bridge/        Node + teleproto. Links Telegram accounts, syncs ch
                              message database, mentions, outbound host guard,
                              keyed handle cache, row serialisation, SQL engine
                              seam, Postgres pool / plan guard / runner / catalog
-services/pocketbase/         legacy — kept only to import an old deployment's data
 docker-compose.dev.yml       services only — NOT Nuxt
 .zed/                        tasks + language server config
 .env.example                 every variable, documented
@@ -743,33 +742,14 @@ To start over locally, drop the schema; the next boot recreates it:
 psql postgres://evolution:change-me@localhost:5432/evolution -c 'DROP SCHEMA app CASCADE'
 ```
 
-### Moving off PocketBase
+### Coming from PocketBase
 
-Earlier versions kept all of this in PocketBase. To move a deployment that did:
-
-1. Deploy this version of **both** services — the PocketBase image now includes
-   `pb_hooks/export.pb.js`, a superuser-only route that exports every row,
-   including the bcrypt password hashes its normal API never returns.
-2. On the web service, set `NUXT_DATABASE_URL`, and keep `NUXT_POCKETBASE_URL`,
-   `NUXT_POCKETBASE_ADMIN_EMAIL` and `NUXT_POCKETBASE_ADMIN_PASSWORD` as they were.
-3. On first boot with an empty `app.users`, the server imports everything in one
-   transaction and logs `[import] done: N users, …`. Until that has landed every
-   request answers 503, so nobody can sign up into an empty database meanwhile.
-   A failure is logged with its cause and retried; nothing is half-written.
-4. Remove the three `NUXT_POCKETBASE_*` variables. The PocketBase service can then
-   be stopped and, once you are satisfied, deleted with its volume.
-
-What carries over: every id (so URLs and bookmarks still work), passwords
-(verified as bcrypt and rehashed to scrypt at each user's next sign-in),
-organizations, roles, connections with their credentials, assignments,
-invitations, and connector tokens — **every connector already configured in
-Claude keeps working**. What does not: browser sessions, so everyone signs in
-once. Rows pointing at something that no longer exists are skipped and listed in
-the log.
-
-Locally, `docker compose -f docker-compose.dev.yml --profile pocketbase up -d
-pocketbase` brings an old `services/pocketbase/pb_data` back up for the same
-import.
+Versions before this one kept all of this in PocketBase. A deployment still on
+PocketBase must first deploy commit `2e1872e` (the merge of ju-li/automata-mcp#46), which imports
+every user, password, connection and token into this schema on its first boot —
+see the README at that commit, "Moving off PocketBase". Accounts imported that way
+keep their bcrypt password hash until they next sign in, when it is replaced with
+scrypt.
 
 ## Connection alerts
 
@@ -962,8 +942,9 @@ The bridge needs no volume: its sessions and chats are in Postgres.
 > Users, connections and tokens are in Postgres now, so back that up: its backups
 > hold every stored credential.
 
-A deployment that still has a **pocketbase** service from an earlier version
-keeps it only until its data has been imported — see "Moving off PocketBase".
+A deployment that still has a **pocketbase** service from an earlier version can
+delete it, and its volume, once its data has been imported — see "Coming from
+PocketBase".
 
 ### Pin the ports
 

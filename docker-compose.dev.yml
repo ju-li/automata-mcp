@@ -2,21 +2,21 @@
 # so you keep HMR and host-side debugging. There is deliberately no `predev` hook;
 # bring these up yourself with `pnpm services:up`.
 #
-# PocketBase is the app's own database and is always needed. Postgres, Redis and
-# Evolution exist ONLY to serve WhatsApp connections, so they sit behind the
-# `whatsapp` profile: `pnpm services:up` brings up PocketBase alone, and
-# `pnpm services:up:whatsapp` brings up everything. The down/logs/ps scripts pass
+# Postgres holds the app's own tables (schema `app`) and is always needed, so
+# `pnpm services:up` brings up Postgres alone. Redis and Evolution exist ONLY to
+# serve WhatsApp connections, so they sit behind the `whatsapp` profile
+# (`pnpm services:up:whatsapp`). The down/logs/ps scripts pass
 # `--profile whatsapp --profile telegram` unconditionally so they still cover the
 # full set — a profiled service you forgot the flag for looks simply absent, which
 # is the one sharp edge profiles have.
 #
 # The `telegram` profile runs the Telegram bridge (apps/telegram-bridge). It uses
-# the Postgres database and credential above, keeping its tables in a `telegram`
-# schema it creates, so that server is in both profiles. `pnpm services:up:telegram`.
+# the same Postgres database and credential, keeping its tables in a `telegram`
+# schema it creates. `pnpm services:up:telegram`.
 #
 # Networking, both directions:
+#   Nuxt (host)      -> Postgres:   localhost:5432
 #   Nuxt (host)      -> Evolution:  http://localhost:8080
-#   Nuxt (host)      -> PocketBase: http://localhost:8090
 #   Evolution (ctr)  -> Nuxt:       http://host.docker.internal:3000/api/webhook/evolution
 #   Nuxt (host)      -> bridge:     http://localhost:8095
 #
@@ -168,32 +168,6 @@ services:
       TELEGRAM_BACKFILL_DAYS: ${TELEGRAM_BACKFILL_DAYS:-365}
       TELEGRAM_BACKFILL_BROADCAST: ${TELEGRAM_BACKFILL_BROADCAST:-false}
       TELEGRAM_BACKFILL_PAGE_DELAY_MS: ${TELEGRAM_BACKFILL_PAGE_DELAY_MS:-1000}
-    networks: [app]
-
-  # Only to import an existing local pb_data into Postgres, once — see README
-  # "Moving off PocketBase". Not part of the stack any more.
-  pocketbase:
-    build:
-      context: ./services/pocketbase
-    profiles: [pocketbase]
-    restart: unless-stopped
-    environment:
-      NUXT_POCKETBASE_ADMIN_EMAIL: ${NUXT_POCKETBASE_ADMIN_EMAIL:-}
-      NUXT_POCKETBASE_ADMIN_PASSWORD: ${NUXT_POCKETBASE_ADMIN_PASSWORD:-}
-    ports:
-      - '8090:8090'
-    volumes:
-      # pb_data is gitignored runtime state.
-      - ./services/pocketbase/pb_data:/pb_data
-      # Bind-mounted so schema changes made in the admin UI are written straight
-      # back into the repo as migration files.
-      - ./services/pocketbase/pb_migrations:/pb_migrations
-      - ./services/pocketbase/pb_hooks:/pb_hooks
-    healthcheck:
-      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:8090/api/health']
-      interval: 5s
-      timeout: 5s
-      retries: 10
     networks: [app]
 
 volumes:

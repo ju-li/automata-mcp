@@ -54,7 +54,7 @@ let pool: Sql | undefined
 let ready: Promise<Sql> | undefined
 
 /**
- * The pool, with the schema migrated (and, once, PocketBase imported).
+ * The pool, with the schema migrated.
  *
  * The first caller in a process prepares it; everyone else awaits the same
  * promise. A failure is kept for a few seconds and then forgotten, so the
@@ -103,18 +103,6 @@ async function prepare(): Promise<Sql> {
     console.error(
       '[app-db] could not prepare the app database. Check NUXT_DATABASE_URL — the host, the port, '
       + 'and that its role may create the `app` schema (or that it already exists):',
-      cause,
-    )
-    throw appDbUnavailable(cause)
-  }
-
-  try {
-    await maybeImportFromPocketBase(pool)
-  }
-  catch (cause) {
-    console.error(
-      '[import] the one-time import from PocketBase failed, and nothing was written. Every request '
-      + 'answers 503 until it succeeds (or NUXT_POCKETBASE_URL is unset to start empty):',
       cause,
     )
     throw appDbUnavailable(cause)

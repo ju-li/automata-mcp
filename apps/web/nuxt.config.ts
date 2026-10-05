@@ -73,13 +73,6 @@ export default defineNuxtConfig({
     // tokens. Required. Tables live in the `app` schema and are migrated at boot.
     databaseUrl: '',
 
-    // A PocketBase to import from, once, into an empty app database. Only for
-    // moving an existing deployment off PocketBase; see
-    // server/utils/pocketbase-import.ts. Leave unset otherwise.
-    pocketbaseUrl: '',
-    pocketbaseAdminEmail: '',
-    pocketbaseAdminPassword: '',
-
     // Outbound mail (connection alerts, invitation emails). Optional: with no
     // host, mail is computed and not delivered. See server/utils/mailer.ts.
     smtpHost: '',
