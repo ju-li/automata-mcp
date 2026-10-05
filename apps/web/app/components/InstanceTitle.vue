@@ -12,9 +12,8 @@ import { CheckIcon, PencilIcon, XIcon } from '@lucide/vue'
  * instance name and the Telegram bridge session name and is not editable by
  * anyone; see `server/api/instances/[id]/label.patch.ts`.
  *
- * The subtitle stays in the panels: it is the one line of that block that
- * genuinely differs per kind, and pulling it in here would mean branching on
- * kind inside a shared component.
+ * Rendered by `InstanceHeader`, whose subtitle slot stays with the panels: it
+ * is the one line of that block that genuinely differs per kind.
  */
 const props = withDefaults(defineProps<{
   id: string

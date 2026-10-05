@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useIntervalFn } from '@vueuse/core'
-import { ArrowLeftIcon, MessageSquareTextIcon, MessagesSquareIcon, SendIcon } from '@lucide/vue'
+import { SendIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
 /**
@@ -83,14 +83,15 @@ const display = computed(() => describeState(state.value, 'telegram', { lost: mo
 const needsDbUrl = computed(() =>
   data.value?.instance.ownServer === true && data.value?.instance.canReadMessages === false,
 )
-const dbUrl = ref('')
-const chatsOpen = ref(false)
-const messagesOpen = ref(false)
+
+/** `@username · +number`, whichever of the two Telegram gave us. */
+const profileDetail = computed(() => [
+  data.value?.username && `@${data.value.username}`,
+  data.value?.number && `+${data.value.number}`,
+].filter(Boolean).join(' · ') || '—')
 
 const { busy, run } = useApiAction()
 const { busy: passwordBusy, run: runPassword } = useApiAction()
-const { busy: savingDbUrl, run: runSaveDbUrl } = useApiAction()
-const { busy: reconnectBusy, run: runReconnect } = useApiAction()
 
 // ── pairing ────────────────────────────────────────────────────────────────
 /**
@@ -161,39 +162,17 @@ async function submitPassword() {
 const { pause: pauseStatusPoll, resume: resumeStatusPoll } = useIntervalFn(() => refresh(), 15000, { immediate: false })
 
 // ── reconnecting ───────────────────────────────────────────────────────────
-const RECONNECT_WATCH_MS = 60_000
-const reconnecting = ref(false)
-const reconnectStalled = ref(false)
-const reconnectStartedAt = ref(0)
-
-const { pause: pauseReconnectPoll, resume: resumeReconnectPoll } = useIntervalFn(async () => {
-  await refresh()
-  if (mode.value !== 'lost') {
-    pauseReconnectPoll()
-    reconnecting.value = false
-    return
-  }
-  if (Date.now() - reconnectStartedAt.value > RECONNECT_WATCH_MS) {
-    pauseReconnectPoll()
-    reconnecting.value = false
-    reconnectStalled.value = true
-  }
-}, 3000, { immediate: false })
-
-async function reconnect() {
-  reconnectStalled.value = false
-  const asked = await runReconnect(
-    async () => {
-      await $fetch(`/api/instances/${id.value}/telegram/reconnect`, { method: 'POST' })
-      return true
-    },
-    { failure: 'Could not reconnect this account' },
-  )
-  if (!asked) return
-  reconnecting.value = true
-  reconnectStartedAt.value = Date.now()
-  resumeReconnectPoll()
-}
+const {
+  busy: reconnectBusy,
+  reconnecting,
+  stalled: reconnectStalled,
+  reconnect,
+  reset: resetReconnect,
+} = useReconnect({
+  url: () => `/api/instances/${id.value}/telegram/reconnect`,
+  refresh,
+  lost: () => mode.value === 'lost',
+})
 
 // ── polling follows the mode ───────────────────────────────────────────────
 function applyMode(next: Mode) {
@@ -205,6 +184,8 @@ function applyMode(next: Mode) {
     pauseQrPoll()
     resumeStatusPoll()
   }
+
+  if (next !== 'lost') resetReconnect()
 }
 
 watch(mode, (next, previous) => {
@@ -231,47 +212,26 @@ async function unlink() {
   )
 }
 
-async function saveDbUrl() {
-  if (!dbUrl.value.trim()) return
-  await runSaveDbUrl(
-    async () => {
-      await $fetch(`/api/instances/${id.value}/telegram-db`, { method: 'PATCH', body: { dbUrl: dbUrl.value.trim() } })
-      dbUrl.value = ''
-      await refresh()
-    },
-    {
-      success: 'Claude can now read and search this account\'s chats.',
-      failure: 'Could not save the database connection string',
-    },
-  )
-}
-
 const count = new Intl.NumberFormat()
 </script>
 
 <template>
   <div class="space-y-8">
-    <div>
-      <NuxtLink to="/instances" class="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
-        <ArrowLeftIcon class="size-4" />
-        All connections
-      </NuxtLink>
-
-      <div class="group/title mt-2 flex items-start justify-between gap-4">
-        <div class="min-w-0">
-          <InstanceTitle
-            :id="id"
-            :label="data?.instance.label"
-            :can-manage="canManage"
-            @renamed="refresh()"
-          />
-          <p class="text-sm text-muted-foreground">
-            {{ canManage ? display.hint : `Telegram account · ${display.label.toLowerCase()}` }}
-          </p>
-        </div>
-        <ConnectionBadge :state="state" kind="telegram" :lost="mode === 'lost'" />
-      </div>
-    </div>
+    <InstanceHeader
+      :id="id"
+      :label="data?.instance.label"
+      :can-manage="canManage"
+      :state="state"
+      kind="telegram"
+      :lost="mode === 'lost'"
+      @renamed="refresh()"
+    >
+      <!-- A member gets what the state is, not a hint they cannot act on; see
+           InstanceWhatsapp. -->
+      <p class="text-sm text-muted-foreground">
+        {{ canManage ? display.hint : `Telegram account · ${display.label.toLowerCase()}` }}
+      </p>
+    </InstanceHeader>
 
     <!-- ── not linked ──────────────────────────────────────────────────── -->
     <Card v-if="mode === 'unlinked'">
@@ -350,10 +310,7 @@ const count = new Intl.NumberFormat()
           </CardDescription>
         </CardHeader>
         <CardContent class="flex flex-col items-center gap-4 pb-8">
-          <div class="flex size-64 items-center justify-center rounded-lg border bg-white p-2">
-            <img v-if="pairing?.qr?.dataUrl" :src="pairing.qr.dataUrl" alt="Telegram login QR code" class="size-full">
-            <Skeleton v-else class="size-full" />
-          </div>
+          <QrFrame :src="pairing?.qr?.dataUrl" alt="Telegram login QR code" />
           <p class="text-center text-xs text-muted-foreground">
             The code refreshes on its own. If nobody scans it within five minutes,
             start again.
@@ -364,88 +321,40 @@ const count = new Intl.NumberFormat()
 
     <!-- ── linked, or was ──────────────────────────────────────────────── -->
     <template v-else>
-      <div v-if="mode === 'lost'" class="space-y-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-4">
-        <div>
-          <p class="text-sm font-medium">
-            Telegram dropped this account's connection
-          </p>
-          <p class="mt-1 text-sm text-muted-foreground">
-            New messages are not arriving and nothing can be sent until it reconnects.
-            <template v-if="canManage">
-              The account is still linked, so reconnecting needs no QR code.
-            </template>
-            <template v-else>
-              An admin of your organization can bring it back.
-            </template>
-          </p>
-        </div>
-        <p v-if="canManage && reconnectStalled" class="text-sm text-muted-foreground">
+      <SessionLostNotice
+        v-if="mode === 'lost'"
+        service="Telegram"
+        :can-manage="canManage"
+        :reconnecting="reconnecting"
+        :stalled="reconnectStalled"
+        :busy="reconnectBusy"
+        @reconnect="reconnect"
+      >
+        <template #hint>
+          The account is still linked, so reconnecting needs no QR code.
+        </template>
+        <template #stalled>
           The connection did not come back. {{ data?.error ? `Telegram said: ${data.error}.` : '' }}
           Try again in a minute, or restart the Telegram bridge.
-        </p>
-        <Button v-if="canManage" size="sm" :disabled="reconnectBusy || reconnecting" @click="reconnect">
-          {{ reconnecting ? 'Reconnecting…' : reconnectStalled ? 'Try again' : 'Reconnect' }}
-        </Button>
-      </div>
+        </template>
+      </SessionLostNotice>
 
-      <div v-if="mode === 'unreachable'" class="rounded-md border border-destructive/40 bg-destructive/5 p-4">
-        <p class="text-sm font-medium">
-          Could not reach the Telegram bridge
-        </p>
-        <p class="mt-1 text-sm text-muted-foreground">
-          {{ data?.error || 'The service that keeps this account connected did not answer.' }}
-          Synced chats stay readable; linking, reconnecting and sending wait for it.
-        </p>
-      </div>
+      <NoticeCard v-if="mode === 'unreachable'" tone="error" title="Could not reach the Telegram bridge">
+        <template #description>
+          <p class="mt-1 text-sm text-muted-foreground">
+            {{ data?.error || 'The service that keeps this account connected did not answer.' }}
+            Synced chats stay readable; linking, reconnecting and sending wait for it.
+          </p>
+        </template>
+      </NoticeCard>
 
-      <Card v-if="linked">
-        <CardContent class="flex items-center gap-4 pt-6">
-          <span class="flex size-12 items-center justify-center rounded-full bg-muted">
-            <SendIcon class="size-5 text-muted-foreground" />
-          </span>
-          <div class="min-w-0">
-            <p class="truncate font-medium">
-              {{ data?.profileName || 'Telegram' }}
-            </p>
-            <p class="truncate text-sm text-muted-foreground tabular-nums">
-              <template v-if="data?.username">@{{ data.username }}</template>
-              <template v-if="data?.username && data?.number"> · </template>
-              <template v-if="data?.number">+{{ data.number }}</template>
-              <template v-if="!data?.username && !data?.number">—</template>
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      <div class="grid gap-4 sm:grid-cols-2">
-        <StatCard
-          label="Messages"
-          :value="data?.stats?.messages ?? 0"
-          :icon="MessageSquareTextIcon"
-          :clickable="data?.instance.canReadMessages !== false"
-          @click="messagesOpen = true"
-        />
-        <StatCard
-          label="Chats"
-          :value="data?.stats?.chats ?? 0"
-          :icon="MessagesSquareIcon"
-          clickable
-          @click="chatsOpen = true"
-        />
-      </div>
-
-      <ChatsDialog
-        v-model:open="chatsOpen"
-        :instance-id="id"
+      <!-- Telegram keeps no address book this app reads, so there is no Contacts card. -->
+      <MessagingOverview
+        :id="id"
         kind="telegram"
-        :total="data?.stats?.chats ?? 0"
-      />
-
-      <MessagesDialog
-        v-model:open="messagesOpen"
-        :instance-id="id"
-        kind="telegram"
-        :total="data?.stats?.messages ?? 0"
+        :profile="{ name: data?.profileName || 'Telegram', detail: profileDetail }"
+        :stats="data?.stats ?? { messages: 0, chats: 0 }"
+        :can-read-messages="data?.instance.canReadMessages !== false"
       />
 
       <p class="text-xs text-muted-foreground">
@@ -464,34 +373,7 @@ const count = new Intl.NumberFormat()
 
     <Separator />
 
-    <div v-if="needsDbUrl" class="space-y-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-4">
-      <div>
-        <p class="text-sm font-medium">
-          Claude cannot read this account's chats yet
-        </p>
-        <p class="mt-1 text-sm text-muted-foreground">
-          Reading and searching go to your Telegram bridge's database. This app has the
-          bridge's URL but not its database. Linking and sending already work.
-        </p>
-      </div>
-      <div class="space-y-2">
-        <Label for="tg-db-url">Database connection string</Label>
-        <Input
-          id="tg-db-url"
-          v-model="dbUrl"
-          autocomplete="off"
-          spellcheck="false"
-          placeholder="postgresql://user:password@host:5432/database"
-          @keydown.enter="saveDbUrl"
-        />
-        <p class="text-xs text-muted-foreground">
-          Checked against the bridge's <span class="font-mono">telegram</span> schema before it is saved.
-        </p>
-      </div>
-      <Button size="sm" :disabled="savingDbUrl || !dbUrl.trim()" @click="saveDbUrl">
-        {{ savingDbUrl ? 'Checking…' : 'Enable reading' }}
-      </Button>
-    </div>
+    <DbUrlNotice v-if="needsDbUrl" :id="id" kind="telegram" @saved="refresh()" />
 
     <!-- Always shown, including while unlinked: a token must be revocable
          exactly when the account is not working. -->
@@ -511,29 +393,18 @@ const count = new Intl.NumberFormat()
         </h2>
 
         <div class="flex flex-wrap gap-3">
-          <AlertDialog v-if="linked">
-            <AlertDialogTrigger as-child>
-              <Button variant="outline" :disabled="busy">
-                Unlink account
-              </Button>
-            </AlertDialogTrigger>
-            <AlertDialogContent>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Unlink this Telegram account?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  This signs the connection out of Telegram and deletes every chat synced
-                  for it. Connector tokens are kept, but read and send nothing until an
-                  account is linked again.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogCancel>Cancel</AlertDialogCancel>
-                <AlertDialogAction @click="unlink">
-                  Unlink
-                </AlertDialogAction>
-              </AlertDialogFooter>
-            </AlertDialogContent>
-          </AlertDialog>
+          <ConfirmAction
+            v-if="linked"
+            label="Unlink account"
+            title="Unlink this Telegram account?"
+            confirm-label="Unlink"
+            :disabled="busy"
+            @confirm="unlink"
+          >
+            This signs the connection out of Telegram and deletes every chat synced
+            for it. Connector tokens are kept, but read and send nothing until an
+            account is linked again.
+          </ConfirmAction>
 
           <AssignConnectionDialog :id="id" kind="telegram" />
 
