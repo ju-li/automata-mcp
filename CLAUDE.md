@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 One Nuxt/Nitro server exposing two surfaces:
 
-1. **Web UI** — users create *connections* and mint connector tokens for them. PocketBase session cookie.
+1. **Web UI** — users create *connections* and mint connector tokens for them. Session cookie.
 2. **MCP endpoint** — Claude connects to `/mcp` as a custom connector. App-minted bearer token.
 
 A connection is a row in `instances` with a `kind`, and a connector token is bound to exactly one row. Two kinds exist:
@@ -14,9 +14,9 @@ A connection is a row in `instances` with a `kind`, and a connector token is bou
 - **`whatsapp`** — an [Evolution API](https://doc.evolution-api.com/) instance, paired by QR, on the Evolution server this deployment is configured with *or* one the user supplied.
 - **`postgres`** — a user-supplied PostgreSQL DSN.
 
-`kind` is read through `instanceKind()` in `mcp-scope.ts`, never off the record directly: PocketBase materialises an unset SelectField as `''`, and a row written before the field existed is a WhatsApp account. That default lives in exactly one function — and it covers exactly those two spellings: any other value throws, because PocketBase and Nuxt deploy separately and a row whose kind the running build has never heard of must be refused, not served as WhatsApp. Every per-kind branch is a `switch` ending in `assertNever` (`shared/connection.ts`), never an `if … else`, so adding a kind fails to compile everywhere it has not been decided.
+`kind` is read through `instanceKind()` in `mcp-scope.ts`. The column is `NOT NULL` with a `CHECK`, but the function still refuses a value the running build does not know rather than serving it as WhatsApp — a rollback after a migration added a kind leaves exactly such rows. Every per-kind branch is a `switch` ending in `assertNever` (`shared/connection.ts`), never an `if … else`, so adding a kind fails to compile everywhere it has not been decided.
 
-PocketBase is the app's database (users, sessions, connections and their credentials). Evolution API, its Postgres and its Redis are dependencies you run **only for WhatsApp connections** — they sit behind a `whatsapp` compose profile, and the `NUXT_EVOLUTION_*` variables are optional.
+The app's own data (users, sessions, organizations, connections and their credentials, tokens) is in Postgres, in an `app` schema migrated at boot — `NUXT_DATABASE_URL`, required. It is the same Postgres Evolution writes into (`public`) and the Telegram bridge uses (`telegram`), and that Postgres is the one compose service that is not behind a profile. Evolution API and its Redis are dependencies you run **only for WhatsApp connections** — they sit behind a `whatsapp` compose profile, and the `NUXT_EVOLUTION_*` variables are optional.
 
 `README.md` is the operator's manual — first-run setup, networking tables, the Linux firewall rule, Railway deploy, MCP client connection. Read it before doing anything involving Docker or the local stack; this file covers the code.
 
@@ -37,9 +37,9 @@ Run from the repo root — root scripts delegate with `pnpm --filter web`:
 
 ```bash
 pnpm install          # postinstall runs `nuxt prepare` in apps/web
-pnpm services:up      # pocketbase only (compose)
-pnpm services:up:whatsapp   # + postgres, redis, evolution
-pnpm services:up:telegram   # + postgres, telegram-bridge
+pnpm services:up      # postgres only (compose)
+pnpm services:up:whatsapp   # + redis, evolution
+pnpm services:up:telegram   # + telegram-bridge
 pnpm bridge:dev       # the Telegram bridge on the host, http://localhost:8095
 pnpm dev              # Nuxt on the host, http://localhost:3000
 pnpm typecheck        # nuxt typecheck across app + server
@@ -71,14 +71,16 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                               usually a kind; `sql/` is the exception and serves
                               every SQL kind. `defineKindTool` is what gates a
                               tool, not the directory
-  server/utils/              pocketbase, session, auth-cookie, org, invites,
+  server/db/migrations.ts    the app schema — append-only, applied at boot
+  server/utils/              app-db, account, session, org, invites,
+                             pocketbase-import (one-time),
                              mcp-auth, instances, tokens, evolution, evolution-db,
                              mentions, redact, net-guard, keyed-resource,
                              db-rows, sql-engine, pg-pool, pg-guard,
                              pg-run, pg-catalog
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              own Postgres database. See "Telegram bridge".
-services/pocketbase/         pinned PocketBase build + committed schema migrations
+services/pocketbase/         legacy; only the source of the one-time import
 docker-compose.dev.yml       services only, NOT Nuxt
 ```
 
@@ -90,7 +92,7 @@ The two surfaces have **entirely separate** credential paths, and there is no sh
 
 | | Web UI | MCP |
 |---|---|---|
-| Credential | PocketBase cookie (`pb_auth`, `httpOnly`) | `Authorization: Bearer` or `/mcp/<token>` |
+| Credential | Session cookie (`automata_session`, `httpOnly`) | `Authorization: Bearer` or `/mcp/<token>` |
 | Resolved by | `server/middleware/session.ts` → `utils/session.ts` | `server/mcp/index.ts` → `utils/mcp-auth.ts` |
 | Context key | `event.context.user` | `event.context.mcpAuth` |
 | Backend client | `evolutionClientForInstance(instance)` / `pgFor(instance)` | `useEvolutionClient()` / `pgFor(instance)` |
@@ -100,11 +102,11 @@ Three things enforce it:
 
 - `server/middleware/session.ts` returns early on any `/mcp*` path, so cookies are never parsed there. Without that early return, a browser signed into the app could authenticate an MCP tool call with a cookie.
 - `useEvolutionClient()` reads `event.context.mcpAuth` and has no branch that reaches a session user; it throws 401 if the key is absent, and again if the connection is not a WhatsApp one.
-- MCP tokens are minted by this app (`wamcp_` + 32 random bytes) and stored **only** as a SHA-256 hash in the superuser-only `mcp_tokens` collection. A token resolves to one `instances` row, which carries that account's Evolution token.
+- MCP tokens are minted by this app (`wamcp_` + 32 random bytes) and stored **only** as a SHA-256 hash in `app.mcp_tokens`. Browser sessions get the same treatment: the cookie is 32 random bytes and `app.sessions` holds only its hash. A token resolves to one `instances` row, which carries that account's Evolution token.
 
 `McpAuth` is a **union discriminated on `kind`** — `{ kind: 'whatsapp', evolution }` or `{ kind: 'postgres' }`. A union rather than optional fields, so a handler reaching for `evolution` must first establish it is talking to WhatsApp. Postgres carries no credential object: the DSN lives on the instance row and `pgFor()` is the only thing that reads it, so copying it into request context would put a second live copy of a user's database password there for nothing.
 
-**Failure-mode semantics matter here:** a PocketBase outage answers **503**, never 401. A 401 tells a client its credential is bad — an MCP client discards a token it should keep, and a browser user gets silently signed out mid-outage. Both surfaces make the distinction: `resolveMcpAuth` returns `undefined` (→ 401) only on a genuine 404, and `getSessionUser` only on 401/403/404 from `authRefresh`. Everything else rethrows as 503. Preserve that in any auth code you add.
+**Failure-mode semantics matter here:** a database outage answers **503**, never 401. A 401 tells a client its credential is bad — an MCP client discards a token it should keep, and a browser user gets silently signed out mid-outage. Both surfaces make the distinction: `resolveMcpAuth` and `getSessionUser` return `undefined` (→ 401) only when the query ran and found no usable row, and turn any thrown error into `appDbUnavailable()` (503). `checkPassword` does the same for the login form. Preserve that in any auth code you add: a `catch` on an auth read must never produce `undefined`.
 
 **A handled `createError` is not logged by Nitro.** Only unhandled/fatal errors reach its error handler, so a deliberate 503 produces a response with *nothing whatsoever* in the server logs — which is how an outage turns into guesswork. Both admin-auth and session failures log the underlying cause themselves, and say which of the two fixes applies. Do the same for any handled error an operator would need to diagnose.
 
@@ -159,7 +161,7 @@ That rule now has a sharper edge, because a global key can sit **on the instance
 
 Only Postgres **pins** the approved address (`postgres({ host })`, so the driver never resolves the name itself). The Evolution path re-checks before every request but cannot pin, because `$fetch` resolves DNS for itself; closing that window needs an undici `Agent` with a `connect` hook, and `undici` is not a direct dependency. The residual rebinding window is documented at the call site in `evolution.ts` — do not delete that note without closing the hole.
 
-**`hidden` is an API-projection flag, not encryption.** `api_key`, `admin_key` and `dsn` are absent from the REST projection, including to the owning user, and sit in clear in `pb_data` and in every backup.
+**Secrets on `instances` are plain columns, not encrypted.** `api_key`, `admin_key`, `dsn`, `evolution_db_url` and `telegram_db_url` never leave the server — `toPublicInstance()` is the only projection the UI receives — and sit in clear in the database and in every backup of it. `NUXT_DATABASE_URL` is in `net-guard`'s list of this deployment's own backends, so a user-supplied DSN that resolves to it is refused whatever `NUXT_ALLOW_PRIVATE_TARGETS` says.
 
 **The Evolution database connection is read-only, and it is now the only way messages are read at all.** `server/utils/evolution-db.ts` is the one file that talks to Evolution's Postgres. It began as a search escape hatch — 2.3.7's `POST /chat/findMessages` accepts a `where.message` and never reads it, so a content search returns an unfiltered page that reads as a result set, and that field is a trap — and `read-messages` joined it for a second reason, below. `NUXT_EVOLUTION_DATABASE_URL` is therefore **required**; there is no HTTP fallback to keep in step, and a missing value is announced once at startup (`server/plugins/evolution-db-check.ts`) and answers 500, not 503, because it will not fix itself on a retry.
 
@@ -216,13 +218,13 @@ Those mechanics now live in **`keyed-resource.ts`**, which is engine-independent
 
 **A DSN change does not invalidate tokens, on purpose.** Tokens name the *connection*, not the credential. Making an owner reissue them because a password rotated would be a reason not to rotate it.
 
-**Hidden fields require the admin client.** `instances.api_key` is a `hidden` PocketBase field. It is absent from anything fetched with a session-scoped client, including `getSessionUser()`'s `authRefresh`. Anything that needs it must go through `pocketbaseAdmin()` — `requireReadableInstance()` already does.
+**There is one database client, and no user's credential ever reaches it.** `appDb()` is the pool; nothing in the app runs a query as the visitor. Authorization is entirely `org.ts` / `mcp-auth.ts` — there are no row-level rules underneath to fall back on, so a route that forgets `requireReadableInstance()` is open. Table names in the helpers are a closed union and every value is a bind parameter.
 
 **Never normalise JIDs locally.** Evolution's `createJid` carries country-specific rules (Brazil's ninth digit, Mexico and Argentina prefixes). A JID stored by our rules but matched by theirs is a token scope that silently reaches the wrong chat, or refuses the right one. `resolveNumberToJid` in `server/utils/mcp-scope.ts` asks Evolution; both storing a scope and checking one go through it.
 
 **`enabled` guards cannot see tool arguments.** They receive only the event, so they can gate a whole tool — including by connection kind — but not "this tool, for this chat" or "this tool, for this table". Anything argument-dependent belongs in the handler: every chat check, and the whole Postgres plan walk. See the table in `mcp-scope.ts`.
 
-**PocketBase materialises an unset boolean as `false`, not absent.** A write path that forgets `all_tools` mints a token that can call nothing. `scopeFields()` in `tokens.ts` always writes all **six** scope columns for this reason — `all_chats`/`chat_jids`, `all_tables`/`table_names`, `all_tools`/`tool_names` — whatever kind the connection is. The same trap applies to a SelectField, which materialises as `''`: it is why the `kind` migration backfills before marking the field required, and why `instanceKind()` exists.
+**The scope columns are `NOT NULL` with defaults, and `scopeFields()` in `tokens.ts` still writes all six** — `all_chats`/`chat_jids`, `all_tables`/`table_names`, `all_tools`/`tool_names` — so a scope edit can never leave one axis as whatever it happened to be. The list columns are `jsonb` and are passed as plain arrays: postgres.js serialises a parameter by the type the server describes, so a pre-stringified value is stored as a JSON *string*, which `scopeFromRecord()` then reads as an empty list.
 
 ## History arrives once, at pairing
 
@@ -353,7 +355,7 @@ The global path had a second gate worth remembering if it is ever re-enabled: `W
 
 ## Disconnect alerts
 
-`server/utils/alerts.ts` decides; `server/utils/mailer.ts` and `services/pocketbase/pb_hooks/mail.pb.js` deliver.
+`server/utils/alerts.ts` decides; `server/utils/mailer.ts` delivers, over SMTP (`NUXT_SMTP_*`).
 
 **Recipients are not a new policy.** `recipientsFor()` runs `authorizesInstance()` over `listOrgMembers()` — every admin of the owning organization plus the members the connection is assigned to, which is the set that can reach it and therefore the set it breaking is a problem for. Inventing a second definition of "reaches this connection" is how the two drift. One message each, never one addressed to all of them: these are colleagues, not a mailing list, and the `to` header would disclose the roster. `alerted_at` is written when the mail reached **anyone**, so one bad address does not queue a repeat to everyone else on every sweep. The outage mail is also role-aware — a member has no Reconnect button and never enters pairing mode, so telling them to press one reproduces in their inbox exactly the failure `InstanceWhatsapp.vue` is careful to avoid. Two date fields on `instances` hold the state — `down_since` (empty = healthy) and `alerted_at` (set = the current outage has been reported). Dates rather than a status field so neither PocketBase default (`''` for a select, `false` for a bool) can mean something unintended.
 
@@ -373,17 +375,17 @@ The Telegram webhook (`api/webhook/telegram.post.ts`) resolves the row by `insta
 
 The sweep is in-process, so **more than one replica mails more than once**. `nitro.scheduledTasks` needs `nitro.experimental.tasks`; both are in `nuxt.config.ts`.
 
-PocketBase is the mailer because it has no generic send-email REST endpoint at all — every mail route it ships is auth-flow bound — so `pb_hooks/mail.pb.js` registers `POST /api/app/send-email` behind `$apis.requireSuperuserAuth()` and applies the SMTP settings from `PB_SMTP_*` on boot. **Turning SMTP on also turns on PocketBase's own login-alert mail**, so the superuser gets a "Login from a new location" message whenever the Nuxt server signs in from a new client — which is every restart. Disable the auth alert on `_superusers` in the admin UI if that noise matters; it is not disabled in code, because silently turning off a security notification is worse than the noise.
+`sendAppEmail()` never throws and answers whether the mail went out; with `NUXT_SMTP_HOST` unset it answers false and warns once. Callers decide what "not sent" means for their own bookkeeping — an alert stays queued, an invitation's link stays on screen.
 
 ## Organizations and roles
 
-A connection belongs to an **organization**, never to a person. Every signup silently creates one and makes that user its admin; joining another happens only by accepting an invitation. A user belongs to exactly **one** organization — `UNIQUE(memberships.user)` is that rule, and it is why accepting an invitation is an `UPDATE` of the existing membership row and never a delete-then-create: the row is the user's single slot, so one write is atomic and there is no window in which they belong to nothing.
+A connection belongs to an **organization**, never to a person. Every signup silently creates one and makes that user its admin; joining another happens only by accepting an invitation. A user belongs to exactly **one** organization — `UNIQUE(memberships.user_id)` is that rule, and it is why accepting an invitation is an `UPDATE` of the existing membership row and never a delete-then-create: the row is the user's single slot, and locking it `FOR UPDATE` serialises two acceptances by the same person.
 
 Two roles. An **admin** manages the organization, invites, changes roles, creates connections, assigns them, mints tokens and edits token scope. A **member** uses the connections assigned to them, sees only their own tokens on those connections, and may revoke or rotate a token's secret but never widen it — rotating a leaked credential must not queue behind someone else's approval.
 
-**Role is not a field on `users`, and the reason is not the obvious one.** `users` is the one collection a visitor's own PocketBase credential can write to (`updateRule = 'id = @request.auth.id'`; `pb_auth` is `httpOnly`, which hides it from `document.cookie` and not from the devtools Application panel). A `hidden: true` role field would *probably* hold — the non-superuser record upsert refuses to load hidden fields, which is what `instances.api_key` already relies on — but `hidden` means "absent from the API projection" everywhere else in this schema, and a superuser-only `memberships` collection needs no *probably*. The organizations migration also sets `users.createRule` and `users.deleteRule` to `null`: signup now creates the account through `pocketbaseAdmin()`, which is what makes "every user has a membership" an invariant rather than a hope, and there is deliberately **no** lazy self-heal — creating an organization for whoever turns up without one would hand a free one to anyone who can reach PocketBase, and silently resurrect a user an admin had just removed.
+**Role lives on `memberships`, not `users`,** because it is a fact about a user *in an organization*, and the unique index on `memberships.user_id` is what makes "one organization" a constraint rather than a convention. Signup writes the account and its organization (or its place in the inviting one) in **one transaction**, which is what makes "every user has a membership" an invariant; there is deliberately **no** lazy self-heal — creating an organization for whoever turns up without one would hand a free one to anyone, and silently resurrect a user an admin had just removed.
 
-**`instances.created_by` does not cascade, and that is load-bearing.** It was `user`, `required`, `cascadeDelete: true`. Under org ownership a cascade there deletes `instances` rows straight out of the database whenever a creator's account goes — bypassing `deleteInstance()` entirely: no `/instance/delete` on Evolution, no pool closed, a live socket on a real phone number left running with nothing recording that it exists. `instances.org` is non-cascading for the same reason, so deleting an organization that still owns connections fails loudly. `mcp_tokens.assigned_to` **does** cascade: a deleted account's tokens must stop working.
+**`instances.created_by` is `ON DELETE SET NULL`, and `instances.org` is `ON DELETE RESTRICT` — both load-bearing.** A cascade on either deletes `instances` rows straight out of the database — bypassing `deleteInstance()` entirely: no `/instance/delete` on Evolution, no pool closed, a live socket on a real phone number left running with nothing recording that it exists. So deleting an organization that still owns connections fails loudly. `mcp_tokens.assigned_to` **does** cascade: a deleted account's tokens must stop working.
 
 **Authorization answers 404, then 403.** The old rule — ownership failures answer 404 so an id cannot be probed — still holds and gains a second half now that a connection can be visible to someone who may not act on it:
 
@@ -396,9 +398,9 @@ Two roles. An **admin** manages the organization, invites, changes roles, create
 
 `resolveTokenForActor()` replaces the old `findOwnedToken`, whose `user = me` predicate is now wrong in both directions: too narrow, because an admin must reach a member's token, and too wide, because it never looked at the connection's organization. A token belonging to a colleague on a shared connection is a **404**, not a 403 — a member cannot see that it exists.
 
-**The MCP surface answers the same question separately, and must keep doing so.** `resolveMcpAuth` loads the holder's membership and assignment itself; `org.ts` is for the session surface. What the two share is `authorizesInstance()` — a *pure* predicate over already-loaded facts, no event, no PocketBase — so the rule lives once while each surface keeps its own credential path and its own failure semantics. A single `getCurrentActor(event)` used by both would collapse the auth split.
+**The MCP surface answers the same question separately, and must keep doing so.** `resolveMcpAuth` loads the holder's membership and assignment itself; `org.ts` is for the session surface. What the two share is `authorizesInstance()` — a *pure* predicate over already-loaded facts, no event, no database — so the rule lives once while each surface keeps its own credential path and its own failure semantics. A single `getCurrentActor(event)` used by both would collapse the auth split.
 
-**Every new PocketBase read on an auth path uses `firstOrNone()`, never `getFirstListItem`.** `getFirstListItem` throws 404 for an empty result *and* PocketBase answers 404 for a collection that does not exist, and `isPocketBaseNotFound` cannot tell them apart. Nuxt and PocketBase deploy as separate services with nothing ordering them, so a membership read written the obvious way turns a not-yet-migrated PocketBase into a **401 storm** — every connected client told its valid token was revoked, and invited to throw it away. `firstOrNone` makes an empty result a value and leaves a throw meaning a fault (→ 503). Verified: renaming `memberships` out from under a running server answers 503, not 401.
+**On the MCP side the facts are one query.** `resolveMcpAuth` reads the token joined (LEFT) to its holder, membership and an `EXISTS` on the assignment, then the instance by primary key. LEFT joins so a missing piece is logged as that missing piece rather than reading as "no such token". Nuxt runs its own migrations at boot, so the old cross-deploy hazard — a new build against a schema that had not arrived yet, answering 401 to every valid token — no longer exists; `appDb()` refuses to hand out a pool until migrations (and the one-time import) have landed, and answers 503 until then.
 
 **Four ordinary actions would otherwise leave tokens that read "Active" and answer 401** — unassigning a connection, demoting an admin, removing a member, and minting for a member who holds no assignment. Each falsifies the MCP predicate without touching `mcp_tokens`, and `toPublicToken` computes status from the row alone. `revokeTokensFor()` exists for the first three; the fourth is refused at mint time. Never add a path that changes membership or assignment without dealing with the tokens it kills.
 
@@ -410,11 +412,11 @@ An invitation code is a **bearer credential for joining an organization** and is
 
 **A code alone cannot join you to anything.** Every invitation names an email address, and acceptance requires the accepting account's own email to match, so a link forwarded into a group chat is not redeemable by whoever reads it first. Signing up *through* an invitation checks the address **before** the account is created — a bad code must not burn an email address, which is unrecoverable for the person holding it — and creates **no** personal organization, or every invited signup would make one and delete it again one request later.
 
-**Accepting is an `UPDATE` of the membership row.** `UNIQUE(memberships.user)` makes that row the user's single slot, so one write is atomic, trips no index, and leaves no window in which they belong to nothing — and there is no transaction to wrap the delete-then-create alternative in. Two refusals, both 409: their current organization still owns connections (those are org-owned, so leaving strands them; migrating them would move a WhatsApp account and its history across a trust boundary on the strength of a link), or they are the only admin of an organization that still has other members. The emptied old organization is deleted afterwards, best-effort — a stranded empty organization is harmless, a failed cleanup must not fail the join.
+**Accepting is an `UPDATE` of the membership row, in one transaction with spending the invitation.** `markInviteAccepted()` is conditional on the invitation still being unused and unrevoked, so two acceptances racing on one code cannot both succeed. Two refusals, both 409: their current organization still owns connections (those are org-owned, so leaving strands them; migrating them would move a WhatsApp account and its history across a trust boundary on the strength of a link), or they are the only admin of an organization that still has other members. The emptied old organization is deleted in the same transaction.
 
-**The last admin is guarded twice, and both are needed.** `assertAdminSurvivesChange()` is a read-only pre-check: it loses a race, so it is not the authority, but it is what makes the ordinary refusal have **no side effects**. `assertAdminSurvives()` runs after the write and undoes it if the admin count hit zero: that one is the authority, and it turns a permanent lockout into a retry. Neither may be "simplified" away — the first has no teeth, the second has no manners.
+**The last admin is guarded by a row lock.** `changeMemberRole` and `removeMember` each open a transaction, lock the organization's memberships `FOR UPDATE`, count admins, and only then write — so two admins demoting each other take turns and the second is refused, and a refusal rolls back everything before it. (This replaced a pre-check plus a post-write undo, which PocketBase needed for want of transactions.) `assertAdminSurvivesChange()` remains as a read-only pre-check for one reason: the role-change route must give the absolute last-admin refusal *before* asking whether to revoke tokens, so it never arrives dressed as a confirmable one.
 
-**`removeMember` deletes the membership first and revokes tokens only once the removal has stuck.** The obvious order is the opposite — revoke first, so a crash over-revokes rather than under-revokes — and it is wrong for an operation that can be *refused*. The first version revoked an admin's connector tokens on its way to telling them they could not leave, and the compensating action restored the membership but could not un-revoke anything. The residual risk, a crash between the delete and the revoke, is closed at the other end: `acceptInviteInto()` revokes whatever a joiner still holds, so old tokens cannot come back to life on a re-invite.
+**`removeMember` is one transaction:** the membership, the member's tokens and their assignments go together or not at all, so neither of the old failure modes — a refusal that had already revoked tokens, or a crash between the delete and the revoke — can happen. `acceptInviteInto()` still revokes whatever a joiner holds, as a second line.
 
 **A demotion that would kill tokens is refused with a 409 and a count, not done quietly** — the caller retries with `revokeTokens: true`, which is an admin saying yes to that specific consequence. The last-admin check runs *before* the token question, so an absolute refusal never arrives dressed as a confirmable one. Only tokens on connections the demoted admin will no longer reach are revoked; ones on connections assigned to them keep working.
 
@@ -496,16 +498,18 @@ The same split as WhatsApp — `telegram.ts` talks to the bridge over HTTP, `tel
 
 **Tool names carry `telegram`** (`read-telegram-messages`, …) because tool basenames are global across groups.
 
-## PocketBase
+## The app database
 
-Two clients in `server/utils/pocketbase.ts`, and the distinction is a security boundary:
+`server/utils/app-db.ts` owns the pool; `server/db/migrations.ts` is the schema.
 
-- `pocketbaseAdmin()` — memoized superuser client, re-auths on expiry *and* when PocketBase rejects an unexpired token (a restart rotates the key through `superuser upsert`; that request is retried once), concurrent callers share one in-flight request. Reads the hidden fields (`api_key`, `admin_key`, `dsn`) and `mcp_tokens`. **Never build a filter for it from user input** (use `pb.filter()` with bindings, as `mcp-auth.ts` does).
-- `pocketbaseForRequest()` — fresh unauthenticated client per request, loaded with the caller's own cookie. Its auth store must never be shared across requests, and must never overwrite the admin store's.
+- **`appDb()` is the only way in.** It memoises one pool and, on first use in a process, creates the `app` schema, applies pending migrations under an advisory lock in one transaction, and runs the one-time PocketBase import. A failure is remembered for 10 s and then retried, so a database that was still starting recovers on its own. `server/plugins/app-db.ts` starts it at boot so a bad URL is in the log immediately.
+- **Every query names `app.<table>`.** The database is shared with Evolution (`public`) and the bridge (`telegram`); nothing may depend on a search path.
+- **Rows come back with `NULL` as `undefined` and timestamps as ISO strings** (a `transform` on the pool), so the `App*` types say `?: string` and mean it. Writes take `undefined` as `NULL`. An empty string is not a valid `timestamptz` — clear a date with `null`.
+- **Migrations are append-only.** A deployed migration is recorded in `app.migrations` and never runs again, so editing one reaches fresh databases and silently skips every existing one. Add a new entry.
+- **Functions that must stand or fall with a caller's other writes take a `Db`** (pool or transaction) — `revokeTokensFor`, `acceptInviteInto`, `markInviteAccepted`, `createUser`, `createOrganizationFor`. Pass the transaction; never open a second one inside.
+- **Passwords are scrypt** (`account.ts`), parameters in the stored string. Imported PocketBase rows carry bcrypt hashes; `checkPassword` verifies them and rehashes on success, so that path empties itself. An unknown email still costs one hash comparison, so the login form does not leak which addresses exist.
 
-`pb_migrations/` and `pb_hooks/` are **COPYed into the PocketBase image**, and also bind-mounted in development. The mount shadows the baked copy, which is what lets schema edits made in the admin UI land back in the repo — but the baked copy is the only one that exists in production. A change that removes the COPY ships a deployment with no collections at all.
-
-`services/pocketbase/pb_migrations/` is committed and is the schema source of truth. The directory is bind-mounted, so schema edits made in the admin UI are written straight back into the working tree as new migration files — **commit them**. `pb_data/` is gitignored runtime state; the container runs as root, so on Linux remove it through a container (see README).
+**The PocketBase import is temporary.** `pocketbase-import.ts` runs only with `NUXT_POCKETBASE_URL` set and `app.users` empty, pulls every row from `services/pocketbase/pb_hooks/export.pb.js` (raw SQL, because the record API never returns password hashes) and writes it in one transaction, keeping every id. It and the PocketBase service go away once deployments have moved.
 
 ## Frontend
 
@@ -540,22 +544,22 @@ cd apps/web && pnpx shadcn-vue@latest add <component>
 ## Things that cost real money or a phone number
 
 - **`docker compose down -v` forces a full WhatsApp QR re-scan.** `-v` deletes the `evolution_instances` volume holding every paired session. Use `down` without `-v` for routine restarts.
-- **The WhatsApp stack is behind a compose profile.** `pnpm services:up` brings up PocketBase alone; `pnpm services:up:whatsapp` adds Postgres, Redis and Evolution. `services:down`, `:logs` and `:ps` pass `--profile whatsapp` unconditionally so they still cover everything — a profiled service you forgot the flag for looks simply absent, which is the one sharp edge profiles have.
+- **The WhatsApp stack is behind a compose profile.** `pnpm services:up` brings up Postgres alone; `pnpm services:up:whatsapp` adds Redis and Evolution. `services:down`, `:logs` and `:ps` pass every profile unconditionally so they still cover everything — a profiled service you forgot the flag for looks simply absent, which is the one sharp edge profiles have.
 - **Pairing burns a real phone number.** Scanning the QR binds a real WhatsApp account; repeated pair/unpair or unsolicited sends get numbers banned. Use a spare SIM.
 - **`pnpm dev` runs `nuxt dev --host 0.0.0.0`**, which it must — bound to localhost, Nuxt is unreachable from the Evolution container. That means the socket listens on the LAN interface too.
 - **On a Linux host with ufw, the inbound webhook silently times out** until you allow container→host traffic. The compose subnet is pinned to `172.31.250.0/24` so one rule covers it; the rule and the round-trip test are in README "Linux firewall". Reachable by ping but not TCP is the signature.
 
 Every image tag in `docker-compose.dev.yml` is pinned. Do not relax one to `latest`.
 
-**The superuser is created at boot, not by hand.** `services/pocketbase/entrypoint.sh` upserts it from `PB_SUPERUSER_EMAIL` / `PB_SUPERUSER_PASSWORD`, falling back to the `NUXT_POCKETBASE_ADMIN_*` names so one variable can be set identically on both services. `upsert` is idempotent, so it doubles as password rotation. It warns and keeps serving on failure rather than exiting — a crash-loop would take away the admin UI, which is the one place you could fix it by hand.
+**`DROP SCHEMA app` is the local reset**, and it deletes every user, connection and token — the next boot recreates the schema empty. Never point that at a deployment's database: the Evolution sessions those connections name keep running with nothing recording them.
 
 ## Container ports
 
-Neither image hardcodes its port. `apps/web/Dockerfile` deliberately does **not** set `NITRO_PORT`, because Nitro resolves `NITRO_PORT || PORT` and pinning it makes the server ignore the port a platform assigns; unset, it defaults to 3000. PocketBase runs through `sh -c` so `${PORT:-8090}` expands, with `exec` so it keeps PID 1 and still receives SIGTERM.
+Neither image hardcodes its port. `apps/web/Dockerfile` deliberately does **not** set `NITRO_PORT`, because Nitro resolves `NITRO_PORT || PORT` and pinning it makes the server ignore the port a platform assigns; unset, it defaults to 3000.
 
-Both bind `::` rather than `0.0.0.0`, which accepts IPv4 and IPv6. Legacy Railway environments route the private network over IPv6 only.
+It binds `::` rather than `0.0.0.0`, which accepts IPv4 and IPv6. Legacy Railway environments route the private network over IPv6 only.
 
-**Following `$PORT` means the listen port is not the Dockerfile default.** Railway injects `PORT=8080` into every service, so PocketBase listens on 8080 there, not 8090, and anything pointing at 8090 gets `ECONNREFUSED` from a hostname that resolves fine. Pin `PORT=8090` on that service. Evolution is unaffected — it reads `SERVER_PORT`, which the README pins.
+**Following `$PORT` means the listen port is not the Dockerfile default.** Railway injects `PORT=8080` into every service, so anything that follows it listens there, and anything pointing at its Dockerfile default gets `ECONNREFUSED` from a hostname that resolves fine. Evolution is unaffected — it reads `SERVER_PORT`, which the README pins — and the Telegram bridge reads `TELEGRAM_BRIDGE_PORT` first.
 
 **Do not add a `VOLUME` instruction.** Railway fails the build on it outright (`docker VOLUME at Line N is not supported, use Railway Volumes`). Persistence comes from the compose bind mount locally and an attached volume in the service settings on Railway.
 
