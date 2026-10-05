@@ -15,10 +15,11 @@ import type { AppInstance } from './app-db'
  * about Postgres — parsing a DSN, guarding and pinning the host, and the driver
  * options.
  *
- * The *only* asymmetry between the two callers is the `guard` flag, which
- * `KeyedPoolOptions` documents: true for anything a user typed, false for this
- * deployment's own `NUXT_EVOLUTION_DATABASE_URL`, which `net-guard` would
- * correctly refuse as our own infrastructure.
+ * Two flags separate the callers, both documented on `KeyedPoolOptions`:
+ * `guard` — true for anything a user typed, false for this deployment's own
+ * `NUXT_EVOLUTION_DATABASE_URL`, which `net-guard` would correctly refuse as our
+ * own infrastructure — and `readOnly`, set by the message databases and never
+ * by the Postgres connection kind.
  *
  * **The address is pinned, not merely checked.** `assertPublicTarget` resolves
  * the DSN's host and approves an address, and that address is what
@@ -114,7 +115,7 @@ function sslFor(target: PgTarget): postgres.Options<Record<string, never>>['ssl'
  * hand-written copy of these options meant a change to the pin, to `onnotice`
  * or to `prepare` could silently apply to one and not the other.
  */
-function driverOptions(target: PgTarget, options: { guard: boolean, max: number, statementTimeoutMs: number }) {
+function driverOptions(target: PgTarget, options: { guard: boolean, max: number, statementTimeoutMs: number, readOnly?: boolean }) {
   const ssl = sslFor(target)
 
   return {
@@ -147,6 +148,7 @@ function driverOptions(target: PgTarget, options: { guard: boolean, max: number,
     connection: {
       application_name: 'claude-mcp-connector',
       statement_timeout: options.statementTimeoutMs,
+      ...(options.readOnly && { default_transaction_read_only: true }),
     },
   }
 }
@@ -170,6 +172,19 @@ export interface KeyedPoolOptions {
   guard: boolean
   max?: number
   statementTimeoutMs?: number
+  /**
+   * Open every session with `default_transaction_read_only`, so a write fails
+   * with 25006 whatever the role behind the URL may do.
+   *
+   * **A backstop, not a boundary.** The message databases are read with the
+   * superuser URL in the default Railway deployment, and a superuser can turn
+   * this off — but only through SQL, and the modules that pass it
+   * (`evolution-db.ts`, `telegram-db.ts`) issue nothing but parameterised
+   * SELECTs they wrote themselves. What it buys is that a mistake in one of
+   * those modules fails instead of writing. Never set for the Postgres
+   * connection kind: `run-statement` must write.
+   */
+  readOnly?: boolean
 }
 
 /**
@@ -195,6 +210,7 @@ export async function keyedPool(key: string, dsn: string, options: KeyedPoolOpti
           guard: options.guard,
           max: options.max ?? PER_POOL_MAX,
           statementTimeoutMs: options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
+          readOnly: options.readOnly,
         }),
         idle_timeout: 30,
         max_lifetime: 60 * 30,

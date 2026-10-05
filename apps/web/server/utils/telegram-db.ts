@@ -138,7 +138,7 @@ async function telegramDbFor(instance: AppInstance): Promise<Sql> {
   return keyedPool(
     resolved.guard ? `tg:${instance.id}` : 'tg:default',
     resolved.url,
-    { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS },
+    { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS, readOnly: true },
   )
 }
 
