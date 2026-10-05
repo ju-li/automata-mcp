@@ -14,8 +14,8 @@
     "services:up": "docker compose -f docker-compose.dev.yml up -d",
     "services:up:whatsapp": "docker compose -f docker-compose.dev.yml --profile whatsapp up -d",
     "services:up:telegram": "docker compose -f docker-compose.dev.yml --profile telegram up -d",
-    "services:down": "docker compose -f docker-compose.dev.yml --profile whatsapp --profile telegram --profile pocketbase down",
-    "services:logs": "docker compose -f docker-compose.dev.yml --profile whatsapp --profile telegram --profile pocketbase logs -f",
-    "services:ps": "docker compose -f docker-compose.dev.yml --profile whatsapp --profile telegram --profile pocketbase ps"
+    "services:down": "docker compose -f docker-compose.dev.yml --profile whatsapp --profile telegram down",
+    "services:logs": "docker compose -f docker-compose.dev.yml --profile whatsapp --profile telegram logs -f",
+    "services:ps": "docker compose -f docker-compose.dev.yml --profile whatsapp --profile telegram ps"
   }
 }

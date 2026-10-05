@@ -52,7 +52,9 @@ async function verifyPassword(password: string, stored: string): Promise<{ ok: b
     return { ok, rehash: ok && (params.N !== SCRYPT.N || params.r !== SCRYPT.r || params.p !== SCRYPT.p) }
   }
 
-  // PocketBase's format, carried over by the import.
+  // PocketBase's format. Accounts imported from it keep a bcrypt hash until
+  // their first sign-in since; remove this branch once none are left
+  // (`SELECT count(*) FROM app.users WHERE password_hash NOT LIKE 'scrypt$%'`).
   if (/^\$2[aby]\$/.test(stored)) {
     const ok = await bcrypt.compare(password, stored)
     return { ok, rehash: ok }

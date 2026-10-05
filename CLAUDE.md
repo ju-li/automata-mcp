@@ -73,14 +73,12 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                               tool, not the directory
   server/db/migrations.ts    the app schema — append-only, applied at boot
   server/utils/              app-db, account, session, org, invites,
-                             pocketbase-import (one-time),
                              mcp-auth, instances, tokens, evolution, evolution-db,
                              mentions, redact, net-guard, keyed-resource,
                              db-rows, sql-engine, pg-pool, pg-guard,
                              pg-run, pg-catalog
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              own Postgres database. See "Telegram bridge".
-services/pocketbase/         legacy; only the source of the one-time import
 docker-compose.dev.yml       services only, NOT Nuxt
 ```
 
@@ -357,7 +355,7 @@ The global path had a second gate worth remembering if it is ever re-enabled: `W
 
 `server/utils/alerts.ts` decides; `server/utils/mailer.ts` delivers, over SMTP (`NUXT_SMTP_*`).
 
-**Recipients are not a new policy.** `recipientsFor()` runs `authorizesInstance()` over `listOrgMembers()` — every admin of the owning organization plus the members the connection is assigned to, which is the set that can reach it and therefore the set it breaking is a problem for. Inventing a second definition of "reaches this connection" is how the two drift. One message each, never one addressed to all of them: these are colleagues, not a mailing list, and the `to` header would disclose the roster. `alerted_at` is written when the mail reached **anyone**, so one bad address does not queue a repeat to everyone else on every sweep. The outage mail is also role-aware — a member has no Reconnect button and never enters pairing mode, so telling them to press one reproduces in their inbox exactly the failure `InstanceWhatsapp.vue` is careful to avoid. Two date fields on `instances` hold the state — `down_since` (empty = healthy) and `alerted_at` (set = the current outage has been reported). Dates rather than a status field so neither PocketBase default (`''` for a select, `false` for a bool) can mean something unintended.
+**Recipients are not a new policy.** `recipientsFor()` runs `authorizesInstance()` over `listOrgMembers()` — every admin of the owning organization plus the members the connection is assigned to, which is the set that can reach it and therefore the set it breaking is a problem for. Inventing a second definition of "reaches this connection" is how the two drift. One message each, never one addressed to all of them: these are colleagues, not a mailing list, and the `to` header would disclose the roster. `alerted_at` is written when the mail reached **anyone**, so one bad address does not queue a repeat to everyone else on every sweep. The outage mail is also role-aware — a member has no Reconnect button and never enters pairing mode, so telling them to press one reproduces in their inbox exactly the failure `InstanceWhatsapp.vue` is careful to avoid. Two date fields on `instances` hold the state — `down_since` (empty = healthy) and `alerted_at` (set = the current outage has been reported). Dates rather than a status field, so "healthy" is simply both being `NULL`.
 
 **The webhook cannot be the whole mechanism, and the sweep is not a backstop.** In 2.3.7 a close Evolution intends to retry emits *no* `connection.update` — `connectionUpdate` rebuilds the socket and returns, and only a close it will not retry (`loggedOut`, `forbidden`, 402, 406) sends anything. So the failure this feature exists for — a socket that died and stayed dead, the one `sessionLost` is built on — is invisible to the webhook by construction. The hourly `alerts:sweep` task is the only thing that sees it, because it performs a live read.
 
@@ -400,7 +398,7 @@ Two roles. An **admin** manages the organization, invites, changes roles, create
 
 **The MCP surface answers the same question separately, and must keep doing so.** `resolveMcpAuth` loads the holder's membership and assignment itself; `org.ts` is for the session surface. What the two share is `authorizesInstance()` — a *pure* predicate over already-loaded facts, no event, no database — so the rule lives once while each surface keeps its own credential path and its own failure semantics. A single `getCurrentActor(event)` used by both would collapse the auth split.
 
-**On the MCP side the facts are one query.** `resolveMcpAuth` reads the token joined (LEFT) to its holder, membership and an `EXISTS` on the assignment, then the instance by primary key. LEFT joins so a missing piece is logged as that missing piece rather than reading as "no such token". Nuxt runs its own migrations at boot, so the old cross-deploy hazard — a new build against a schema that had not arrived yet, answering 401 to every valid token — no longer exists; `appDb()` refuses to hand out a pool until migrations (and the one-time import) have landed, and answers 503 until then.
+**On the MCP side the facts are one query.** `resolveMcpAuth` reads the token joined (LEFT) to its holder, membership and an `EXISTS` on the assignment, then the instance by primary key. LEFT joins so a missing piece is logged as that missing piece rather than reading as "no such token". Nuxt runs its own migrations at boot, so the old cross-deploy hazard — a new build against a schema that had not arrived yet, answering 401 to every valid token — no longer exists; `appDb()` refuses to hand out a pool until migrations have landed, and answers 503 until then.
 
 **Four ordinary actions would otherwise leave tokens that read "Active" and answer 401** — unassigning a connection, demoting an admin, removing a member, and minting for a member who holds no assignment. Each falsifies the MCP predicate without touching `mcp_tokens`, and `toPublicToken` computes status from the row alone. `revokeTokensFor()` exists for the first three; the fourth is refused at mint time. Never add a path that changes membership or assignment without dealing with the tokens it kills.
 
@@ -502,14 +500,14 @@ The same split as WhatsApp — `telegram.ts` talks to the bridge over HTTP, `tel
 
 `server/utils/app-db.ts` owns the pool; `server/db/migrations.ts` is the schema.
 
-- **`appDb()` is the only way in.** It memoises one pool and, on first use in a process, creates the `app` schema, applies pending migrations under an advisory lock in one transaction, and runs the one-time PocketBase import. A failure is remembered for 10 s and then retried, so a database that was still starting recovers on its own. `server/plugins/app-db.ts` starts it at boot so a bad URL is in the log immediately.
+- **`appDb()` is the only way in.** It memoises one pool and, on first use in a process, creates the `app` schema and applies pending migrations under an advisory lock in one transaction. A failure is remembered for 10 s and then retried, so a database that was still starting recovers on its own. `server/plugins/app-db.ts` starts it at boot so a bad URL is in the log immediately.
 - **Every query names `app.<table>`.** The database is shared with Evolution (`public`) and the bridge (`telegram`); nothing may depend on a search path.
 - **Rows come back with `NULL` as `undefined` and timestamps as ISO strings** (a `transform` on the pool), so the `App*` types say `?: string` and mean it. Writes take `undefined` as `NULL`. An empty string is not a valid `timestamptz` — clear a date with `null`.
 - **Migrations are append-only.** A deployed migration is recorded in `app.migrations` and never runs again, so editing one reaches fresh databases and silently skips every existing one. Add a new entry.
 - **Functions that must stand or fall with a caller's other writes take a `Db`** (pool or transaction) — `revokeTokensFor`, `acceptInviteInto`, `markInviteAccepted`, `createUser`, `createOrganizationFor`. Pass the transaction; never open a second one inside.
 - **Passwords are scrypt** (`account.ts`), parameters in the stored string. Imported PocketBase rows carry bcrypt hashes; `checkPassword` verifies them and rehashes on success, so that path empties itself. An unknown email still costs one hash comparison, so the login form does not leak which addresses exist.
 
-**The PocketBase import is temporary.** `pocketbase-import.ts` runs only with `NUXT_POCKETBASE_URL` set and `app.users` empty, pulls every row from `services/pocketbase/pb_hooks/export.pb.js` (raw SQL, because the record API never returns password hashes) and writes it in one transaction, keeping every id. It and the PocketBase service go away once deployments have moved.
+**PocketBase is gone; one trace of it remains on purpose.** Users imported from it (by the one-time import at commit `2e1872e`) keep a bcrypt hash until their next sign-in, so `verifyPassword` still accepts `$2a$`/`$2b$` hashes and rehashes them. Remove that branch, and the `bcryptjs` dependency, once `SELECT count(*) FROM app.users WHERE password_hash NOT LIKE 'scrypt$%'` is zero. Imported rows also keep their 15-character PocketBase ids; new rows get uuids, and both are just `text`.
 
 ## Frontend
 
@@ -531,7 +529,7 @@ cd apps/web && pnpx shadcn-vue@latest add <component>
 
 **Provisioning is click-triggered, not on-mount.** Creating a WhatsApp instance reserves a live socket on the Evolution server, so a page refresh must never create a second account. A database connection is proved by actually connecting, which a refresh should not re-do either.
 
-**The dashboard is two panels, not one with fields hidden.** `pages/instances/[id].vue` picks `InstanceWhatsapp.vue` or `InstancePostgres.vue` from `instance.kind`; a database has no QR, no profile and no message count, and rendering an empty version of any of those suggests a state it can be in. The page decides from `/api/instances/:id/summary` — a PocketBase read with no backend call — because the panel it picks then makes the expensive call itself, and deciding from a full status fetch would mean two.
+**The dashboard is two panels, not one with fields hidden.** `pages/instances/[id].vue` picks `InstanceWhatsapp.vue` or `InstancePostgres.vue` from `instance.kind`; a database has no QR, no profile and no message count, and rendering an empty version of any of those suggests a state it can be in. The page decides from `/api/instances/:id/summary` — an app-database read with no backend call — because the panel it picks then makes the expensive call itself, and deciding from a full status fetch would mean two.
 
 **Only the axis a kind has is fetched by the scope picker.** `TokenScopeFields.vue` sets `immediate` per kind: asking a WhatsApp connection for its tables answers 404, and a 404 in the console on every dialog open reads as a bug. A new Postgres token starts read-only, with the read tools pre-checked from the server's own catalogue.
 

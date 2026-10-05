@@ -1,2 +1,0 @@
-# Runtime state — often large, and never wanted in an image.
-pb_data/
