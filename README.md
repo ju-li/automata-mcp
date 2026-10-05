@@ -18,9 +18,11 @@ connection:
 - **PostgreSQL**, through a connection string the user supplies. Read-only
   unless a token is explicitly granted the write tool.
 
-PocketBase is the app's own database (users, sessions, connections and their
-credentials). Evolution API, its Postgres and its Redis are dependencies you run
-**only if you want WhatsApp connections** — they sit behind a compose profile,
+The app keeps its own data (users, sessions, organizations, connections and their
+credentials, connector tokens) in Postgres, in an `app` schema it creates and
+migrates at boot — `NUXT_DATABASE_URL` is the one thing every deployment needs.
+Evolution API and its Redis are dependencies you run **only if you want WhatsApp
+connections** — they sit behind a compose profile,
 and `NUXT_EVOLUTION_URL` / `NUXT_EVOLUTION_ADMIN_KEY` are optional. If you do
 want them, `NUXT_EVOLUTION_DATABASE_URL` is **required** — both WhatsApp read
 tools go through it. See "Reading and searching messages". The Telegram bridge
@@ -51,11 +53,12 @@ apps/telegram-bridge/        Node + teleproto. Links Telegram accounts, syncs ch
   server/mcp/index.ts        MCP handler + auth middleware
   server/mcp/tools/<group>/  one file per tool: whatsapp/, telegram/, sql/
   server/plugins/            token redaction, per-kind instructions, startup check
-  server/utils/              PocketBase, auth, instances, tokens, Evolution client and
+  server/db/migrations.ts    the app schema, applied at boot
+  server/utils/              app database, auth, instances, tokens, Evolution client and
                              message database, mentions, outbound host guard,
                              keyed handle cache, row serialisation, SQL engine
                              seam, Postgres pool / plan guard / runner / catalog
-services/pocketbase/         pinned PocketBase image + committed schema
+services/pocketbase/         legacy — kept only to import an old deployment's data
 docker-compose.dev.yml       services only — NOT Nuxt
 .zed/                        tasks + language server config
 .env.example                 every variable, documented
@@ -68,32 +71,31 @@ Package manager is **pnpm** (`pnpm@11.22.0`, pinned via `packageManager`). Do no
 ```bash
 cp .env.example .env          # then fill in the blanks — see comments in the file
 pnpm install
-pnpm services:up              # pocketbase only — enough for database connections
+pnpm services:up              # postgres only — enough for database connections
 ```
 
-Only `NUXT_POCKETBASE_ADMIN_EMAIL` and `NUXT_POCKETBASE_ADMIN_PASSWORD` have to
-be filled in for that to come up. If you want WhatsApp connections as well:
+Nothing in `.env` has to be filled in for that to come up: the defaults for
+`POSTGRES_*` and `NUXT_DATABASE_URL` agree with each other. If you want WhatsApp
+connections as well:
 
 ```bash
-pnpm services:up:whatsapp     # + postgres, redis, evolution
+pnpm services:up:whatsapp     # + redis, evolution
 ```
 
 For Telegram connections, fill in the Telegram section of `.env` first (your own
 `api_id` / `api_hash` and two generated keys — see "Telegram connections"), then:
 
 ```bash
-pnpm services:up:telegram     # + postgres, telegram-bridge
+pnpm services:up:telegram     # + telegram-bridge
 ```
 
-Postgres, Redis and Evolution sit behind a `whatsapp` compose profile because
-they exist only to serve WhatsApp connections; Postgres and the bridge sit behind
-`telegram`. `services:down`, `:logs` and `:ps` always pass both profiles, so they
-cover everything either way.
+Redis and Evolution sit behind a `whatsapp` compose profile because they exist
+only to serve WhatsApp connections; the bridge sits behind `telegram`. Postgres
+is not profiled — the app's own tables live in it. `services:down`, `:logs` and
+`:ps` always pass every profile, so they cover everything either way.
 
-The PocketBase superuser is created for you from `NUXT_POCKETBASE_ADMIN_EMAIL`
-and `NUXT_POCKETBASE_ADMIN_PASSWORD` — the container upserts it on every boot, so
-there is no manual step and changing the password is just editing `.env` and
-restarting.
+The app creates its schema and applies any new migrations when it starts, so
+there is no setup step for the database either.
 
 Then start Nuxt **on the host** (it is deliberately not in compose, so you keep HMR):
 
@@ -101,7 +103,7 @@ Then start Nuxt **on the host** (it is deliberately not in compose, so you keep 
 pnpm dev                      # http://localhost:3000
 ```
 
-Admin UI: <http://localhost:8090/_/> · Evolution (WhatsApp profile): <http://localhost:8080> · Telegram bridge (Telegram profile): <http://localhost:8095/health> · Nuxt: <http://localhost:3000>
+Evolution (WhatsApp profile): <http://localhost:8080> · Telegram bridge (Telegram profile): <http://localhost:8095/health> · Nuxt: <http://localhost:3000>
 
 There is no `predev` hook — bring the services up yourself.
 
@@ -112,9 +114,9 @@ There is no `predev` hook — bring the services up yourself.
 | `pnpm dev` | Nuxt dev server on the host |
 | `pnpm build` / `pnpm preview` | production build / serve it |
 | `pnpm typecheck` | `nuxt typecheck` across app + server — the only automated check |
-| `pnpm services:up` | PocketBase only |
-| `pnpm services:up:whatsapp` | + Evolution, its Postgres and Redis |
-| `pnpm services:up:telegram` | + Postgres and the Telegram bridge |
+| `pnpm services:up` | Postgres only |
+| `pnpm services:up:whatsapp` | + Evolution and Redis |
+| `pnpm services:up:telegram` | + the Telegram bridge |
 | `pnpm services:down` / `:logs` / `:ps` | the whole stack, profiles included |
 | `pnpm bridge:dev` | the Telegram bridge on the host instead of in compose |
 | `pnpm bridge:typecheck` | `tsc` for the bridge — `pnpm typecheck` does not cover it |
@@ -126,16 +128,15 @@ Traffic crosses the host/container boundary in both directions.
 | From | To | Address |
 |---|---|---|
 | Nuxt (host) | Evolution | `http://localhost:8080` |
-| Nuxt (host) | PocketBase | `http://localhost:8090` |
-| Nuxt (host) | Evolution's Postgres | `localhost:5432` (read-only role, see below) |
+| Nuxt (host) | Postgres — the app's own tables | `localhost:5432` (`NUXT_DATABASE_URL`) |
+| Nuxt (host) | Postgres — Evolution's messages | `localhost:5432` (read-only role, see below) |
 | Nuxt (host) | Telegram bridge | `http://localhost:8095` |
 | Evolution (container) | Nuxt webhook | `http://host.docker.internal:3000/api/webhook/evolution` |
 | Telegram bridge (container) | Nuxt webhook | `http://host.docker.internal:3000/api/webhook/telegram` |
 
 Postgres (`5432`), Redis (`6379`), Evolution (`8080`) and the Telegram bridge
 (`8095`) publish on `127.0.0.1` only: their dev credentials have defaults, and between them they hold — and can
-send from — every paired account. PocketBase publishes `8090` on every
-interface.
+send from — every paired account.
 
 `host.docker.internal` is not resolvable in Linux containers by default, so the
 evolution and telegram-bridge services declare
@@ -203,19 +204,21 @@ back to the browser session.**
 
 | | Web UI | MCP |
 |---|---|---|
-| Credential | PocketBase session cookie | `Authorization: Bearer <token>`, or `/mcp/<token>` |
+| Credential | Session cookie (`automata_session`, `httpOnly`) | `Authorization: Bearer <token>`, or `/mcp/<token>` |
 | Resolved by | `server/middleware/session.ts` → `server/utils/session.ts` | `server/mcp/index.ts` → `server/utils/mcp-auth.ts` |
 | Context key | `event.context.user` | `event.context.mcpAuth` |
 | Backend client | `evolutionClientForInstance(instance)` / `pgFor(instance)` | `useEvolutionClient()` / `pgFor(instance)` |
 | On failure | 401 JSON | **401 + `WWW-Authenticate`** — never 200 |
 
 `server/middleware/session.ts` returns early on `/mcp`, so cookies are never even
-parsed there. `useEvolutionClient()` (used by tools) reads `event.context.mcpAuth`,
+parsed there. The cookie is 32 random bytes; `app.sessions` stores only its
+SHA-256, lasts 14 days and slides forward while it is used. Passwords are scrypt
+hashes (`server/utils/account.ts`); changing yours ends every other session. `useEvolutionClient()` (used by tools) reads `event.context.mcpAuth`,
 has no code path to the session user, and refuses a connection that is not a
 WhatsApp one.
 
 The MCP token is minted by this app — it is **not** Evolution's `apikey`. Only its
-SHA-256 hash is stored, in the superuser-only `mcp_tokens` collection, alongside
+SHA-256 hash is stored, in `app.mcp_tokens`, alongside
 `last_used_at` and `expires_at`. It resolves to one row in `instances` — the
 connection — which holds that connection's credentials server-side: an Evolution
 token for WhatsApp, a connection string for Postgres.
@@ -230,8 +233,9 @@ account. A bring-your-own connection stores *its own* server's global key on its
 row, hidden, for the same two operations against that server only. Neither key
 is ever sent to the other's server.
 
-A PocketBase outage answers **503**, not 401 — a 401 would tell a client its
-valid token had been revoked and invite it to throw the token away.
+A database outage answers **503**, not 401, on both surfaces — a 401 would tell
+an MCP client its valid token had been revoked and invite it to throw the token
+away, and sign every browser user out mid-outage.
 
 Tokens never reach logs or error bodies: `server/plugins/redact-mcp.ts` scrubs
 `/mcp/<token>` to `/mcp/[redacted]` at the source (`event.node.req.originalUrl`,
@@ -515,7 +519,8 @@ this deployment's own database, which holds every user's messages. Set
 `NUXT_ALLOW_PRIVATE_TARGETS=true` for local development and single-tenant
 self-hosting — `.env.example` sets it; the app defaults to off — and leave it off
 for anything shared. Independently of that setting, a target resolving to this
-deployment's own PocketBase, Evolution or Evolution database is always refused.
+deployment's own database (`NUXT_DATABASE_URL`), Evolution or Evolution database
+is always refused.
 
 The guard runs whenever a connection is opened, not only when it is saved, so
 turning the setting off stops existing connections to private addresses. The
@@ -687,67 +692,90 @@ environment, where accounts use numbers of the form `99966XYYYY`. That
 environment is separate from the real one: an account from one does not exist in
 the other, so link a test bridge only from a test account.
 
-## PocketBase schema
+## The app database
 
-`users` holds accounts; an account can read only its own record. `instances`
-holds one row per connection, with a `kind` of `whatsapp` or `postgres`:
+Everything the app itself keeps is in the `app` schema of `NUXT_DATABASE_URL` —
+the same Postgres Evolution writes into (under `public`) and the Telegram bridge
+uses (under `telegram`). The schema is `apps/web/server/db/migrations.ts`, applied
+in order when the server starts, under an advisory lock and in one transaction;
+`app.migrations` records which have run. Migrations are append-only: one that has
+been deployed is never edited, because it will not run again anywhere it already
+has.
+
+| Table | Holds |
+|---|---|
+| `users` | email (stored lower-cased), display name, password hash |
+| `sessions` | browser sessions — SHA-256 of the cookie, expiry |
+| `organizations`, `memberships` | one membership per user (a unique index), with its role |
+| `instances` | one row per connection, `kind` of `whatsapp`, `postgres` or `telegram` |
+| `instance_assignments` | "may use, not manage" grants to members |
+| `invitations` | SHA-256 of the invitation code, address, role, expiry |
+| `mcp_tokens` | SHA-256 of the connector token, holder, scope, expiry, `last_used_at` |
+
+An `instances` row carries, by kind:
 
 - **WhatsApp** — the Evolution instance's `name` and `instance_id`, its
   `base_url`, and the per-instance `api_key`. A bring-your-own connection also
   carries its server's `admin_key` and, once supplied, `evolution_db_url`.
 - **Postgres** — the `dsn`, plus `db_host`, `db_port` and `db_database` for
-  display. Those four are shared by every database kind rather than named for
-  one engine; nothing connects through the display three, and each engine's DSN
-  parser refuses the other engines' schemes.
+  display. Nothing connects through the display three.
+- **Telegram** — the bridge's `base_url`, the session's `instance_id` and
+  `api_key`, and for a bring-your-own bridge its `admin_key` and `telegram_db_url`.
 
-`mcp_tokens` holds hashed connector tokens — `token_hash`, `label`,
-`last_used_at`, `expires_at`, `revoked` and six scope columns — each bound to one
-instance and cascade-deleted with it; instances cascade with their user.
-`instances` and `mcp_tokens` are superuser-only — the browser never talks to
-PocketBase, so the session cookie is `httpOnly` and every read goes through a
-Nuxt route.
+Two more columns, `down_since` and `alerted_at`, carry outage state — see
+"Connection alerts".
 
-Two more columns on `instances` carry outage state — `down_since` and
-`alerted_at`, both dates, both written only by the server. See "Connection
-alerts".
+`api_key`, `admin_key`, `dsn`, `evolution_db_url` and `telegram_db_url` never
+leave the server — `toPublicInstance()` is the only projection the UI receives —
+but they are **not encrypted**: they sit in clear in the database and in every
+backup of it. So treat `NUXT_DATABASE_URL` and the database's backups as holding
+every connected account.
 
-`api_key`, `admin_key`, `dsn` and `evolution_db_url` are `hidden` fields: absent
-from every API response, including to the owning user, but **not encrypted** —
-they sit in clear in `pb_data` and in every backup. So is the SMTP password, and
-for the same reason: PocketBase encrypts its settings only when
-`PB_ENCRYPTION_KEY` is set.
+Foreign keys say what deleting does. A user's tokens, sessions, memberships and
+assignments go with them; a connection's tokens and assignments go with it. An
+organization that still owns connections **cannot** be deleted, and a connection
+does not go with its creator — a cascade there would drop rows pointing at live
+WhatsApp sockets without ever telling Evolution.
 
-`pb_hooks/mail.pb.js` is the one hook file. It applies the SMTP settings from the
-environment at boot and registers `POST /api/app/send-email`, superuser-only —
-PocketBase has no generic send-email endpoint of its own, only the auth-flow
-ones.
-
-`services/pocketbase/pb_migrations/` is committed and is the source of truth.
-`pb_migrations/` and `pb_hooks/` are bind-mounted, so schema changes you make in
-the admin UI are written straight back into the working tree — commit them. A
-PocketBase restart is what applies new migration files.
-
-Restarting PocketBase also rotates the superuser's token key (the entrypoint's
-`superuser upsert` does that). The app notices the rejected token, signs in again
-and retries once, logging `superuser token rejected … re-authenticating and
-retrying once` — expected after a restart, not a fault.
-
-`pb_data/` is gitignored runtime state. The container runs as root, so on Linux
-the directory ends up root-owned; remove it through a container:
+To start over locally, drop the schema; the next boot recreates it:
 
 ```bash
-docker compose -f docker-compose.dev.yml stop pocketbase
-docker run --rm -v "$PWD/services/pocketbase:/x" alpine:3.22.5 rm -rf /x/pb_data
-docker compose -f docker-compose.dev.yml up -d pocketbase
+psql postgres://evolution:change-me@localhost:5432/evolution -c 'DROP SCHEMA app CASCADE'
 ```
 
-That resets everything, including the superuser, and re-applies every migration.
+### Moving off PocketBase
+
+Earlier versions kept all of this in PocketBase. To move a deployment that did:
+
+1. Deploy this version of **both** services — the PocketBase image now includes
+   `pb_hooks/export.pb.js`, a superuser-only route that exports every row,
+   including the bcrypt password hashes its normal API never returns.
+2. On the web service, set `NUXT_DATABASE_URL`, and keep `NUXT_POCKETBASE_URL`,
+   `NUXT_POCKETBASE_ADMIN_EMAIL` and `NUXT_POCKETBASE_ADMIN_PASSWORD` as they were.
+3. On first boot with an empty `app.users`, the server imports everything in one
+   transaction and logs `[import] done: N users, …`. Until that has landed every
+   request answers 503, so nobody can sign up into an empty database meanwhile.
+   A failure is logged with its cause and retried; nothing is half-written.
+4. Remove the three `NUXT_POCKETBASE_*` variables. The PocketBase service can then
+   be stopped and, once you are satisfied, deleted with its volume.
+
+What carries over: every id (so URLs and bookmarks still work), passwords
+(verified as bcrypt and rehashed to scrypt at each user's next sign-in),
+organizations, roles, connections with their credentials, assignments,
+invitations, and connector tokens — **every connector already configured in
+Claude keeps working**. What does not: browser sessions, so everyone signs in
+once. Rows pointing at something that no longer exists are skipped and listed in
+the log.
+
+Locally, `docker compose -f docker-compose.dev.yml --profile pocketbase up -d
+pocketbase` brings an old `services/pocketbase/pb_data` back up for the same
+import.
 
 ## Connection alerts
 
 A WhatsApp or Telegram connection that stops working emails everyone who can
 reach it, and emails them again once it recovers. Always on, no setting; it needs SMTP
-configured on the pocketbase service (`PB_SMTP_*`) and nothing else.
+configured on the web service (`NUXT_SMTP_*`) and nothing else.
 
 The same SMTP settings deliver organization invitations: the invitation-link
 dialog has **Send invite email**, and each pending invitation has **Resend
@@ -827,23 +855,16 @@ Registration is re-asserted on every sweep, which is what picks up a connection
 created before this existed, or one whose Evolution server or Telegram bridge was
 rebuilt. It uses the connection's own key, not a global one.
 
-**Configuring SMTP also switches on PocketBase's own login alerts.** The web
-server signs in as the superuser, so that account gets a "Login from a new
-location" mail on roughly every restart. Turn the auth alert off on the
-`_superusers` collection in the admin UI if the noise is not worth it — nothing
-in this repo disables it for you.
-
-To try it locally without a mail provider, point `PB_SMTP_HOST` at a catcher on
-the compose network:
+To try it locally without a mail provider, run a catcher and point
+`NUXT_SMTP_HOST` at it (Nuxt runs on the host, so `localhost`):
 
 ```bash
-docker run -d --name wamcp-mailpit --network claude-whatsapp-mcp_app -p 8025:8025 axllent/mailpit:v1.21
-# .env: PB_SMTP_HOST=wamcp-mailpit, PB_SMTP_PORT=1025, PB_SENDER_ADDRESS=alerts@automata.test
+docker run -d --name wamcp-mailpit -p 1025:1025 -p 8025:8025 axllent/mailpit:v1.21
+# .env: NUXT_SMTP_HOST=localhost, NUXT_SMTP_PORT=1025, NUXT_MAIL_FROM=alerts@automata.test
 ```
 
-Then read what was sent at <http://localhost:8025>. `PB_SENDER_ADDRESS` has to be
-a valid address — PocketBase rejects `alerts@localhost` and the hook logs
-`[mail] WARNING: could not apply the SMTP settings`. The sweep can be triggered
+Then read what was sent at <http://localhost:8025>. A failed send is logged by
+`[mailer]` with what to check. The sweep can be triggered
 by hand in development with `curl -X POST
 http://localhost:3000/_nitro/tasks/alerts:sweep`.
 
@@ -909,18 +930,17 @@ docker compose -f docker-compose.dev.yml down     # no -v
 
 ## Deploying to Railway
 
-Up to six services. Three are built from this repo; Redis and evolution you
-provision only for WhatsApp, the Telegram bridge only for Telegram, and Postgres
-for either. A deployment that serves database connections alone is
-**pocketbase** and **web**.
+Up to five services. Two are built from this repo; Redis and evolution you
+provision only for WhatsApp, the Telegram bridge only for Telegram. Postgres is
+always there — it holds the app's own tables. A deployment that serves database
+connections alone is **Postgres** and **web**.
 
 | Service | Source | Target port | Volume |
 |---|---|---|---|
-| **Postgres** *(WhatsApp or Telegram)* | Railway template | — | managed |
+| **Postgres** | Railway template | — | managed |
 | **Redis** *(WhatsApp only)* | Railway template | — | managed |
 | **evolution** *(WhatsApp only)* | image `evoapicloud/evolution-api:v2.3.7` | 8080 | `/evolution/instances` |
 | **telegram-bridge** *(Telegram only)* | this repo, root directory `/`, Dockerfile path `/apps/telegram-bridge/Dockerfile` | 8095 | — |
-| **pocketbase** | this repo, root directory `services/pocketbase` | 8090 | `/pb_data` |
 | **web** | this repo, root directory `/`, Dockerfile path `apps/web/Dockerfile` | 3000 | — |
 
 The web service and the Telegram bridge build from the **repo root**, not their
@@ -932,14 +952,18 @@ If you use watch paths, the bridge needs `/apps/telegram-bridge/**` and
 
 The bridge needs no volume: its sessions and chats are in Postgres.
 
-> **The volumes are not optional.** Without `/evolution/instances`, every deploy
-> unpairs every WhatsApp account and forces a fresh QR scan on each one. Without
-> `/pb_data`, you lose all users, connections and tokens.
+> **The evolution volume is not optional.** Without `/evolution/instances`, every
+> deploy unpairs every WhatsApp account and forces a fresh QR scan on each one.
 >
-> Attach them in each service's settings. Railway rejects a `VOLUME` instruction
-> in a Dockerfile — *"docker VOLUME at Line N is not supported, use Railway
-> Volumes"* — so neither image declares one, and nothing warns you at deploy
-> time if you forget.
+> Attach it in the service's settings. Railway rejects a `VOLUME` instruction in a
+> Dockerfile — *"docker VOLUME at Line N is not supported, use Railway Volumes"* —
+> so no image declares one, and nothing warns you at deploy time if you forget.
+>
+> Users, connections and tokens are in Postgres now, so back that up: its backups
+> hold every stored credential.
+
+A deployment that still has a **pocketbase** service from an earlier version
+keeps it only until its data has been imported — see "Moving off PocketBase".
 
 ### Pin the ports
 
@@ -952,7 +976,6 @@ Set these explicitly so nothing depends on Railway's default:
 
 | Service | Variable |
 |---|---|
-| pocketbase | `PORT=8090` |
 | evolution | `SERVER_PORT=8080` (Evolution reads this, not `PORT`) |
 | telegram-bridge | `TELEGRAM_BRIDGE_PORT=8095` (it follows `PORT` only when this is unset) |
 | web | nothing — it is the public service, let Railway assign it |
@@ -1023,42 +1046,21 @@ The database URL is the same one Evolution uses; the bridge keeps to its own
 process at a time". Losing `TELEGRAM_SESSION_ENCRYPTION_KEY` unlinks every
 account, so keep a copy somewhere other than Railway.
 
-**pocketbase** — the superuser it upserts at boot, and the SMTP settings it sends
-mail with. Both admin values must be identical to the web service's; use a Railway
-variable reference so they cannot drift:
-
-```
-PORT=8090
-NUXT_POCKETBASE_ADMIN_EMAIL=<you>
-NUXT_POCKETBASE_ADMIN_PASSWORD=<generate>
-
-# Mail. Optional — with PB_SMTP_HOST empty, connection alerts are computed and
-# then not delivered.
-PB_SMTP_HOST=<smtp host>
-PB_SMTP_PORT=587
-PB_SMTP_USERNAME=<username>
-PB_SMTP_PASSWORD=<password>
-PB_SMTP_TLS=false          # false = STARTTLS on 587; true = implicit TLS on 465
-PB_SMTP_AUTH_METHOD=PLAIN  # or LOGIN
-PB_SENDER_ADDRESS=<a from address the provider will accept>
-PB_SENDER_NAME=Automata MCP
-```
-
-The SMTP values are applied on every boot by `pb_hooks/mail.pb.js`, so changing
-one is a redeploy rather than a click through the admin UI — look for `[mail]
-SMTP configured from the environment` in the logs. `PB_SENDER_ADDRESS` must be a
-real address: PocketBase validates it, and rejects something like
-`alerts@localhost` with `[mail] WARNING: could not apply the SMTP settings`. The
-password is stored in `pb_data` in clear unless `PB_ENCRYPTION_KEY` is set — the
-same standing as the hidden fields on `instances`.
-
 **web** — internal addresses for the backends, public URLs for anything a user sees:
 
 ```
-NUXT_POCKETBASE_URL=http://pocketbase.railway.internal:8090   # matches PORT=8090 above
-NUXT_POCKETBASE_ADMIN_EMAIL=<you>
-NUXT_POCKETBASE_ADMIN_PASSWORD=<generate>
+NUXT_DATABASE_URL=${{Postgres.DATABASE_URL}}
 NUXT_PUBLIC_APP_URL=https://<web-domain>
+
+# Mail. Optional — with NUXT_SMTP_HOST empty, alerts and invitation emails are
+# computed and not delivered.
+NUXT_SMTP_HOST=<smtp host>
+NUXT_SMTP_PORT=587
+NUXT_SMTP_USERNAME=<username>
+NUXT_SMTP_PASSWORD=<password>
+NUXT_SMTP_TLS=false          # false = STARTTLS on 587; true = implicit TLS on 465
+NUXT_MAIL_FROM=<a from address the provider will accept>
+NUXT_MAIL_FROM_NAME=Automata MCP
 
 # WhatsApp only
 NUXT_EVOLUTION_URL=http://evolution.railway.internal:8080    # matches SERVER_PORT above
@@ -1075,6 +1077,11 @@ NUXT_TELEGRAM_DATABASE_URL=${{Postgres.DATABASE_URL}}
 
 `NUXT_TELEGRAM_WEBHOOK_URL` is not needed here: the bridge posts to
 `NUXT_PUBLIC_APP_URL` + `/api/webhook/telegram`.
+
+`NUXT_DATABASE_URL` is the database's owner, on purpose: the app creates and
+migrates its own `app` schema at boot, beside Evolution's tables and the bridge's
+`telegram` schema. It holds every stored credential, and the app refuses any
+user-supplied connection that resolves to it.
 
 `NUXT_PUBLIC_APP_URL` is what connector URLs are built from. Get it wrong and
 every token you hand out points at the wrong host.
@@ -1101,23 +1108,8 @@ for any deployment more than one person uses — see "Database connections".
 
 ### First run
 
-Nothing to do. Set `NUXT_POCKETBASE_ADMIN_EMAIL` and
-`NUXT_POCKETBASE_ADMIN_PASSWORD` on the **pocketbase** service as well as the web
-service — to the same values — and its entrypoint upserts the superuser on every
-boot. The schema needs no action either; `pb_migrations/` is baked into the image
-and applied at startup.
-
-Both admin variables must match across the two services: the web server signs in
-with them to read hidden fields and the admin-only collections. A Railway variable
-reference (`${{pocketbase.NUXT_POCKETBASE_ADMIN_EMAIL}}`) keeps them in step.
-
-Because the upsert runs every boot, rotating the password is editing the variable
-on both services and redeploying. Look for `[entrypoint] superuser ready:` in the
-pocketbase logs to confirm.
-
-That account can read every stored credential — Evolution keys, connection
-strings and message database URLs. Give it a long password — PocketBase's CLI
-will accept a short one without complaint, though the entrypoint warns.
+Nothing to do. The web service creates its schema in Postgres on first boot —
+look for `[app-db] applied migrations` in its logs.
 
 Then open the web service's domain and sign up.
 
@@ -1127,7 +1119,7 @@ Then open the web service's domain and sign up.
 - **`host.docker.internal` does not exist here.** The webhook uses the public
   HTTPS URL instead, which is the only thing that differs between dev and prod —
   and it differs by configuration, not code.
-- All three containers built from this repo bind `::`, which accepts IPv4 and IPv6. Railway environments
+- Both containers built from this repo bind `::`, which accepts IPv4 and IPv6. Railway environments
   created before 16 October 2025 route the private network over IPv6 only, where
   binding `0.0.0.0` is unreachable internally.
 - `docker-compose.dev.yml` is for local development only. Nothing in it is used

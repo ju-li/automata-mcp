@@ -1,4 +1,4 @@
-import type { AppInstance } from '~~/server/utils/pocketbase'
+import type { AppInstance } from '~~/server/utils/app-db'
 
 /**
  * Inbound webhook from a Telegram bridge (apps/telegram-bridge).
@@ -63,18 +63,16 @@ export default defineEventHandler(async (event) => {
 /**
  * A bridge session id is a UUID the bridge minted, stored as `instance_id`.
  * Kind-filtered so a delivery can never start a health check on a WhatsApp or
- * Postgres row, and bound with `pb.filter()` because the id arrives from the
- * network. The admin client is required: `api_key` is hidden, and it is what the
- * live read authenticates with.
+ * Postgres row. The id arrives from the network, so it is only ever a bind
+ * parameter.
  */
 async function findInstanceBySession(sessionId: string): Promise<AppInstance | undefined> {
   try {
-    const pb = await pocketbaseAdmin()
-    return await firstOrNone<AppInstance>(
-      pb,
-      'instances',
-      pb.filter('instance_id = {:sessionId} && kind = {:kind}', { sessionId, kind: 'telegram' }),
-    )
+    const sql = await appDb()
+    const [row] = await sql<AppInstance[]>`
+      SELECT * FROM app.instances WHERE instance_id = ${sessionId} AND kind = 'telegram'
+    `
+    return row
   }
   catch (error) {
     console.error('[webhook] could not resolve the Telegram connection for a delivery:', error)

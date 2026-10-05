@@ -1,6 +1,6 @@
 import type { Sql } from 'postgres'
 import postgres from 'postgres'
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 
 /**
  * Every Postgres connection this app opens — a user's own database, and

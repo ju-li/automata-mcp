@@ -19,7 +19,7 @@ interface MeResponse {
 /**
  * The signed-in user and their organization, shared across the app.
  *
- * The browser never talks to PocketBase — the session cookie is `httpOnly`, so
+ * The browser never reads the session itself — the session cookie is `httpOnly`, so
  * the only way to know who is signed in is to ask the server. This caches that
  * answer in `useState` so it survives hydration and is fetched once per load
  * rather than once per navigation.

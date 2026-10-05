@@ -1,4 +1,4 @@
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 import type { EvolutionClient } from './evolution'
 
 /**

@@ -1,11 +1,8 @@
 import { z } from 'zod'
-import type { AppUser } from '~~/server/utils/pocketbase'
 
 const body = z.object({
   email: z.string().email(),
-  // PocketBase enforces 8 characters minimum; fail here with a useful message
-  // rather than surfacing its validation payload.
-  password: z.string().min(8, 'Password must be at least 8 characters'),
+  password: z.string().min(8, 'Password must be at least 8 characters').max(200),
   name: z.string().max(100).optional(),
   /** Signing up through an invitation link joins that organization instead. */
   invite: z.string().max(200).optional(),
@@ -14,32 +11,20 @@ const body = z.object({
 /**
  * Sign up, and land in an organization.
  *
- * The account is created through the **admin** client. `users.createRule` is
- * null as of the organizations migration — nothing outside this handler may
- * create an account — which is what makes "every user has a membership" an
- * invariant rather than a hope. A user with no organization can do nothing at
- * all, and lazily creating one for whoever turns up without one would hand a
- * free organization to anyone who could reach PocketBase, and silently
+ * The account and its organization (or its place in the inviting one) are
+ * written in **one transaction**, which is what makes "every user has a
+ * membership" an invariant rather than a hope: there is no window, and no
+ * compensating delete, in which an account exists with nowhere to go. There is
+ * deliberately no lazy self-heal elsewhere — creating an organization for
+ * whoever turns up without one would hand a free one to anyone, and silently
  * resurrect a user an admin had just removed.
  *
- * The organization is created second and compensated on failure, the same idiom
- * `provisionWhatsappInstance` uses across Evolution and PocketBase: two writes
- * with no transaction between them, so the one that can be undone is the one
- * that goes first.
- *
  * Signing up **through an invitation** joins that organization instead, and
- * creates no solo organization — otherwise every invited signup would make one
- * and delete it again one request later. The invitation is resolved and its
- * email checked BEFORE the account is created: a bad code must not burn an email
- * address, which is unrecoverable for the person holding it.
- *
- * `authWithPassword` runs on a fresh per-request client, never the admin one —
- * its auth store must not be clobbered by a visitor's session.
+ * creates no solo organization. The invitation is resolved and its email checked
+ * BEFORE anything is written, so a bad code costs nothing.
  */
 export default defineEventHandler(async (event) => {
   const { email, password, name, invite: code } = await parseBody(event, body)
-
-  const admin = await pocketbaseAdmin()
 
   const invited = code ? await resolveInvite(code) : undefined
   if (invited) {
@@ -57,45 +42,26 @@ export default defineEventHandler(async (event) => {
     }
   }
 
-  let created: AppUser
-  try {
-    created = await admin.collection('users').create<AppUser>({
-      email,
-      password,
-      passwordConfirm: password,
-      name: name?.trim() || email.split('@')[0],
-    })
-  } catch (error) {
-    // 400 here is a duplicate email or a rejected password. Both are the user's
-    // to fix, so say so without leaking which.
-    if ((error as { status?: number })?.status === 400) {
-      throw createError({
-        statusCode: 400,
-        statusMessage: 'That email is already registered, or the password was rejected',
-      })
-    }
-    throw error
-  }
+  const passwordHash = await hashPassword(password)
+  const sql = await appDb()
 
-  try {
+  const user = await sql.begin(async (tx) => {
+    const created = await createUser(tx, {
+      email,
+      passwordHash,
+      name: name?.trim() || email.split('@')[0] || '',
+    })
+
     if (invited?.invite) {
-      await acceptInviteInto(created, invited.invite.org, invited.invite.role)
-      await markInviteAccepted(invited.invite.id, created.id)
+      await acceptInviteInto(tx, created, invited.invite.org, invited.invite.role)
+      await markInviteAccepted(tx, invited.invite.id, created.id)
     }
     else {
-      await createOrganizationFor(created)
+      await createOrganizationFor(tx, created)
     }
-  } catch (error) {
-    // An account with no organization is a dead end the user cannot fix and an
-    // email address they can never register again. Undo it.
-    await admin.collection('users').delete(created.id).catch(() => {})
-    console.error('[signup] could not place the account in an organization; it was rolled back', error)
-    throw error
-  }
+    return created
+  })
 
-  const pb = pocketbaseForRequest()
-  await pb.collection('users').authWithPassword(email, password)
-  setSessionCookie(event, pb)
-
-  return { id: pb.authStore.record?.id, email: pb.authStore.record?.email }
+  await startSession(event, user.id)
+  return { id: user.id, email: user.email }
 })

@@ -8,16 +8,9 @@ const body = z.object({
 export default defineEventHandler(async (event) => {
   const { email, password } = await parseBody(event, body)
 
-  // A per-request client: the memoized admin client's auth store must never be
-  // overwritten with a visitor's token.
-  const pb = pocketbaseForRequest()
+  const user = await checkPassword(email, password)
+  if (!user) throw authFailed()
 
-  try {
-    await pb.collection('users').authWithPassword(email, password)
-  } catch {
-    throw authFailed()
-  }
-
-  setSessionCookie(event, pb)
-  return { id: pb.authStore.record?.id, email: pb.authStore.record?.email }
+  await startSession(event, user.id)
+  return { id: user.id, email: user.email }
 })

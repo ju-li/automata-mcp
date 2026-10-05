@@ -1,6 +1,6 @@
 import { assertNever } from '#shared/connection'
 import type { InstanceKind } from '#shared/connection'
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 import type { McpScope } from './mcp-scope'
 import type { ListTablesOptions, PgTable, PgTablePage, PgTableDescription } from './pg-catalog'
 import type { ReadQueryOptions, ReadQueryResult, WriteStatementOptions, WriteStatementResult } from './pg-run'

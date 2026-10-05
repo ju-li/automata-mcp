@@ -1,4 +1,4 @@
-import type { AppInvitation } from '~~/server/utils/pocketbase'
+import type { AppInvitation } from '~~/server/utils/app-db'
 
 /**
  * Revoke a pending invitation; the link stops working immediately.
@@ -14,13 +14,11 @@ export default defineEventHandler(async (event) => {
 
   if (!id) throw createError({ statusCode: 404, statusMessage: 'Not found' })
 
-  const pb = await pocketbaseAdmin()
-
-  const invite = await getOneOrNone<AppInvitation>(pb, 'invitations', id)
+  const invite = await getRow<AppInvitation>('invitations', id)
   if (!invite || invite.org !== actor.org.id) {
     throw createError({ statusCode: 404, statusMessage: 'Not found' })
   }
 
-  await pb.collection('invitations').update(invite.id, { revoked: true })
+  await updateRow('invitations', invite.id, { revoked: true })
   return { ok: true }
 })

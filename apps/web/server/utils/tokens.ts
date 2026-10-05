@@ -1,4 +1,4 @@
-import type { AppMcpToken } from './pocketbase'
+import type { AppMcpToken, Db } from './app-db'
 import type { McpScope } from './mcp-scope'
 import type { ScopeInput } from './scope-schema'
 
@@ -9,9 +9,8 @@ import type { ScopeInput } from './scope-schema'
  * `org.ts` does it, and every mutating function below takes a token record that
  * has already been through it. What stays here is the rule that a read is always
  * a predicate in the query: `listTokens` narrows to one connection and, for a
- * member, to their own tokens, in the `filter` rather than by dropping rows
- * afterwards. Filters use `pb.filter()` bindings — the admin client must never
- * receive a filter string built by concatenating user input.
+ * member, to their own tokens, in the `WHERE` rather than by dropping rows
+ * afterwards.
  */
 
 /** What the UI may see. `token_hash` is never included. */
@@ -60,35 +59,33 @@ export async function listTokens(
   instanceId: string,
   options: { assignedTo?: string, emails?: Map<string, string> } = {},
 ): Promise<PublicToken[]> {
-  const pb = await pocketbaseAdmin()
+  const sql = await appDb()
 
-  const filter = options.assignedTo
-    ? pb.filter('instance = {:iid} && assigned_to = {:uid}', { iid: instanceId, uid: options.assignedTo })
-    : pb.filter('instance = {:iid}', { iid: instanceId })
-
-  const rows = await pb.collection('mcp_tokens').getFullList<AppMcpToken>({
-    filter,
-    sort: '-created',
-  })
+  const rows = await sql<AppMcpToken[]>`
+    SELECT * FROM app.mcp_tokens
+    WHERE instance = ${instanceId}
+      ${options.assignedTo ? sql`AND assigned_to = ${options.assignedTo}` : sql``}
+    ORDER BY created DESC
+  `
   return rows.map(row => toPublicToken(row, options.emails))
 }
 
-/** Expiry presets offered by the UI. `never` leaves `expires_at` empty. */
+/** Expiry presets offered by the UI. `never` leaves `expires_at` NULL. */
 export type ExpiryPreset = '30d' | '90d' | '1y' | 'never'
 
-function expiryFromPreset(preset: ExpiryPreset): string {
-  if (preset === 'never') return ''
+function expiryFromPreset(preset: ExpiryPreset): string | null {
+  if (preset === 'never') return null
   const days = preset === '30d' ? 30 : preset === '90d' ? 90 : 365
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString()
 }
 
 /**
- * The scope columns, as PocketBase wants them.
+ * The scope columns.
  *
- * Always writes all six. PocketBase stores an unset boolean as `false`, so
- * omitting `all_tools` here would mint a token that can call nothing — a silent,
- * confusing failure rather than a loud one. The same is true of every axis that
- * gets added: write them all, every time, whatever kind the connection is.
+ * Always writes all six, so a scope edit can never leave one axis as whatever
+ * it happened to be before. The lists are `jsonb` and go in as plain arrays:
+ * postgres.js serialises a parameter by the column type the server describes,
+ * so a pre-stringified value would be stored as a JSON *string*.
  */
 function scopeFields(scope: McpScope) {
   return {
@@ -118,9 +115,7 @@ export interface CreateTokenInput {
 
 export async function createToken(input: CreateTokenInput): Promise<{ token: string, record: PublicToken }> {
   const { token, hash } = mintMcpToken()
-  const pb = await pocketbaseAdmin()
-
-  const record = await pb.collection('mcp_tokens').create<AppMcpToken>({
+  const record = await insertRow<AppMcpToken>('mcp_tokens', {
     assigned_to: input.assignedTo,
     created_by: input.createdBy,
     instance: input.instanceId,
@@ -173,15 +168,12 @@ export async function rotateToken(token: AppMcpToken): Promise<{ token: string, 
   }
 
   const { token: plaintext, hash } = mintMcpToken()
-  const pb = await pocketbaseAdmin()
-
-  const record = await pb.collection('mcp_tokens').update<AppMcpToken>(token.id, { token_hash: hash })
+  const record = await updateRow<AppMcpToken>('mcp_tokens', token.id, { token_hash: hash })
   return { token: plaintext, record: toPublicToken(record) }
 }
 
 export async function updateTokenScope(token: AppMcpToken, scope: McpScope): Promise<PublicToken> {
-  const pb = await pocketbaseAdmin()
-  const record = await pb.collection('mcp_tokens').update<AppMcpToken>(token.id, scopeFields(scope))
+  const record = await updateRow<AppMcpToken>('mcp_tokens', token.id, scopeFields(scope))
   return toPublicToken(record)
 }
 
@@ -195,8 +187,7 @@ export async function updateTokenScope(token: AppMcpToken, scope: McpScope): Pro
  * removed or unassigned.
  */
 export async function revokeToken(token: AppMcpToken): Promise<void> {
-  const pb = await pocketbaseAdmin()
-  await pb.collection('mcp_tokens').update(token.id, { revoked: true })
+  await updateRow('mcp_tokens', token.id, { revoked: true })
 }
 
 /**
@@ -206,21 +197,19 @@ export async function revokeToken(token: AppMcpToken): Promise<void> {
  * Used wherever an action would otherwise leave a token that still reads
  * "Active" in the UI and answers 401 on the wire: removing a member, demoting
  * an admin, unassigning a connection. Returns how many were revoked so the
- * caller can say so.
+ * caller can say so. Pass the caller's transaction where the revoke must stand
+ * or fall with the change that caused it.
  */
 export async function revokeTokensFor(
   userId: string,
   options: { instanceId?: string } = {},
+  db?: Db,
 ): Promise<number> {
-  const pb = await pocketbaseAdmin()
-
-  const filter = options.instanceId
-    ? pb.filter('assigned_to = {:uid} && instance = {:iid} && revoked != true', { uid: userId, iid: options.instanceId })
-    : pb.filter('assigned_to = {:uid} && revoked != true', { uid: userId })
-
-  const rows = await pb.collection('mcp_tokens').getFullList<AppMcpToken>({ filter })
-  for (const row of rows) {
-    await pb.collection('mcp_tokens').update(row.id, { revoked: true })
-  }
-  return rows.length
+  const sql = db ?? await appDb()
+  const result = await sql`
+    UPDATE app.mcp_tokens SET revoked = true, updated = now()
+    WHERE assigned_to = ${userId} AND NOT revoked
+      ${options.instanceId ? sql`AND instance = ${options.instanceId}` : sql``}
+  `
+  return result.count
 }

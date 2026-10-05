@@ -69,9 +69,26 @@ export default defineNuxtConfig({
   },
 
   runtimeConfig: {
+    // The app's own database: users, sessions, organizations, connections,
+    // tokens. Required. Tables live in the `app` schema and are migrated at boot.
+    databaseUrl: '',
+
+    // A PocketBase to import from, once, into an empty app database. Only for
+    // moving an existing deployment off PocketBase; see
+    // server/utils/pocketbase-import.ts. Leave unset otherwise.
     pocketbaseUrl: '',
     pocketbaseAdminEmail: '',
     pocketbaseAdminPassword: '',
+
+    // Outbound mail (connection alerts, invitation emails). Optional: with no
+    // host, mail is computed and not delivered. See server/utils/mailer.ts.
+    smtpHost: '',
+    smtpPort: '587',
+    smtpUsername: '',
+    smtpPassword: '',
+    smtpTls: 'false',
+    mailFrom: '',
+    mailFromName: 'Automata MCP',
 
     // The *default* Evolution server, used by any WhatsApp connection that did
     // not bring its own. Optional: with these unset the app still runs, and the

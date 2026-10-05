@@ -1,5 +1,9 @@
 # PocketBase service
 
+> **Legacy.** The app no longer uses PocketBase; its data lives in Postgres. This
+> service is kept only so an existing deployment can be imported once — see the
+> root README, "Moving off PocketBase". It will be removed.
+
 Pinned PocketBase release on Alpine. Admin UI: <http://localhost:8090/_/>
 
 - **`pb_migrations/`** — committed. Schema source of truth. PocketBase applies

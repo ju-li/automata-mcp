@@ -1,4 +1,4 @@
-import type { AppUser } from '~~/server/utils/pocketbase'
+import type { AppUser } from '~~/server/utils/app-db'
 
 /**
  * Current session, or `{ user: null }`. Deliberately not a 401: the client

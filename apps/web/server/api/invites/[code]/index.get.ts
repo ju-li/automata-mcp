@@ -1,4 +1,4 @@
-import type { AppOrganization, AppUser } from '~~/server/utils/pocketbase'
+import type { AppOrganization, AppUser } from '~~/server/utils/app-db'
 
 /**
  * Preview an invitation, for the page behind the link.
@@ -28,8 +28,7 @@ export default defineEventHandler(async (event) => {
     }
   }
 
-  const pb = await pocketbaseAdmin()
-  const org = await getOneOrNone<AppOrganization>(pb, 'organizations', invite.org)
+  const org = await getRow<AppOrganization>('organizations', invite.org)
   if (!org) {
     // The organization was deleted after the invitation was sent. Nothing to
     // join, and the invitation is the only thing that still points at it.

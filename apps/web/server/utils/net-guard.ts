@@ -25,7 +25,7 @@ import { BlockList, isIP } from 'node:net'
  *      Turned off wholesale by `NUXT_ALLOW_PRIVATE_TARGETS`, which a
  *      single-tenant self-hosted deployment genuinely needs.
  *   2. Our own infrastructure — reject anything resolving to the host:port of
- *      PocketBase, Evolution or Evolution's database, whatever its address
+ *      this app's own database, Evolution or Evolution's database, whatever its address
  *      class. This one is never disabled, and it is what still stops
  *      `postgres:5432` on a deployment that had to turn (1) off.
  *
@@ -177,7 +177,8 @@ async function ownTargets(): Promise<OwnTarget[]> {
   const config = useRuntimeConfig()
   const sources: Array<{ raw: string, what: string, defaultPort: number }> = []
 
-  if (config.pocketbaseUrl) sources.push({ raw: config.pocketbaseUrl, what: 'this app\'s PocketBase', defaultPort: 80 })
+  if (config.pocketbaseUrl) sources.push({ raw: config.pocketbaseUrl, what: 'the PocketBase being imported from', defaultPort: 80 })
+  if (config.databaseUrl) sources.push({ raw: config.databaseUrl, what: 'this app\'s own database', defaultPort: 5432 })
   if (config.evolutionUrl) sources.push({ raw: config.evolutionUrl, what: 'this app\'s Evolution server', defaultPort: 80 })
   if (config.evolutionDatabaseUrl) sources.push({ raw: config.evolutionDatabaseUrl, what: 'Evolution\'s database', defaultPort: 5432 })
   if (config.telegramUrl) sources.push({ raw: config.telegramUrl, what: 'this app\'s Telegram bridge', defaultPort: 80 })

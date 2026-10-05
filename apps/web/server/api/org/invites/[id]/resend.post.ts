@@ -1,4 +1,4 @@
-import type { AppInvitation } from '~~/server/utils/pocketbase'
+import type { AppInvitation } from '~~/server/utils/app-db'
 
 /**
  * Email a pending invitation again, with a new link.
@@ -22,9 +22,7 @@ export default defineEventHandler(async (event) => {
 
   if (!id) throw createError({ statusCode: 404, statusMessage: 'Not found' })
 
-  const pb = await pocketbaseAdmin()
-
-  const existing = await getOneOrNone<AppInvitation>(pb, 'invitations', id)
+  const existing = await getRow<AppInvitation>('invitations', id)
   if (!existing || existing.org !== actor.org.id) {
     throw createError({ statusCode: 404, statusMessage: 'Not found' })
   }

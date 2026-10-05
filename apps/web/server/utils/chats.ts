@@ -1,4 +1,4 @@
-import type { AppInstance } from './pocketbase'
+import type { AppInstance } from './app-db'
 import type { EvolutionClient } from './evolution'
 import type { MentionDirectory } from './mentions'
 import { applyMentions, authorName, contactsToDirectory, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
@@ -784,7 +784,7 @@ export async function contactDirectory(
   const cached = contactCache.get(instance.id)
   if (cached && Date.now() < cached.expiresAt) return cached.contacts
 
-  // Concurrent callers share one fetch, as `pocketbaseAdmin()` does. A search
+  // Concurrent callers share one fetch, as `appDb()` does. A search
   // labels its chats and resolves its mentions at the same time, so a cold cache
   // would otherwise pull the entire contact table twice for one request.
   const inFlight = contactFetches.get(instance.id)

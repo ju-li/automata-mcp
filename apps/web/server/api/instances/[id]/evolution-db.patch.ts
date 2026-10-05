@@ -40,10 +40,7 @@ export default defineEventHandler(async (event) => {
   // from "account with no messages", which are otherwise identical answers.
   if (dbUrl) await probePgConnection(dbUrl, { requireTable: '"Message"' })
 
-  const pb = await pocketbaseAdmin()
-  const updated = await pb.collection('instances').update<AppInstance>(instance.id, {
-    evolution_db_url: dbUrl,
-  })
+  const updated = await updateRow<AppInstance>('instances', instance.id, { evolution_db_url: dbUrl })
 
   // Drop the pool so the change takes effect now rather than at the next
   // fingerprint check. Belt and braces — `keyedPool` would notice on its own.

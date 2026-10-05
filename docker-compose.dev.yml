@@ -25,9 +25,10 @@
 name: claude-whatsapp-mcp
 
 services:
+  # The app's own database (schema `app`) as well as Evolution's and the
+  # Telegram bridge's, so it is not behind a profile.
   postgres:
     image: postgres:16.15-alpine
-    profiles: [whatsapp, telegram]
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-evolution}
@@ -169,28 +170,16 @@ services:
       TELEGRAM_BACKFILL_PAGE_DELAY_MS: ${TELEGRAM_BACKFILL_PAGE_DELAY_MS:-1000}
     networks: [app]
 
+  # Only to import an existing local pb_data into Postgres, once — see README
+  # "Moving off PocketBase". Not part of the stack any more.
   pocketbase:
     build:
       context: ./services/pocketbase
+    profiles: [pocketbase]
     restart: unless-stopped
     environment:
-      # The entrypoint upserts this superuser on every boot, so a fresh clone
-      # needs no manual step. Same variables the Nuxt server signs in with —
-      # they have to match, so they are read from the one .env.
-      NUXT_POCKETBASE_ADMIN_EMAIL: ${NUXT_POCKETBASE_ADMIN_EMAIL:?set NUXT_POCKETBASE_ADMIN_EMAIL in .env}
-      NUXT_POCKETBASE_ADMIN_PASSWORD: ${NUXT_POCKETBASE_ADMIN_PASSWORD:?set NUXT_POCKETBASE_ADMIN_PASSWORD in .env}
-      # SMTP, applied on every boot by pb_hooks/mail.pb.js. PocketBase is this
-      # deployment's mailer — the Nuxt server has no SMTP client of its own and
-      # sends disconnect alerts through it. All optional: with PB_SMTP_HOST
-      # unset nothing is configured and no alert mail goes out.
-      PB_SMTP_HOST: ${PB_SMTP_HOST:-}
-      PB_SMTP_PORT: ${PB_SMTP_PORT:-587}
-      PB_SMTP_USERNAME: ${PB_SMTP_USERNAME:-}
-      PB_SMTP_PASSWORD: ${PB_SMTP_PASSWORD:-}
-      PB_SMTP_TLS: ${PB_SMTP_TLS:-false}
-      PB_SMTP_AUTH_METHOD: ${PB_SMTP_AUTH_METHOD:-PLAIN}
-      PB_SENDER_ADDRESS: ${PB_SENDER_ADDRESS:-}
-      PB_SENDER_NAME: ${PB_SENDER_NAME:-}
+      NUXT_POCKETBASE_ADMIN_EMAIL: ${NUXT_POCKETBASE_ADMIN_EMAIL:-}
+      NUXT_POCKETBASE_ADMIN_PASSWORD: ${NUXT_POCKETBASE_ADMIN_PASSWORD:-}
     ports:
       - '8090:8090'
     volumes:

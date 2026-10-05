@@ -1,5 +1,5 @@
 /**
- * Attaches the PocketBase session user to `event.context.user` for the UI.
+ * Attaches the session cookie's user to `event.context.user` for the UI.
  *
  * The MCP surface is excluded before anything else happens. This is load-bearing:
  * if cookies were parsed on /mcp, a browser that is signed in to this app and

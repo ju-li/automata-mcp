@@ -1,15 +1,17 @@
+import nodemailer from 'nodemailer'
+import type { Transporter } from 'nodemailer'
+
 /**
- * Outbound email, through PocketBase's mailer.
+ * Outbound email, over SMTP from this process.
  *
- * PocketBase exposes no generic send-email endpoint — every mail route it ships
- * is auth-flow bound — so `services/pocketbase/pb_hooks/mail.pb.js` registers
- * one, superuser-only, and this is its only caller. Sending through PocketBase
- * rather than an SMTP client here is what keeps the deployment to a single mail
- * configuration: the same settings send the alerts and any auth mail added
- * later, and there is no second set of credentials to keep in step.
+ * Configured from `NUXT_SMTP_*`. With `NUXT_SMTP_HOST` unset nothing is sent:
+ * alerts are still computed, `sendAppEmail` answers false, and the callers that
+ * care (the alert bookkeeping, the invitation dialog) treat that as "not
+ * delivered" — an alert stays queued for the next sweep, and an invitation's
+ * link is still on screen to copy.
  *
- * The admin client authenticates as the superuser already, for the hidden
- * fields; `pb.send()` attaches that token.
+ * `NUXT_SMTP_TLS=true` is implicit TLS (port 465). False sends STARTTLS when the
+ * server offers it, which is what port 587 wants.
  */
 
 export interface AppEmail {
@@ -19,41 +21,57 @@ export interface AppEmail {
   html?: string
 }
 
+let transport: Transporter | undefined
+let warnedUnconfigured = false
+
+function mailTransport(): Transporter | undefined {
+  const config = useRuntimeConfig()
+  if (!config.smtpHost) {
+    if (!warnedUnconfigured) {
+      warnedUnconfigured = true
+      console.warn('[mailer] NUXT_SMTP_HOST is not set; mail (connection alerts, invitation emails) will not be delivered.')
+    }
+    return undefined
+  }
+
+  transport ??= nodemailer.createTransport({
+    host: config.smtpHost,
+    port: Number(config.smtpPort) || 587,
+    secure: String(config.smtpTls) === 'true',
+    auth: config.smtpUsername ? { user: config.smtpUsername, pass: config.smtpPassword } : undefined,
+  })
+  return transport
+}
+
 /**
  * Send one email. Answers whether it went out; never throws.
  *
  * A caller here is a background sweep or a webhook ack, and neither has anyone
- * to report a failure to — so a mail outage must not become a failed sweep that
- * skips the connections after it, or a non-2xx that sends Evolution into its
- * retry ladder. The cause is logged instead, because a handled error produces
- * nothing in Nitro's own logs and this is precisely the failure an operator
- * would otherwise have to guess at: unset SMTP settings answer 400 here and
- * look, from the outside, exactly like nothing having gone wrong.
+ * to report a failure to — so it is logged here, with what to check, and the
+ * caller decides what "not sent" means for its own bookkeeping.
  */
 export async function sendAppEmail(mail: AppEmail): Promise<boolean> {
   if (!mail.to) return false
 
+  const smtp = mailTransport()
+  if (!smtp) return false
+
+  const { mailFrom, mailFromName } = useRuntimeConfig()
+
   try {
-    const pb = await pocketbaseAdmin()
-    await pb.send('/api/app/send-email', {
-      method: 'POST',
-      body: {
-        to: mail.to,
-        subject: mail.subject,
-        text: mail.text ?? '',
-        html: mail.html ?? '',
-      },
+    await smtp.sendMail({
+      from: mailFromName ? { name: mailFromName, address: mailFrom } : mailFrom,
+      to: mail.to,
+      subject: mail.subject,
+      text: mail.text || undefined,
+      html: mail.html || undefined,
     })
     return true
   }
   catch (error) {
-    // The recipient is logged, the body is not: an alert mail names a
-    // connection and links to it, and there is no reason to copy that into the
-    // log to say that sending failed.
     console.error(
       `[mailer] could not send "${mail.subject}" to ${mail.to}. `
-      + 'Check the PocketBase SMTP settings (PB_SMTP_HOST and friends) and that '
-      + 'pb_hooks/mail.pb.js is loaded:',
+      + 'Check NUXT_SMTP_HOST and friends, and that NUXT_MAIL_FROM is an address the SMTP server may send as:',
       error,
     )
     return false

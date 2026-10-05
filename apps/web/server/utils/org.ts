@@ -1,13 +1,13 @@
 import type { H3Event } from 'h3'
 import type {
   AppInstance,
-  AppInstanceAssignment,
   AppMcpToken,
   AppMembership,
   AppOrganization,
   AppUser,
   OrgRole,
-} from './pocketbase'
+  Db,
+} from './app-db'
 
 /**
  * Organizations, roles, and every authorization decision the **web UI** makes.
@@ -47,7 +47,7 @@ export interface Actor {
 /**
  * May this actor reach this connection at all?
  *
- * Pure: no event, no PocketBase, no throwing. Shared verbatim with
+ * Pure: no event, no database, no throwing. Shared verbatim with
  * `resolveMcpAuth` so the UI and the MCP surface cannot drift on the rule while
  * disagreeing only in how they load the facts.
  *
@@ -70,7 +70,7 @@ export function authorizesInstance(
  * The acting user's organization and role.
  *
  * Memoized on `event.context.orgMembership` — deliberately NOT resolved in
- * `server/middleware/session.ts`, which would put a PocketBase query on every
+ * `server/middleware/session.ts`, which would put a database query on every
  * request including the ones that return early.
  *
  * Throws 403 when the user belongs to no organization. That state is reachable
@@ -103,32 +103,29 @@ export async function requireMembership(event: H3Event): Promise<Actor> {
  * outage reads as "your account is gone".
  */
 export async function loadActor(user: AppUser): Promise<Actor | undefined> {
-  const pb = await pocketbaseAdmin()
-
-  let membership: AppMembership | undefined
-  let org: AppOrganization | undefined
+  let row: { membership_id: string, role: OrgRole, org_id: string, org_name: string, org_created?: string } | undefined
   try {
-    membership = await firstOrNone<AppMembership>(
-      pb,
-      'memberships',
-      pb.filter('user = {:uid}', { uid: user.id }),
-    )
-    if (!membership) return undefined
-
-    org = await pb.collection('organizations').getOne<AppOrganization>(membership.org)
-  } catch (error) {
-    // A membership row pointing at a deleted organization is data corruption,
-    // not an auth failure — but it is also unrecoverable for this request, and
-    // a 404 here would read as "you are signed out".
-    console.error('[org] could not resolve the membership for user', user.id, error)
-    throw createError({
-      statusCode: 503,
-      statusMessage: 'Auth backend unavailable',
-      cause: error,
-    })
+    const sql = await appDb()
+    ;[row] = await sql`
+      SELECT m.id AS membership_id, m.role, o.id AS org_id, o.name AS org_name, o.created AS org_created
+      FROM app.memberships m JOIN app.organizations o ON o.id = m.org
+      WHERE m.user_id = ${user.id}
+    `
   }
+  catch (error) {
+    // A 401 or a silent empty answer during an outage reads as "your account is
+    // gone"; log it, because a handled 503 is invisible to Nitro.
+    console.error('[org] could not resolve the membership for user', user.id, error)
+    throw appDbUnavailable(error)
+  }
+  if (!row) return undefined
 
-  return { user, org, role: membership.role, membershipId: membership.id }
+  return {
+    user,
+    org: { id: row.org_id, name: row.org_name, created: row.org_created },
+    role: row.role,
+    membershipId: row.membership_id,
+  }
 }
 
 /** An organization action: renaming it, inviting, changing roles, removing members. */
@@ -143,33 +140,24 @@ export async function requireOrgAdmin(event: H3Event): Promise<Actor> {
   return actor
 }
 
-/** Create an organization and make one user its admin. Used by signup and by tests. */
-export async function createOrganizationFor(user: AppUser, name?: string): Promise<{ org: AppOrganization, membership: AppMembership }> {
-  const pb = await pocketbaseAdmin()
-
+/**
+ * Create an organization and make one user its admin, inside the caller's
+ * transaction — signup's, so an account and its organization exist together or
+ * not at all.
+ */
+export async function createOrganizationFor(tx: Db, user: AppUser, name?: string): Promise<{ org: AppOrganization, membership: AppMembership }> {
   const label = (name ?? '').trim()
     || (user.name ?? '').trim()
     || user.email.split('@')[0]
     || 'Organization'
 
-  const org = await pb.collection('organizations').create<AppOrganization>({
-    name: label.slice(0, 100),
-  })
-
-  try {
-    const membership = await pb.collection('memberships').create<AppMembership>({
-      org: org.id,
-      user: user.id,
-      role: 'admin',
-    })
-    return { org, membership }
-  } catch (error) {
-    // Compensating delete, the same idiom `provisionWhatsappInstance` uses: an
-    // organization with no members is unreachable by anyone and would sit in the
-    // database forever.
-    await pb.collection('organizations').delete(org.id).catch(() => {})
-    throw error
-  }
+  const [org] = await tx<AppOrganization[]>`
+    INSERT INTO app.organizations (name) VALUES (${label.slice(0, 100)}) RETURNING id, name, created
+  `
+  const [membership] = await tx<AppMembership[]>`
+    INSERT INTO app.memberships (org, user_id, role) VALUES (${org!.id}, ${user.id}, 'admin') RETURNING *
+  `
+  return { org: org!, membership: membership! }
 }
 
 /**
@@ -178,21 +166,21 @@ export async function createOrganizationFor(user: AppUser, name?: string): Promi
  * Admins hold no assignment rows, so this is only ever the member half of the
  * question — never call it without consulting the role first.
  */
-export async function listAssignedInstanceIds(userId: string): Promise<string[]> {
-  const pb = await pocketbaseAdmin()
-  const rows = await pb.collection('instance_assignments').getFullList<AppInstanceAssignment>({
-    filter: pb.filter('user = {:uid}', { uid: userId }),
-  })
+export async function listAssignedInstanceIds(userId: string, db?: Db): Promise<string[]> {
+  const sql = db ?? await appDb()
+  const rows = await sql<{ instance: string }[]>`
+    SELECT instance FROM app.instance_assignments WHERE user_id = ${userId}
+  `
   return rows.map(row => row.instance)
 }
 
 /** The user ids assigned to one connection. Admins are not in here — see `authorizesInstance`. */
 export async function listInstanceAssignees(instanceId: string): Promise<string[]> {
-  const pb = await pocketbaseAdmin()
-  const rows = await pb.collection('instance_assignments').getFullList<AppInstanceAssignment>({
-    filter: pb.filter('instance = {:iid}', { iid: instanceId }),
-  })
-  return rows.map(row => row.user)
+  const sql = await appDb()
+  const rows = await sql<{ user_id: string }[]>`
+    SELECT user_id FROM app.instance_assignments WHERE instance = ${instanceId}
+  `
+  return rows.map(row => row.user_id)
 }
 
 /**
@@ -207,15 +195,11 @@ export async function assignInstance(orgId: string, instanceId: string, userId: 
   const member = await requireOrgMember(orgId, userId)
   if (member.role === 'admin') return
 
-  const pb = await pocketbaseAdmin()
-  const existing = await firstOrNone<AppInstanceAssignment>(
-    pb,
-    'instance_assignments',
-    pb.filter('user = {:uid} && instance = {:iid}', { uid: userId, iid: instanceId }),
-  )
-  if (existing) return
-
-  await pb.collection('instance_assignments').create({ instance: instanceId, user: userId })
+  const sql = await appDb()
+  await sql`
+    INSERT INTO app.instance_assignments (instance, user_id) VALUES (${instanceId}, ${userId})
+    ON CONFLICT (instance, user_id) DO NOTHING
+  `
 }
 
 /**
@@ -233,15 +217,11 @@ export async function unassignInstance(
 ): Promise<{ revokedTokens: number }> {
   await requireOrgMember(orgId, userId)
 
-  const pb = await pocketbaseAdmin()
-  const existing = await firstOrNone<AppInstanceAssignment>(
-    pb,
-    'instance_assignments',
-    pb.filter('user = {:uid} && instance = {:iid}', { uid: userId, iid: instanceId }),
-  )
-  if (existing) await pb.collection('instance_assignments').delete(existing.id)
-
-  return { revokedTokens: await revokeTokensFor(userId, { instanceId }) }
+  const sql = await appDb()
+  return await sql.begin(async (tx) => {
+    await tx`DELETE FROM app.instance_assignments WHERE user_id = ${userId} AND instance = ${instanceId}`
+    return { revokedTokens: await revokeTokensFor(userId, { instanceId }, tx) }
+  })
 }
 
 /**
@@ -249,23 +229,19 @@ export async function unassignInstance(
  * confirmation can say what it costs rather than asking "are you sure".
  */
 export async function countTokensOn(userId: string, instanceId: string): Promise<number> {
-  const pb = await pocketbaseAdmin()
-  const page = await pb.collection('mcp_tokens').getList(1, 1, {
-    filter: pb.filter('assigned_to = {:uid} && instance = {:iid} && revoked != true', {
-      uid: userId,
-      iid: instanceId,
-    }),
-  })
-  return page.totalItems
+  const sql = await appDb()
+  const [row] = await sql<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM app.mcp_tokens
+    WHERE assigned_to = ${userId} AND instance = ${instanceId} AND NOT revoked
+  `
+  return row?.count ?? 0
 }
 
 async function hasAssignment(userId: string, instanceId: string): Promise<boolean> {
-  const pb = await pocketbaseAdmin()
-  const row = await firstOrNone<AppInstanceAssignment>(
-    pb,
-    'instance_assignments',
-    pb.filter('user = {:uid} && instance = {:iid}', { uid: userId, iid: instanceId }),
-  )
+  const sql = await appDb()
+  const [row] = await sql`
+    SELECT 1 FROM app.instance_assignments WHERE user_id = ${userId} AND instance = ${instanceId}
+  `
   return Boolean(row)
 }
 
@@ -286,16 +262,9 @@ export async function requireReadableInstance(
     throw createError({ statusCode: 404, statusMessage: 'Not found' })
   }
 
-  const pb = await pocketbaseAdmin()
-
-  let instance: AppInstance
-  try {
-    instance = await pb.collection('instances').getOne<AppInstance>(instanceId)
-  } catch (error) {
-    if (isPocketBaseNotFound(error)) {
-      throw createError({ statusCode: 404, statusMessage: 'Not found' })
-    }
-    throw error
+  const instance = await getRow<AppInstance>('instances', instanceId)
+  if (!instance) {
+    throw createError({ statusCode: 404, statusMessage: 'Not found' })
   }
 
   // The assignment read is skipped for an admin: they reach every connection in
@@ -407,105 +376,46 @@ export interface OrgMember {
   joined?: string
 }
 
-export async function listOrgMembers(orgId: string): Promise<OrgMember[]> {
-  const pb = await pocketbaseAdmin()
-
-  const memberships = await pb.collection('memberships').getFullList<AppMembership>({
-    filter: pb.filter('org = {:org}', { org: orgId }),
-    sort: 'created',
-  })
-  if (!memberships.length) return []
-
-  // One filtered read rather than one per member, with a binding per id — the
-  // admin client must never receive a filter built by concatenating values.
-  const params: Record<string, string> = {}
-  const clauses = memberships.map((m, index) => {
-    params[`u${index}`] = m.user
-    return `id = {:u${index}}`
-  })
-  const users = await pb.collection('users').getFullList<AppUser>({
-    filter: pb.filter(clauses.join(' || '), params),
-  })
-  const byId = new Map(users.map(u => [u.id, u]))
-
-  return memberships.map(m => ({
-    membershipId: m.id,
-    userId: m.user,
-    email: byId.get(m.user)?.email ?? '(unknown)',
-    name: byId.get(m.user)?.name,
-    role: m.role,
-    joined: m.created,
-  }))
+export async function listOrgMembers(orgId: string, db?: Db): Promise<OrgMember[]> {
+  const sql = db ?? await appDb()
+  return await sql<OrgMember[]>`
+    SELECT m.id AS "membershipId", m.user_id AS "userId", u.email, u.name, m.role, m.created AS joined
+    FROM app.memberships m JOIN app.users u ON u.id = m.user_id
+    WHERE m.org = ${orgId}
+    ORDER BY m.created
+  `
 }
 
-async function countOrgAdmins(orgId: string): Promise<number> {
-  const pb = await pocketbaseAdmin()
-  const page = await pb.collection('memberships').getList(1, 1, {
-    filter: pb.filter('org = {:org} && role = "admin"', { org: orgId }),
-  })
-  return page.totalItems
-}
-
-async function countOrgMembers(orgId: string): Promise<number> {
-  const pb = await pocketbaseAdmin()
-  const page = await pb.collection('memberships').getList(1, 1, {
-    filter: pb.filter('org = {:org}', { org: orgId }),
-  })
-  return page.totalItems
-}
-
-export async function listOrgInstances(orgId: string): Promise<AppInstance[]> {
-  const pb = await pocketbaseAdmin()
-  return await pb.collection('instances').getFullList<AppInstance>({
-    filter: pb.filter('org = {:org}', { org: orgId }),
-  })
+export async function listOrgInstances(orgId: string, db?: Db): Promise<AppInstance[]> {
+  const sql = db ?? await appDb()
+  return await sql<AppInstance[]>`SELECT * FROM app.instances WHERE org = ${orgId} ORDER BY created`
 }
 
 const NO_ADMIN_LEFT = 'That would leave the organization with no admin. Make someone else an admin first.'
 
 /**
- * The last admin cannot be demoted or removed. **Two** checks, and both are
- * needed for different reasons.
+ * Lock an organization's memberships for the rest of the transaction and answer
+ * how many admins it has.
  *
- * This one is an ordinary read-modify-write pre-check. It loses a race, so it is
- * not the authority — but it is what makes the ordinary refusal have **no side
- * effects at all**. That is not a nicety: the first version of `removeMember`
- * revoked the member's tokens before discovering it could not remove them, and
- * the compensating action put the membership back but not the tokens. A refused
- * operation that silently kills an admin's connector tokens is worse than the
- * race it was guarding against.
- *
- * Call it before doing anything destructive.
+ * This is the whole last-admin guard. It used to be two checks — a pre-check
+ * that lost races and a post-write count that undid the change — because
+ * PocketBase had no transaction to hold across a read and a write. Here the
+ * `FOR UPDATE` makes two admins demoting each other take turns, so the second
+ * one sees the first one's write and is refused; and a refusal rolls back
+ * everything before it, which is what keeps a refused operation from having
+ * side effects (the first version of `removeMember` revoked an admin's tokens on
+ * its way to telling them they could not leave).
  */
-export async function assertAdminSurvivesChange(
-  orgId: string,
-  member: OrgMember,
-  nextRole?: OrgRole,
-): Promise<void> {
-  if (member.role !== 'admin') return
-  if (nextRole === 'admin') return
-  if (await countOrgAdmins(orgId) > 1) return
-
-  throw createError({ statusCode: 409, statusMessage: NO_ADMIN_LEFT })
+async function lockOrgAdmins(tx: Db, orgId: string): Promise<number> {
+  const rows = await tx<{ role: OrgRole }[]>`
+    SELECT role FROM app.memberships WHERE org = ${orgId} FOR UPDATE
+  `
+  return rows.filter(row => row.role === 'admin').length
 }
 
-/**
- * The authority, and the race guard.
- *
- * There is no transaction to hold across a read and a write, so two admins
- * demoting each other concurrently can both pass the pre-check above and both
- * write, leaving an organization nobody can administer. So the count is taken
- * **after** the write, and the change is undone if it went to zero.
- *
- * A compensating action rather than a lock, the same shape the Evolution
- * provisioning path uses — it turns a permanent lockout into a retry. Do not
- * "simplify" either of these two checks away: the first has no teeth and the
- * second has no manners.
- */
-async function assertAdminSurvives(orgId: string, undo: () => Promise<void>): Promise<void> {
-  if (await countOrgAdmins(orgId) > 0) return
-
-  await undo()
+function assertAdminSurvives(admins: number, member: OrgMember, nextRole?: OrgRole): void {
+  if (member.role !== 'admin' || nextRole === 'admin') return
+  if (admins > 1) return
   throw createError({ statusCode: 409, statusMessage: NO_ADMIN_LEFT })
 }
 
@@ -516,7 +426,7 @@ async function assertAdminSurvives(orgId: string, undo: () => Promise<void>): Pr
  * to them, and an admin holds no assignments. Those tokens would keep reading
  * "Active" in the UI while answering 401 on the wire, with nothing in the logs —
  * so they are revoked here, and the caller is expected to have said how many
- * first. `preview` reports the count without changing anything.
+ * first. `previewRoleChange` reports the count without changing anything.
  */
 export async function previewRoleChange(
   orgId: string,
@@ -525,21 +435,30 @@ export async function previewRoleChange(
 ): Promise<{ tokensAtRisk: number }> {
   if (role !== 'member' || member.role !== 'admin') return { tokensAtRisk: 0 }
 
-  const pb = await pocketbaseAdmin()
-  const assigned = new Set(await listAssignedInstanceIds(member.userId))
-  const orgInstances = await listOrgInstances(orgId)
-  const unreachable = orgInstances.filter(i => !assigned.has(i.id)).map(i => i.id)
-  if (!unreachable.length) return { tokensAtRisk: 0 }
+  const sql = await appDb()
+  const [row] = await sql<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM app.mcp_tokens t JOIN app.instances i ON i.id = t.instance
+    WHERE t.assigned_to = ${member.userId} AND NOT t.revoked AND i.org = ${orgId}
+      AND NOT EXISTS (
+        SELECT 1 FROM app.instance_assignments a WHERE a.instance = i.id AND a.user_id = ${member.userId}
+      )
+  `
+  return { tokensAtRisk: row?.count ?? 0 }
+}
 
-  const params: Record<string, string> = { uid: member.userId }
-  const clauses = unreachable.map((id, index) => {
-    params[`i${index}`] = id
-    return `instance = {:i${index}}`
-  })
-  const page = await pb.collection('mcp_tokens').getList(1, 1, {
-    filter: pb.filter(`assigned_to = {:uid} && revoked != true && (${clauses.join(' || ')})`, params),
-  })
-  return { tokensAtRisk: page.totalItems }
+/**
+ * The last-admin check runs before anything is written, so an absolute refusal
+ * never arrives after a confirmable one; the caller checks `previewRoleChange`
+ * for the token question only once this would be allowed.
+ */
+export async function assertAdminSurvivesChange(orgId: string, member: OrgMember, nextRole?: OrgRole): Promise<void> {
+  if (member.role !== 'admin' || nextRole === 'admin') return
+  const sql = await appDb()
+  const [row] = await sql<{ count: number }[]>`
+    SELECT count(*)::int AS count FROM app.memberships WHERE org = ${orgId} AND role = 'admin'
+  `
+  if ((row?.count ?? 0) > 1) return
+  throw createError({ statusCode: 409, statusMessage: NO_ADMIN_LEFT })
 }
 
 export async function changeMemberRole(
@@ -547,84 +466,66 @@ export async function changeMemberRole(
   member: OrgMember,
   role: OrgRole,
 ): Promise<{ revokedTokens: number }> {
-  const pb = await pocketbaseAdmin()
   if (member.role === role) return { revokedTokens: 0 }
 
-  await assertAdminSurvivesChange(orgId, member, role)
-  await pb.collection('memberships').update(member.membershipId, { role })
-  await assertAdminSurvives(orgId, async () => {
-    await pb.collection('memberships').update(member.membershipId, { role: member.role })
+  const sql = await appDb()
+  return await sql.begin(async (tx) => {
+    assertAdminSurvives(await lockOrgAdmins(tx, orgId), member, role)
+    await tx`UPDATE app.memberships SET role = ${role}, updated = now() WHERE id = ${member.membershipId}`
+
+    if (role !== 'member') return { revokedTokens: 0 }
+
+    // Revoke only what the demotion actually breaks: tokens on connections they
+    // still reach keep working, and an admin re-promoted a minute later would
+    // find nothing to explain if we had revoked everything.
+    const revoked = await tx`
+      UPDATE app.mcp_tokens t SET revoked = true, updated = now()
+      FROM app.instances i
+      WHERE i.id = t.instance AND i.org = ${orgId}
+        AND t.assigned_to = ${member.userId} AND NOT t.revoked
+        AND NOT EXISTS (
+          SELECT 1 FROM app.instance_assignments a WHERE a.instance = i.id AND a.user_id = ${member.userId}
+        )
+    `
+    return { revokedTokens: revoked.count }
   })
-
-  if (role !== 'member') return { revokedTokens: 0 }
-
-  // Revoke only what the demotion actually breaks: tokens on connections they
-  // still reach keep working, and an admin re-promoted a minute later would find
-  // nothing to explain if we had revoked everything.
-  const assigned = new Set(await listAssignedInstanceIds(member.userId))
-  const orgInstances = await listOrgInstances(orgId)
-
-  let revoked = 0
-  for (const instance of orgInstances) {
-    if (assigned.has(instance.id)) continue
-    revoked += await revokeTokensFor(member.userId, { instanceId: instance.id })
-  }
-  return { revokedTokens: revoked }
 }
 
 /**
  * Remove a member from the organization.
  *
- * **The membership goes first, and the tokens only once the removal has stuck.**
- * The obvious order is the other way round — revoke first, so that dying halfway
- * over-revokes rather than under-revokes — and it is wrong here, because this
- * operation can be *refused*. Revoking before the last-admin guard has had its
- * say means a 409 that silently killed an admin's connector tokens on its way to
- * saying no, and the compensating action restores the membership but cannot
- * un-revoke anything.
- *
- * What the chosen order risks instead is a crash between the delete and the
- * revoke, leaving tokens marked live that no longer authenticate — harmless on
- * its own, since `resolveMcpAuth` refuses them the moment the membership is
- * gone, and closed at the other end by `acceptInviteInto`, which revokes
- * whatever a joiner still holds.
+ * One transaction: the last-admin check, the membership, their tokens and their
+ * assignments go together or not at all. The ordering arguments this used to
+ * need — membership before tokens, so a refusal could not kill tokens; and a
+ * crash window between the two, closed at the other end by `acceptInviteInto` —
+ * are both answered by the transaction rolling back. `acceptInviteInto` still
+ * revokes whatever a joiner holds, as a second line.
  *
  * The account itself is untouched. Removing someone from an organization is not
  * deleting them, and they land on `/no-organization` rather than being signed
  * out from under themselves.
  */
 export async function removeMember(orgId: string, member: OrgMember): Promise<{ revokedTokens: number }> {
-  const pb = await pocketbaseAdmin()
+  const sql = await appDb()
+  return await sql.begin(async (tx) => {
+    assertAdminSurvives(await lockOrgAdmins(tx, orgId), member)
 
-  await assertAdminSurvivesChange(orgId, member)
+    await tx`DELETE FROM app.memberships WHERE id = ${member.membershipId}`
+    const revokedTokens = await revokeTokensFor(member.userId, {}, tx)
+    await tx`DELETE FROM app.instance_assignments WHERE user_id = ${member.userId}`
 
-  await pb.collection('memberships').delete(member.membershipId)
-  await assertAdminSurvives(orgId, async () => {
-    // Recreate the row rather than "un-delete" it: the id changes, but the
-    // organization keeps an admin, which is the invariant being defended.
-    await pb.collection('memberships').create({ org: orgId, user: member.userId, role: member.role })
+    return { revokedTokens }
   })
-
-  const revokedTokens = await revokeTokensFor(member.userId)
-
-  const assignments = await pb.collection('instance_assignments').getFullList<AppInstanceAssignment>({
-    filter: pb.filter('user = {:uid}', { uid: member.userId }),
-  })
-  for (const row of assignments) {
-    await pb.collection('instance_assignments').delete(row.id)
-  }
-
-  return { revokedTokens }
 }
 
 /**
  * Move a user into the organization an invitation names.
  *
- * This is an **UPDATE** of their existing membership row, never a
- * delete-then-create. `UNIQUE(memberships.user)` makes the row the user's single
- * slot, so one write is atomic, trips no index, and leaves no window in which
- * they belong to nothing — which matters because there is no transaction to
- * wrap the alternative in.
+ * Runs inside the caller's transaction (signup's, or acceptance's together with
+ * spending the invitation). It is an **UPDATE** of their existing membership
+ * row, never a delete-then-create: `UNIQUE(memberships.user_id)` makes the row
+ * the user's single slot, and locking it `FOR UPDATE` is what serialises two
+ * acceptances by the same person.
  *
  * Two refusals, both 409, because the alternative in each case is losing
  * something:
@@ -636,24 +537,21 @@ export async function removeMember(orgId: string, member: OrgMember): Promise<{ 
  *   - they are the only admin of an organization that still has other members.
  *     Leaving would lock those members out.
  *
- * The now-empty old organization is deleted afterwards, best-effort: a stranded
- * empty organization is harmless, and a failed cleanup must not fail the join.
+ * The now-empty old organization is deleted in the same transaction. It owns no
+ * connections — that was the first refusal — so nothing restricts the delete.
  */
 export async function acceptInviteInto(
+  tx: Db,
   user: AppUser,
   orgId: string,
   role: OrgRole,
 ): Promise<{ movedFrom?: string }> {
-  const pb = await pocketbaseAdmin()
-
-  const current = await firstOrNone<AppMembership>(
-    pb,
-    'memberships',
-    pb.filter('user = {:uid}', { uid: user.id }),
-  )
+  const [current] = await tx<AppMembership[]>`
+    SELECT * FROM app.memberships WHERE user_id = ${user.id} FOR UPDATE
+  `
 
   if (!current) {
-    await pb.collection('memberships').create({ org: orgId, user: user.id, role })
+    await tx`INSERT INTO app.memberships (org, user_id, role) VALUES (${orgId}, ${user.id}, ${role})`
     return {}
   }
 
@@ -665,7 +563,7 @@ export async function acceptInviteInto(
 
   const previousOrg = current.org
 
-  const owned = await listOrgInstances(previousOrg)
+  const owned = await listOrgInstances(previousOrg, tx)
   if (owned.length) {
     const names = owned.map(i => i.label || i.name).join(', ')
     throw createError({
@@ -675,7 +573,10 @@ export async function acceptInviteInto(
     })
   }
 
-  if (current.role === 'admin' && await countOrgAdmins(previousOrg) === 1 && await countOrgMembers(previousOrg) > 1) {
+  const others = await tx<{ role: OrgRole }[]>`
+    SELECT role FROM app.memberships WHERE org = ${previousOrg} AND user_id <> ${user.id} FOR UPDATE
+  `
+  if (current.role === 'admin' && others.length && !others.some(row => row.role === 'admin')) {
     throw createError({
       statusCode: 409,
       statusMessage: 'You are the only admin of your current organization. '
@@ -683,17 +584,15 @@ export async function acceptInviteInto(
     })
   }
 
-  await pb.collection('memberships').update(current.id, { org: orgId, role })
+  await tx`UPDATE app.memberships SET org = ${orgId}, role = ${role}, updated = now() WHERE id = ${current.id}`
 
   // Nobody carries live connector tokens across a boundary. In the ordinary case
   // there are none — leaving requires owning no connections, and a token names
-  // one. It closes the narrow window `removeMember` documents, where a crash
-  // between dropping a membership and revoking could otherwise let old tokens
-  // come back to life if the same person were re-invited.
-  await revokeTokensFor(user.id)
+  // one — but it is cheap and it makes the rule unconditional.
+  await revokeTokensFor(user.id, {}, tx)
 
-  if (await countOrgMembers(previousOrg) === 0) {
-    await pb.collection('organizations').delete(previousOrg).catch(() => {})
+  if (!others.length) {
+    await tx`DELETE FROM app.organizations WHERE id = ${previousOrg}`
   }
 
   return { movedFrom: previousOrg }
@@ -741,18 +640,10 @@ export async function resolveTokenForActor(
     throw createError({ statusCode: 404, statusMessage: 'Not found' })
   }
 
-  const pb = await pocketbaseAdmin()
-
-  let token: AppMcpToken
-  let instance: AppInstance
-  try {
-    token = await pb.collection('mcp_tokens').getOne<AppMcpToken>(tokenId)
-    instance = await pb.collection('instances').getOne<AppInstance>(token.instance)
-  } catch (error) {
-    if (isPocketBaseNotFound(error)) {
-      throw createError({ statusCode: 404, statusMessage: 'Not found' })
-    }
-    throw error
+  const token = await getRow<AppMcpToken>('mcp_tokens', tokenId)
+  const instance = token && await getRow<AppInstance>('instances', token.instance)
+  if (!token || !instance) {
+    throw createError({ statusCode: 404, statusMessage: 'Not found' })
   }
 
   if (instance.org && instance.org === actor.org.id) {

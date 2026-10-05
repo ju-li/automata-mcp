@@ -1,4 +1,4 @@
-export default defineEventHandler((event) => {
-  clearSessionCookie(event)
+export default defineEventHandler(async (event) => {
+  await endSession(event)
   return { ok: true }
 })

@@ -32,8 +32,7 @@ export default defineEventHandler(async (event) => {
   const { instance } = await requireManagedInstance(event, getRouterParam(event, 'id'))
   const { label } = await parseBody(event, body)
 
-  const pb = await pocketbaseAdmin()
-  const updated = await pb.collection('instances').update<AppInstance>(instance.id, { label })
+  const updated = await updateRow<AppInstance>('instances', instance.id, { label })
 
   return { instance: toPublicInstance(updated) }
 })
