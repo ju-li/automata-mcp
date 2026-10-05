@@ -150,7 +150,7 @@ async function evolutionDbFor(instance: AppInstance): Promise<Sql> {
   return keyedPool(
     resolved.guard ? `evo:${instance.id}` : 'evo:default',
     resolved.url,
-    { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS },
+    { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS, readOnly: true },
   )
 }
 
