@@ -3,7 +3,7 @@ import { Api, Logger, TelegramClient, sessions } from 'teleproto'
 import type { BridgeConfig } from './config.ts'
 import { digestsEqual, hashKey, mintKey, seal, sessionContext, unseal, webhookContext } from './crypto.ts'
 import type { Sql } from './db.ts'
-import { HttpError, describeError } from './http-error.ts'
+import { HttpError, describeError, telegramNotConfigured } from './http-error.ts'
 import { SessionLocks } from './locks.ts'
 import { chatRow, entityId, inputPeerFor, markedId, usersOf } from './sync/convert.ts'
 import { type ChatListing, SyncStore } from './sync/store.ts'
@@ -206,7 +206,7 @@ export class SessionManager {
              (SELECT count(*) FROM messages WHERE session_id = ${id} AND deleted_at IS NULL) AS messages,
              (SELECT count(*) FROM chats WHERE session_id = ${id} AND backfill_stopped IS NULL) AS pending`
     const rt = this.runtime(id)
-    return describe(rt, row, {
+    return describe(rt, row, this.config.telegram !== undefined, {
       chats: Number(counts?.chats ?? 0),
       messages: Number(counts?.messages ?? 0),
     }, Number(counts?.pending ?? 0))
@@ -294,11 +294,18 @@ export class SessionManager {
       rt.heldElsewhere = false
 
       let saved: string | undefined
-      try {
-        saved = rt.client ? undefined : this.openSession(id, row.session_enc)
+      if (!this.config.telegram) {
+        // No credentials to reach Telegram with. What is left is an entry in the
+        // account's Telegram → Devices, the same as any failed remote logout.
+        console.error(`[sessions] ${id}: TELEGRAM_API_ID / TELEGRAM_API_HASH are not set, so it cannot be logged out on Telegram's side; forgetting it anyway`)
       }
-      catch {
-        console.error(`[sessions] ${id}: the stored session could not be decrypted, so it cannot be logged out on Telegram's side; forgetting it anyway`)
+      else {
+        try {
+          saved = rt.client ? undefined : this.openSession(id, row.session_enc)
+        }
+        catch {
+          console.error(`[sessions] ${id}: the stored session could not be decrypted, so it cannot be logged out on Telegram's side; forgetting it anyway`)
+        }
       }
 
       if (rt.client || saved !== undefined) {
@@ -482,7 +489,7 @@ export class SessionManager {
     try {
       await client.connect()
       const user = await client.signInUserWithQrCode(
-        { apiId: this.config.apiId, apiHash: this.config.apiHash },
+        this.credentials(),
         {
           abortSignal: signal,
           qrCode: async ({ token, expires }) => {
@@ -551,6 +558,9 @@ export class SessionManager {
   /** Connect a linked session from its stored string, and resume syncing it. */
   private async resume(rt: Runtime, row: SessionRow): Promise<void> {
     if (rt.client || rt.pairing || !row.session_enc || this.stopping) return
+    // Linked earlier, and the credentials have since been removed. Nothing to
+    // connect with; `describe` reports it as closed, with the reason.
+    if (!this.config.telegram) return
     if (!(await this.locks.acquire(rt.id))) {
       rt.heldElsewhere = true
       return
@@ -709,6 +719,16 @@ export class SessionManager {
     return unseal(this.config.sealKey, sealed, sessionContext(id))
   }
 
+  /**
+   * Telegram's app credentials, or the not-configured refusal. The HTTP layer
+   * already refuses the routes that would get here; this is what stops any other
+   * path building a client without them.
+   */
+  private credentials(): { apiId: number, apiHash: string } {
+    if (!this.config.telegram) throw telegramNotConfigured()
+    return this.config.telegram
+  }
+
   private newClient(session: sessions.StringSession): TelegramClient {
     const logger = new Logger('warn' as LogLevel)
     logger.handler = (record) => {
@@ -716,7 +736,8 @@ export class SessionManager {
       if (level !== 'error' && level !== 'warn') return
       console.error(`[teleproto] ${level}: ${String(record.message).slice(0, 300)}`)
     }
-    return new TelegramClient(session, this.config.apiId, this.config.apiHash, {
+    const { apiId, apiHash } = this.credentials()
+    return new TelegramClient(session, apiId, apiHash, {
       connectionRetries: 5,
       autoReconnect: true,
       floodSleepThreshold: 60,
@@ -786,7 +807,7 @@ export class SessionManager {
         const [row] = await this.sql<SessionRow[]>`SELECT ${this.sql(SESSION_COLUMNS)} FROM sessions WHERE id = ${rt.id}`
         if (!row?.webhook_url) return
 
-        const state = describe(rt, row, { chats: 0, messages: 0 }, 0)
+        const state = describe(rt, row, this.config.telegram !== undefined, { chats: 0, messages: 0 }, 0)
         const signature = [state.state, state.sessionLost, state.revoked, state.pairing ?? ''].join('|')
         if (signature === rt.lastPublished) return
         rt.lastPublished = signature
@@ -809,7 +830,7 @@ export class SessionManager {
   }
 }
 
-function describe(rt: Runtime, row: SessionRow, stats: SessionState['stats'], pendingBackfill: number): SessionState {
+function describe(rt: Runtime, row: SessionRow, telegramConfigured: boolean, stats: SessionState['stats'], pendingBackfill: number): SessionState {
   const base = {
     sessionLost: false,
     revoked: rt.revoked || row.revoked_at !== null,
@@ -841,6 +862,9 @@ function describe(rt: Runtime, row: SessionRow, stats: SessionState['stats'], pe
     }
   }
   if (!row.session_enc) return { ...base, state: 'close' }
+  // Linked, and the bridge has since lost its credentials: closed, not a dropped
+  // connection that a Reconnect could fix.
+  if (!telegramConfigured) return { ...base, state: 'close', lastError: telegramNotConfigured().message }
   if (rt.heldElsewhere) return { ...base, state: 'unknown' }
   if (rt.client?.connected && rt.healthy) return { ...base, state: 'open' }
   return { ...base, state: 'connecting', sessionLost: true }

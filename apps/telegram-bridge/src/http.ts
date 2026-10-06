@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { z } from 'zod'
 import type { BridgeConfig } from './config.ts'
 import { digestsEqual, hashKey } from './crypto.ts'
-import { HttpError, describeError } from './http-error.ts'
+import { HttpError, describeError, telegramNotConfigured } from './http-error.ts'
 import type { SessionManager } from './sessions.ts'
 
 /**
@@ -33,6 +33,12 @@ interface Route {
   method: string
   pattern: RegExp
   access: Access
+  /**
+   * Talks to Telegram, so it is refused with `telegramNotConfigured()` when the
+   * bridge runs without API credentials. Checked after authentication, so an
+   * unauthenticated caller learns nothing about the configuration from it.
+   */
+  needsTelegram?: boolean
   handle: (request: { id: string, body: unknown, query: URLSearchParams }) => Promise<Reply>
 }
 
@@ -64,10 +70,12 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
   const routes: Route[] = [
     {
       label: 'GET /health', method: 'GET', pattern: /^\/health$/, access: 'public',
-      handle: async () => ({ status: 200, body: { ok: true } }),
+      // Stays 200 without Telegram so a platform health check passes; `telegram`
+      // is what the app reads to tell an admin what to set. No value is exposed.
+      handle: async () => ({ status: 200, body: { ok: true, telegram: config.telegram ? 'configured' : 'unconfigured' } }),
     },
     {
-      label: 'POST /sessions', method: 'POST', pattern: /^\/sessions$/, access: 'admin',
+      label: 'POST /sessions', method: 'POST', pattern: /^\/sessions$/, access: 'admin', needsTelegram: true,
       handle: async ({ body }) => ({ status: 201, body: await manager.create(parse(createBody, body).name) }),
     },
     {
@@ -82,7 +90,7 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       handle: async ({ id }) => ({ status: 200, body: await manager.state(id) }),
     },
     {
-      label: 'POST /sessions/:id/pair', method: 'POST', pattern: /^\/sessions\/([^/]+)\/pair$/, access: 'session',
+      label: 'POST /sessions/:id/pair', method: 'POST', pattern: /^\/sessions\/([^/]+)\/pair$/, access: 'session', needsTelegram: true,
       handle: async ({ id }) => ({ status: 202, body: await manager.pair(id) }),
     },
     {
@@ -90,7 +98,7 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       handle: async ({ id }) => ({ status: 200, body: await manager.qr(id) }),
     },
     {
-      label: 'POST /sessions/:id/password', method: 'POST', pattern: /^\/sessions\/([^/]+)\/password$/, access: 'session',
+      label: 'POST /sessions/:id/password', method: 'POST', pattern: /^\/sessions\/([^/]+)\/password$/, access: 'session', needsTelegram: true,
       handle: async ({ id, body }) => ({ status: 202, body: await manager.submitPassword(id, parse(passwordBody, body).password) }),
     },
     {
@@ -98,7 +106,7 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       handle: async ({ id }) => ({ status: 200, body: await manager.logout(id) }),
     },
     {
-      label: 'POST /sessions/:id/reconnect', method: 'POST', pattern: /^\/sessions\/([^/]+)\/reconnect$/, access: 'session',
+      label: 'POST /sessions/:id/reconnect', method: 'POST', pattern: /^\/sessions\/([^/]+)\/reconnect$/, access: 'session', needsTelegram: true,
       handle: async ({ id }) => ({ status: 202, body: await manager.reconnect(id) }),
     },
     {
@@ -117,11 +125,11 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       }),
     },
     {
-      label: 'POST /sessions/:id/resolve', method: 'POST', pattern: /^\/sessions\/([^/]+)\/resolve$/, access: 'session',
+      label: 'POST /sessions/:id/resolve', method: 'POST', pattern: /^\/sessions\/([^/]+)\/resolve$/, access: 'session', needsTelegram: true,
       handle: async ({ id, body }) => ({ status: 200, body: await manager.resolve(id, parse(resolveBody, body).query) }),
     },
     {
-      label: 'POST /sessions/:id/send', method: 'POST', pattern: /^\/sessions\/([^/]+)\/send$/, access: 'session',
+      label: 'POST /sessions/:id/send', method: 'POST', pattern: /^\/sessions\/([^/]+)\/send$/, access: 'session', needsTelegram: true,
       handle: async ({ id, body }) => {
         const { chatId, text } = parse(sendBody, body)
         return { status: 200, body: await manager.send(id, chatId, text) }
@@ -153,11 +161,18 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
         return send(res, { status: 401, body: { error: 'Unauthorized.' } })
       }
 
+      if (route.needsTelegram && !config.telegram) {
+        req.resume()
+        throw telegramNotConfigured()
+      }
+
       const body = req.method === 'POST' || req.method === 'PUT' ? await readJson(req) : undefined
       send(res, await route.handle({ id, body, query: url.searchParams }))
     }
     catch (error) {
-      if (error instanceof HttpError) return send(res, { status: error.status, body: { error: error.message } })
+      if (error instanceof HttpError) {
+        return send(res, { status: error.status, body: { error: error.message, ...(error.code && { code: error.code }) } })
+      }
       console.error(`[http] ${route.label} failed: ${describeError(error)}`)
       send(res, { status: 500, body: { error: 'Internal error.' } })
     }
