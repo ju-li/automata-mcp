@@ -1,4 +1,11 @@
-# claude-whatsapp-mcp
+# Automata MCP
+
+The MCP server behind [Automata](https://www.getautomata.app/). It lets Claude
+read and act on a WhatsApp account, a Telegram account or a PostgreSQL database
+through a custom connector. The hosted service runs at
+<https://mcp.getautomata.app/> — sign up there and a connector URL looks like
+`https://mcp.getautomata.app/mcp/<token>`. This repository is for running or
+developing it yourself.
 
 A Nuxt app that serves two surfaces from one Nitro server:
 
@@ -30,10 +37,12 @@ is the same kind of dependency: run it **only if you want Telegram
 connections**, and every `TELEGRAM_*` / `NUXT_TELEGRAM_*` variable is optional
 until you do.
 
-> **Status.** Sign-up, all three connection kinds (WhatsApp paired by QR with
+> **Status.** Sign-up (which creates an organization), inviting colleagues by
+> email, all three connection kinds (WhatsApp paired by QR with
 > its history imported, Telegram linked by QR with its chats synced, Postgres by
-> connection string), the per-connection dashboard, and connector token
-> provisioning with per-chat and per-table scoping all work. Fifteen MCP tools,
+> connection string), the per-connection dashboard, assigning connections to
+> members, and connector token provisioning with per-chat and per-table scoping
+> all work — see "Organizations and roles". Fifteen MCP tools,
 > five per kind — see "MCP tools". A WhatsApp or Telegram connection that drops
 > emails the people who use it, and emails them again when it comes back — see
 > "Connection alerts".
@@ -42,22 +51,29 @@ until you do.
 
 ```
 apps/web/                    Nuxt 4 + TypeScript. Own Dockerfile, built from the repo root.
-apps/telegram-bridge/        Node + teleproto. Links Telegram accounts, syncs chats to Postgres.
-                             Own Dockerfile, built from the repo root.
-  app/pages/                 login, signup, instances/{index,new,[id]}
+  app/pages/                 login, signup, team, no-organization, invite/[code],
+                             instances/{index,new,[id]}
   app/components/            app components + ui/ (shadcn-vue)
-  app/composables/           session, connection state, token scope, API actions
+  app/composables/           session, organization, connection state, token scope,
+                             table paging, API actions
   modules/                   local Nuxt modules (registers /mcp/:token)
   shared/                    types used by both the app and the server
-  server/api/                auth, instances, tokens, Evolution and Telegram webhooks
+  server/api/                auth, org, invites, instances, tokens,
+                             Evolution and Telegram webhooks
   server/mcp/index.ts        MCP handler + auth middleware
   server/mcp/tools/<group>/  one file per tool: whatsapp/, telegram/, sql/
-  server/plugins/            token redaction, per-kind instructions, startup check
+  server/plugins/            app database, token redaction, per-kind instructions,
+                             Evolution and Telegram database startup checks
   server/db/migrations.ts    the app schema, applied at boot
-  server/utils/              app database, auth, instances, tokens, Evolution client and
-                             message database, mentions, outbound host guard,
-                             keyed handle cache, row serialisation, SQL engine
-                             seam, Postgres pool / plan guard / runner / catalog
+  server/utils/              app database, auth, organizations, invitations, instances,
+                             tokens, Evolution and Telegram clients and message
+                             databases, mentions, alerts, mailer, outbound host
+                             guard, keyed handle cache, row serialisation, SQL
+                             engine seam, Postgres pool / plan guard / runner / catalog
+apps/telegram-bridge/        Node + teleproto. Links Telegram accounts, syncs chats to Postgres.
+                             Own Dockerfile, built from the repo root.
+  src/                       HTTP API, sessions, locks, webhook
+  src/sync/                  live updates, catch-up, backfill
 docker-compose.dev.yml       services only — NOT Nuxt
 .zed/                        tasks + language server config
 .env.example                 every variable, documented
@@ -220,7 +236,8 @@ The MCP token is minted by this app — it is **not** Evolution's `apikey`. Only
 SHA-256 hash is stored, in `app.mcp_tokens`, alongside
 `last_used_at` and `expires_at`. It resolves to one row in `instances` — the
 connection — which holds that connection's credentials server-side: an Evolution
-token for WhatsApp, a connection string for Postgres.
+token for WhatsApp, a bridge session key for Telegram, a connection string for
+Postgres.
 
 **This deployment's Evolution global key never reaches a user record.** It is
 used only to create and delete instances on this deployment's server
@@ -243,7 +260,8 @@ through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
 
 ### Using it
 
-1. Sign up at <http://localhost:3000>.
+1. Sign up at <http://localhost:3000> (or <https://mcp.getautomata.app> for the
+   hosted service — the steps are the same).
 2. Create a connection: pick **WhatsApp account**, **Telegram account** or
    **PostgreSQL database**, and name it.
 3. **WhatsApp:** continue to the QR code and scan it — WhatsApp → Settings →
@@ -266,6 +284,32 @@ through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
 **One connection per connector.** A token is bound to the connection it was
 created on, so no tool takes a connection argument, and Claude cannot address the
 wrong number or the wrong database. Connect several and give each its own token.
+
+### Organizations and roles
+
+Connections belong to an **organization**, not to a person. Signing up creates
+one and makes you its admin; you join someone else's only by accepting an
+invitation, and an account belongs to exactly one organization.
+
+- **Admins** manage the organization (**Team** page): invite people, change
+  roles, remove members, create and delete connections, assign them, and mint
+  or edit tokens for anyone.
+- **Members** use the connections assigned to them. They see only their own
+  tokens there, and may revoke a token or rotate its secret but never widen its
+  scope. Reconnecting, re-pairing and deleting are management, so a member is
+  told what is wrong and that an admin can fix it.
+
+An invitation names an email address and can be accepted only by an account
+with that address, so a forwarded link is useless to anyone else. The link is
+shown once when it is created and can also be emailed (see "Connection alerts"
+for SMTP). Accepting moves you out of your current organization, which is
+refused while that organization still owns connections or while you are its
+only admin with other members left.
+
+Anything that takes away someone's access to a connection — unassigning it,
+demoting an admin, removing a member — revokes the tokens they held on it, and
+asks first. A connection you cannot see answers 404; one you can see but may not
+manage answers 403.
 
 ### MCP tools
 
@@ -300,17 +344,20 @@ comes back.
 A token is narrowed on independent axes, set when it is created and editable from
 the connection's dashboard. Which axes appear depends on the kind:
 
-- **Actions** (both kinds) — all tools, or a chosen few, listed from the
+- **Actions** (every kind) — all tools, or a chosen few, listed from the
   connection's own kind. Enforced by refusing to register the others for that
   request, so a tool outside scope is not merely hidden from the tool list:
   calling it fails. A new Postgres token starts read-only — the read tools
   ticked, `run-statement` not.
-- **Chats** (WhatsApp) — all conversations, or an allowlist. `list-chats` returns
+- **Chats** (WhatsApp and Telegram) — all conversations, or an allowlist. `list-chats` returns
   only allowed conversations; `read-messages` and `send-text-message` refuse
   anything else, naming the chat so the assistant can explain why.
   `search-messages` does both: asked for a chat outside scope it refuses by name,
   while an unrestricted search is narrowed to the allowed chats — out-of-scope
   messages are excluded by the query itself, not filtered out after being read.
+  **Telegram** works the same way through its own tools, with chats named by
+  `chatId`; a send to an @username is resolved first and then checked against
+  the allowlist, so a name cannot reach a chat the id could not.
 - **Tables** (Postgres) — every table the connecting role can read, or an
   allowlist. `list-tables` and `describe-table` apply it in their own SQL, so a
   table outside it is neither listed nor described. `run-query` and
@@ -344,7 +391,8 @@ pnpm dlx @modelcontextprotocol/inspector
 ```
 
 Point it at `http://localhost:3000/mcp/<token>`, or at `http://localhost:3000/mcp`
-with an `Authorization: Bearer <token>` header.
+with an `Authorization: Bearer <token>` header. For the hosted service, the same
+paths under `https://mcp.getautomata.app`.
 
 ### Reading and searching messages
 
@@ -1056,7 +1104,7 @@ account, so keep a copy somewhere other than Railway.
 
 ```
 NUXT_DATABASE_URL=${{Postgres.DATABASE_URL}}
-NUXT_PUBLIC_APP_URL=https://<web-domain>
+NUXT_PUBLIC_APP_URL=https://<web-domain>      # e.g. https://mcp.getautomata.app
 
 # Mail. Optional — with NUXT_SMTP_HOST empty, alerts and invitation emails are
 # computed and not delivered.
