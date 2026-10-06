@@ -185,7 +185,7 @@ function formatTimestamp(iso?: string): string {
         <Input v-model="table.q.value" placeholder="Search message text" class="pl-8" />
       </div>
 
-      <div class="min-h-0 rounded-md border [&_[data-slot=table-container]]:max-h-[60vh]">
+      <div class="min-h-0 min-w-0 rounded-md border [&_[data-slot=table-container]]:max-h-[60vh]">
         <Table>
           <TableHeader class="sticky top-0 z-10 bg-background">
             <TableRow>
@@ -236,7 +236,7 @@ function formatTimestamp(iso?: string): string {
 
             <template v-else>
               <TableRow v-for="message in table.rows.value" :key="message.key">
-                <TableCell class="max-w-[12rem]">
+                <TableCell class="max-w-[10rem]">
                   <span class="block truncate" :title="message.chat">{{ message.chat }}</span>
                 </TableCell>
 
@@ -246,14 +246,14 @@ function formatTimestamp(iso?: string): string {
                   the sending device's localised word for its own owner sitting
                   next to the account's real name on the very same message.
                 -->
-                <TableCell class="max-w-[10rem]">
+                <TableCell class="max-w-[8rem]">
                   <span v-if="message.fromMe" class="text-muted-foreground">You</span>
                   <span v-else class="block truncate" :title="message.author">
                     {{ message.author ?? '—' }}
                   </span>
                 </TableCell>
 
-                <TableCell class="max-w-[28rem]">
+                <TableCell class="w-full max-w-0">
                   <span v-if="message.text" class="block truncate" :title="message.text">{{ message.text }}</span>
                   <span v-else-if="message.note" class="text-muted-foreground italic">[{{ message.note }}]</span>
                   <span v-else class="text-muted-foreground">—</span>
