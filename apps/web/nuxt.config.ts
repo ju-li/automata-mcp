@@ -98,7 +98,7 @@ export default defineNuxtConfig({
     // default server (announced once at startup); a bring-your-own connection
     // carries its own URL instead. This reaches every user's messages, so the
     // role behind it must be SELECT-only — see server/utils/evolution-db.ts and
-    // README "Reading and searching messages".
+    // docs/whatsapp.md "Reading and searching messages".
     evolutionDatabaseUrl: '',
 
     // The *default* Telegram bridge (apps/telegram-bridge), for Telegram

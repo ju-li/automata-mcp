@@ -44,7 +44,7 @@
   },
   {
     // Point the inspector at http://localhost:3000/mcp/<token> (or /mcp with an
-    // Authorization: Bearer header). See README "Connecting an MCP client".
+    // Authorization: Bearer header). See docs/using-automata.md "Getting started".
     "label": "mcp: inspector",
     "command": "pnpm dlx @modelcontextprotocol/inspector",
     "cwd": "$ZED_WORKTREE_ROOT",

@@ -174,7 +174,7 @@ volumes:
   postgres_data:
   redis_data:
   # Deleting this volume (`docker compose down -v`) destroys every paired
-  # WhatsApp session and forces a full QR re-scan. See README.
+  # WhatsApp session and forces a full QR re-scan. See docs/self-hosting.md.
   evolution_instances:
 
 networks:
@@ -182,9 +182,9 @@ networks:
     driver: bridge
     ipam:
       config:
-        # Pinned so the firewall rule documented in the README never changes.
+        # Pinned so the firewall rule in docs/development.md never changes.
         # On Linux hosts running ufw (especially with ufw-docker applied),
         # container -> host traffic is dropped by default and the Evolution
-        # webhook cannot reach Nuxt. See README "Linux firewall".
+        # webhook cannot reach Nuxt. See docs/development.md "Linux firewall".
         - subnet: 172.31.250.0/24
           gateway: 172.31.250.1

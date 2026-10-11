@@ -1,0 +1,161 @@
+# Self-hosting: the whole app from published images. For development, use
+# docker-compose.dev.yml instead — it runs the services only and leaves Nuxt on
+# the host for HMR.
+#
+#   cp .env.selfhost.example .env     # fill in the blanks
+#   docker compose up -d                                         # database connections
+#   docker compose --profile whatsapp up -d                      # + WhatsApp
+#   docker compose --profile whatsapp --profile telegram up -d   # + Telegram
+#
+# The web app is the only published port. Postgres, Evolution and the Telegram
+# bridge are reachable on the compose network alone, which is also how the web
+# app and its webhooks reach them — no host.docker.internal, no firewall rule.
+#
+# The web service's NUXT_* variables are set here from a handful of shared ones,
+# never read from .env directly, so a development .env next to this file cannot
+# point the container at localhost.
+#
+# Never `docker compose down -v`: it deletes evolution_instances, and every
+# paired WhatsApp number needs its QR scanned again. See docs/self-hosting.md.
+#
+# Every image tag is pinned. Do not relax one to `latest`.
+
+name: automata
+
+x-database-url: &database-url postgresql://${POSTGRES_USER:-automata}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-automata}
+
+services:
+  postgres:
+    image: postgres:16.15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-automata}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-automata}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    image: ghcr.io/ju-li/automata-mcp-web:1
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '${WEB_PORT:-3000}:3000'
+    environment:
+      NUXT_DATABASE_URL: *database-url
+      NUXT_PUBLIC_APP_URL: ${NUXT_PUBLIC_APP_URL:?set NUXT_PUBLIC_APP_URL in .env}
+      NUXT_WEBHOOK_SECRET: ${WEBHOOK_SECRET:?set WEBHOOK_SECRET in .env}
+
+      # WhatsApp. Harmless without the whatsapp profile: nothing answers there,
+      # and the create page says WhatsApp is unavailable.
+      NUXT_EVOLUTION_URL: http://evolution:8080
+      NUXT_EVOLUTION_ADMIN_KEY: ${EVOLUTION_API_KEY:?set EVOLUTION_API_KEY in .env}
+      NUXT_EVOLUTION_DATABASE_URL: *database-url
+      NUXT_WEBHOOK_URL: http://web:3000/api/webhook/evolution
+
+      # Telegram. Same: harmless without the telegram profile.
+      NUXT_TELEGRAM_URL: http://telegram-bridge:8095
+      NUXT_TELEGRAM_ADMIN_KEY: ${TELEGRAM_BRIDGE_ADMIN_KEY:-}
+      NUXT_TELEGRAM_DATABASE_URL: *database-url
+      NUXT_TELEGRAM_WEBHOOK_URL: http://web:3000/api/webhook/telegram
+
+      # Mail. Optional — with NUXT_SMTP_HOST empty, alerts and invitation
+      # emails are not delivered.
+      NUXT_SMTP_HOST: ${SMTP_HOST:-}
+      NUXT_SMTP_PORT: ${SMTP_PORT:-587}
+      NUXT_SMTP_USERNAME: ${SMTP_USERNAME:-}
+      NUXT_SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      NUXT_SMTP_TLS: ${SMTP_TLS:-false}
+      NUXT_MAIL_FROM: ${MAIL_FROM:-}
+      NUXT_MAIL_FROM_NAME: ${MAIL_FROM_NAME:-Automata MCP}
+
+  redis:
+    image: redis:8.2.9-alpine
+    profiles: [whatsapp]
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  evolution:
+    image: evoapicloud/evolution-api:v2.3.7
+    profiles: [whatsapp]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SERVER_TYPE: http
+      SERVER_PORT: 8080
+      SERVER_URL: http://evolution:8080
+      TELEMETRY_ENABLED: 'false'
+      LOG_LEVEL: ERROR,WARN,INFO,LOG
+      LANGUAGE: en
+      DEL_INSTANCE: 'false'
+      QRCODE_LIMIT: 30
+
+      AUTHENTICATION_API_KEY: ${EVOLUTION_API_KEY:?set EVOLUTION_API_KEY in .env}
+      AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES: 'true'
+
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER:-automata}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-automata}?schema=public
+      DATABASE_CONNECTION_CLIENT_NAME: evolution_exchange
+      DATABASE_SAVE_DATA_INSTANCE: 'true'
+      DATABASE_SAVE_DATA_NEW_MESSAGE: 'true'
+      DATABASE_SAVE_MESSAGE_UPDATE: 'true'
+      DATABASE_SAVE_DATA_CONTACTS: 'true'
+      DATABASE_SAVE_DATA_CHATS: 'true'
+      # The history WhatsApp hands over once, at pairing. False drops it for good.
+      DATABASE_SAVE_DATA_HISTORIC: 'true'
+
+      CACHE_REDIS_ENABLED: 'true'
+      CACHE_REDIS_URI: redis://redis:6379/6
+      CACHE_REDIS_PREFIX_KEY: evolution
+      CACHE_REDIS_SAVE_INSTANCES: 'false'
+      CACHE_LOCAL_ENABLED: 'false'
+
+      # Off: the app registers a webhook per connection, and with both on every
+      # event arrives twice. See docs/deploy-railway.md, "Environment".
+      WEBHOOK_GLOBAL_ENABLED: 'false'
+    volumes:
+      - evolution_instances:/evolution/instances
+
+  telegram-bridge:
+    image: ghcr.io/ju-li/automata-mcp-telegram-bridge:1
+    profiles: [telegram]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TELEGRAM_BRIDGE_PORT: 8095
+      # Interpolation is not profile-aware, so these two are not `:?` here; the
+      # bridge itself refuses to start without them.
+      # From my.telegram.org. Both or neither — without them the bridge runs
+      # and the app says what to set.
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-}
+      TELEGRAM_BRIDGE_ADMIN_KEY: ${TELEGRAM_BRIDGE_ADMIN_KEY:-}
+      # Losing this unlinks every Telegram account. Keep a copy elsewhere.
+      TELEGRAM_SESSION_ENCRYPTION_KEY: ${TELEGRAM_SESSION_ENCRYPTION_KEY:-}
+      TELEGRAM_BRIDGE_DATABASE_URL: *database-url
+
+volumes:
+  postgres_data:
+  redis_data:
+  # Deleting this volume destroys every paired WhatsApp session.
+  evolution_instances:
