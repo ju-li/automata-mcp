@@ -2,8 +2,7 @@
 
 ## Getting started
 
-1. Sign up at <http://localhost:3000> (or <https://mcp.getautomata.app> for the
-   hosted service — the steps are the same).
+1. Sign up at your deployment's address (<http://localhost:3000> locally).
 2. Create a connection: pick **WhatsApp account**, **Telegram account** or
    **PostgreSQL database**, and name it.
 3. **WhatsApp:** continue to the QR code and scan it — WhatsApp → Settings →
@@ -132,5 +131,5 @@ pnpm dlx @modelcontextprotocol/inspector
 ```
 
 Point it at `http://localhost:3000/mcp/<token>`, or at `http://localhost:3000/mcp`
-with an `Authorization: Bearer <token>` header. For the hosted service, the same
-paths under `https://mcp.getautomata.app`.
+with an `Authorization: Bearer <token>` header. On a deployment, the same paths
+under its `NUXT_PUBLIC_APP_URL`.

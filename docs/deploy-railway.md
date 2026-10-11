@@ -127,7 +127,7 @@ account, so keep a copy somewhere other than Railway.
 
 ```
 NUXT_DATABASE_URL=${{Postgres.DATABASE_URL}}
-NUXT_PUBLIC_APP_URL=https://<web-domain>      # e.g. https://mcp.getautomata.app
+NUXT_PUBLIC_APP_URL=https://<web-domain>
 
 # Mail. Optional — with NUXT_SMTP_HOST empty, alerts and invitation emails are
 # computed and not delivered.

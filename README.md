@@ -17,14 +17,13 @@
   <a href="https://railway.com/deploy/automata-or-whatsapp-telegram-sql-mcp?referralCode=HxrUPo&utm_medium=integration&utm_source=template&utm_campaign=generic"><img src="https://railway.com/button.svg" alt="Deploy on Railway"></a>
 </p>
 
-**Automata MCP gives Claude your WhatsApp, Telegram and PostgreSQL.** Connect an
+**Automata MCP safely gives Claude (or Codex or any AI Agent) access to your WhatsApp, Telegram and PostgreSQL.** Connect an
 account or a database once, mint a connector token scoped to the chats or
 tables you choose, and paste its URL into Claude as a custom connector. Claude
 can then read, search and summarise your conversations, query your data, and —
 only if you allow it — send messages and write rows.
 
-Use the hosted service at [mcp.getautomata.app](https://mcp.getautomata.app),
-or run your own with one click on Railway or with Docker Compose.
+Run your own with one click on Railway or with Docker Compose.
 
 ## Screenshots
 
