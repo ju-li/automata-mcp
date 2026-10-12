@@ -28,7 +28,7 @@ Run your own with one click on Railway or with Docker Compose.
 ## Screenshots
 
 <p align="center">
-  <img src="docs/images/claude-chat.png" alt="Claude reading a WhatsApp team chat and querying a database to prepare for a meeting" width="720">
+  <img src="docs/images/claude-chat.png" alt="Claude searching a WhatsApp team chat and a Telegram client group to recap a project and its action items" width="720">
   <br><em>Claude pulls a meeting plan from a WhatsApp group and the numbers from your database, in one answer.</em>
 </p>
 
