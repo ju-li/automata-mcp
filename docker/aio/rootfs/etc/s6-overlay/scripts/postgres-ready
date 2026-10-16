@@ -1,0 +1,25 @@
+#!/command/with-contenv bash
+# Waits until Postgres accepts connections, then makes the app's role and
+# database exist with the current password. Running the ALTER every boot is what
+# lets a POSTGRES_PASSWORD passed on a later boot take over from the generated one.
+set -euo pipefail
+. /usr/local/bin/automata-env
+
+for _ in $(seq 1 120); do
+  if pg_isready -q -h /run/postgresql -p "$AUTOMATA_PG_PORT" -U postgres; then break; fi
+  sleep 0.5
+done
+pg_isready -q -h /run/postgresql -p "$AUTOMATA_PG_PORT" -U postgres || { echo '[automata] Postgres did not come up' >&2; exit 1; }
+
+psql() { s6-setuidgid postgres psql -h /run/postgresql -p "$AUTOMATA_PG_PORT" -U postgres -v ON_ERROR_STOP=1 -qtA "$@"; }
+
+# Values reach SQL as psql variables (:'name' quotes them), never spliced in.
+psql -d postgres -v user="$POSTGRES_USER" -v pass="$POSTGRES_PASSWORD" <<'SQL'
+SELECT format('CREATE ROLE %I LOGIN', :'user')
+WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = :'user') \gexec
+SELECT format('ALTER ROLE %I PASSWORD %L', :'user', :'pass') \gexec
+SQL
+psql -d postgres -v user="$POSTGRES_USER" -v db="$POSTGRES_DB" <<'SQL'
+SELECT format('CREATE DATABASE %I OWNER %I', :'db', :'user')
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = :'db') \gexec
+SQL

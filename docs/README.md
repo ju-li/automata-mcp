@@ -5,7 +5,7 @@ here are about running and developing this repository.
 
 **Running it**
 
-- [Self-hosting with Docker Compose](self-hosting.md) — the whole app from published images, backups, the app database
+- [Self-hosting](self-hosting.md) — the whole app from published images, as one container or with Docker Compose; backups, the app database
 - [Deploying to Railway](deploy-railway.md) — services, ports and every variable, for the one-click template or by hand
 - [Releases](releases.md) — image tags and how a release is cut
 

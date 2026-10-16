@@ -1,0 +1,3 @@
+#!/command/with-contenv bash
+. /usr/local/bin/automata-env
+exec s6-setuidgid postgres postgres -D "$AUTOMATA_DATA/postgres"

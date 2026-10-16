@@ -81,6 +81,19 @@ Run your own with one click on Railway or with Docker Compose.
 
 Every service and variable is explained in [Deploying to Railway](docs/deploy-railway.md).
 
+### Docker (single container)
+
+```bash
+docker run -d --name automata --restart unless-stopped --stop-timeout 30 \
+  -p 3000:3000 -v automata_data:/data \
+  -e NUXT_PUBLIC_APP_URL=https://automata.example.com \
+  ghcr.io/ju-li/automata-mcp-aio:1
+```
+
+Postgres, Redis, Evolution API, the web app and the Telegram bridge in one
+container; secrets are generated into the volume on first boot. Back up the
+volume — see [Single container](docs/self-hosting.md#single-container).
+
 ### Docker Compose
 
 ```bash
@@ -100,8 +113,8 @@ from it. See [Self-hosting](docs/self-hosting.md).
 
 > [!WARNING]
 > Pairing binds a real WhatsApp number, and numbers that pair and unpair
-> repeatedly can be banned — use a spare SIM. Never run `docker compose down -v`:
-> it deletes every paired session.
+> repeatedly can be banned — use a spare SIM. Never run `docker compose down -v`
+> or delete the single container's volume: either deletes every paired session.
 
 ### Connect Claude
 

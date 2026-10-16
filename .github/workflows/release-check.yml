@@ -35,11 +35,15 @@ jobs:
             dockerfile: apps/web/Dockerfile
           - image: automata-mcp-telegram-bridge
             dockerfile: apps/telegram-bridge/Dockerfile
+          # Everything in one container: builds web and bridge again from
+          # source, on top of Evolution's image. See docker/aio/Dockerfile.
+          - image: automata-mcp-aio
+            dockerfile: docker/aio/Dockerfile
     steps:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
-      # Same context and Dockerfile as release.yml, built and discarded. Both
-      # Dockerfiles need the repo root: the lockfile and workspace manifest are there.
+      # Same context and Dockerfile as release.yml, built and discarded. Every
+      # Dockerfile needs the repo root: the lockfile and workspace manifest are there.
       - uses: docker/build-push-action@v7
         with:
           context: .
