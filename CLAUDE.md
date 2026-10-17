@@ -19,7 +19,7 @@ Connection = row in `instances` with `kind`; connector token bound to exactly on
 
 App's own data (users, sessions, organizations, connections + credentials, tokens) in Postgres, `app` schema migrated at boot — `NUXT_DATABASE_URL`, required. Same Postgres Evolution writes into (`public`) and Telegram bridge uses (`telegram`); that Postgres is only compose service not behind profile. Evolution API + its Redis needed **only for WhatsApp connections** — behind `whatsapp` compose profile; `NUXT_EVOLUTION_*` vars optional.
 
-`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `alerts.md`, `using-automata.md`, `releases.md`. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`.
+`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `alerts.md`, `using-automata.md`, `releases.md`. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
 
 **Status:** product loop works end to end for all three kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat or per-table scoping. Fifteen MCP tools, gated by kind:
 
@@ -88,6 +88,8 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              `telegram` schema of the shared Postgres. See "Telegram bridge".
 docker-compose.dev.yml       services only, NOT Nuxt
+docker/aio/                  all-in-one image: Dockerfile + rootfs/ (s6 service tree,
+                             automata-env). See "All-in-one image".
 ```
 
 Aliases resolve relative to `apps/web` (Nuxt root), not repo root: `~`/`@` → `apps/web/app/`, `~~`/`@@` → `apps/web/`, `#shared` → `apps/web/shared/`. `apps/web/tsconfig.json` holds no compiler options — only references four generated `.nuxt/tsconfig.*.json` projects. Never hand-edit `.nuxt/`.
@@ -250,7 +252,7 @@ Three preconditions, two must hold **before** QR scanned:
 
 **`syncFullHistory: true` also disables Evolution's group filter.** Its `shouldIgnoreJid` stops excluding `@g.us` regardless of `groupsIgnore`, so group chats sync and show in `list-chats` and token scope picker. Per-token chat scoping contains it, but wider default surface.
 
-**Bumping pinned Evolution tag = re-verify this.** Specifically: `messaging-history.set` still gates on `SAVE_DATA.HISTORIC`, settings schema still requires six booleans, `syncFullHistory` still reaches socket config, `Message` still has no unique constraint on message id (if one appears, duplicates stop, dedupe becomes belt-and-braces). Also `prepareMessage` still calls `getContentType` on **un-normalized** payload, so wrapper still types own row — bump onto Baileys whose `normalizeMessageContent` unwraps `associatedChildMessage` makes local unwrap no-op rather than breaking, but paragraph above would describe something no longer happening — and `ProtocolMessage.Type.MESSAGE_EDIT` still `14` and stored as integer. Message reads no longer depend on `fetchMessages`' envelope, ordering, skip/take — SQL now — but `Message` columns still Evolution's: `key` and `message` are `JsonB NOT NULL`, `messageTimestamp` is `Int` of unix **seconds**, `contextInfo` nullable, `@@index([instanceId])` only index.
+**Bumping pinned Evolution tag = re-verify this** — in `docker-compose*.yml` *and* as `FROM` base of `docker/aio/Dockerfile`, which also relies on its `Docker/scripts/deploy_database.sh`, `dist/main` entry and cwd-relative `instances`/`store` dirs. Specifically: `messaging-history.set` still gates on `SAVE_DATA.HISTORIC`, settings schema still requires six booleans, `syncFullHistory` still reaches socket config, `Message` still has no unique constraint on message id (if one appears, duplicates stop, dedupe becomes belt-and-braces). Also `prepareMessage` still calls `getContentType` on **un-normalized** payload, so wrapper still types own row — bump onto Baileys whose `normalizeMessageContent` unwraps `associatedChildMessage` makes local unwrap no-op rather than breaking, but paragraph above would describe something no longer happening — and `ProtocolMessage.Type.MESSAGE_EDIT` still `14` and stored as integer. Message reads no longer depend on `fetchMessages`' envelope, ordering, skip/take — SQL now — but `Message` columns still Evolution's: `key` and `message` are `JsonB NOT NULL`, `messageTimestamp` is `Int` of unix **seconds**, `contextInfo` nullable, `@@index([instanceId])` only index.
 
 Reading back: `listMessages()` in `chats.ts` takes `{ limit, page, since, until, includeReactions }`, delegates to `listMessagesPage()` in `evolution-db.ts`. Range bounds = ordinary SQL predicates, so one-sided range = one predicate — old widening (Evolution honoured `messageTimestamp` filter only with **both** bounds) gone with HTTP path. `chats.ts` keeps shaping: `previewOf()` for payload, one name directory for authors and @-mentions.
 
@@ -519,17 +521,17 @@ cd apps/web && pnpx shadcn-vue@latest add <component>
 - **`pnpm dev` runs `nuxt dev --host 0.0.0.0`**, must — bound to localhost, Nuxt unreachable from Evolution container. Means socket listens on LAN interface too.
 - **Linux host with ufw: inbound webhook silently times out** until container→host traffic allowed. Compose subnet pinned to `172.31.250.0/24` so one rule covers it; rule and round-trip test in `docs/development.md` "Linux firewall". Reachable by ping but not TCP = signature.
 
-Every image tag in `docker-compose.dev.yml` pinned. Never relax to `latest`.
+Every image tag in `docker-compose.dev.yml`, `docker-compose.yml` and `docker/aio/Dockerfile` pinned. Never relax to `latest`.
 
 **`DROP SCHEMA app` = local reset**, deletes every user, connection, token — next boot recreates schema empty. Never point at deployment's DB: Evolution sessions those connections name keep running with nothing recording them.
 
 ## Releases
 
-Merging `main` into `prod` publishes `ghcr.io/ju-li/automata-mcp-web` and `ghcr.io/ju-li/automata-mcp-telegram-bridge`, tagged with version in **root `package.json`** — only place version lives; `apps/*/package.json` unversioned. `docs/releases.md` = operator's procedure.
+Merging `main` into `prod` publishes `ghcr.io/ju-li/automata-mcp-web`, `ghcr.io/ju-li/automata-mcp-telegram-bridge` and `ghcr.io/ju-li/automata-mcp-aio`, tagged with version in **root `package.json`** — only place version lives; `apps/*/package.json` unversioned. `docs/releases.md` = operator's procedure.
 
 - **`.github/scripts/release-version.sh`** = one version rule: three-part `X.Y.Z`, no existing `vX.Y.Z` tag, strictly above latest. Both workflows call it, so PR check and push guard can't drift.
-- **`release-check.yml`** (PRs into `prod`) runs that, builds both images without pushing — after merge, bad version or broken Dockerfile already on release branch.
-- **`release.yml`** (push to `prod`) re-runs version guard, pushes both images, then creates tag and GitHub Release **last**, so tag means images exist. All in one workflow since tag pushed with `GITHUB_TOKEN` doesn't trigger another.
+- **`release-check.yml`** (PRs into `prod`) runs that, builds all three images without pushing — after merge, bad version or broken Dockerfile already on release branch.
+- **`release.yml`** (push to `prod`) re-runs version guard, pushes all three images, then creates tag and GitHub Release **last**, so tag means images exist. All in one workflow since tag pushed with `GITHUB_TOKEN` doesn't trigger another.
 - **`main → prod` = merge commit, never squash.** Squash leaves `prod` off `main`'s history; every later release PR re-shows old commits or conflicts.
 
 Templates pin major tag, not `latest`: migrations run at boot, append-only, so image rollback after one isn't clean undo.
@@ -545,3 +547,17 @@ Binds `::` not `0.0.0.0`, accepting IPv4 and IPv6. Legacy Railway environments r
 **Don't add `VOLUME` instruction.** Railway fails build outright (`docker VOLUME at Line N is not supported, use Railway Volumes`). Persistence from compose bind mount locally, attached volume in service settings on Railway.
 
 **Don't add BuildKit cache mount either.** Railway rejects any `--mount=type=cache` whose `id` isn't prefixed with service's own id (`id=s/<service-id>-<target>`), which would hardcode one Railway service into Dockerfile. `apps/web/Dockerfile` installs without one; install layer keyed on lockfile, so unchanged lockfile skips it anyway.
+
+## All-in-one image
+
+`docker/aio/Dockerfile` = Postgres + Redis + Evolution + web + bridge in one container, for `docker run`. `docs/self-hosting.md` "Single container" = operator's side. Build context repo root; root `.dockerignore` keeps local `node_modules`/`.nuxt`/`.output`/`.env` out (cline worktree symlinks break `COPY apps/web` otherwise).
+
+- **Base = `evoapicloud/evolution-api:v2.3.7`**, so Evolution runs as shipped (Node 24, Prisma engines, boot script). Web + bridge run on **Node 22.23.2 copied to `/opt/node22`**, same as published images. Redis binaries copied from `redis:8.2.9-alpine`; Postgres = Alpine `postgresql16` + `-contrib` (bridge needs `pg_trgm`). Build ends with version asserts so a binary that can't run here fails build, not first boot.
+- **Web and bridge stages duplicate `apps/web/Dockerfile` / `apps/telegram-bridge/Dockerfile`** — change one, change both.
+- **s6-overlay v3 supervises** (`rootfs/etc/s6-overlay/s6-rc.d/`): `init-data` → `postgres` → `postgres-ready` → {`evolution-migrate` → `evolution`, `telegram-bridge`, `web`}; `redis` beside. Dependencies = start order and reverse shutdown order, so Postgres stops last. `postgres-ready` exists because longrun "up" means started, not accepting connections. `S6_BEHAVIOUR_IF_STAGE2_FAILS=2`: failed oneshot stops container (failed longrun would restart forever — why PORT check lives in `init-data`). `S6_CMD_WAIT_FOR_SERVICES_MAXTIME=0`: Evolution migrations outlast 5 s default.
+- **`rootfs/usr/local/bin/automata-env` = only place derived vars written**, sourced by every script — container's `environment:` block. Empty var = unset, so `--env-file` with blank `.env.selfhost.example` lines works.
+- **Secrets generated into `/data/secrets` on first boot**; env var of same name overrides, never written back. `postgres-ready` re-`ALTER ROLE`s password every boot, so override and its removal both converge. App role = DB owner, not superuser; superuser reachable only via socket + peer.
+- **Internal ports 5432/6379 on loopback, Evolution 18080, bridge 18095** — off 8080/8095 because web follows `$PORT` and Railway injects 8080. `init-data` refuses `PORT` equal to any. URLs use literal `127.0.0.1`, never `localhost`, so net-guard's own-backend check resolves exactly; verified refusing `127.0.0.1:5432` with `NUXT_ALLOW_PRIVATE_TARGETS=true`. Redis not in own-backend list — docs say so.
+- **Evolution migrations run as root** (`evolution-migrate`, upstream script as child — not `set -u` clean, so not sourced); everything else drops to `node` / `postgres` via `s6-setuidgid`. Evolution's cwd-relative `instances` and `store` symlinked into `/data/evolution`.
+- **No `VOLUME`, no cache mount** (Railway rules above). Everything under `/data`; deleting that volume = `down -v`.
+

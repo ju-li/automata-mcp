@@ -1,0 +1,5 @@
+#!/command/with-contenv bash
+. /usr/local/bin/automata-env
+export HOME=/home/node
+exec s6-setuidgid node redis-server --bind 127.0.0.1 --port "$AUTOMATA_REDIS_PORT" \
+  --appendonly yes --dir "$AUTOMATA_DATA/redis"

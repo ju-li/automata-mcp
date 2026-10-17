@@ -1,0 +1,45 @@
+#!/command/with-contenv bash
+# First boot: lays out /data, generates every missing secret, creates the
+# Postgres cluster. Later boots: re-asserts ownership and does nothing else.
+# Everything the container keeps lives under /data — mount a volume there.
+set -euo pipefail
+. /usr/local/bin/automata-env
+
+# Checked here rather than in web's run script: a failed oneshot stops the
+# container (S6_BEHAVIOUR_IF_STAGE2_FAILS=2), a failed longrun restarts forever.
+for p in $AUTOMATA_PG_PORT $AUTOMATA_REDIS_PORT $AUTOMATA_EVOLUTION_PORT $AUTOMATA_BRIDGE_PORT; do
+  if [ "$AUTOMATA_WEB_PORT" = "$p" ]; then
+    echo "[automata] PORT=$AUTOMATA_WEB_PORT is used inside this container. Unset PORT (the web app then listens on 3000) or pick another." >&2
+    exit 1
+  fi
+done
+
+mkdir -p "$AUTOMATA_DATA"/{postgres,redis,evolution/instances,evolution/store} "$AUTOMATA_SECRETS" /run/postgresql
+chown postgres:postgres "$AUTOMATA_DATA/postgres" /run/postgresql
+chmod 700 "$AUTOMATA_DATA/postgres"
+chown -R node:node "$AUTOMATA_DATA/redis" "$AUTOMATA_DATA/evolution"
+chmod 700 "$AUTOMATA_SECRETS"
+
+for name in $AUTOMATA_SECRET_NAMES; do
+  if [ ! -s "$AUTOMATA_SECRETS/$name" ]; then
+    (umask 077; openssl rand -hex 32 > "$AUTOMATA_SECRETS/$name")
+    echo "[automata] generated $name in $AUTOMATA_SECRETS"
+  fi
+done
+# Re-read: the variables above were sourced before the files existed.
+. /usr/local/bin/automata-env
+
+if [ ! -s "$AUTOMATA_DATA/postgres/PG_VERSION" ]; then
+  echo "[automata] creating the Postgres cluster in $AUTOMATA_DATA/postgres"
+  # The superuser is reachable only over the local socket as the postgres OS
+  # user (peer); every service connects over TCP as $POSTGRES_USER, by password.
+  s6-setuidgid postgres initdb -D "$AUTOMATA_DATA/postgres" \
+    --username=postgres --auth-local=peer --auth-host=scram-sha-256 \
+    --encoding=UTF8 --locale=C.UTF-8 >/dev/null
+  cat >> "$AUTOMATA_DATA/postgres/postgresql.conf" <<CONF
+
+# all-in-one image: nothing outside the container reaches the database.
+listen_addresses = 'localhost'
+port = $AUTOMATA_PG_PORT
+CONF
+fi

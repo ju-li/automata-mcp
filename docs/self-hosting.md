@@ -1,11 +1,119 @@
-# Self-hosting with Docker Compose
+# Self-hosting
 
-`docker-compose.yml` at the repository root runs the whole app from the
-published images: the web app, Postgres, and — behind compose profiles — the
-WhatsApp and Telegram backends. It is not the development setup; for that, see
-[Development](development.md).
+Two ways to run the whole app from published images:
 
-## Start it
+- **[Single container](#single-container)** — one `docker run`. Postgres,
+  Redis, Evolution API, the web app and the Telegram bridge share one image and
+  one volume; every secret is generated on first boot.
+- **[Docker Compose](#docker-compose)** — `docker-compose.yml` at the repository
+  root, one container per service, WhatsApp and Telegram behind profiles.
+
+Neither is the development setup; for that, see [Development](development.md).
+
+## Single container
+
+```bash
+docker run -d --name automata --restart unless-stopped --stop-timeout 30 \
+  -p 3000:3000 -v automata_data:/data \
+  -e NUXT_PUBLIC_APP_URL=https://automata.example.com \
+  ghcr.io/ju-li/automata-mcp-aio:1
+```
+
+Open the app on port 3000 and sign up. The first account creates an
+organization and is its admin. First boot creates the database and runs
+Evolution's and the app's migrations; `docker logs -f automata` shows each
+service starting.
+
+`NUXT_PUBLIC_APP_URL` is the address people will open — every connector URL is
+built from it. Left out, it defaults to `http://localhost:3000`, which is fine
+for trying it and wrong for anything Claude has to reach.
+
+`--stop-timeout 30` gives the services time to stop in order — the web app,
+Evolution and the bridge first, Postgres last. Docker's default 10 seconds can
+cut that short.
+
+### What is inside
+
+| Process | Version | Listens on (inside the container) |
+|---|---|---|
+| Web app | this release | `3000`, or `$PORT` — the only port to publish |
+| Postgres | 16 (Alpine's `postgresql16`) | `127.0.0.1:5432` |
+| Redis | 8.2.9 | `127.0.0.1:6379` |
+| Evolution API | v2.3.7 | `18080` |
+| Telegram bridge | this release | `18095` |
+
+The image is built on Evolution's own image, so Evolution runs exactly as it
+ships; [s6-overlay](https://github.com/just-containers/s6-overlay) starts the
+rest in order, restarts what crashes and stops the container if a start-up step
+fails. The image is large (about 2 GB), most of it Evolution's.
+
+`PORT` may not be one of the internal ports above; the container refuses to
+start and says so.
+
+### Everything lives in `/data`
+
+| Path | Holds |
+|---|---|
+| `/data/postgres` | the database: every user, connection, stored credential and synced message |
+| `/data/redis` | Evolution's cache |
+| `/data/evolution` | Evolution's session files |
+| `/data/secrets` | the generated secrets, one file each |
+
+**Back up the whole volume.** On first boot the container generates
+`POSTGRES_PASSWORD`, `WEBHOOK_SECRET`, `EVOLUTION_API_KEY`,
+`TELEGRAM_BRIDGE_ADMIN_KEY` and `TELEGRAM_SESSION_ENCRYPTION_KEY` into
+`/data/secrets`. Losing `TELEGRAM_SESSION_ENCRYPTION_KEY` unlinks every Telegram
+account; losing the volume loses everything, and every WhatsApp number needs its
+QR scanned again.
+
+An environment variable with one of those names overrides the stored file
+(which is left as it was). Set them only if you manage secrets elsewhere, keep
+them URL-safe (`openssl rand -hex 32`), and never change
+`TELEGRAM_SESSION_ENCRYPTION_KEY` after the first boot.
+
+`docker rm` and `docker run` again with the same volume is safe — that is also
+how to update. **`docker volume rm automata_data` is the single-container
+`docker compose down -v`**: see the warnings below.
+
+### Options
+
+Everything is optional. The names are the ones `.env.selfhost.example` uses, so
+a filled-in copy works as `docker run --env-file .env …`; blank values are
+ignored.
+
+| Variable | For |
+|---|---|
+| `NUXT_PUBLIC_APP_URL` | the public address (above) |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Telegram — from <https://my.telegram.org>, both or neither. Without them the app tells an admin what to set. See [Telegram connections](telegram.md). |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS`, `MAIL_FROM`, `MAIL_FROM_NAME` | [connection alerts](alerts.md) and invitation emails |
+| `NUXT_ALLOW_PRIVATE_TARGETS` | `true` lets connections reach private and loopback addresses — see below |
+| `PORT` | the web app's port inside the container (default 3000) |
+
+`NUXT_ALLOW_PRIVATE_TARGETS=true` means more here than with Compose: every
+backend is on the container's loopback. The app still refuses its own Postgres,
+Evolution and bridge by address and port, but not Redis on `127.0.0.1:6379`, so
+turn it on only where everyone with an account is trusted.
+
+### Updating
+
+```bash
+docker pull ghcr.io/ju-li/automata-mcp-aio:1
+docker rm -f automata
+docker run -d --name automata …   # the same command as before
+```
+
+Migrations run at boot and only go forward, so moving to a new major is a
+deliberate edit of the tag. See [Releases](releases.md).
+
+### When to use Compose instead
+
+Choose Compose when you want to restart, upgrade or back up one service without
+the others, put Postgres on its own disk, or leave out WhatsApp or Telegram
+entirely. The single container always runs all of them.
+
+## Docker Compose
+
+### Start it
 
 ```bash
 git clone https://github.com/ju-li/automata-mcp.git && cd automata-mcp
@@ -35,7 +143,7 @@ Mail is optional: with `SMTP_HOST` empty, [connection alerts](alerts.md) and
 invitation emails are not delivered; an invitation link is still shown on
 screen when it is created.
 
-## What it runs
+### What it runs
 
 | Service | Image | Profile | Published |
 |---|---|---|---|
@@ -85,6 +193,10 @@ docker compose --profile whatsapp --profile telegram down
 
 Back up the `postgres_data` volume: it holds every user, connection, stored
 credential and synced message.
+
+The single container's equivalent is `docker volume rm` on the volume mounted at
+`/data` — it holds the sessions and the database alike. `docker rm` alone is
+safe.
 
 ## The app database
 

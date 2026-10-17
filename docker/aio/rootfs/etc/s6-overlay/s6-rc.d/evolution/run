@@ -1,0 +1,5 @@
+#!/command/with-contenv bash
+. /usr/local/bin/automata-env
+export HOME=/home/node
+cd /evolution
+exec s6-setuidgid node node dist/main
