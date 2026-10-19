@@ -217,6 +217,7 @@ has.
 | `instance_assignments` | "may use, not manage" grants to members |
 | `invitations` | SHA-256 of the invitation code, address, role, expiry |
 | `mcp_tokens` | SHA-256 of the connector token, holder, scope, expiry, `last_used_at` |
+| `totp_credentials`, `webauthn_credentials`, `recovery_codes`, `mfa_challenges` | second sign-in factors — see [Two-factor authentication](two-factor.md) |
 
 An `instances` row carries, by kind:
 

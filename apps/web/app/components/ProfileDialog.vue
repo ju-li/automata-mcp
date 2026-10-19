@@ -2,7 +2,8 @@
 import { toast } from 'vue-sonner'
 
 /**
- * Your own account: display name, email address, password.
+ * Your own account: display name, email address, password, two-factor
+ * authentication (`TwoFactorSettings.vue`, which asks for the password itself).
  *
  * Three stacked sections rather than tabs, each with its own submit button and
  * its own busy flag. They are three independent writes against three routes, and
@@ -275,6 +276,10 @@ async function submitPassword() {
           </Button>
         </div>
       </form>
+
+      <Separator />
+
+      <TwoFactorSettings />
 
       <DialogFooter>
         <Button

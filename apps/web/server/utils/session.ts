@@ -21,28 +21,24 @@ export const SESSION_COOKIE = 'automata_session'
 
 const SESSION_TTL_MS = 14 * 24 * 60 * 60 * 1000
 
-function hashSessionToken(token: string): string {
+export function hashSessionToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
 
+/**
+ * The flags every auth cookie carries — the session's, and the short-lived one
+ * a sign-in holds while it owes a second factor (`mfa.ts`).
+ */
+export function authCookieOptions(path = '/') {
+  return { httpOnly: true, secure: !import.meta.dev, sameSite: 'lax' as const, path }
+}
+
 function writeSessionCookie(event: H3Event, token: string, expiresAt: Date): void {
-  setCookie(event, SESSION_COOKIE, token, {
-    httpOnly: true,
-    secure: !import.meta.dev,
-    sameSite: 'lax',
-    path: '/',
-    expires: expiresAt,
-  })
+  setCookie(event, SESSION_COOKIE, token, { ...authCookieOptions(), expires: expiresAt })
 }
 
 export function clearSessionCookie(event: H3Event): void {
-  setCookie(event, SESSION_COOKIE, '', {
-    httpOnly: true,
-    secure: !import.meta.dev,
-    sameSite: 'lax',
-    path: '/',
-    maxAge: 0,
-  })
+  setCookie(event, SESSION_COOKIE, '', { ...authCookieOptions(), maxAge: 0 })
 }
 
 /** Start a session for this user and set its cookie. */
