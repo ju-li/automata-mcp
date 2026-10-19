@@ -90,3 +90,28 @@ export function recordLoginFailure(event: H3Event, email: string): void {
 export function clearLoginFailures(email: string): void {
   failures.delete(`email:${normaliseEmail(email)}`)
 }
+
+/**
+ * The same cap on wrong signup codes, per client address only — there is no
+ * account to key on yet. Shares the map and window with sign-in failures, under
+ * its own prefix, so the two never count against each other.
+ */
+export function assertSignupCodeAllowed(event: H3Event): void {
+  const now = Date.now()
+  prune(now)
+
+  const times = failures.get(`signup-ip:${clientIp(event)}`) ?? []
+  if (times.length < LOGIN_FAILURE_LIMIT) return
+
+  const retryAt = times[times.length - LOGIN_FAILURE_LIMIT]! + LOGIN_WINDOW_MS
+  setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil((retryAt - now) / 1000)))
+  throw createError({
+    statusCode: 429,
+    statusMessage: 'Too many wrong signup codes. Try again in a few minutes.',
+  })
+}
+
+export function recordSignupCodeFailure(event: H3Event): void {
+  const key = `signup-ip:${clientIp(event)}`
+  failures.set(key, [...(failures.get(key) ?? []), Date.now()])
+}

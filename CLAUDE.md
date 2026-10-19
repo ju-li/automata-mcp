@@ -118,6 +118,10 @@ Three things enforce it:
 
 **Handled `createError` not logged by Nitro.** Only unhandled/fatal errors reach its error handler, so deliberate 503 produces response with *nothing* in server logs — outage becomes guesswork. Admin-auth and session failures log underlying cause themselves, say which of two fixes applies. Do same for any handled error operator needs to diagnose.
 
+## Who may sign up
+
+`server/utils/signup-policy.ts` gates every signup **without** invitation; invitation path untouched in every mode. `NUXT_SIGNUP` = `open` | `invite-only`, default `invite-only`, unknown value read as invite-only (typo must not open door). Invite-only + `NUXT_SIGNUP_CODE` set → code required, **first account included** — else whoever finds fresh public install first becomes admin. Invite-only, no code → first account on empty DB only, decided by `claimFirstAccount()` *inside* signup transaction under `pg_advisory_xact_lock`, so two racing first signups can't both win; read failure = 503, never allow. Wrong code throttled per IP (`login-throttle.ts`, `signup-ip:` key) and logged. `/api/auth/signup-policy` tells UI `open` / `code` / `closed`, never the code. Why it matters: every self-signup = new org admin on our Evolution and bridge, and with `NUXT_ALLOW_PRIVATE_TARGETS` a stranger's DSN reaches the private network.
+
 ## Two-factor sign-in
 
 Web UI only — MCP tokens untouched, auth split intact. Opt-in per user: TOTP (`totp.ts`, hand-rolled RFC 6238 on `node:crypto`, verified against Appendix B vectors) and WebAuthn passkeys/security keys (`webauthn.ts`, `@simplewebauthn/server`), plus recovery codes. Passkey = **second factor only**, never passwordless. `docs/two-factor.md` = operator side.

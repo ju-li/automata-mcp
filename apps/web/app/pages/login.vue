@@ -18,6 +18,9 @@ const password = ref('')
 const error = ref('')
 const busy = ref(false)
 
+// Hide "Create one" where it would lead to a page saying sign-up is closed.
+const { data: signupPolicy } = await useFetch<{ selfSignup: 'open' | 'code' | 'closed' }>('/api/auth/signup-policy')
+
 const step = ref<'password' | 'factor'>('password')
 const methods = ref<Method[]>([])
 const method = ref<Method>('totp')
@@ -194,7 +197,7 @@ function choose(next: Method) {
       </div>
     </div>
 
-    <p v-if="step === 'password'" class="mt-6 text-center text-sm text-muted-foreground">
+    <p v-if="step === 'password' && signupPolicy?.selfSignup !== 'closed'" class="mt-6 text-center text-sm text-muted-foreground">
       No account?
       <NuxtLink to="/signup" class="text-foreground underline underline-offset-4">
         Create one
