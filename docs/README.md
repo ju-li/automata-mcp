@@ -16,6 +16,7 @@ here are about running and developing this repository.
 - [Telegram connections](telegram.md) — setting up the bridge, what syncs, bringing your own bridge
 - [Database connections](postgres.md) — what the table allowlist does and does not close, least-privilege roles
 - [Connection alerts](alerts.md) — disconnect emails and the hourly sweep
+- [Two-factor authentication](two-factor.md) — authenticator apps and passkeys, the `NUXT_PUBLIC_APP_URL` dependency, resetting a lost factor
 
 **Working on it**
 

@@ -157,4 +157,71 @@ export const APP_MIGRATIONS: AppMigration[] = [
       CREATE INDEX mcp_tokens_instance_idx ON app.mcp_tokens (instance);
     `,
   },
+  {
+    name: '0002_two_factor',
+    sql: /* sql */ `
+      -- Second factors for the web sign-in. None of this touches the MCP
+      -- surface: a connector token is its own credential.
+
+      -- An authenticator-app secret, one per user. confirmed_at stays empty
+      -- until a code from the app has been checked, so a setup abandoned
+      -- halfway is not a factor login asks for. last_step is the newest
+      -- 30-second step a code was accepted for; a code from that step or an
+      -- older one is refused, so one observed code cannot be replayed.
+      -- The secret is a plain column, like the credentials on app.instances.
+      CREATE TABLE app.totp_credentials (
+        user_id      text PRIMARY KEY REFERENCES app.users (id) ON DELETE CASCADE,
+        secret       text NOT NULL,
+        last_step    bigint NOT NULL DEFAULT 0,
+        confirmed_at timestamptz,
+        created      timestamptz NOT NULL DEFAULT now()
+      );
+
+      -- A passkey or security key. The public key is not secret; counter is
+      -- the authenticator's signature counter (0 for most passkeys).
+      CREATE TABLE app.webauthn_credentials (
+        id            text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        user_id       text NOT NULL REFERENCES app.users (id) ON DELETE CASCADE,
+        credential_id text NOT NULL,
+        public_key    bytea NOT NULL,
+        counter       bigint NOT NULL DEFAULT 0,
+        transports    jsonb NOT NULL DEFAULT '[]'::jsonb,
+        name          text NOT NULL DEFAULT '' CHECK (length(name) <= 100),
+        created       timestamptz NOT NULL DEFAULT now(),
+        last_used_at  timestamptz
+      );
+      CREATE UNIQUE INDEX webauthn_credentials_credential_id_key ON app.webauthn_credentials (credential_id);
+      CREATE INDEX webauthn_credentials_user_idx ON app.webauthn_credentials (user_id);
+
+      -- Single-use recovery codes. Only the SHA-256 is stored; the codes carry
+      -- 60 random bits each, so a fast hash is enough.
+      CREATE TABLE app.recovery_codes (
+        id        text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        user_id   text NOT NULL REFERENCES app.users (id) ON DELETE CASCADE,
+        code_hash text NOT NULL CHECK (length(code_hash) = 64),
+        used_at   timestamptz,
+        created   timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX recovery_codes_user_hash_key ON app.recovery_codes (user_id, code_hash);
+
+      -- A sign-in that passed the password and still owes a second factor
+      -- ('login'), or a passkey registration in progress ('register'). Never a
+      -- session: a row in app.sessions means fully signed in, so nothing that
+      -- reads sessions can mistake a half-finished login for one. token_hash is
+      -- the SHA-256 of the login cookie; registration rows have none.
+      CREATE TABLE app.mfa_challenges (
+        id                 text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        user_id            text NOT NULL REFERENCES app.users (id) ON DELETE CASCADE,
+        purpose            text NOT NULL CHECK (purpose IN ('login', 'register')),
+        token_hash         text CHECK (token_hash IS NULL OR length(token_hash) = 64),
+        webauthn_challenge text,
+        attempts           integer NOT NULL DEFAULT 0,
+        expires_at         timestamptz NOT NULL,
+        created            timestamptz NOT NULL DEFAULT now(),
+        CHECK ((purpose = 'login') = (token_hash IS NOT NULL))
+      );
+      CREATE UNIQUE INDEX mfa_challenges_token_hash_key ON app.mfa_challenges (token_hash);
+      CREATE INDEX mfa_challenges_user_idx ON app.mfa_challenges (user_id);
+    `,
+  },
 ]
