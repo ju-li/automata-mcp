@@ -3,6 +3,12 @@ const PUBLIC_ROUTES = new Set(['/login', '/signup'])
 /** Reachable while signed in but belonging to no organization. */
 const ORGLESS_ROUTE = '/no-organization'
 
+/**
+ * Your own account, reachable with or without an organization: changing a
+ * password or adding a second factor must not wait on someone inviting you.
+ */
+const PROFILE_ROUTE = '/profile'
+
 /** An invitation link is reachable signed out, signed in, and with no organization. */
 function isInviteRoute(path: string): boolean {
   return path.startsWith('/invite/')
@@ -49,7 +55,7 @@ export default defineNuxtRouteMiddleware(async (to) => {
 
   if (!user.value) return
 
-  if (!hasOrg.value && to.path !== ORGLESS_ROUTE) {
+  if (!hasOrg.value && to.path !== ORGLESS_ROUTE && to.path !== PROFILE_ROUTE) {
     return navigateTo(ORGLESS_ROUTE)
   }
 

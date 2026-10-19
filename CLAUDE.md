@@ -62,7 +62,7 @@ Nuxt overrides `runtimeConfig` only from `NUXT_`-prefixed vars, so some values d
 
 ```
 apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context = repo root).
-  app/pages/                 login, signup, no-organization, team, invite/[code],
+  app/pages/                 login, signup, no-organization, team, profile, invite/[code],
                              instances/{index,new,[id]}
   app/components/            app components + ui/ (shadcn-vue, bare names)
   app/composables/           useSession (user + org + role), useOrg, useConnectionState,
