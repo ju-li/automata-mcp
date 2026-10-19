@@ -63,6 +63,8 @@ Run your own with one click on Railway or with Docker Compose.
   message are collapsed, and @-mentions are resolved to names.
 - **Built for teams.** Organizations with admins and members, email invitations,
   and connections assigned to the people who should use them.
+- **Two-factor sign-in.** Authenticator apps, passkeys and security keys, with
+  recovery codes. See [two-factor authentication](docs/two-factor.md).
 - **Disconnect alerts.** When a WhatsApp or Telegram connection drops, everyone
   who can reach it gets an email — and another when it recovers.
 - **Bring your own backend.** Point a connection at your own Evolution API server
@@ -130,6 +132,7 @@ from it. See [Self-hosting](docs/self-hosting.md).
   [self-hosting](docs/self-hosting.md), [Railway](docs/deploy-railway.md),
   [WhatsApp](docs/whatsapp.md), [Telegram](docs/telegram.md),
   [PostgreSQL](docs/postgres.md), [alerts](docs/alerts.md),
+  [two-factor](docs/two-factor.md),
   [development](docs/development.md)
 
 ## License

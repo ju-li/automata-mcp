@@ -83,7 +83,7 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              db-rows, sql-engine, pg-pool, pg-guard,
                              pg-run, pg-catalog, chats, alerts, mailer,
                              mcp-kind-tool, telegram, telegram-db,
-                             telegram-instances, …
+                             telegram-instances, mfa, totp, webauthn, …
   shared/connection.ts       InstanceKind, assertNever — imported as #shared
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              `telegram` schema of the shared Postgres. See "Telegram bridge".
@@ -117,6 +117,22 @@ Three things enforce it:
 **Failure-mode semantics matter:** DB outage answers **503**, never 401. 401 tells client credential bad — MCP client discards token it should keep, browser user silently signed out mid-outage. Both surfaces distinguish: `resolveMcpAuth` and `getSessionUser` return `undefined` (→ 401) only when query ran and found no usable row; any thrown error → `appDbUnavailable()` (503). `checkPassword` same for login form. Preserve in any new auth code: `catch` on auth read must never produce `undefined`.
 
 **Handled `createError` not logged by Nitro.** Only unhandled/fatal errors reach its error handler, so deliberate 503 produces response with *nothing* in server logs — outage becomes guesswork. Admin-auth and session failures log underlying cause themselves, say which of two fixes applies. Do same for any handled error operator needs to diagnose.
+
+## Two-factor sign-in
+
+Web UI only — MCP tokens untouched, auth split intact. Opt-in per user: TOTP (`totp.ts`, hand-rolled RFC 6238 on `node:crypto`, verified against Appendix B vectors) and WebAuthn passkeys/security keys (`webauthn.ts`, `@simplewebauthn/server`), plus recovery codes. Passkey = **second factor only**, never passwordless. `docs/two-factor.md` = operator side.
+
+**Row in `app.sessions` means fully signed in.** Password-OK-factor-owed sign-in = row in `app.mfa_challenges` + `automata_mfa` cookie scoped to `/api/auth/login`; becomes session only via `finishLoginChallenge()`. So `getSessionUser`, session middleware, every `requireSessionUser` caller unchanged and can't be handed half-finished login. Never add "mfa pending" flag to sessions — every reader of sessions would have to remember to check it.
+
+Rules easy to undo:
+
+- **`login.post.ts` fails closed.** Factor read throwing = 503, never fall through to `startSession` — that signs 2FA account in on password alone. Challenge lookup throwing = 503 (`resolveLoginChallenge`), same rule as `getSessionUser`.
+- **Every single-use thing spent by conditional write**, so racing duplicates can't both pass: TOTP `last_step` moves forward only (`UPDATE … WHERE last_step < step`) = replay guard; recovery code `WHERE used_at IS NULL`; passkey prompt challenge nulled `WHERE webauthn_challenge = expected` *before* verifying; login challenge deleted `RETURNING` before `startSession`; attempts bumped `WHERE attempts < 5`. Five wrong answers delete challenge → password again. In-memory per-account throttle (`assertAuthAttemptAllowed`) = speed bump only, like invite mail.
+- **Adding a factor needs current password, not just removing.** Stolen session enrolling attacker's authenticator locks owner out. First factor (decided under `lockUserFactors` row lock, so two enrolments agree) mints recovery codes and calls `endOtherSessions`; last factor removed deletes recovery codes in same transaction. Recovery codes alone ≠ factor.
+- **RP ID and origin from `NUXT_PUBLIC_APP_URL`, never request `Host`.** Unset → passkey routes 501, UI hides them. Domain change kills every passkey; TOTP survives.
+- **Passkey and registration challenges in DB** (`mfa_challenges.purpose`), not memory — second replica must finish what first started.
+
+TOTP secret = plain column, same trade as `instances` credentials. Recovery codes 60-bit random, stored SHA-256 (fast hash fine at that entropy).
 
 ## MCP wiring
 
