@@ -87,6 +87,7 @@ ignored.
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Telegram — from <https://my.telegram.org>, both or neither. Without them the app tells an admin what to set. See [Telegram connections](telegram.md). |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS`, `MAIL_FROM`, `MAIL_FROM_NAME` | [connection alerts](alerts.md) and invitation emails |
 | `NUXT_ALLOW_PRIVATE_TARGETS` | `true` lets connections reach private and loopback addresses — see below |
+| `SIGNUP`, `SIGNUP_CODE` | who can create an account — see [Who can sign up](#who-can-sign-up) |
 | `PORT` | the web app's port inside the container (default 3000) |
 
 `NUXT_ALLOW_PRIVATE_TARGETS=true` means more here than with Compose: every
@@ -173,6 +174,34 @@ docker compose pull && docker compose up -d   # add the same --profile flags
 Migrations run at boot and only go forward, so moving to a new major is a
 deliberate edit of the tag, not something `pull` does for you. See
 [Releases](releases.md).
+
+## Who can sign up
+
+Each self-signup creates a new organization, and its admin can start
+connections on your Evolution server and Telegram bridge. So by default nobody
+can sign up without an invitation:
+
+| `SIGNUP` (`NUXT_SIGNUP`) | `SIGNUP_CODE` (`NUXT_SIGNUP_CODE`) | Without an invitation |
+|---|---|---|
+| unset or `invite-only` | unset | only the first account on an empty database — that person becomes admin |
+| unset or `invite-only` | set | anyone who enters the code, the first account included |
+| `open` | ignored | anyone who finds the URL |
+
+Invitation links work in every mode. Neither variable is required: a new
+install with both unset lets you sign up first, and you invite everyone else
+from the Team page.
+
+Until that first signup, a fresh install on a public address belongs to
+whoever opens it first. If that window matters, set `SIGNUP_CODE` before you
+start the stack (`openssl rand -base64 24`) and hand the code only to people
+who should get their own organization.
+
+**`NUXT_ALLOW_PRIVATE_TARGETS=true` with `SIGNUP=open` is the risky
+combination.** Any stranger who signs up can then paste a database or Evolution
+address such as `postgres://…@192.168.1.20:5432/…` and the server connects to
+it for them. The app still refuses its own Postgres, Evolution and bridge, but
+not anything else on your network. Keep private targets for deployments where
+everyone with an account is trusted, and keep sign-up closed there.
 
 ## ⚠️ WhatsApp pairing burns a real phone number
 

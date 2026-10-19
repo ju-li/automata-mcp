@@ -122,6 +122,15 @@ export default defineNuxtConfig({
     // deployment's own backends. See server/utils/net-guard.ts.
     allowPrivateTargets: false,
 
+    // Who may create an account without an invitation: `open` or `invite-only`.
+    // Invite-only lets the first account on an empty database through, so a new
+    // deployment still works unconfigured. See server/utils/signup-policy.ts.
+    signup: 'invite-only',
+    // Optional, invite-only mode only: a shared code that lets its holder sign
+    // up and create their own organization. When set, the first account needs
+    // it too.
+    signupCode: '',
+
     webhookUrl: '',
     webhookSecret: '',
 

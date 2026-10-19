@@ -53,6 +53,10 @@ services:
       NUXT_PUBLIC_APP_URL: ${NUXT_PUBLIC_APP_URL:?set NUXT_PUBLIC_APP_URL in .env}
       NUXT_WEBHOOK_SECRET: ${WEBHOOK_SECRET:?set WEBHOOK_SECRET in .env}
 
+      # Sign-up. Unset = invite-only; see docs/self-hosting.md "Who can sign up".
+      NUXT_SIGNUP: ${SIGNUP:-invite-only}
+      NUXT_SIGNUP_CODE: ${SIGNUP_CODE:-}
+
       # WhatsApp. Harmless without the whatsapp profile: nothing answers there,
       # and the create page says WhatsApp is unavailable.
       NUXT_EVOLUTION_URL: http://evolution:8080
