@@ -9,10 +9,16 @@ const body = z.object({
 /**
  * Change your own email address.
  *
- * The password proof stands in for a confirmation link: invitations are already
- * link-based rather than mail-dependent, and an email change that waited on a
- * mail this deployment may not be able to send would leave the user waiting for
- * a message nobody can deliver.
+ * With email verification on (`server/utils/email-verification.ts`) the new
+ * address gets a code and a link, and nothing changes until one comes back: an
+ * account must not be able to take an address it does not own — someone else's
+ * pending invitation included. The answer is `{ pending: true }` and the old
+ * address keeps working meanwhile. The taken-address check still runs first,
+ * so a signed-in user is told plainly rather than mailing the address's owner.
+ *
+ * With it off (no SMTP in `auto` mode, or `off`) the password proof is all
+ * there is, as before: a change that waited on a mail this deployment cannot
+ * send would leave the user waiting for a message nobody can deliver.
  *
  * The address is stored through `normaliseEmail()`, the same function invitation
  * acceptance compares against. Getting that wrong would make a pending
@@ -31,6 +37,16 @@ export default defineEventHandler(async (event) => {
 
   const next = normaliseEmail(email)
   if (next === normaliseEmail(user.email)) return { email: user.email, reauthenticated: true }
+
+  if (emailVerificationRequired()) {
+    if (verificationSetting() === 'required') assertVerificationDeliverable()
+    const sql = await appDb()
+    const [taken] = await sql`SELECT 1 FROM app.users WHERE email = ${next}`
+    if (taken) throw createError({ statusCode: 409, statusMessage: 'That email address is already in use' })
+
+    await startVerification(event, { purpose: 'email_change', email: next, userId: user.id })
+    return { email: user.email, pending: true, pendingEmail: next, reauthenticated: true }
+  }
 
   let updated: AppUser
   try {

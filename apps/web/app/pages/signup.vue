@@ -9,14 +9,14 @@ const busy = ref(false)
 
 // How this deployment lets people sign up without an invitation. Unknown (the
 // read failed) shows the form; the server decides either way.
-const { data: policy } = await useFetch<{ selfSignup: 'open' | 'code' | 'closed' }>('/api/auth/signup-policy')
+const { data: policy } = await useFetch<{ selfSignup: 'open' | 'code' | 'closed', verification?: boolean }>('/api/auth/signup-policy')
 const selfSignup = computed(() => policy.value?.selfSignup ?? 'open')
 
 async function submit() {
   error.value = ''
   busy.value = true
   try {
-    await $fetch('/api/auth/signup', {
+    const result = await $fetch<{ verificationRequired?: boolean }>('/api/auth/signup', {
       method: 'POST',
       body: {
         email: email.value,
@@ -24,6 +24,9 @@ async function submit() {
         signupCode: selfSignup.value === 'code' ? signupCode.value : undefined,
       },
     })
+    // With verification on, the account does not exist yet: the mailed code
+    // creates it.
+    if (result.verificationRequired) return await navigateTo('/verify-email')
     await refresh()
     await navigateTo('/instances')
   }
@@ -42,7 +45,9 @@ async function submit() {
       Create an account
     </h1>
     <p v-if="selfSignup !== 'closed'" class="mt-1 text-sm text-muted-foreground">
-      You will add your first connection in the next step.
+      {{ policy?.verification
+        ? 'We will email you a code to confirm the address first.'
+        : 'You will add your first connection in the next step.' }}
     </p>
 
     <p v-if="selfSignup === 'closed'" class="mt-8 text-sm text-muted-foreground">

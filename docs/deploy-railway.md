@@ -188,7 +188,9 @@ the first account on the new database gets through and everyone after joins by
 invitation. Set `NUXT_SIGNUP_CODE` on the web service to let holders of that
 code create their own organization; it is then required for the first account
 too. `NUXT_SIGNUP=open` lets anyone who finds the domain sign up. See
-[Who can sign up](self-hosting.md#who-can-sign-up).
+[Who can sign up](self-hosting.md#who-can-sign-up). Once SMTP is configured,
+new signups and address changes are verified by email — see
+[Email verification](self-hosting.md#email-verification).
 
 ## First run
 

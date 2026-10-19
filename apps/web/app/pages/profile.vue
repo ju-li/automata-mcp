@@ -31,6 +31,11 @@ const newPassword = ref('')
 const confirmPassword = ref('')
 const mismatch = ref('')
 
+// An address change waiting on its mailed code (email verification on). The old
+// address stays the sign-in until it is confirmed.
+const { data: pendingData, refresh: refreshPendingEmail } = await useFetch<{ pendingEmail: string | null }>('/api/auth/email/pending')
+const pendingEmail = computed(() => pendingData.value?.pendingEmail ?? null)
+
 const { busy: nameBusy, run: runName } = useApiAction()
 const { busy: emailBusy, run: runEmail } = useApiAction()
 const { busy: passwordBusy, run: runPassword } = useApiAction()
@@ -82,18 +87,33 @@ async function submitEmail() {
   if (!emailChanged.value || !emailPassword.value) return
 
   const result = await runEmail(async () => {
-    return await $fetch<{ email: string, reauthenticated: boolean }>('/api/auth/email', {
+    return await $fetch<{ email: string, reauthenticated: boolean, pending?: boolean, pendingEmail?: string }>('/api/auth/email', {
       method: 'PATCH',
       body: { email: email.value.trim(), currentPassword: emailPassword.value },
     })
   }, { failure: 'Could not change the email address' })
 
   if (!result) return
+  if (result.pending) {
+    emailPassword.value = ''
+    email.value = user.value?.email ?? ''
+    await refreshPendingEmail()
+    toast.success(`We sent a code to ${result.pendingEmail}. Your address changes once you confirm it.`)
+    await navigateTo('/verify-email')
+    return
+  }
   if (!await settleSession(result.reauthenticated, 'Email address changed.')) return
 
   emailPassword.value = ''
   await refreshEverything()
   toast.success(`Email address changed to ${result.email}.`)
+}
+
+async function cancelPendingEmail() {
+  await runEmail(async () => {
+    await $fetch('/api/auth/email/pending', { method: 'DELETE' })
+    await refreshPendingEmail()
+  }, { success: 'Pending address change cancelled.', failure: 'Could not cancel the change' })
 }
 
 async function submitPassword() {
@@ -167,7 +187,24 @@ async function submitPassword() {
           will no longer be yours to accept.
         </CardDescription>
       </CardHeader>
-      <CardContent>
+      <CardContent class="space-y-4">
+        <div v-if="pendingEmail" class="max-w-sm rounded-md border p-3 text-sm">
+          <p>
+            Waiting for confirmation of <span class="font-medium">{{ pendingEmail }}</span>.
+            Until then you keep signing in as {{ user?.email }}.
+          </p>
+          <div class="mt-3 flex gap-2">
+            <Button as-child size="sm" variant="outline">
+              <NuxtLink to="/verify-email">
+                Enter code
+              </NuxtLink>
+            </Button>
+            <Button size="sm" variant="ghost" :disabled="emailBusy" @click="cancelPendingEmail()">
+              Cancel change
+            </Button>
+          </div>
+        </div>
+
         <form class="max-w-sm space-y-4" @submit.prevent="submitEmail">
           <div class="space-y-2">
             <Label for="profile-email">New address</Label>

@@ -122,6 +122,24 @@ Three things enforce it:
 
 `server/utils/signup-policy.ts` gates every signup **without** invitation; invitation path untouched in every mode. `NUXT_SIGNUP` = `open` | `invite-only`, default `invite-only`, unknown value read as invite-only (typo must not open door). Invite-only + `NUXT_SIGNUP_CODE` set → code required, **first account included** — else whoever finds fresh public install first becomes admin. Invite-only, no code → first account on empty DB only, decided by `claimFirstAccount()` *inside* signup transaction under `pg_advisory_xact_lock`, so two racing first signups can't both win; read failure = 503, never allow. Wrong code throttled per IP (`login-throttle.ts`, `signup-ip:` key) and logged. `/api/auth/signup-policy` tells UI `open` / `code` / `closed`, never the code. Why it matters: every self-signup = new org admin on our Evolution and bridge, and with `NUXT_ALLOW_PRIVATE_TARGETS` a stranger's DSN reaches the private network.
 
+## Email verification
+
+`server/utils/email-verification.ts` = one file minting, resolving, spending. Covers self-signup, invited signup (holding forwarded link ≠ holding inbox), profile email change. `NUXT_EMAIL_VERIFICATION` = `auto` | `required` | `off`, default `auto` = on iff `NUXT_SMTP_HOST` set; unknown value read as `required`. `required` without SMTP → 503 + log, never unverified account.
+
+**Signup has no `app.users` row until verified.** Pending signup = row in `app.email_verifications` carrying finished password hash, invite id, `first_account_only`; holds **no** unique claim on address, so several may name one, first to verify wins (`createUser` 409 for rest). That *is* the anti-squatting property — never add `email_verified` column on users with unverified rows taking the unique index. Same transaction as unverified signup runs at verify time (`claimFirstAccount`, `createUser`, org or invite acceptance), with row's `DELETE … RETURNING` as first statement, so spend rolls back with failure and two verifies of one row can't both win. Invitation re-read at verify — may be revoked meanwhile. Permanent refusal (409/422/403) deletes row.
+
+Rules easy to undo:
+
+- **Link built from `NUXT_PUBLIC_APP_URL` only**, never request origin — `Host` is requester's choice, link pointing there hands them token. Unset → mail carries code only. (`inviteUrl` does fall back to request origin; harmless there since link shown to admin who made it.)
+- **Link spent only by POST** (`/api/auth/verify/link`, Confirm button on `/verify-email`), never on GET/page load — mail scanners open links.
+- **Code bound to `automata_verify` cookie** (path `/api/auth/verify`, so `/verify-email` page fetches pending row client-side only — SSR request never carries it). Five wrong codes delete row; resend rotates code + link but resets **neither** attempts nor expiry.
+- **Signup answer identical whether address registered.** Registered address gets "you already have an account" mail instead of code — no enumeration through signup form.
+- **Mail cooldown keyed on client IP + address, never address alone** — else stranger resubmitting victim's address each minute keeps owner from ever getting code: squatting moved into throttle. Per-IP hourly cap bounds flooding.
+- **Email change: old address stays sign-in until confirmed**; one pending change per account; taken-address check runs first (signed-in user, 409 fine); old address mailed notice on success.
+- Mail send failing deletes row and answers 503 — pending signup nobody can finish worse than error.
+
+Existing accounts never asked to verify; mode `off` keeps old password-only email change.
+
 ## Two-factor sign-in
 
 Web UI only — MCP tokens untouched, auth split intact. Opt-in per user: TOTP (`totp.ts`, hand-rolled RFC 6238 on `node:crypto`, verified against Appendix B vectors) and WebAuthn passkeys/security keys (`webauthn.ts`, `@simplewebauthn/server`), plus recovery codes. Passkey = **second factor only**, never passwordless. `docs/two-factor.md` = operator side.

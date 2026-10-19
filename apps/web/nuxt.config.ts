@@ -130,6 +130,10 @@ export default defineNuxtConfig({
     // up and create their own organization. When set, the first account needs
     // it too.
     signupCode: '',
+    // Prove an address before it becomes a sign-in: `auto` (on when
+    // NUXT_SMTP_HOST is set), `required` or `off`; anything else is read as
+    // required. See server/utils/email-verification.ts.
+    emailVerification: 'auto',
 
     webhookUrl: '',
     webhookSecret: '',
