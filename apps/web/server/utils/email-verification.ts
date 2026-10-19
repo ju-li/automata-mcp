@@ -23,7 +23,9 @@ import type { AppInvitation, AppUser, Db } from './app-db'
  * The mail carries a link and a six-digit code. The link stands alone (32
  * random bytes); the code works only with the `automata_verify` cookie the
  * waiting browser was handed, five wrong answers delete the row, and the row
- * expires after thirty minutes.
+ * expires after thirty minutes. Wrong codes are also capped per address across
+ * every row (`assertVerifyCodeAllowed`), since a fresh signup is a fresh row
+ * with five fresh guesses.
  *
  * `NUXT_EMAIL_VERIFICATION` is `auto` (default: on when `NUXT_SMTP_HOST` is
  * set), `required` or `off`. Anything else reads as `required`, since a typo
@@ -407,8 +409,13 @@ export async function verifyByCode(event: H3Event, code: string): Promise<Verifi
     throw verificationExpired()
   }
 
+  // Before the comparison, and before any write: a locked address must not
+  // burn its owner's row either.
+  assertVerifyCodeAllowed(event, row.email)
+
   if (!codeMatches(row, code)) {
     console.warn(`[verify] wrong verification code for a pending ${row.purpose}`)
+    recordVerifyCodeFailure(row.email)
     const sql = await appDb()
     // Conditional, so two wrong answers in flight cannot both be the fourth.
     const [counted] = await sql<{ attempts: number }[]>`

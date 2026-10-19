@@ -115,3 +115,38 @@ export function recordSignupCodeFailure(event: H3Event): void {
   const key = `signup-ip:${clientIp(event)}`
   failures.set(key, [...(failures.get(key) ?? []), Date.now()])
 }
+
+/**
+ * The same cap on wrong email-verification codes, per address being verified
+ * and across every pending row for it. Each row allows five guesses, but a new
+ * signup for the same address is a new row with five more, and the per-client
+ * mail throttle is all that limits minting rows — so neither bound holds alone.
+ * Keyed on the address only, for that reason.
+ *
+ * The price is the per-email login key's: a stranger can keep code entry for an
+ * address locked. Only the code — the link in the mail is not throttled here, so
+ * the owner still verifies with it. A refused attempt touches no row.
+ */
+function verifyCodeKey(email: string): string {
+  return `verify-email:${normaliseEmail(email)}`
+}
+
+export function assertVerifyCodeAllowed(event: H3Event, email: string): void {
+  const now = Date.now()
+  prune(now)
+
+  const times = failures.get(verifyCodeKey(email)) ?? []
+  if (times.length < LOGIN_FAILURE_LIMIT) return
+
+  const retryAt = times[times.length - LOGIN_FAILURE_LIMIT]! + LOGIN_WINDOW_MS
+  setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil((retryAt - now) / 1000)))
+  throw createError({
+    statusCode: 429,
+    statusMessage: 'Too many wrong codes for this address. Use the link in the email, or try again in a few minutes.',
+  })
+}
+
+export function recordVerifyCodeFailure(email: string): void {
+  const key = verifyCodeKey(email)
+  failures.set(key, [...(failures.get(key) ?? []), Date.now()])
+}

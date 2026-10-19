@@ -134,6 +134,7 @@ Rules easy to undo:
 - **Link spent only by POST** (`/api/auth/verify/link`, Confirm button on `/verify-email`), never on GET/page load — mail scanners open links.
 - **Code bound to `automata_verify` cookie** (path `/api/auth/verify`, so `/verify-email` page fetches pending row client-side only — SSR request never carries it). Five wrong codes delete row; resend rotates code + link but resets **neither** attempts nor expiry.
 - **Signup answer identical whether address registered.** Registered address gets "you already have an account" mail instead of code — no enumeration through signup form.
+- **Wrong codes also capped per address, across all rows and clients** (`assertVerifyCodeAllowed` in `login-throttle.ts`, 10 per 15 min). Per-row five resets with every new signup for the address, so per-row alone = unbounded guessing. Locks **code only** — never put it on link path, link is owner's way out — and checked before any write so locked address can't burn owner's row. Never replace with per-address mail cap: that withholds mail itself.
 - **Mail cooldown keyed on client IP + address, never address alone** — else stranger resubmitting victim's address each minute keeps owner from ever getting code: squatting moved into throttle. Per-IP hourly cap bounds flooding.
 - **Email change: old address stays sign-in until confirmed**; one pending change per account; taken-address check runs first (signed-in user, 409 fine); old address mailed notice on success.
 - Mail send failing deletes row and answers 503 — pending signup nobody can finish worse than error.
