@@ -29,13 +29,17 @@ there is no passwordless sign-in.
 1. Email and password, as before. If they are right and the account has a
    factor, no session starts yet. The browser gets a five-minute, httpOnly
    cookie scoped to `/api/auth/login`, backed by a row in `app.mfa_challenges`.
+   An account has one pending sign-in at a time: entering the password again
+   cancels the earlier one.
 2. The person answers with a code, a passkey, or a recovery code. A right answer
-   deletes the challenge and starts the normal session. After five wrong
-   answers the challenge is deleted, and the password has to be entered again.
+   deletes the challenge and starts the normal session. Each answer uses up one
+   of five attempts as it arrives, before it is checked, so sending many at once
+   gets no more than five; after that the challenge is deleted and the password
+   has to be entered again.
 
 Each authenticator code works once, and a code seen over someone's shoulder
 can't be replayed. Throttles refuse further attempts for a while after ten
-failures in fifteen minutes: per account for the second step, and per email
+in fifteen minutes: per account for the second step (failed attempts only), and per email
 and per client address for the password. They are in memory, per process.
 
 Adding or removing a factor, or regenerating recovery codes, asks for the
