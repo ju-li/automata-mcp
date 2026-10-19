@@ -16,9 +16,12 @@ import type { Db } from './app-db'
  * every `requireSessionUser` caller are unchanged — none of them can be handed
  * a half-finished sign-in, because none of them can see one.
  *
- * A challenge allows five wrong answers and is then deleted; the password has
- * to be typed again for another five. That cap is the control. The per-account
- * throttle below is a speed bump on top, as for invitation mail.
+ * A challenge allows five answers and is then deleted; the password has to be
+ * typed again for another five. Each answer claims its attempt *before* it is
+ * checked, so five requests in flight at once spend all five, and an account has
+ * one live sign-in at a time, so the five cannot be multiplied across cookies.
+ * That cap is the control. The per-account throttle below is a speed bump on
+ * top, as for invitation mail.
  */
 
 export const MFA_COOKIE = 'automata_mfa'
@@ -77,17 +80,31 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
 
-/** Password accepted, factor owed: record that and hand the browser its cookie. */
+/**
+ * Password accepted, factor owed: record that and hand the browser its cookie.
+ *
+ * Replaces any sign-in the account already had pending. Otherwise someone
+ * holding the password signs in K times and spreads guesses over K challenges,
+ * five each. The user row lock serialises two sign-ins racing, so both cannot
+ * delete before either inserts and leave two alive. The cost is that a sign-in
+ * left half-finished in another tab expires.
+ */
 export async function startLoginChallenge(event: H3Event, userId: string): Promise<void> {
   const sql = await appDb()
   const token = randomBytes(32).toString('base64url')
   const expiresAt = new Date(Date.now() + CHALLENGE_TTL_MS)
 
-  await sql`
-    INSERT INTO app.mfa_challenges (user_id, purpose, token_hash, expires_at)
-    VALUES (${userId}, 'login', ${hashToken(token)}, ${expiresAt})
-  `
-  void sql`DELETE FROM app.mfa_challenges WHERE user_id = ${userId} AND expires_at < now()`.catch(() => {})
+  await sql.begin(async (tx) => {
+    await lockUserFactors(tx, userId)
+    await tx`
+      DELETE FROM app.mfa_challenges
+      WHERE user_id = ${userId} AND (purpose = 'login' OR expires_at < now())
+    `
+    await tx`
+      INSERT INTO app.mfa_challenges (user_id, purpose, token_hash, expires_at)
+      VALUES (${userId}, 'login', ${hashToken(token)}, ${expiresAt})
+    `
+  })
 
   setCookie(event, MFA_COOKIE, token, { ...authCookieOptions(MFA_COOKIE_PATH), expires: expiresAt })
 }
@@ -141,21 +158,48 @@ export function loginChallengeExpired(): Error {
 }
 
 /**
- * Count a wrong answer. The fifth deletes the challenge, so the next try needs
- * the password again. The increment is one conditional statement, so two wrong
- * answers in flight cannot both be the fourth.
+ * Spend one of the challenge's attempts, before the answer is looked at, and
+ * return which attempt this is. Counting after the check let every request that
+ * read `attempts = 0` at the start have a guess, however many arrived at once.
+ * The increment is one conditional statement, so no two requests claim the same
+ * attempt and none claims a sixth; one that finds nothing left gets the 401 that
+ * sends it back to the password.
  */
-export async function failLoginChallenge(challenge: LoginChallenge, reason: string): Promise<Error> {
-  console.warn(`[mfa] second factor refused for user ${challenge.user_id}: ${reason}`)
-  recordAuthFailure(`mfa:${challenge.user_id}`)
+export async function claimLoginAttempt(challenge: LoginChallenge): Promise<number> {
+  let row: { attempts: number } | undefined
+  try {
+    const sql = await appDb()
+    ;[row] = await sql<{ attempts: number }[]>`
+      UPDATE app.mfa_challenges SET attempts = attempts + 1
+      WHERE id = ${challenge.id}
+        AND purpose = 'login'
+        AND expires_at > now()
+        AND attempts < ${MAX_CHALLENGE_ATTEMPTS}
+      RETURNING attempts
+    `
+    if (!row) await sql`DELETE FROM app.mfa_challenges WHERE id = ${challenge.id}`
+  }
+  catch (cause) {
+    console.error('[mfa] could not count a sign-in attempt in the app database:', cause)
+    throw appDbUnavailable(cause)
+  }
 
-  const sql = await appDb()
-  const [row] = await sql<{ attempts: number }[]>`
-    UPDATE app.mfa_challenges SET attempts = attempts + 1
-    WHERE id = ${challenge.id} AND attempts < ${MAX_CHALLENGE_ATTEMPTS}
-    RETURNING attempts
-  `
-  if (!row || row.attempts >= MAX_CHALLENGE_ATTEMPTS) {
+  if (!row) {
+    console.warn(`[mfa] sign-in challenge for user ${challenge.user_id} is out of attempts`)
+    throw loginChallengeExpired()
+  }
+  return row.attempts
+}
+
+/**
+ * The answer to `attempt` was wrong. The attempt is already spent; the last one
+ * deletes the challenge, so the next try needs the password again.
+ */
+export async function failLoginChallenge(challenge: LoginChallenge, attempt: number, reason: string): Promise<Error> {
+  console.warn(`[mfa] second factor refused for user ${challenge.user_id} (attempt ${attempt}): ${reason}`)
+
+  if (attempt >= MAX_CHALLENGE_ATTEMPTS) {
+    const sql = await appDb()
     await sql`DELETE FROM app.mfa_challenges WHERE id = ${challenge.id}`
     return loginChallengeExpired()
   }
@@ -271,10 +315,14 @@ export async function afterFactorRemoved(tx: Db, userId: string): Promise<void> 
 // ── throttle ───────────────────────────────────────────────────────────────
 
 /**
- * A crude per-account throttle on failed second steps: ten failures in fifteen
- * minutes and the next attempt is refused for the rest of the window. Keys are
- * `mfa:<user id>`. The password step has its own, per email and per client
- * address, in `login-throttle.ts`.
+ * A crude per-account throttle on second steps: ten attempts in fifteen minutes
+ * and the next is refused for the rest of the window. Keys are `mfa:<user id>`.
+ * The password step has its own, per email and per client address, in
+ * `login-throttle.ts`.
+ *
+ * An attempt is counted when it is claimed, in the same synchronous step as the
+ * check, so a burst arriving together cannot all pass before any is recorded.
+ * A right answer hands its attempt back with `forgiveAuthAttempt`.
  *
  * In-memory and per-process, like the invitation mail throttle. A speed bump,
  * not a security control: a restart empties it and a second replica doubles
@@ -291,16 +339,25 @@ function recentFailures(key: string, now: number): number[] {
   return recent
 }
 
-export function assertAuthAttemptAllowed(key: string): void {
-  if (recentFailures(key, Date.now()).length >= FAILURE_LIMIT) {
-    console.warn(`[mfa] throttled sign-in attempts for ${key.split(':')[0]}`)
-    throw createError({ statusCode: 429, statusMessage: 'Too many failed attempts. Try again in a few minutes.' })
-  }
-}
-
-export function recordAuthFailure(key: string): void {
+/** Check and count an attempt, with no `await` between the two. Returns its timestamp. */
+export function claimAuthAttempt(key: string): number {
   const now = Date.now()
   // Prune everything now and then so keys for addresses tried once do not pile up.
   if (failures.size > 10_000) for (const k of failures.keys()) recentFailures(k, now)
-  failures.set(key, [...recentFailures(key, now), now])
+  const recent = recentFailures(key, now)
+  if (recent.length >= FAILURE_LIMIT) {
+    console.warn(`[mfa] throttled sign-in attempts for ${key.split(':')[0]}`)
+    throw createError({ statusCode: 429, statusMessage: 'Too many failed attempts. Try again in a few minutes.' })
+  }
+  failures.set(key, [...recent, now])
+  return now
+}
+
+/** The attempt claimed at `at` succeeded: it no longer counts against the account. */
+export function forgiveAuthAttempt(key: string, at: number): void {
+  const recent = failures.get(key)
+  const index = recent?.indexOf(at) ?? -1
+  if (index < 0) return
+  recent!.splice(index, 1)
+  if (!recent!.length) failures.delete(key)
 }

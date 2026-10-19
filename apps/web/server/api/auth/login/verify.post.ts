@@ -11,7 +11,8 @@ const body = z.discriminatedUnion('method', [
 /**
  * The second step of signing in: answer the challenge `login.post.ts` issued
  * with an authenticator code, a passkey, or a recovery code. A right answer
- * starts the session; a wrong one counts against the challenge's five.
+ * starts the session. Every answer, right or wrong, spends one of the
+ * challenge's five before it is checked.
  */
 export default defineEventHandler(async (event) => {
   const input = await parseBody(event, body)
@@ -21,7 +22,11 @@ export default defineEventHandler(async (event) => {
     clearLoginChallengeCookie(event)
     throw loginChallengeExpired()
   }
-  assertAuthAttemptAllowed(`mfa:${challenge.user_id}`)
+  // Both counts are taken before the answer is looked at, so guesses sent in
+  // parallel spend attempts as they arrive rather than after they are judged.
+  const throttleKey = `mfa:${challenge.user_id}`
+  const claimedAt = claimAuthAttempt(throttleKey)
+  const attempt = await claimLoginAttempt(challenge)
 
   const sql = await appDb()
   let failure: string | undefined
@@ -43,8 +48,9 @@ export default defineEventHandler(async (event) => {
       assertNever(input)
   }
 
-  if (failure) throw await failLoginChallenge(challenge, failure)
+  if (failure) throw await failLoginChallenge(challenge, attempt, failure)
 
+  forgiveAuthAttempt(throttleKey, claimedAt)
   await finishLoginChallenge(event, challenge)
   return { id: challenge.user_id, email: challenge.email }
 })
