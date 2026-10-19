@@ -271,9 +271,10 @@ export async function afterFactorRemoved(tx: Db, userId: string): Promise<void> 
 // ── throttle ───────────────────────────────────────────────────────────────
 
 /**
- * A crude per-account throttle on failed sign-in steps: ten failures in fifteen
+ * A crude per-account throttle on failed second steps: ten failures in fifteen
  * minutes and the next attempt is refused for the rest of the window. Keys are
- * `login:<email>` for the password and `mfa:<user id>` for the second step.
+ * `mfa:<user id>`. The password step has its own, per email and per client
+ * address, in `login-throttle.ts`.
  *
  * In-memory and per-process, like the invitation mail throttle. A speed bump,
  * not a security control: a restart empties it and a second replica doubles

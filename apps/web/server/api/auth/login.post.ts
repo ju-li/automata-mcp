@@ -15,15 +15,15 @@ const body = z.object({
  */
 export default defineEventHandler(async (event) => {
   const { email, password } = await parseBody(event, body)
+  assertLoginAllowed(event, email)
 
-  const throttleKey = `login:${normaliseEmail(email)}`
-  assertAuthAttemptAllowed(throttleKey)
-
+  // A database outage throws out of checkPassword as 503 and is not counted.
   const user = await checkPassword(email, password)
   if (!user) {
-    recordAuthFailure(throttleKey)
+    recordLoginFailure(event, email)
     throw authFailed()
   }
+  clearLoginFailures(email)
 
   let factors: UserFactors
   try {

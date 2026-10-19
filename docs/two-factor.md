@@ -34,8 +34,9 @@ there is no passwordless sign-in.
    answers the challenge is deleted, and the password has to be entered again.
 
 Each authenticator code works once, and a code seen over someone's shoulder
-can't be replayed. A per-account throttle refuses further attempts for a while
-after ten failures in fifteen minutes. That throttle is in memory, per process.
+can't be replayed. Throttles refuse further attempts for a while after ten
+failures in fifteen minutes: per account for the second step, and per email
+and per client address for the password. They are in memory, per process.
 
 Adding or removing a factor, or regenerating recovery codes, asks for the
 current password. Turning 2FA on signs out every other session of that account.
