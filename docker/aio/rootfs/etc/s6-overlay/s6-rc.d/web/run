@@ -1,0 +1,5 @@
+#!/command/with-contenv bash
+. /usr/local/bin/automata-env
+export HOME=/home/node
+cd /app/web
+exec s6-setuidgid node /opt/node22/bin/node .output/server/index.mjs

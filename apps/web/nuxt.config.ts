@@ -49,7 +49,10 @@ export default defineNuxtConfig({
      * service to a single instance or give the sweep a lock first.
      */
     scheduledTasks: {
-      '0 * * * *': ['alerts:sweep'],
+      // Every five minutes so an outage that outlasts the 10-minute grace is
+      // mailed soon after it does. Webhook re-registration stays hourly.
+      '*/5 * * * *': ['alerts:sweep'],
+      '0 * * * *': ['alerts:register-webhooks'],
     },
   },
 
@@ -98,7 +101,7 @@ export default defineNuxtConfig({
     // default server (announced once at startup); a bring-your-own connection
     // carries its own URL instead. This reaches every user's messages, so the
     // role behind it must be SELECT-only — see server/utils/evolution-db.ts and
-    // README "Reading and searching messages".
+    // docs/whatsapp.md "Reading and searching messages".
     evolutionDatabaseUrl: '',
 
     // The *default* Telegram bridge (apps/telegram-bridge), for Telegram
@@ -121,6 +124,19 @@ export default defineNuxtConfig({
     // wrong for anything shared, where it lets one user's connection reach this
     // deployment's own backends. See server/utils/net-guard.ts.
     allowPrivateTargets: false,
+
+    // Who may create an account without an invitation: `open` or `invite-only`.
+    // Invite-only lets the first account on an empty database through, so a new
+    // deployment still works unconfigured. See server/utils/signup-policy.ts.
+    signup: 'invite-only',
+    // Optional, invite-only mode only: a shared code that lets its holder sign
+    // up and create their own organization. When set, the first account needs
+    // it too.
+    signupCode: '',
+    // Prove an address before it becomes a sign-in: `auto` (on when
+    // NUXT_SMTP_HOST is set), `required` or `off`; anything else is read as
+    // required. See server/utils/email-verification.ts.
+    emailVerification: 'auto',
 
     webhookUrl: '',
     webhookSecret: '',

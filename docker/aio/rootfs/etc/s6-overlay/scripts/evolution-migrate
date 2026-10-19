@@ -1,0 +1,10 @@
+#!/command/with-contenv bash
+# Evolution's own boot step, as its image ENTRYPOINT runs it: Prisma migrations,
+# then client generation. As root because both write inside /evolution, which
+# the image ships root-owned; Evolution itself then runs as node.
+set -eo pipefail
+. /usr/local/bin/automata-env
+cd /evolution
+# A child, not sourced as upstream does: the script is not `set -u` clean, and
+# the variables it would export are already set by automata-env.
+bash ./Docker/scripts/deploy_database.sh

@@ -1,5 +1,5 @@
-# Publishes a release when main is merged into prod: both images built from this
-# repo go to GHCR tagged with the package.json version, then the git tag and the
+# Publishes a release when main is merged into prod: the three images built from
+# this repo go to GHCR tagged with the package.json version, then the git tag and the
 # GitHub Release are created.
 #
 # Images first, tag last, so a tag always means its images exist. All in one
@@ -37,7 +37,7 @@ jobs:
       contents: read
       packages: write
     strategy:
-      # One image without the other is not a release.
+      # One image without the others is not a release.
       fail-fast: true
       matrix:
         include:
@@ -45,6 +45,10 @@ jobs:
             dockerfile: apps/web/Dockerfile
           - image: automata-mcp-telegram-bridge
             dockerfile: apps/telegram-bridge/Dockerfile
+          # Everything in one container: builds web and bridge again from
+          # source, on top of Evolution's image. See docker/aio/Dockerfile.
+          - image: automata-mcp-aio
+            dockerfile: docker/aio/Dockerfile
     steps:
       - uses: actions/checkout@v7
 

@@ -6,6 +6,8 @@ const body = z.object({
   name: z.string().max(100).optional(),
   /** Signing up through an invitation link joins that organization instead. */
   invite: z.string().max(200).optional(),
+  /** `NUXT_SIGNUP_CODE`, when the deployment is invite-only and has one. */
+  signupCode: z.string().max(200).optional(),
 })
 
 /**
@@ -22,11 +24,22 @@ const body = z.object({
  * Signing up **through an invitation** joins that organization instead, and
  * creates no solo organization. The invitation is resolved and its email checked
  * BEFORE anything is written, so a bad code costs nothing.
+ *
+ * Without an invitation, `NUXT_SIGNUP` decides (`server/utils/signup-policy.ts`):
+ * open, a signup code, or — invite-only with no code — the first account only,
+ * claimed inside the transaction so two racing first signups cannot both win.
+ *
+ * **With email verification on** (`server/utils/email-verification.ts`) every
+ * check above still runs here, but nothing is written to `app.users`: the
+ * signup waits, holding no claim on the address, until the mailed code or link
+ * proves it, and the same transaction runs then. The answer does not say
+ * whether the address already had an account — that mail says so instead.
  */
 export default defineEventHandler(async (event) => {
-  const { email, password, name, invite: code } = await parseBody(event, body)
+  const { email, password, name, invite: code, signupCode } = await parseBody(event, body)
 
   const invited = code ? await resolveInvite(code) : undefined
+  const { firstAccountOnly } = invited ? { firstAccountOnly: false } : checkSelfSignup(event, signupCode)
   if (invited) {
     if (invited.problem || !invited.invite) {
       throw createError({
@@ -42,10 +55,27 @@ export default defineEventHandler(async (event) => {
     }
   }
 
+  const verify = emailVerificationRequired()
+  if (verify && verificationSetting() === 'required') assertVerificationDeliverable()
+
   const passwordHash = await hashPassword(password)
+
+  if (verify) {
+    const pending = await startVerification(event, {
+      purpose: 'signup',
+      email,
+      passwordHash,
+      name: name?.trim() || email.split('@')[0] || '',
+      inviteId: invited?.invite?.id,
+      firstAccountOnly,
+    })
+    return { verificationRequired: true, email: pending.email }
+  }
+
   const sql = await appDb()
 
   const user = await sql.begin(async (tx) => {
+    if (firstAccountOnly) await claimFirstAccount(tx)
     const created = await createUser(tx, {
       email,
       passwordHash,

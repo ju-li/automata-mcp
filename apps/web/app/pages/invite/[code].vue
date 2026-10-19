@@ -52,7 +52,7 @@ async function accept() {
 
 async function signUpAndAccept() {
   await run(async () => {
-    await $fetch('/api/auth/signup', {
+    const result = await $fetch<{ verificationRequired?: boolean }>('/api/auth/signup', {
       method: 'POST',
       body: {
         email: data.value?.email,
@@ -61,6 +61,9 @@ async function signUpAndAccept() {
         invite: code.value,
       },
     })
+    // The invitation is accepted when the mailed code comes back, not before:
+    // holding the link does not prove holding the inbox.
+    if (result.verificationRequired) return await navigateTo('/verify-email')
     await refreshSession()
     toast.success(`Welcome to ${data.value?.org?.name}.`)
     await navigateTo('/instances')

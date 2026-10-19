@@ -157,4 +157,107 @@ export const APP_MIGRATIONS: AppMigration[] = [
       CREATE INDEX mcp_tokens_instance_idx ON app.mcp_tokens (instance);
     `,
   },
+  {
+    name: '0002_two_factor',
+    sql: /* sql */ `
+      -- Second factors for the web sign-in. None of this touches the MCP
+      -- surface: a connector token is its own credential.
+
+      -- An authenticator-app secret, one per user. confirmed_at stays empty
+      -- until a code from the app has been checked, so a setup abandoned
+      -- halfway is not a factor login asks for. last_step is the newest
+      -- 30-second step a code was accepted for; a code from that step or an
+      -- older one is refused, so one observed code cannot be replayed.
+      -- The secret is a plain column, like the credentials on app.instances.
+      CREATE TABLE app.totp_credentials (
+        user_id      text PRIMARY KEY REFERENCES app.users (id) ON DELETE CASCADE,
+        secret       text NOT NULL,
+        last_step    bigint NOT NULL DEFAULT 0,
+        confirmed_at timestamptz,
+        created      timestamptz NOT NULL DEFAULT now()
+      );
+
+      -- A passkey or security key. The public key is not secret; counter is
+      -- the authenticator's signature counter (0 for most passkeys).
+      CREATE TABLE app.webauthn_credentials (
+        id            text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        user_id       text NOT NULL REFERENCES app.users (id) ON DELETE CASCADE,
+        credential_id text NOT NULL,
+        public_key    bytea NOT NULL,
+        counter       bigint NOT NULL DEFAULT 0,
+        transports    jsonb NOT NULL DEFAULT '[]'::jsonb,
+        name          text NOT NULL DEFAULT '' CHECK (length(name) <= 100),
+        created       timestamptz NOT NULL DEFAULT now(),
+        last_used_at  timestamptz
+      );
+      CREATE UNIQUE INDEX webauthn_credentials_credential_id_key ON app.webauthn_credentials (credential_id);
+      CREATE INDEX webauthn_credentials_user_idx ON app.webauthn_credentials (user_id);
+
+      -- Single-use recovery codes. Only the SHA-256 is stored; the codes carry
+      -- 60 random bits each, so a fast hash is enough.
+      CREATE TABLE app.recovery_codes (
+        id        text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        user_id   text NOT NULL REFERENCES app.users (id) ON DELETE CASCADE,
+        code_hash text NOT NULL CHECK (length(code_hash) = 64),
+        used_at   timestamptz,
+        created   timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX recovery_codes_user_hash_key ON app.recovery_codes (user_id, code_hash);
+
+      -- A sign-in that passed the password and still owes a second factor
+      -- ('login'), or a passkey registration in progress ('register'). Never a
+      -- session: a row in app.sessions means fully signed in, so nothing that
+      -- reads sessions can mistake a half-finished login for one. token_hash is
+      -- the SHA-256 of the login cookie; registration rows have none.
+      CREATE TABLE app.mfa_challenges (
+        id                 text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        user_id            text NOT NULL REFERENCES app.users (id) ON DELETE CASCADE,
+        purpose            text NOT NULL CHECK (purpose IN ('login', 'register')),
+        token_hash         text CHECK (token_hash IS NULL OR length(token_hash) = 64),
+        webauthn_challenge text,
+        attempts           integer NOT NULL DEFAULT 0,
+        expires_at         timestamptz NOT NULL,
+        created            timestamptz NOT NULL DEFAULT now(),
+        CHECK ((purpose = 'login') = (token_hash IS NOT NULL))
+      );
+      CREATE UNIQUE INDEX mfa_challenges_token_hash_key ON app.mfa_challenges (token_hash);
+      CREATE INDEX mfa_challenges_user_idx ON app.mfa_challenges (user_id);
+    `,
+  },
+  {
+    name: '0003_email_verification',
+    sql: /* sql */ `
+      -- An address waiting to be proved: a signup ('signup') or a change of
+      -- sign-in address ('email_change'). A signup has no app.users row until
+      -- it is verified, so a pending row claims nothing: several may name one
+      -- address, and the first to verify wins. That is what stops someone
+      -- registering an address they do not own ahead of its owner.
+      --
+      -- link_hash is the SHA-256 of the token in the mailed link; pending_hash
+      -- of the cookie that lets the waiting browser type the code instead;
+      -- code_hash of the row id and the six-digit code. Five wrong codes delete
+      -- the row. password_hash and name are what the account is created with.
+      CREATE TABLE app.email_verifications (
+        id                 text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        purpose            text NOT NULL CHECK (purpose IN ('signup', 'email_change')),
+        email              text NOT NULL CHECK (email = lower(btrim(email)) AND email <> ''),
+        link_hash          text NOT NULL CHECK (length(link_hash) = 64),
+        pending_hash       text NOT NULL CHECK (length(pending_hash) = 64),
+        code_hash          text NOT NULL CHECK (length(code_hash) = 64),
+        attempts           integer NOT NULL DEFAULT 0,
+        user_id            text REFERENCES app.users (id) ON DELETE CASCADE,
+        password_hash      text,
+        name               text,
+        invite_id          text REFERENCES app.invitations (id) ON DELETE CASCADE,
+        first_account_only boolean NOT NULL DEFAULT false,
+        expires_at         timestamptz NOT NULL,
+        created            timestamptz NOT NULL DEFAULT now(),
+        CHECK ((purpose = 'email_change') = (user_id IS NOT NULL)),
+        CHECK ((purpose = 'signup') = (password_hash IS NOT NULL))
+      );
+      CREATE UNIQUE INDEX email_verifications_link_hash_key ON app.email_verifications (link_hash);
+      CREATE UNIQUE INDEX email_verifications_pending_hash_key ON app.email_verifications (pending_hash);
+      CREATE INDEX email_verifications_user_idx ON app.email_verifications (user_id);
+    `,
+  },
 ]

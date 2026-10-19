@@ -19,6 +19,6 @@ export default defineNitroPlugin(() => {
     '[startup] NUXT_EVOLUTION_DATABASE_URL is not set. Reading and searching messages '
     + 'will fail for accounts on this deployment\'s Evolution server; pairing and sending '
     + 'still work, and an account on its own Evolution server reads through the database URL '
-    + 'stored on that connection. See README "Reading and searching messages".',
+    + 'stored on that connection. See docs/whatsapp.md "Reading and searching messages".',
   )
 })

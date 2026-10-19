@@ -1,0 +1,8 @@
+# Build context for every Dockerfile here is the repo root. Each installs its
+# own dependencies and builds from source, so nothing local belongs in it —
+# least of all .env, which holds real secrets in development.
+**/node_modules
+**/.nuxt
+**/.output
+.env
+.git

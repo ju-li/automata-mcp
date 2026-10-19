@@ -22,7 +22,7 @@ import { mentionedJidsOf } from './mentions'
  * `credentialsForInstance()` deliberately refuses. Three rules keep it contained,
  * and none of them is optional:
  *
- *   1. The role is read-only. Only SELECT on "Message" is granted (README).
+ *   1. The role is read-only. Only SELECT on "Message" is granted (docs/whatsapp.md).
  *      Nothing here writes, and nothing here runs DDL — the schema belongs to
  *      Evolution's Prisma migrations.
  *   2. Every query carries `"instanceId" = <this account>`. `searchMessages`
@@ -127,7 +127,7 @@ async function evolutionDbFor(instance: AppInstance): Promise<Sql> {
       console.error(
         '[evolution-db] NUXT_EVOLUTION_DATABASE_URL is not set — read-messages and '
         + 'search-messages cannot answer for accounts on this deployment\'s Evolution '
-        + 'server. See README "Reading and searching messages".',
+        + 'server. See docs/whatsapp.md "Reading and searching messages".',
       )
       throw createError({
         statusCode: 500,
