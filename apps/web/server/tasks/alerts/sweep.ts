@@ -1,5 +1,5 @@
 /**
- * Hourly connection sweep — the complete half of disconnect alerting, for
+ * Five-minute connection sweep — the complete half of disconnect alerting, for
  * WhatsApp and Telegram connections.
  *
  * The webhook is faster but structurally incomplete: in Evolution 2.3.7 a close

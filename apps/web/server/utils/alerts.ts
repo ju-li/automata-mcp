@@ -10,7 +10,7 @@ import type { ConnectionState, InstanceKind } from '#shared/connection'
  *   the webhook  `connection.update` from Evolution or the Telegram bridge,
  *                which arrives within seconds of a logout, a ban, a replaced
  *                or a revoked session.
- *   the sweep    an hourly pass over every WhatsApp and Telegram connection.
+ *   the sweep    a five-minute pass over every WhatsApp and Telegram connection.
  *
  * The sweep is not a backstop for a flaky webhook — it is the only thing that
  * sees the failure that matters most. In 2.3.7 a close Evolution intends to
@@ -128,10 +128,12 @@ function alertableKind(instance: AppInstance): 'whatsapp' | 'telegram' | undefin
 /**
  * How long a connection must be unhealthy before anyone is told.
  *
- * Only `connecting` and `unknown` serve it out — a live `close` is Evolution
- * having given up, so it mails at once. The grace exists for the states that
- * routinely resolve themselves: a reconnect in progress, or one failed status
- * read against a server that is merely restarting.
+ * Every unhealthy state serves it out, a live `close` included. Short drops that
+ * recover on their own are common enough that mailing on the first `close`
+ * meant an outage mail followed seconds later by a recovery mail; a connection
+ * that recovers inside the window mails nobody. The sweep runs every five
+ * minutes, so an outage that outlasts the grace is reported within five minutes
+ * of the grace running out.
  */
 const GRACE_MS = 10 * 60 * 1000
 
@@ -141,7 +143,7 @@ const GRACE_MS = 10 * 60 * 1000
  * Idempotent, and safe to call as often as you like — the two date fields on the
  * row are what make it so. `down_since` empty means healthy; `alerted_at` set
  * means the current outage has already been reported, which is what stops the
- * hourly sweep from mailing hourly.
+ * sweep from mailing every five minutes.
  *
  * A connection that has never been paired is skipped entirely. A fresh instance
  * sits in `close` until somebody scans its QR code, and that is not an outage —
@@ -202,23 +204,19 @@ async function evaluate(instance: AppInstance): Promise<void> {
 
   if (!instance.down_since) {
     await updateRow('instances', instance.id, { down_since: new Date() })
-    // Fall through to the grace check below rather than returning: a live
-    // `close` is already definitive and should not wait an hour for the next
-    // sweep to say so.
   }
 
   if (instance.alerted_at) return
 
   const downSince = instance.down_since ? Date.parse(instance.down_since) : Date.now()
-  const definitive = health.state === 'close'
-  if (!definitive && Date.now() - downSince < GRACE_MS) return
+  if (Date.now() - downSince < GRACE_MS) return
 
   const sent = await notifyWatchers(instance, canManage => outageMail(instance, health, canManage))
   if (sent) await updateRow('instances', instance.id, { alerted_at: new Date() })
 }
 
 /**
- * The hourly pass. Registered as the `alerts:sweep` scheduled task.
+ * The five-minute pass. Registered as the `alerts:sweep` scheduled task.
  *
  * Sequential, and every connection is wrapped on its own: one unreachable
  * Evolution server or Telegram bridge must not decide that the connections after
@@ -242,12 +240,6 @@ export async function sweepConnectionAlerts(): Promise<{ checked: number, failed
   let failed = 0
 
   for (const instance of instances) {
-    // Re-asserted rather than assumed: this heals a connection created before
-    // alerting existed, one whose server or bridge was rebuilt, and one whose
-    // registration failed at provision time (where it is deliberately
-    // non-fatal). Cheap at one call per connection per hour.
-    await registerWebhookFor(instance).catch(() => {})
-
     try {
       await evaluateConnectionHealth(instance)
     }
@@ -258,6 +250,26 @@ export async function sweepConnectionAlerts(): Promise<{ checked: number, failed
   }
 
   return { checked: instances.length, failed }
+}
+
+/**
+ * Re-assert every WhatsApp and Telegram connection's webhook. Registered as the
+ * hourly `alerts:register-webhooks` task, apart from the sweep so the sweep can
+ * run often without a registration call per connection each time.
+ *
+ * Re-asserted rather than assumed: this heals a connection created before
+ * alerting existed, one whose server or bridge was rebuilt, and one whose
+ * registration failed at provision time (where it is deliberately non-fatal).
+ */
+export async function reregisterConnectionWebhooks(): Promise<{ registered: number }> {
+  const sql = await appDb()
+  const instances = await sql<AppInstance[]>`
+    SELECT * FROM app.instances WHERE kind IN ('whatsapp', 'telegram') ORDER BY created
+  `
+  for (const instance of instances) {
+    await registerWebhookFor(instance).catch(() => {})
+  }
+  return { registered: instances.length }
 }
 
 function registerWebhookFor(instance: AppInstance): Promise<void> {
