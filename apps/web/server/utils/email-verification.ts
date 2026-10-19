@@ -25,6 +25,13 @@ import type { AppInvitation, AppUser, Db } from './app-db'
  * waiting browser was handed, five wrong answers delete the row, and the row
  * expires after thirty minutes.
  *
+ * **The link proves the address; it signs in only the browser that started
+ * the signup.** A session starts when the confirming browser carries this
+ * row's `automata_verify` cookie; any other browser gets "confirmed, now sign
+ * in". Otherwise a stranger signs up with their own mailbox, forwards the
+ * link, and whoever presses Confirm is signed into the stranger's organization
+ * — where every connection they then set up lands.
+ *
  * `NUXT_EMAIL_VERIFICATION` is `auto` (default: on when `NUXT_SMTP_HOST` is
  * set), `required` or `off`. Anything else reads as `required`, since a typo
  * must not switch verification off. `required` with no SMTP refuses signups
@@ -397,6 +404,22 @@ export async function resendVerification(event: H3Event): Promise<{ email: strin
 export interface VerificationResult {
   purpose: VerificationPurpose
   email: string
+  /** Whether this request was signed in. False for a signup confirmed by link in another browser. */
+  signedIn: boolean
+}
+
+/** A spent row, with the hash that says which browser was waiting for it. */
+type SpentRow = VerificationRow & { pending_hash: string }
+
+const SPENT_COLUMNS = [...ROW_COLUMNS, 'pending_hash'] as const
+
+/** Whether this request carries the `automata_verify` cookie the row was started with. */
+function isWaitingBrowser(event: H3Event, row: Pick<SpentRow, 'pending_hash'>): boolean {
+  const token = getCookie(event, VERIFY_COOKIE)
+  if (!token) return false
+  const presented = Buffer.from(sha256(token))
+  const stored = Buffer.from(row.pending_hash)
+  return presented.length === stored.length && timingSafeEqual(presented, stored)
 }
 
 /** The code typed into the waiting browser. */
@@ -424,12 +447,39 @@ export async function verifyByCode(event: H3Event, code: string): Promise<Verifi
     throw createError({ statusCode: 400, statusMessage: 'That code is not valid', data: { code: 'verification_invalid' } })
   }
 
-  return await complete(event, tx => spend(tx, { id: row.id }))
+  // Found through the cookie, so this is the waiting browser by construction.
+  return await complete(event, tx => spend(tx, { id: row.id }), () => true)
 }
 
-/** The link from the mail. Needs no cookie: the token is the proof. */
+/**
+ * The link from the mail. Needs no cookie to prove the address — the token is
+ * the proof — but signs in only the browser holding this row's cookie.
+ */
 export async function verifyByLink(event: H3Event, token: string): Promise<VerificationResult> {
-  return await complete(event, tx => spend(tx, { linkHash: sha256(token) }))
+  return await complete(event, tx => spend(tx, { linkHash: sha256(token) }), row => isWaitingBrowser(event, row))
+}
+
+/**
+ * What a mailed link would confirm, for the Confirm screen, without spending
+ * it. Holding the token is the authorization: the address is the one it was
+ * mailed to.
+ */
+export async function describeVerificationLink(token: string): Promise<{ purpose: VerificationPurpose, email: string } | undefined> {
+  try {
+    const sql = await appDb()
+    const [row] = await sql<Pick<VerificationRow, 'purpose' | 'email'>[]>`
+      SELECT purpose, email
+      FROM app.email_verifications
+      WHERE link_hash = ${sha256(token)}
+        AND expires_at > now()
+        AND attempts < ${MAX_CODE_ATTEMPTS}
+    `
+    return row ? { purpose: row.purpose, email: row.email } : undefined
+  }
+  catch (cause) {
+    console.error('[verify] could not read a verification link from the app database:', cause)
+    throw appDbUnavailable(cause)
+  }
 }
 
 /**
@@ -437,27 +487,34 @@ export async function verifyByLink(event: H3Event, token: string): Promise<Verif
  * delete is the spend: two requests verifying one row at once find it once,
  * and a failure further on rolls the spend back with everything else.
  */
-async function spend(tx: Db, match: { id: string } | { linkHash: string }): Promise<VerificationRow | undefined> {
+async function spend(tx: Db, match: { id: string } | { linkHash: string }): Promise<SpentRow | undefined> {
   const [row] = 'id' in match
-    ? await tx<VerificationRow[]>`
+    ? await tx<SpentRow[]>`
         DELETE FROM app.email_verifications
         WHERE id = ${match.id} AND expires_at > now() AND attempts < ${MAX_CODE_ATTEMPTS}
-        RETURNING ${tx(ROW_COLUMNS)}
+        RETURNING ${tx(SPENT_COLUMNS)}
       `
-    : await tx<VerificationRow[]>`
+    : await tx<SpentRow[]>`
         DELETE FROM app.email_verifications
         WHERE link_hash = ${match.linkHash} AND expires_at > now() AND attempts < ${MAX_CODE_ATTEMPTS}
-        RETURNING ${tx(ROW_COLUMNS)}
+        RETURNING ${tx(SPENT_COLUMNS)}
       `
   return row
 }
 
+/**
+ * `waitingBrowser` decides whether the request is the browser that started the
+ * row. Only that one is signed in, and only its cookie is cleared — a link
+ * confirmed elsewhere must not wipe a different pending signup in this browser.
+ */
 async function complete(
   event: H3Event,
-  spendIn: (tx: Db) => Promise<VerificationRow | undefined>,
+  spendIn: (tx: Db) => Promise<SpentRow | undefined>,
+  waitingBrowser: (row: SpentRow) => boolean,
 ): Promise<VerificationResult> {
   const sql = await appDb()
   let spentId: string | undefined
+  let ownsCookie = false
 
   let outcome: { row: VerificationRow, userId?: string, previousEmail?: string }
   try {
@@ -465,6 +522,7 @@ async function complete(
       const row = await spendIn(tx)
       if (!row) throw verificationExpired()
       spentId = row.id
+      ownsCookie = waitingBrowser(row)
 
       switch (row.purpose) {
         case 'signup':
@@ -482,15 +540,16 @@ async function complete(
     const status = (error as { statusCode?: number }).statusCode
     if (spentId && status && status < 500 && status !== 410) {
       await sql`DELETE FROM app.email_verifications WHERE id = ${spentId}`.catch(() => {})
-      clearVerifyCookie(event)
+      if (ownsCookie) clearVerifyCookie(event)
     }
     throw error
   }
 
-  clearVerifyCookie(event)
+  if (ownsCookie) clearVerifyCookie(event)
   const { row, userId, previousEmail } = outcome
 
-  if (userId) await startSession(event, userId)
+  const signedIn = Boolean(userId) && ownsCookie
+  if (signedIn) await startSession(event, userId!)
   if (previousEmail) {
     // Best effort: tells the owner of the old address, in case it was not them.
     void sendAppEmail({
@@ -504,7 +563,7 @@ async function complete(
     })
   }
 
-  return { purpose: row.purpose, email: row.email }
+  return { purpose: row.purpose, email: row.email, signedIn }
 }
 
 /**

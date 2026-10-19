@@ -7,9 +7,13 @@ import { toast } from 'vue-sonner'
  *
  * Two ways in, and they need different things:
  *
- *   ?token=…   the link from the mail. Needs no cookie, so it works on another
- *              device. Spent only by the Confirm button, never on load — mail
- *              scanners open links, and opening one must not use it up.
+ *   ?token=…   the link from the mail. Needs no cookie to prove the address,
+ *              so it works on another device — but only the browser holding
+ *              the pending cookie is signed in; any other is sent to sign in,
+ *              so a forwarded link cannot sign someone into the sender's
+ *              organization. Names the address before Confirm. Spent only by
+ *              the Confirm button, never on load — mail scanners open links,
+ *              and opening one must not use it up.
  *   no token   the browser that started it, waiting for the six-digit code.
  *              The pending row is named by an httpOnly cookie, so what is
  *              pending is asked of the server rather than carried in the URL.
@@ -33,13 +37,28 @@ const { data, status, refresh: refreshPending } = await useFetch<{ pending: Pend
 )
 const pending = computed(() => data.value?.pending ?? null)
 
+// What the link would confirm, read without spending it. Client only, like the
+// pending read above: nothing about the token belongs in the SSR request.
+const { data: link, status: linkStatus } = await useFetch<Pending>('/api/auth/verify/link-info', {
+  method: 'POST',
+  body: { token },
+  immediate: Boolean(token.value),
+  server: false,
+})
+
 const code = ref('')
 const { busy, run } = useApiAction()
 const { busy: resendBusy, run: runResend } = useApiAction()
 
-async function finished(result: { purpose: Pending['purpose'], email: string }) {
+async function finished(result: { purpose: Pending['purpose'], email: string, signedIn: boolean }) {
   await refresh()
-  if (result.purpose === 'signup') {
+  if (result.purpose === 'signup' && !result.signedIn) {
+    // Confirmed in a browser other than the one that signed up: the address is
+    // proved, but signing in here is the password's job.
+    toast.success('Email confirmed. Sign in to continue.')
+    await navigateTo('/login')
+  }
+  else if (result.purpose === 'signup') {
     toast.success('Email confirmed. Welcome!')
     await navigateTo('/instances')
   }
@@ -52,7 +71,7 @@ async function finished(result: { purpose: Pending['purpose'], email: string }) 
 
 async function submitCode() {
   const result = await run(async () => {
-    return await $fetch<{ purpose: Pending['purpose'], email: string }>('/api/auth/verify', {
+    return await $fetch<{ purpose: Pending['purpose'], email: string, signedIn: boolean }>('/api/auth/verify', {
       method: 'POST',
       body: { code: code.value.trim() },
     })
@@ -68,7 +87,7 @@ async function submitCode() {
 
 async function confirmLink() {
   const result = await run(async () => {
-    return await $fetch<{ purpose: Pending['purpose'], email: string }>('/api/auth/verify/link', {
+    return await $fetch<{ purpose: Pending['purpose'], email: string, signedIn: boolean }>('/api/auth/verify/link', {
       method: 'POST',
       body: { token: token.value },
     })
@@ -91,13 +110,38 @@ async function resend() {
     </h1>
 
     <!-- The mailed link. -->
-    <div v-if="token" class="mt-8 space-y-4">
+    <Skeleton v-if="token && (linkStatus === 'idle' || linkStatus === 'pending')" class="mt-8 h-40" />
+
+    <div v-else-if="token && link" class="mt-8 space-y-4">
       <p class="text-sm text-muted-foreground">
-        Press confirm to prove this address is yours.
+        Confirm <span class="font-medium text-foreground">{{ link.email }}</span> as
+        {{ link.purpose === 'signup' ? 'the sign-in address of a new account' : 'your new sign-in address' }}.
+      </p>
+      <p v-if="link.purpose === 'signup'" class="text-sm text-muted-foreground">
+        Only confirm if you signed up with this address yourself. If you did not, close this page.
       </p>
       <Button class="w-full" :disabled="busy" @click="confirmLink()">
         {{ busy ? 'Confirming…' : 'Confirm email address' }}
       </Button>
+    </div>
+
+    <div v-else-if="token" class="mt-8 space-y-4">
+      <p class="text-sm text-muted-foreground">
+        This link has expired or was already used. Sign up again, or sign in if
+        you already confirmed it.
+      </p>
+      <div class="flex gap-2">
+        <Button as-child variant="outline">
+          <NuxtLink to="/signup">
+            Sign up again
+          </NuxtLink>
+        </Button>
+        <Button as-child variant="outline">
+          <NuxtLink to="/login">
+            Sign in
+          </NuxtLink>
+        </Button>
+      </div>
     </div>
 
     <Skeleton v-else-if="status === 'idle' || status === 'pending'" class="mt-8 h-40" />
