@@ -7,9 +7,15 @@ const body = z.object({
 
 export default defineEventHandler(async (event) => {
   const { email, password } = await parseBody(event, body)
+  assertLoginAllowed(event, email)
 
+  // A database outage throws out of checkPassword as 503 and is not counted.
   const user = await checkPassword(email, password)
-  if (!user) throw authFailed()
+  if (!user) {
+    recordLoginFailure(event, email)
+    throw authFailed()
+  }
+  clearLoginFailures(email)
 
   await startSession(event, user.id)
   return { id: user.id, email: user.email }
