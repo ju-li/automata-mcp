@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDownIcon, CircleUserIcon, LogOutIcon, UserIcon, UsersIcon } from '@lucide/vue'
+import { ChevronDownIcon, CircleUserIcon, LogOutIcon, MailIcon, UserIcon, UsersIcon } from '@lucide/vue'
 
 const { user, org, logout } = useSession()
 
@@ -66,6 +66,13 @@ watch(profileOpen, async (value) => {
         </div>
 
         <div class="flex items-center gap-3">
+          <Button as-child variant="ghost" size="sm">
+            <a href="https://www.getautomata.app/contact" target="_blank" rel="noopener noreferrer">
+              <MailIcon class="size-4" />
+              <span class="hidden sm:inline">Contact</span>
+            </a>
+          </Button>
+
           <Button v-if="org" as-child variant="ghost" size="sm">
             <NuxtLink to="/team">
               <UsersIcon class="size-4" />
