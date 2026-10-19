@@ -15,6 +15,13 @@ function isInviteRoute(path: string): boolean {
 }
 
 /**
+ * Confirming an email address, the same: a signup is signed out until the code
+ * comes back, an address change is signed in, and the mailed link may be opened
+ * in any browser at all.
+ */
+const VERIFY_ROUTE = '/verify-email'
+
+/**
  * Session gate. Authentication, plus the two routing decisions that depend on
  * the organization.
  *
@@ -41,7 +48,7 @@ export default defineNuxtRouteMiddleware(async (to) => {
   const { user, hasOrg, isAdmin, ensureLoaded } = useSession()
   await ensureLoaded()
 
-  if (isInviteRoute(to.path)) return
+  if (isInviteRoute(to.path) || to.path === VERIFY_ROUTE) return
 
   const isPublic = PUBLIC_ROUTES.has(to.path)
 

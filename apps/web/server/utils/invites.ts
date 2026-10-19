@@ -150,11 +150,15 @@ export async function resolveInvite(
     return { problem: 'not-found' }
   }
 
-  if (invite.revoked) return { invite, problem: 'revoked' }
-  if (invite.accepted_at) return { invite, problem: 'accepted' }
-  if (isExpired(invite)) return { invite, problem: 'expired' }
+  return { invite, problem: inviteProblemOf(invite) }
+}
 
-  return { invite }
+/** Why a loaded invitation cannot be used, or `undefined` when it can. */
+export function inviteProblemOf(invite: AppInvitation): InviteProblem | undefined {
+  if (invite.revoked) return 'revoked'
+  if (invite.accepted_at) return 'accepted'
+  if (isExpired(invite)) return 'expired'
+  return undefined
 }
 
 /** The message for an unusable invitation, written for the person holding it. */

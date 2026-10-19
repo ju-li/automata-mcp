@@ -224,4 +224,40 @@ export const APP_MIGRATIONS: AppMigration[] = [
       CREATE INDEX mfa_challenges_user_idx ON app.mfa_challenges (user_id);
     `,
   },
+  {
+    name: '0003_email_verification',
+    sql: /* sql */ `
+      -- An address waiting to be proved: a signup ('signup') or a change of
+      -- sign-in address ('email_change'). A signup has no app.users row until
+      -- it is verified, so a pending row claims nothing: several may name one
+      -- address, and the first to verify wins. That is what stops someone
+      -- registering an address they do not own ahead of its owner.
+      --
+      -- link_hash is the SHA-256 of the token in the mailed link; pending_hash
+      -- of the cookie that lets the waiting browser type the code instead;
+      -- code_hash of the row id and the six-digit code. Five wrong codes delete
+      -- the row. password_hash and name are what the account is created with.
+      CREATE TABLE app.email_verifications (
+        id                 text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        purpose            text NOT NULL CHECK (purpose IN ('signup', 'email_change')),
+        email              text NOT NULL CHECK (email = lower(btrim(email)) AND email <> ''),
+        link_hash          text NOT NULL CHECK (length(link_hash) = 64),
+        pending_hash       text NOT NULL CHECK (length(pending_hash) = 64),
+        code_hash          text NOT NULL CHECK (length(code_hash) = 64),
+        attempts           integer NOT NULL DEFAULT 0,
+        user_id            text REFERENCES app.users (id) ON DELETE CASCADE,
+        password_hash      text,
+        name               text,
+        invite_id          text REFERENCES app.invitations (id) ON DELETE CASCADE,
+        first_account_only boolean NOT NULL DEFAULT false,
+        expires_at         timestamptz NOT NULL,
+        created            timestamptz NOT NULL DEFAULT now(),
+        CHECK ((purpose = 'email_change') = (user_id IS NOT NULL)),
+        CHECK ((purpose = 'signup') = (password_hash IS NOT NULL))
+      );
+      CREATE UNIQUE INDEX email_verifications_link_hash_key ON app.email_verifications (link_hash);
+      CREATE UNIQUE INDEX email_verifications_pending_hash_key ON app.email_verifications (pending_hash);
+      CREATE INDEX email_verifications_user_idx ON app.email_verifications (user_id);
+    `,
+  },
 ]

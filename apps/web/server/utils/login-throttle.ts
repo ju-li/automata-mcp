@@ -47,7 +47,7 @@ function prune(now: number): void {
  * is whatever the client chose to send, and would make the per-address key free
  * to rotate.
  */
-function clientIp(event: H3Event): string {
+export function clientIp(event: H3Event): string {
   const forwarded = getRequestHeader(event, 'x-forwarded-for')
   const last = forwarded?.split(',').map(part => part.trim()).filter(Boolean).pop()
   return last ?? getRequestIP(event) ?? 'unknown'

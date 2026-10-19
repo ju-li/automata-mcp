@@ -203,6 +203,26 @@ it for them. The app still refuses its own Postgres, Evolution and bridge, but
 not anything else on your network. Keep private targets for deployments where
 everyone with an account is trusted, and keep sign-up closed there.
 
+### Email verification
+
+Without it, anyone can register `someone@yourcompany.com` before its owner
+does, and the owner can then neither sign up nor accept an invitation sent to
+that address. With it, signing up (with or without an invitation) and changing
+an account's address both mail a six-digit code and a link, and nothing is
+created or changed until one comes back. A signup that is never confirmed holds
+no claim on the address and expires after 30 minutes.
+
+| `EMAIL_VERIFICATION` (`NUXT_EMAIL_VERIFICATION`) | Behaviour |
+|---|---|
+| unset or `auto` | on when `SMTP_HOST` is set, off otherwise |
+| `required` | always on; with no SMTP, signups and address changes are refused |
+| `off` | never; the password alone proves an address change, as before |
+
+Anything else is read as `required`. The link is built from
+`NUXT_PUBLIC_APP_URL` only, never from the request, so a forged `Host` header
+cannot redirect it; without that URL the mail carries the code alone. Existing
+accounts are not asked to verify.
+
 ## ⚠️ WhatsApp pairing burns a real phone number
 
 Scanning the QR binds a real WhatsApp account to an instance. WhatsApp rate-limits

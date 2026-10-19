@@ -56,6 +56,7 @@ services:
       # Sign-up. Unset = invite-only; see docs/self-hosting.md "Who can sign up".
       NUXT_SIGNUP: ${SIGNUP:-invite-only}
       NUXT_SIGNUP_CODE: ${SIGNUP_CODE:-}
+      NUXT_EMAIL_VERIFICATION: ${EMAIL_VERIFICATION:-auto}
 
       # WhatsApp. Harmless without the whatsapp profile: nothing answers there,
       # and the create page says WhatsApp is unavailable.
