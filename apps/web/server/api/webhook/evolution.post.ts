@@ -77,7 +77,7 @@ export default defineEventHandler(async (event) => {
     await evaluateConnectionHealth(instance)
   }
   catch (error) {
-    // Acked anyway — a retry would arrive into the same failure, and the hourly
+    // Acked anyway — a retry would arrive into the same failure, and the five-minute
     // sweep covers this connection regardless. Logged because a handled error
     // leaves nothing in Nitro's own logs.
     console.error(`[webhook] could not evaluate connection ${instance.id} (${instance.name}):`, error)

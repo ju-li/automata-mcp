@@ -49,7 +49,10 @@ export default defineNuxtConfig({
      * service to a single instance or give the sweep a lock first.
      */
     scheduledTasks: {
-      '0 * * * *': ['alerts:sweep'],
+      // Every five minutes so an outage that outlasts the 10-minute grace is
+      // mailed soon after it does. Webhook re-registration stays hourly.
+      '*/5 * * * *': ['alerts:sweep'],
+      '0 * * * *': ['alerts:register-webhooks'],
     },
   },
 

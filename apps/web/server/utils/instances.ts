@@ -302,7 +302,7 @@ export async function registerConnectionWebhook(instance: AppInstance): Promise<
       console.warn(
         '[instances] NUXT_WEBHOOK_URL is not set, so connections are not subscribed to '
         + 'Evolution connection events. Disconnect alerts still work, but only as fast '
-        + 'as the hourly sweep.',
+        + 'as the five-minute sweep.',
       )
     }
     return

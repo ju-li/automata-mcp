@@ -22,7 +22,7 @@ Two things feed it, and they are not redundant.
 | | What it catches | Latency |
 |---|---|---|
 | Per-connection webhook | logout, ban, session replaced, QR limit; for Telegram, any state change the bridge sees | seconds |
-| Hourly sweep | everything, including a socket that died and never came back, and a Telegram bridge that is down | up to an hour |
+| Five-minute sweep | everything, including a socket that died and never came back, and a Telegram bridge that is down | up to five minutes |
 
 The sweep is not a backstop for a flaky webhook. In Evolution 2.3.7 a close that
 Evolution intends to **retry** emits no `connection.update` at all — it rebuilds
@@ -43,9 +43,11 @@ What it will and will not send:
 - A connection that has **never been paired** is skipped. A fresh instance sits
   in `close` until somebody scans its QR code, and `ownerJid` is the only thing
   that tells that apart from a logout.
-- A live `close` mails immediately — Evolution only reports that once it has
-  given up. `connecting` and `unknown` serve out a 10-minute grace period first,
-  so a reconnect in progress or one failed status read stays quiet.
+- Nothing is mailed until a connection has been down for **10 minutes**, in any
+  state, `close` included. A drop that recovers inside that window mails nobody,
+  so a short blip no longer produces an outage mail followed seconds later by a
+  recovery mail. The sweep runs every five minutes, so a real outage is reported
+  10–15 minutes after it starts.
 - One mail per outage. `alerted_at` is written only once a message actually went
   out, so a broken SMTP configuration delays an alert rather than losing it.
 - The mail says which fix applies: a dropped session asks for **Reconnect**, an

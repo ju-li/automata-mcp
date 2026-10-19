@@ -131,7 +131,7 @@ export async function registerTelegramWebhook(instance: AppInstance): Promise<vo
       console.warn(
         '[telegram] neither NUXT_TELEGRAM_WEBHOOK_URL nor NUXT_PUBLIC_APP_URL is set, so Telegram '
         + 'connections are not subscribed to bridge events. Disconnect alerts still work, '
-        + 'but only as fast as the hourly sweep.',
+        + 'but only as fast as the five-minute sweep.',
       )
     }
     return

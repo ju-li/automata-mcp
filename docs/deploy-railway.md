@@ -177,7 +177,7 @@ Evolution sends custom headers on. That is also why `WEBHOOK_GLOBAL_ENABLED` is
 off above — the global webhook sends none, so with a secret set every global
 delivery would 401, which Evolution treats as non-retryable and drops.
 
-**Keep the web service at one replica.** The hourly connection sweep runs
+**Keep the web service at one replica.** The five-minute connection sweep runs
 in-process, so a second replica means a second sweep and duplicate alert emails.
 
 **Leave `NUXT_ALLOW_PRIVATE_TARGETS` unset.** It defaults to off, which is right
