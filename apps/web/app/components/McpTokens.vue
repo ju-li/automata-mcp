@@ -55,6 +55,8 @@ function initialScope(): TokenScope {
   switch (props.kind) {
     case 'whatsapp':
     case 'telegram':
+    // Every mail tool reads; there is nothing to hold back by default.
+    case 'imap':
       return openScope()
     case 'postgres': {
       const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly).map(t => t.name)
@@ -285,6 +287,11 @@ function statusOf(token: TokenRow) {
           <template v-else-if="kind === 'telegram'">
             This account is not connected, so tokens cannot send or read anything
             until it is linked again. You can still revoke them.
+          </template>
+          <template v-else-if="kind === 'imap'">
+            This mailbox is not syncing, so tokens see only what was synced
+            before and cannot fetch bodies or attachments until it works again.
+            You can still revoke them.
           </template>
         </p>
       </div>

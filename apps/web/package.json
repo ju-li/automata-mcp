@@ -19,6 +19,8 @@
     "bcryptjs": "^3.0.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "html-to-text": "^10.0.1",
+    "imapflow": "^2.5.5",
     "nodemailer": "^8.0.11",
     "nuxt": "^4.5.2",
     "postgres": "3.4.9",
@@ -34,6 +36,7 @@
   "devDependencies": {
     "@nuxt/kit": "^4.5.2",
     "@tailwindcss/vite": "^4.3.3",
+    "@types/html-to-text": "^9.0.4",
     "@types/node": "^26.2.0",
     "@types/nodemailer": "^8.0.2",
     "@types/qrcode": "1.5.6",

@@ -19,6 +19,7 @@ const props = defineProps<{ id: string, label?: string, kind: InstanceKind }>()
 const noun = computed<'connection' | 'account'>(() => {
   switch (props.kind) {
     case 'postgres':
+    case 'imap':
       return 'connection'
     case 'whatsapp':
     case 'telegram':
@@ -80,6 +81,12 @@ async function destroy() {
             deletes every message and chat synced for it, and every connector
             token issued for it. Claude will immediately lose access. Your
             Telegram account itself is not touched. This cannot be undone.
+          </template>
+          <template v-else-if="kind === 'imap'">
+            This deletes the stored password, every email header synced for
+            it, and every connector token issued for it, and Claude
+            immediately loses access. Your mailbox and its mail are not
+            touched. This cannot be undone.
           </template>
         </AlertDialogDescription>
       </AlertDialogHeader>

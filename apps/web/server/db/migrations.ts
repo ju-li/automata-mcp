@@ -260,4 +260,100 @@ export const APP_MIGRATIONS: AppMigration[] = [
       CREATE INDEX email_verifications_user_idx ON app.email_verifications (user_id);
     `,
   },
+  {
+    name: '0004_imap',
+    sql: /* sql */ `
+      -- A fourth kind: a user-supplied IMAP mailbox. The CHECK was declared
+      -- inline in 0001_init, so it carries Postgres' default name.
+      ALTER TABLE app.instances DROP CONSTRAINT instances_kind_check;
+      ALTER TABLE app.instances ADD CONSTRAINT instances_kind_check
+        CHECK (kind IN ('whatsapp', 'postgres', 'telegram', 'imap'));
+
+      -- The mailbox's credentials. imap_password is a secret like dsn: plain,
+      -- never projected. There is no plaintext transport — 'starttls' must
+      -- upgrade or the connection is refused.
+      ALTER TABLE app.instances
+        ADD COLUMN imap_host     text NOT NULL DEFAULT '',
+        ADD COLUMN imap_port     integer,
+        ADD COLUMN imap_security text NOT NULL DEFAULT ''
+          CHECK (imap_security IN ('', 'tls', 'starttls')),
+        ADD COLUMN imap_user     text NOT NULL DEFAULT '',
+        ADD COLUMN imap_password text NOT NULL DEFAULT '';
+
+      -- What the sync knows about a mailbox. Headers only: bodies and
+      -- attachments are fetched from the mail server when a tool asks, and are
+      -- never written here. See server/utils/imap-sync.ts.
+      --
+      -- identity is lower(user@host): when new credentials name another
+      -- mailbox, everything synced under the old one is deleted. lease_until is
+      -- claimed by conditional UPDATE, so two replicas never sync one mailbox
+      -- at once.
+      CREATE TABLE app.mail_sync_state (
+        instance_id     text PRIMARY KEY REFERENCES app.instances (id) ON DELETE CASCADE,
+        identity        text NOT NULL DEFAULT '',
+        lease_until     timestamptz NOT NULL DEFAULT '-infinity',
+        runs            integer NOT NULL DEFAULT 0,
+        last_attempt_at timestamptz,
+        last_success_at timestamptz,
+        last_error_code text,
+        last_error_at   timestamptz,
+        auth_failed     boolean NOT NULL DEFAULT false
+      );
+
+      -- One row per folder the server lists, synced or not, so a listing can
+      -- say a folder exists and was skipped. oldest_uid is how far down the
+      -- backfill has walked; backfill_stopped says why it stopped short of the
+      -- folder's first message ('days' or 'count'), backfill_complete that it
+      -- did not.
+      CREATE TABLE app.mail_folders (
+        instance_id       text NOT NULL REFERENCES app.instances (id) ON DELETE CASCADE,
+        path              text NOT NULL,
+        name              text NOT NULL DEFAULT '',
+        delimiter         text,
+        special_use       text,
+        synced            boolean NOT NULL DEFAULT false,
+        uidvalidity       bigint,
+        last_uid          bigint NOT NULL DEFAULT 0,
+        oldest_uid        bigint,
+        highest_modseq    numeric,
+        backfill_complete boolean NOT NULL DEFAULT false,
+        backfill_stopped  text CHECK (backfill_stopped IN ('days', 'count')),
+        server_messages   integer,
+        last_synced_at    timestamptz,
+        PRIMARY KEY (instance_id, path)
+      );
+
+      -- One row per message per folder. A message filed in two folders (a
+      -- Gmail label) is two rows sharing message_id; cross-folder reads
+      -- collapse them. text_part / html_part are BODYSTRUCTURE part ids, and
+      -- attachments lists parts with name, type and size — the bytes stay on
+      -- the mail server.
+      CREATE TABLE app.mail_messages (
+        instance_id     text NOT NULL REFERENCES app.instances (id) ON DELETE CASCADE,
+        folder_path     text NOT NULL,
+        uidvalidity     bigint NOT NULL,
+        uid             bigint NOT NULL,
+        message_id      text,
+        in_reply_to     text,
+        refs            text[] NOT NULL DEFAULT '{}',
+        subject         text NOT NULL DEFAULT '',
+        from_addr       jsonb NOT NULL DEFAULT '[]',
+        to_addr         jsonb NOT NULL DEFAULT '[]',
+        cc_addr         jsonb NOT NULL DEFAULT '[]',
+        sent_at         timestamptz,
+        received_at     timestamptz NOT NULL,
+        flags           text[] NOT NULL DEFAULT '{}',
+        size            integer,
+        text_part       text,
+        html_part       text,
+        attachments     jsonb NOT NULL DEFAULT '[]',
+        subject_tsv     tsvector GENERATED ALWAYS AS (to_tsvector('simple', subject)) STORED,
+        PRIMARY KEY (instance_id, folder_path, uid),
+        FOREIGN KEY (instance_id, folder_path) REFERENCES app.mail_folders (instance_id, path) ON DELETE CASCADE
+      );
+      CREATE INDEX mail_messages_received_idx ON app.mail_messages (instance_id, received_at DESC, uid DESC);
+      CREATE INDEX mail_messages_message_id_idx ON app.mail_messages (instance_id, message_id);
+      CREATE INDEX mail_messages_subject_idx ON app.mail_messages USING gin (subject_tsv);
+    `,
+  },
 ]

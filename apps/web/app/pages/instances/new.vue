@@ -6,6 +6,7 @@ import {
   DatabaseIcon,
   HardDriveIcon,
   LeafIcon,
+  MailIcon,
   MessageCircleIcon,
   SendIcon,
   SmartphoneIcon,
@@ -53,6 +54,11 @@ const kindCards: Record<InstanceKind, KindCard> = {
     description: 'Point Claude at a database with a connection string or its parameters. Read-only by default.',
     icon: DatabaseIcon,
   },
+  imap: {
+    title: 'Email (IMAP)',
+    description: 'Connect a mailbox with its IMAP login. Claude can list, search and read email and its attachments.',
+    icon: MailIcon,
+  },
 }
 
 /**
@@ -80,6 +86,11 @@ const groups: {
         icon: SmartphoneIcon,
       },
     ],
+  },
+  {
+    heading: 'Email',
+    kinds: ['imap'],
+    soon: [],
   },
   {
     heading: 'Databases',
@@ -123,6 +134,9 @@ const serverDbUrl = ref('')
 // Postgres
 const dsn = ref('')
 
+// IMAP
+const imap = ref<ImapCredentials>(emptyImapCredentials())
+
 // Whether this deployment's own Telegram bridge can serve Telegram — asked when
 // Telegram is picked, so a bridge running without its API credentials says what
 // to set before the form is filled in rather than on the click. Re-asked on every
@@ -154,6 +168,7 @@ const telegramBlocked = computed(() =>
 const canSubmit = computed(() => {
   if (busy.value) return false
   if (kind.value === 'postgres') return dsn.value.trim().length > 0
+  if (kind.value === 'imap') return imapCredentialsBody(imap.value) !== undefined
   if (kind.value === 'whatsapp' || kind.value === 'telegram') {
     if (!ownServer.value) return !telegramBlocked.value
     return serverUrl.value.trim().length > 0 && serverKey.value.trim().length > 0
@@ -167,6 +182,8 @@ async function create() {
 
   const body = kind.value === 'postgres'
     ? { kind: 'postgres', label: label.value, dsn: dsn.value.trim() }
+    : kind.value === 'imap'
+    ? { kind: 'imap', label: label.value, ...imapCredentialsBody(imap.value) }
     : {
         kind: kind.value,
         label: label.value,
@@ -266,7 +283,7 @@ async function create() {
             <Input
               id="label"
               v-model="label"
-              :placeholder="kind === 'postgres' ? 'Production analytics' : kind === 'telegram' ? 'Personal Telegram' : 'Work phone'"
+              :placeholder="kind === 'postgres' ? 'Production analytics' : kind === 'telegram' ? 'Personal Telegram' : kind === 'imap' ? 'Work inbox' : 'Work phone'"
               @keydown.enter="create"
             />
             <p class="text-xs text-muted-foreground">
@@ -283,6 +300,19 @@ async function create() {
                 Checked by actually connecting before it is saved, and never shown
                 again afterwards. It is stored so this app can reconnect, so treat
                 the password in it as one this server holds.
+              </p>
+            </div>
+          </template>
+
+          <!-- IMAP -->
+          <template v-else-if="kind === 'imap'">
+            <Separator />
+            <div class="space-y-2">
+              <ImapCredentialsInput v-model="imap" id-prefix="imap" />
+              <p class="text-xs text-muted-foreground">
+                Checked by logging in before it is saved, and never shown again
+                afterwards. The password is stored so this app can sync, so use an
+                app password you can revoke on its own.
               </p>
             </div>
           </template>
@@ -461,10 +491,10 @@ async function create() {
 
           <Button class="w-full" :disabled="!canSubmit" @click="create">
             <template v-if="busy">
-              {{ kind === 'postgres' ? 'Connecting…' : 'Setting up…' }}
+              {{ kind === 'postgres' || kind === 'imap' ? 'Connecting…' : 'Setting up…' }}
             </template>
             <template v-else>
-              {{ kind === 'postgres' ? 'Connect database' : 'Continue to QR code' }}
+              {{ kind === 'postgres' ? 'Connect database' : kind === 'imap' ? 'Connect mailbox' : 'Continue to QR code' }}
             </template>
           </Button>
 
@@ -485,6 +515,18 @@ async function create() {
             everything can be talked into reading everything. Create a role with
             <span class="font-mono">GRANT SELECT</span> on just the tables you
             want, and use that here.
+          </p>
+        </template>
+        <template v-else-if="kind === 'imap'">
+          <p class="font-medium">
+            Use an app password, not your account password.
+          </p>
+          <p class="mt-1 text-muted-foreground">
+            Most providers issue app passwords for exactly this: one you can revoke
+            without changing your main password. Microsoft 365 and Outlook.com no
+            longer accept passwords over IMAP and cannot be connected this way.
+            Headers sync here; message bodies and attachments are fetched from your
+            mail server only when Claude asks, and never stored.
           </p>
         </template>
         <template v-else-if="kind === 'telegram'">

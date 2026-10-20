@@ -3,7 +3,7 @@ import { assertNever } from '#shared/connection'
 
 /**
  * Conversations for the scope picker and the dashboard's chat table, for a
- * WhatsApp or a Telegram connection. Telegram's rows come back in the same shape
+ * WhatsApp or a Telegram connection — or a mailbox's folders, for an IMAP one. Telegram's rows come back in the same shape
  * — `jid` carries its chat id — so the picker and the dialog need no second copy.
  *
  * Two callers, two paging idioms, one listing behind both:
@@ -35,7 +35,7 @@ const query = z.object({
 })
 
 export default defineEventHandler(async (event) => {
-  const { instance, kind } = await requireReadableInstanceOfKinds(event, getRouterParam(event, 'id'), ['whatsapp', 'telegram'])
+  const { instance, kind } = await requireReadableInstanceOfKinds(event, getRouterParam(event, 'id'), ['whatsapp', 'telegram', 'imap'])
 
   const params = await getValidatedQuery(event, q => query.parse(q))
 
@@ -57,6 +57,11 @@ export default defineEventHandler(async (event) => {
       return await listTelegramChatsForPicker(instance, table
         ? { take: limit, skip: (page - 1) * limit, q: params.q, sort: params.sort, dir: params.dir }
         : { take: params.take ?? 500, skip: params.skip ?? 0 })
+    case 'imap':
+      // Folders, in the picker's row shape: `jid` carries the path, which is
+      // what a mail token's chat scope stores. One page — a mailbox has tens of
+      // folders, not thousands.
+      return await listMailFoldersForPicker(instance, params.q)
     default:
       return assertNever(kind, 'connection kind')
   }

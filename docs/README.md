@@ -15,6 +15,7 @@ here are about running and developing this repository.
 - [WhatsApp connections](whatsapp.md) — reading and searching, history import, bringing your own Evolution server
 - [Telegram connections](telegram.md) — setting up the bridge, what syncs, bringing your own bridge
 - [Database connections](postgres.md) — what the table allowlist does and does not close, least-privilege roles
+- [Email (IMAP) connections](imap.md) — what syncs and what stays on the mail server, app passwords, attachments
 - [Connection alerts](alerts.md) — disconnect emails and the five-minute sweep
 - [Two-factor authentication](two-factor.md) — authenticator apps and passkeys, the `NUXT_PUBLIC_APP_URL` dependency, resetting a lost factor
 

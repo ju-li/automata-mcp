@@ -3,8 +3,8 @@
 ## Getting started
 
 1. Sign up at your deployment's address (<http://localhost:3000> locally).
-2. Create a connection: pick **WhatsApp account**, **Telegram account** or
-   **PostgreSQL database**, and name it.
+2. Create a connection: pick **WhatsApp account**, **Telegram account**,
+   **Email (IMAP)** or **PostgreSQL database**, and name it.
 3. **WhatsApp:** continue to the QR code and scan it — WhatsApp → Settings →
    Linked devices → Link a device. To use an Evolution server other than this
    app's, tick **Use my own Evolution API server** first (see [Bring your own Evolution server](whatsapp.md#bring-your-own-evolution-server)).
@@ -14,6 +14,9 @@
    stored nowhere. Chats start syncing as soon as it links.
    **Postgres:** paste a connection string. It is proved by connecting before
    anything is saved (see [Database connections](postgres.md)).
+   **Email:** enter the IMAP server and an app password. It is proved by logging
+   in before anything is saved, and headers start syncing at once (see
+   [Email (IMAP) connections](imap.md)).
 4. On the connection's dashboard, create a **New connector token**: a name, an
    expiry (30 days, 90 days — the default — 1 year, or never) and a scope.
 5. Add it to Claude. The **How to connect** dialog has the steps for Claude.ai
@@ -70,6 +73,12 @@ comes back.
 | `read-telegram-messages` | Telegram | read | One chat, newest first, with the same paging envelope as `read-messages`; optional forum `topicId`; says when older history was never synced |
 | `search-telegram-messages` | Telegram | read | Messages containing every word of `query` (text and captions), across chats in scope or one `chatId` |
 | `send-telegram-message` | Telegram | **write** | Send plain text to a `chatId` or an @username |
+| `get-mailbox-status` | Email | read | Which mailbox, whether its sync works, when it last ran, and which folders are still backfilling |
+| `list-mail-folders` | Email | read | Folders in scope with synced and unread counts; skipped folders (All Mail, Junk, Trash) marked `synced: false` |
+| `list-emails` | Email | read | Headers newest first from one folder or all in scope, 1–100 per page; filters for date, unread, flagged, attachments |
+| `search-emails` | Email | read | `from`, `to`, `subject` against synced headers and `text` through the mail server's own search |
+| `read-email` | Email | read | One email's headers, body as plain text (fetched live, never stored) and attachment list |
+| `get-email-attachment` | Email | read | One attachment, fetched live: images as images, text as text, other files embedded; 10 MB cap by default |
 | `get-database-info` | Postgres | read | Server version, database, connecting role, and what this token is scoped to |
 | `list-tables` | Postgres | read | Tables in scope, filterable by schema and name, paged (1–500, default 100) |
 | `describe-table` | Postgres | read | Columns, keys, constraints, indexes and comments for one table |
@@ -98,6 +107,10 @@ the connection's dashboard. Which axes appear depends on the kind:
   **Telegram** works the same way through its own tools, with chats named by
   `chatId`; a send to an @username is resolved first and then checked against
   the allowlist, so a name cannot reach a chat the id could not.
+- **Folders** (Email) — all folders, or an allowlist, stored on the chat axis.
+  Listings and searches are narrowed in SQL; reading an email or fetching an
+  attachment from a folder outside it is refused by name. An email filed in
+  several folders is reachable only through a copy in an allowed one.
 - **Tables** (Postgres) — every table the connecting role can read, or an
   allowlist. `list-tables` and `describe-table` apply it in their own SQL, so a
   table outside it is neither listed nor described. `run-query` and

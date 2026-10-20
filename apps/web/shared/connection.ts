@@ -22,7 +22,7 @@
  * Read a row's kind through `instanceKind()` in `server/utils/mcp-scope.ts`,
  * which refuses a value this build does not know rather than guessing.
  */
-export type InstanceKind = 'whatsapp' | 'postgres' | 'telegram'
+export type InstanceKind = 'whatsapp' | 'postgres' | 'telegram' | 'imap'
 
 /**
  * What sort of thing a kind is.
@@ -46,6 +46,9 @@ export function connectionFamily(kind: InstanceKind): ConnectionFamily {
   switch (kind) {
     case 'whatsapp':
     case 'telegram':
+    // A mailbox's folders take the chat axis: a token is scoped to folders the
+    // way a WhatsApp token is scoped to chats.
+    case 'imap':
       return 'messaging'
     case 'postgres':
       return 'database'

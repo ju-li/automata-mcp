@@ -40,12 +40,14 @@ interface McpAuthBase {
  * Postgres carries no separate credential object: the DSN lives on the instance
  * row and `pgFor(instance)` is the only thing that reads it, so copying it here
  * would put a second live copy of a user's database password in request context
- * for no gain.
+ * for no gain. IMAP follows the same rule for the mailbox password, which only
+ * imap-client.ts reads.
  */
 export type McpAuth =
   | (McpAuthBase & { kind: 'whatsapp', evolution: EvolutionCredentials })
   | (McpAuthBase & { kind: 'postgres' })
   | (McpAuthBase & { kind: 'telegram', telegram: TelegramCredentials })
+  | (McpAuthBase & { kind: 'imap' })
 
 /**
  * One row per token, joined to everything that decides whether it still works.
@@ -232,6 +234,14 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
         return undefined
       }
       auth = { ...base, kind: 'telegram', telegram }
+      break
+    }
+    case 'imap': {
+      if (!instance.imap_host || !instance.imap_user) {
+        console.error(`[mcp-auth] instance ${instance.id} is kind=imap with no mailbox; token ${record.id} refused`)
+        return undefined
+      }
+      auth = { ...base, kind: 'imap' }
       break
     }
     default:
