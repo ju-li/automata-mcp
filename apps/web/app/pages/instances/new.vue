@@ -213,7 +213,11 @@ async function create() {
 </script>
 
 <template>
-  <div class="mx-auto max-w-md space-y-6">
+  <!--
+    The picker takes the layout's full width so its cards sit in a grid; the
+    form for a chosen kind is a single column of inputs and stays narrow.
+  -->
+  <div class="mx-auto space-y-6" :class="kind ? 'max-w-md' : 'max-w-5xl'">
     <div>
       <h1 class="font-heading text-2xl font-semibold">
         Add a connection
@@ -231,12 +235,12 @@ async function create() {
           {{ group.heading }}
         </h2>
 
-        <div class="grid gap-3">
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <button
             v-for="available in group.kinds"
             :key="available"
             type="button"
-            class="flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-accent"
+            class="flex h-full items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-accent"
             @click="kind = available"
           >
             <component :is="kindCards[available].icon" class="mt-0.5 size-5 shrink-0 text-muted-foreground" />
@@ -255,11 +259,11 @@ async function create() {
           <div
             v-for="card in group.soon"
             :key="card.title"
-            class="flex items-start gap-3 rounded-lg border border-dashed p-4 opacity-60"
+            class="flex h-full items-start gap-3 rounded-lg border border-dashed p-4 opacity-60"
           >
             <component :is="card.icon" class="mt-0.5 size-5 shrink-0 text-muted-foreground" />
             <div>
-              <div class="flex items-center gap-2">
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span class="font-medium">{{ card.title }}</span>
                 <Badge variant="secondary">
                   Coming soon
