@@ -83,6 +83,19 @@ export function describeState(
           return { label: 'Unknown', variant: 'destructive', hint: 'Could not reach the Telegram bridge for this account.' }
       }
 
+    // The sync's last outcome, not a live login — see `getImapHealth`.
+    case 'imap':
+      switch (state) {
+        case 'open':
+          return { label: 'Syncing', variant: 'default', hint: 'Headers sync every two minutes; bodies and attachments are fetched when Claude asks.' }
+        case 'connecting':
+          return { label: 'First sync', variant: 'secondary', hint: 'The first sync is under way. Recent mail appears first.' }
+        case 'close':
+          return { label: 'Sync failing', variant: 'outline', hint: 'The last sync could not log in or reach the mail server.' }
+        default:
+          return { label: 'Stale', variant: 'destructive', hint: 'The mailbox has not synced recently.' }
+      }
+
     default:
       return assertNever(kind, 'connection kind')
   }

@@ -45,6 +45,7 @@ export function sqlKindOf(instance: Pick<AppInstance, 'kind'>): SqlKind | undefi
       return kind
     case 'whatsapp':
     case 'telegram':
+    case 'imap':
       return undefined
     default:
       return assertNever(kind, 'connection kind')

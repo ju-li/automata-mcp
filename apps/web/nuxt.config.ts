@@ -53,6 +53,8 @@ export default defineNuxtConfig({
       // mailed soon after it does. Webhook re-registration stays hourly.
       '*/5 * * * *': ['alerts:sweep'],
       '0 * * * *': ['alerts:register-webhooks'],
+      // Mailbox headers. Safe on several replicas: each mailbox is leased.
+      '*/2 * * * *': ['imap:sync'],
     },
   },
 
@@ -118,6 +120,13 @@ export default defineNuxtConfig({
     // app URL + /api/webhook/telegram; set it where the bridge cannot reach that
     // (in development, http://host.docker.internal:3000/api/webhook/telegram).
     telegramWebhookUrl: '',
+
+    // IMAP mailboxes: how far back the header sync reaches, per folder, and the
+    // largest attachment a tool will fetch. Attachments are fetched from the
+    // mail server on request and never stored. See server/utils/imap-sync.ts.
+    imapBackfillDays: '365',
+    imapBackfillMax: '50000',
+    imapAttachmentMaxBytes: String(10 * 1024 * 1024),
 
     // Let a user-supplied Postgres DSN or Evolution URL point at a private or
     // loopback address. Correct for a single-tenant, self-hosted deployment;

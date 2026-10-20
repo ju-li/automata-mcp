@@ -9,23 +9,25 @@ One Nuxt/Nitro server, two surfaces:
 1. **Web UI** — users create *connections*, mint connector tokens for them. Session cookie.
 2. **MCP endpoint** — Claude connects to `/mcp` as custom connector. App-minted bearer token.
 
-Connection = row in `instances` with `kind`; connector token bound to exactly one row. Three kinds:
+Connection = row in `instances` with `kind`; connector token bound to exactly one row. Four kinds:
 
 - **`whatsapp`** — [Evolution API](https://doc.evolution-api.com/) instance, paired by QR, on deployment's configured Evolution server *or* user-supplied one.
 - **`postgres`** — user-supplied PostgreSQL DSN.
 - **`telegram`** — personal Telegram account linked by QR through `apps/telegram-bridge`, deployment's own bridge *or* user-supplied one. See "Telegram bridge".
+- **`imap`** — user-supplied IMAP mailbox, username + app password. Read-only. Headers synced, bodies and attachments fetched live. See "IMAP connections".
 
 `kind` read through `instanceKind()` in `mcp-scope.ts`. Column `NOT NULL` with `CHECK`, but function still refuses value running build doesn't know rather than serving it as WhatsApp — rollback after migration added a kind leaves such rows. Every per-kind branch = `switch` ending in `assertNever` (`shared/connection.ts`), never `if … else`, so adding kind fails to compile everywhere not yet decided.
 
 App's own data (users, sessions, organizations, connections + credentials, tokens) in Postgres, `app` schema migrated at boot — `NUXT_DATABASE_URL`, required. Same Postgres Evolution writes into (`public`) and Telegram bridge uses (`telegram`); that Postgres is only compose service not behind profile. Evolution API + its Redis needed **only for WhatsApp connections** — behind `whatsapp` compose profile; `NUXT_EVOLUTION_*` vars optional.
 
-`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `alerts.md`, `using-automata.md`, `releases.md`. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
+`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `imap.md`, `alerts.md`, `using-automata.md`, `releases.md`. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
 
-**Status:** product loop works end to end for all three kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat or per-table scoping. Fifteen MCP tools, gated by kind:
+**Status:** product loop works end to end for all four kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat, per-folder or per-table scoping. Twenty-one MCP tools, gated by kind:
 
 - `whatsapp`: `get-connection-status`, `list-chats`, `read-messages`, `search-messages`, `send-text-message`
 - `telegram`: `get-telegram-status`, `list-telegram-chats`, `read-telegram-messages`, `search-telegram-messages`, `send-telegram-message`
 - `postgres` (the `sql/` group): `get-database-info`, `list-tables`, `describe-table`, `run-query`, `run-statement` (write)
+- `imap`: `get-mailbox-status`, `list-mail-folders`, `list-emails`, `search-emails`, `read-email`, `get-email-attachment` (all read)
 
 WhatsApp or Telegram connection that drops emails everyone who can reach it, emails again on recovery — see "Disconnect alerts".
 
@@ -83,7 +85,8 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              db-rows, sql-engine, pg-pool, pg-guard,
                              pg-run, pg-catalog, chats, alerts, mailer,
                              mcp-kind-tool, telegram, telegram-db,
-                             telegram-instances, mfa, totp, webauthn, …
+                             telegram-instances, imap-client, imap-sync, imap-db,
+                             mail-format, mfa, totp, webauthn, …
   shared/connection.ts       InstanceKind, assertNever — imported as #shared
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              `telegram` schema of the shared Postgres. See "Telegram bridge".
@@ -209,7 +212,7 @@ Sharper edge now: global key can sit **on instance row itself** — `instances.a
 
 Only Postgres **pins** approved address (`postgres({ host })`, driver never resolves name itself). Evolution path re-checks before every request but can't pin, because `$fetch` resolves DNS itself; closing window needs undici `Agent` with `connect` hook, and `undici` not direct dependency. Residual rebinding window documented at call site in `evolution.ts` — don't delete note without closing hole.
 
-**Secrets on `instances` are plain columns, not encrypted.** `api_key`, `admin_key`, `dsn`, `evolution_db_url`, `telegram_db_url` never leave server — `toPublicInstance()` only projection UI receives — sit in clear in DB and every backup. `NUXT_DATABASE_URL` in `net-guard`'s own-backends list, so user DSN resolving to it refused regardless of `NUXT_ALLOW_PRIVATE_TARGETS`.
+**Secrets on `instances` are plain columns, not encrypted.** `api_key`, `admin_key`, `dsn`, `evolution_db_url`, `telegram_db_url`, `imap_password` never leave server — `toPublicInstance()` only projection UI receives — sit in clear in DB and every backup. `NUXT_DATABASE_URL` in `net-guard`'s own-backends list, so user DSN resolving to it refused regardless of `NUXT_ALLOW_PRIVATE_TARGETS`.
 
 **Evolution DB connection read-only, and now only way messages are read.** `server/utils/evolution-db.ts` = one file talking to Evolution's Postgres. Began as search escape hatch — 2.3.7's `POST /chat/findMessages` accepts `where.message` and never reads it, so content search returns unfiltered page that reads as result set; that field is trap — and `read-messages` joined for second reason, below. `NUXT_EVOLUTION_DATABASE_URL` therefore **required**; no HTTP fallback; missing value announced once at startup (`server/plugins/evolution-db-check.ts`), answers 500 not 503, since retry won't fix it.
 
@@ -507,6 +510,31 @@ Same split as WhatsApp — `telegram.ts` talks to bridge over HTTP, `telegram-db
 **Chat list and chat lookup routes serve both messaging kinds** via `requireReadableInstanceOfKinds`. Telegram rows return in picker's existing shape with chat id in `jid`, so `TokenScopeFields` and `ChatsDialog` shared not copied; `ChatsDialog` takes kind to show @username instead of phone number.
 
 **Tool names carry `telegram`** (`read-telegram-messages`, …) since tool basenames global across groups.
+
+## IMAP connections
+
+`imap-client.ts` = only file speaking IMAP (imapflow): connect, probe, live body / attachment / body-search. `imap-sync.ts` = header sync. `imap-db.ts` = SQL reads over `app.mail_*`. `mail-format.ts` = tool presentation + folder resolution. Tools in `server/mcp/tools/imap/`. `docs/imap.md` = operator side.
+
+**Hybrid by decision: headers synced, bodies and attachments never stored.** Row ≈ 1 KB (envelope, flags, BODYSTRUCTURE part ids, attachment name/type/size). `read-email` downloads text part live, `get-email-attachment` streams one part into memory, `search-emails`' `text` = server's own `SEARCH BODY` (Gmail: `X-GM-RAW`), UIDs joined back onto synced rows. Never add body or attachment columns — storage was the stated constraint.
+
+Rules easy to undo:
+
+- **Every connect through `assertPublicTarget`, dials approved address**, hostname as `servername`, `rejectUnauthorized: true`. **No plaintext:** `starttls` sets `doSTARTTLS: true` — imapflow's default carries on in cleartext when STARTTLS absent from (strippable) capabilities.
+- **Read-only everywhere:** every mailbox opened `readOnly` (EXAMINE), parts fetched with BODY.PEEK — reading must not mark mail read for owner. Connector can't send/move/flag; adding that = new write tools, new scope decision.
+- **`error` listener on every ImapFlow** — unhandled `error` on dropped socket crashes process.
+- **UIDVALIDITY checked before every folder (sync) and every live fetch.** Changed value = folder renumbered: sync deletes folder's rows and restarts; live fetch answers 410. `emailId` encodes folder + uidvalidity + uid for this reason.
+- **Completeness decided by date, never UID position.** UIDs follow arrival, not sending; imported mail lands old messages at high UIDs. `finished()` = `SEARCH BEFORE cutoff` empty. Walking UIDs to 1 and calling it complete reported a year of skipped mail as "no older mail" — found in testing.
+- **Lease by conditional UPDATE** (`lease_until < now()`), not advisory lock — no DB connection held across minutes of IMAP. Scheduled task safe on several replicas (unlike alert sweep). Crash mid-run holds lease ≤ 10 min.
+- **`auth_failed` stops scheduled sync** until credentials change or Sync now — retrying refused password every 2 min gets accounts locked.
+- **Identity (`lower(user@host)`) change wipes synced rows** (`resetIfIdentityChanged`), in credential update and before every run.
+- **`part` checked against row's stored `attachments`** before any download — arbitrary part id = read body / nested messages through file route. Size refused from BODYSTRUCTURE before download, cap re-enforced on bytes.
+- **Folder scope rides `chat_jids`** (paths), `connectionFamily('imap') = 'messaging'`. Predicate in SQL for listings; `assertFolderAllowed` before live fetch. Cross-folder listings collapse by `Message-ID` (`DISTINCT ON`) inside scope only — `folders` never names a folder token can't see.
+- **Health = sync's last outcome, not live login** (`getImapHealth`) — dashboard polls, login per poll = rate-limit. Stale (>15 min) reads `unknown`, never `open`. Listings carry `staleSyncNote`.
+- **All Mail / Junk / Trash / `\Noselect` listed, not synced** — All Mail duplicates everything.
+- Live connection cached via `keyedResource('imap:<id>')` with build de-dupe; one retry on dropped connection (`isDropped`). Sync uses own short-lived connection so backfill never holds mailbox tool call waits on.
+- Tool result with `content: [...]` passes through toolkit's `normalizeToolResult` untouched — how attachments return `image` / `resource` blocks. Never return plain object with array `content` key from other tools.
+
+Not alertable yet (`alertableKind` → `undefined`); `auth_failed` is the signal that would drive it. OAuth (Gmail/Microsoft XOAUTH2) not supported.
 
 ## The app database
 

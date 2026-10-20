@@ -17,7 +17,7 @@
   <a href="https://railway.com/deploy/automata-or-whatsapp-telegram-sql-mcp?referralCode=HxrUPo&utm_medium=integration&utm_source=template&utm_campaign=generic"><img src="https://railway.com/button.svg" alt="Deploy on Railway"></a>
 </p>
 
-**Automata MCP safely gives Claude (or Codex or any AI Agent) access to your WhatsApp, Telegram and PostgreSQL.** Connect an
+**Automata MCP safely gives Claude (or Codex or any AI Agent) access to your WhatsApp, Telegram, email and PostgreSQL.** Connect an
 account or a database once, mint a connector token scoped to the chats or
 tables you choose, and paste its URL into Claude as a custom connector. Claude
 can then read, search and summarise your conversations, query your data, and —
@@ -44,15 +44,17 @@ Run your own with one click on Railway or with Docker Compose.
 
 ## Features
 
-- **Three kinds of connection.** A WhatsApp account paired by QR, a Telegram
-  account linked by QR, or a PostgreSQL database by connection string.
-- **Fifteen MCP tools, five per kind.** Check status, list chats, read and search
-  messages, send text; list and describe tables, run queries and — when granted —
-  write statements. See [the tool list](docs/using-automata.md#mcp-tools).
+- **Four kinds of connection.** A WhatsApp account paired by QR, a Telegram
+  account linked by QR, an email mailbox over IMAP, or a PostgreSQL database by
+  connection string.
+- **Twenty-one MCP tools.** Check status, list chats, read and search
+  messages, send text; list, search and read email and fetch attachments; list
+  and describe tables, run queries and — when granted — write statements. See
+  [the tool list](docs/using-automata.md#mcp-tools).
 - **Your history, not just what arrives next.** WhatsApp history is imported when
   a number is paired; Telegram chats are synced and backfilled.
 - **Scoped connector tokens.** Each token reaches exactly one connection, and can
-  be narrowed to specific chats, specific tables and specific tools. Tokens are
+  be narrowed to specific chats, folders, tables and tools. Tokens are
   shown once, stored only as a hash, and can expire, be rotated or be revoked.
 - **Read-only databases by default.** Queries run in read-only transactions, one
   statement at a time, checked against the token's table allowlist by inspecting
@@ -131,7 +133,7 @@ from it. See [Self-hosting](docs/self-hosting.md).
 - Running and developing this repository: [docs/](docs/README.md) —
   [self-hosting](docs/self-hosting.md), [Railway](docs/deploy-railway.md),
   [WhatsApp](docs/whatsapp.md), [Telegram](docs/telegram.md),
-  [PostgreSQL](docs/postgres.md), [alerts](docs/alerts.md),
+  [email](docs/imap.md), [PostgreSQL](docs/postgres.md), [alerts](docs/alerts.md),
   [two-factor](docs/two-factor.md),
   [development](docs/development.md)
 

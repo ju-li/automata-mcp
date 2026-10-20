@@ -42,6 +42,10 @@ const open = computed({
           Anyone with this token can read and send Telegram messages from this
           account. Treat it like a password.
         </p>
+        <p v-else-if="kind === 'imap'">
+          Anyone with this token can read the email in this mailbox, attachments
+          included. Treat it like a password.
+        </p>
       </div>
 
       <p v-if="scope" class="text-sm">

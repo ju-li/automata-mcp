@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { DatabaseIcon, MessageCircleIcon, SendIcon } from '@lucide/vue'
+import { DatabaseIcon, MailIcon, MessageCircleIcon, SendIcon } from '@lucide/vue'
 import { assertNever } from '#shared/connection'
 
 /**
@@ -12,7 +12,24 @@ import { assertNever } from '#shared/connection'
  */
 const props = defineProps<{ instance: InstanceListRow }>()
 
-const isPostgres = computed(() => props.instance.kind === 'postgres')
+/**
+ * What the card's two lines carry. A database and a mailbox both show where
+ * they point and a line of health; only the messaging accounts have a profile
+ * and message counts.
+ */
+const layout = computed<'target' | 'messaging'>(() => {
+  const kind = props.instance.kind
+  switch (kind) {
+    case 'postgres':
+    case 'imap':
+      return 'target'
+    case 'whatsapp':
+    case 'telegram':
+      return 'messaging'
+    default:
+      return assertNever(kind, 'connection kind')
+  }
+})
 
 const kindIcon = computed(() => {
   const kind = props.instance.kind
@@ -23,13 +40,15 @@ const kindIcon = computed(() => {
       return MessageCircleIcon
     case 'telegram':
       return SendIcon
+    case 'imap':
+      return MailIcon
     default:
       return assertNever(kind, 'connection kind')
   }
 })
 
 const secondary = computed(() => {
-  if (isPostgres.value) return props.instance.target || 'No connection string stored'
+  if (layout.value === 'target') return props.instance.target || 'No credentials stored'
   return props.instance.profileName || props.instance.number || 'Not paired yet'
 })
 </script>
@@ -44,7 +63,7 @@ const secondary = computed(() => {
               <component :is="kindIcon" class="size-4 shrink-0 text-muted-foreground" />
               {{ instance.label }}
             </CardTitle>
-            <CardDescription :class="isPostgres && 'font-mono text-xs'">
+            <CardDescription :class="layout === 'target' && 'font-mono text-xs'">
               <ScrollOnHover :text="secondary" />
             </CardDescription>
           </div>
@@ -52,8 +71,8 @@ const secondary = computed(() => {
         </div>
       </CardHeader>
       <CardContent>
-        <p v-if="isPostgres" class="truncate text-sm text-muted-foreground">
-          {{ instance.detail || 'PostgreSQL' }}
+        <p v-if="layout === 'target'" class="truncate text-sm text-muted-foreground">
+          {{ instance.detail || (instance.kind === 'imap' ? 'IMAP mailbox' : 'PostgreSQL') }}
         </p>
         <p v-else class="text-sm text-muted-foreground tabular-nums">
           {{ instance.stats?.messages ?? 0 }} messages · {{ instance.stats?.chats ?? 0 }} chats

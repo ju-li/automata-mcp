@@ -43,6 +43,16 @@ const body = z.discriminatedUnion('kind', [
       dbUrl: z.string().min(1).max(2000).optional(),
     }).optional(),
   }),
+  // A mailbox. No plaintext option: `starttls` must upgrade or it fails.
+  z.object({
+    kind: z.literal('imap'),
+    label: z.string().max(100).optional(),
+    host: z.string().trim().min(1).max(253),
+    port: z.number().int().min(1).max(65535),
+    security: z.enum(['tls', 'starttls']),
+    user: z.string().trim().min(1).max(320),
+    password: z.string().min(1).max(1000),
+  }),
 ])
 
 export default defineEventHandler(async (event) => {
@@ -62,6 +72,9 @@ export default defineEventHandler(async (event) => {
       break
     case 'telegram':
       instance = await provisionTelegramInstance(actor, { label: parsed.label, server: parsed.server })
+      break
+    case 'imap':
+      instance = await provisionImapInstance(actor, parsed)
       break
     default:
       return assertNever(parsed, 'connection kind')
