@@ -24,6 +24,7 @@ import { toast } from 'vue-sonner'
  */
 export function useApiAction() {
   const busy = ref(false)
+  const { isAdmin } = useSession()
 
   async function run<T>(
     work: () => Promise<T>,
@@ -43,11 +44,8 @@ export function useApiAction() {
       return result
     }
     catch (error) {
-      toast.error(
-        options.preferServerMessage === false
-          ? options.failure
-          : apiErrorMessage(error, options.failure),
-      )
+      // A plan limit always shows its own message, with the way out.
+      toastApiError(error, options.failure, { preferServerMessage: options.preferServerMessage, isAdmin: isAdmin.value })
       busy.value = false
       return undefined
     }

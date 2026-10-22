@@ -539,6 +539,14 @@ export async function removeMember(orgId: string, member: OrgMember): Promise<{ 
  *
  * The now-empty old organization is deleted in the same transaction. It owns no
  * connections — that was the first refusal — so nothing restricts the delete.
+ * With billing on there is a third refusal: that organization still holds a
+ * paid subscription not set to cancel, which deleting it would leave billing
+ * with nobody able to reach it.
+ *
+ * With billing on, the inviting organization's plan must have a seat for them
+ * (`assertCanAdd`): every join goes through here, so this is the one check
+ * that covers accepting signed in, invited signup, and invited verification.
+ * The caller syncs the billed seat count once its transaction has committed.
  */
 export async function acceptInviteInto(
   tx: Db,
@@ -550,14 +558,16 @@ export async function acceptInviteInto(
     SELECT * FROM app.memberships WHERE user_id = ${user.id} FOR UPDATE
   `
 
-  if (!current) {
-    await tx`INSERT INTO app.memberships (org, user_id, role) VALUES (${orgId}, ${user.id}, ${role})`
+  if (current?.org === orgId) {
+    // Already here. Idempotent rather than an error: a double-clicked link, or a
+    // second copy of the same mail, must not read as a failure.
     return {}
   }
 
-  if (current.org === orgId) {
-    // Already here. Idempotent rather than an error: a double-clicked link, or a
-    // second copy of the same mail, must not read as a failure.
+  await assertCanAdd(tx, orgId, 'member')
+
+  if (!current) {
+    await tx`INSERT INTO app.memberships (org, user_id, role) VALUES (${orgId}, ${user.id}, ${role})`
     return {}
   }
 
@@ -582,6 +592,17 @@ export async function acceptInviteInto(
       statusMessage: 'You are the only admin of your current organization. '
         + 'Make someone else an admin there before joining another one.',
     })
+  }
+
+  if (!others.length && billingEnabled()) {
+    const billing = await loadOrgBilling(tx, previousOrg)
+    if (effectivePlan(billing) === 'pro' && !billing?.cancel_at_period_end) {
+      throw createError({
+        statusCode: 409,
+        statusMessage: 'Your current organization has an active subscription. '
+          + 'Cancel it under Billing before joining another organization.',
+      })
+    }
   }
 
   await tx`UPDATE app.memberships SET org = ${orgId}, role = ${role}, updated = now() WHERE id = ${current.id}`

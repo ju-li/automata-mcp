@@ -50,13 +50,19 @@ const code = ref('')
 const { busy, run } = useApiAction()
 const { busy: resendBusy, run: runResend } = useApiAction()
 
-async function finished(result: { purpose: Pending['purpose'], email: string, signedIn: boolean }) {
+async function finished(result: { purpose: Pending['purpose'], email: string, signedIn: boolean, next?: 'checkout' }) {
   await refresh()
   if (result.purpose === 'signup' && !result.signedIn) {
     // Confirmed in a browser other than the one that signed up: the address is
     // proved, but signing in here is the password's job.
     toast.success('Email confirmed. Sign in to continue.')
     await navigateTo('/login')
+  }
+  else if (result.purpose === 'signup' && result.next === 'checkout') {
+    // Picked Pro on the signup page. The account exists on Free already, so a
+    // failed or abandoned checkout still leaves the Billing page to retry from.
+    toast.success('Email confirmed. Next, start your trial.')
+    if (!await startCheckout()) await navigateTo('/billing')
   }
   else if (result.purpose === 'signup') {
     toast.success('Email confirmed. Welcome!')
@@ -71,7 +77,7 @@ async function finished(result: { purpose: Pending['purpose'], email: string, si
 
 async function submitCode() {
   const result = await run(async () => {
-    return await $fetch<{ purpose: Pending['purpose'], email: string, signedIn: boolean }>('/api/auth/verify', {
+    return await $fetch<{ purpose: Pending['purpose'], email: string, signedIn: boolean, next?: 'checkout' }>('/api/auth/verify', {
       method: 'POST',
       body: { code: code.value.trim() },
     })
@@ -87,7 +93,7 @@ async function submitCode() {
 
 async function confirmLink() {
   const result = await run(async () => {
-    return await $fetch<{ purpose: Pending['purpose'], email: string, signedIn: boolean }>('/api/auth/verify/link', {
+    return await $fetch<{ purpose: Pending['purpose'], email: string, signedIn: boolean, next?: 'checkout' }>('/api/auth/verify/link', {
       method: 'POST',
       body: { token: token.value },
     })

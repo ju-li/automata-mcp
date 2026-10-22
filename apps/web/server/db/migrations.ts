@@ -356,4 +356,35 @@ export const APP_MIGRATIONS: AppMigration[] = [
       CREATE INDEX mail_messages_subject_idx ON app.mail_messages USING gin (subject_tsv);
     `,
   },
+  {
+    name: '0005_billing',
+    sql: /* sql */ `
+      -- Plans, for a deployment with NUXT_BILLING=stripe. Every column is
+      -- inert when billing is off, which is every self-hosted deployment.
+      --
+      -- subscription_status is Stripe's own status, verbatim, as last read
+      -- from Stripe — never from a webhook payload. An organization with none
+      -- is on Free; see effectivePlan() in server/utils/billing.ts.
+      -- trial_used survives the subscription, so cancelling and resubscribing
+      -- does not buy a second trial. seats_billed is the quantity last pushed
+      -- to the seat price, so the reconcile task can tell when it drifted.
+      ALTER TABLE app.organizations
+        ADD COLUMN stripe_customer_id     text,
+        ADD COLUMN stripe_subscription_id text,
+        ADD COLUMN subscription_status    text,
+        ADD COLUMN trial_ends_at          timestamptz,
+        ADD COLUMN current_period_end     timestamptz,
+        ADD COLUMN cancel_at_period_end   boolean NOT NULL DEFAULT false,
+        ADD COLUMN trial_used             boolean NOT NULL DEFAULT false,
+        ADD COLUMN seats_billed           integer;
+      CREATE UNIQUE INDEX organizations_stripe_customer_key
+        ON app.organizations (stripe_customer_id) WHERE stripe_customer_id IS NOT NULL;
+
+      -- The plan picked on the signup page, carried through verification so
+      -- the verified signup can send the browser on to checkout. NULL for an
+      -- invited signup, an email change, and any deployment without billing.
+      ALTER TABLE app.email_verifications
+        ADD COLUMN plan text CHECK (plan IN ('free', 'pro'));
+    `,
+  },
 ]

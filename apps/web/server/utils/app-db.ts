@@ -216,6 +216,23 @@ export interface AppOrganization {
   created?: string
 }
 
+/**
+ * An organization's billing columns. Only `billing.ts` and `stripe.ts` read
+ * them; with billing off they are never consulted.
+ */
+export interface AppOrganizationBilling {
+  id: string
+  name: string
+  stripe_customer_id?: string
+  stripe_subscription_id?: string
+  subscription_status?: string
+  trial_ends_at?: string
+  current_period_end?: string
+  cancel_at_period_end: boolean
+  trial_used: boolean
+  seats_billed?: number
+}
+
 export type OrgRole = 'admin' | 'member'
 
 /**

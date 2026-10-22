@@ -20,7 +20,7 @@ Connection = row in `instances` with `kind`; connector token bound to exactly on
 
 App's own data (users, sessions, organizations, connections + credentials, tokens) in Postgres, `app` schema migrated at boot — `NUXT_DATABASE_URL`, required. Same Postgres Evolution writes into (`public`) and Telegram bridge uses (`telegram`); that Postgres is only compose service not behind profile. Evolution API + its Redis needed **only for WhatsApp connections** — behind `whatsapp` compose profile; `NUXT_EVOLUTION_*` vars optional.
 
-`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `imap.md`, `alerts.md`, `using-automata.md`, `releases.md`. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
+`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `imap.md`, `alerts.md`, `using-automata.md`, `releases.md`, `billing.md`. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
 
 **Status:** product loop works end to end for all four kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat, per-folder or per-table scoping. Twenty-one MCP tools, gated by kind:
 
@@ -86,7 +86,7 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              pg-run, pg-catalog, chats, alerts, mailer,
                              mcp-kind-tool, telegram, telegram-db,
                              telegram-instances, imap-client, imap-sync, imap-db,
-                             mail-format, mfa, totp, webauthn, …
+                             mail-format, mfa, totp, webauthn, billing, stripe, …
   shared/connection.ts       InstanceKind, assertNever — imported as #shared
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              `telegram` schema of the shared Postgres. See "Telegram bridge".
@@ -124,6 +124,23 @@ Three things enforce it:
 ## Who may sign up
 
 `server/utils/signup-policy.ts` gates every signup **without** invitation; invitation path untouched in every mode. `NUXT_SIGNUP` = `open` | `invite-only`, default `invite-only`, unknown value read as invite-only (typo must not open door). Invite-only + `NUXT_SIGNUP_CODE` set → code required, **first account included** — else whoever finds fresh public install first becomes admin. Invite-only, no code → first account on empty DB only, decided by `claimFirstAccount()` *inside* signup transaction under `pg_advisory_xact_lock`, so two racing first signups can't both win; read failure = 503, never allow. Wrong code throttled per IP (`login-throttle.ts`, `signup-ip:` key) and logged. `/api/auth/signup-policy` tells UI `open` / `code` / `closed`, never the code. Why it matters: every self-signup = new org admin on our Evolution and bridge, and with `NUXT_ALLOW_PRIVATE_TARGETS` a stranger's DSN reaches the private network.
+
+## Plans and billing
+
+Hosted offering only. `NUXT_BILLING` = `off` (default) | `stripe`; unknown value read as `stripe` (typo on hosted deploy must not hand out unlimited). **Off = invisible**: `effectivePlan()` answers `unlimited`, `assertCanAdd` no-op, every billing route 404, `/api/auth/me` carries no `plan` field, signup-policy says `billing: false` so no plan picker. Self-hosters never set it. `billing.ts` decides plans; `stripe.ts` only file importing SDK. `docs/billing.md` = operator side.
+
+Free = 1 connection, 1 live token, 1 member. Pro = Stripe status `trialing`/`active`/`past_due` (retry window counts as Pro); 5 seats included, seat price quantity = members − 5.
+
+Rules easy to undo:
+
+- **Org born Free; Pro only when Stripe says so.** Signup's `plan` (carried on `email_verifications.plan` through verification) only decides whether browser goes on to Checkout. Abandoned checkout = working Free account, never half-state.
+- **Payload = hint, live read = fact** (same as Evolution webhook). Webhook verifies signature, maps customer → org, calls `syncOrgFromStripe()`, which re-lists customer's subscriptions and writes columns. Sole writer of `subscription_status`. Hourly `billing:reconcile` same, backstop for lost deliveries and failed seat syncs. Webhook sync failure answers 500 — Stripe retries, unlike Evolution.
+- **Limit checks at choke points, under org row lock.** `assertCanAdd(db, org, …)` locks `app.organizations` row `FOR UPDATE` then counts — takes `Db`, runs in caller's transaction. Token mint wraps check + `createToken` in one tx. Member check lives **inside `acceptInviteInto`** — covers accept, invited signup, invited verify. Invite creation counts pending invites too. Connection check runs before provisioning (remote session reserved before row exists) and can't hold lock across it; race harmless because of next rule.
+- **Lapsed Free org: oldest live token on oldest connection answers, rest 403** (`mcpPlanRefusal`, called in `server/mcp/index.ts` after `resolveMcpAuth`). **Never 401** — client would discard token that revives on resubscribe. Read failure 503. Nothing deleted on lapse; `overLimit` drives banner.
+- **Seats synced after commit** (`syncSeatsLater`), never inside membership tx — Stripe hiccup must not undo join/removal. Every new path changing membership must call it.
+- **Leaving org with live Pro subscription refused** in `acceptInviteInto` (old org would be deleted while still billing), unless `cancel_at_period_end`.
+- **Stripe links from `NUXT_PUBLIC_APP_URL` only**, never `Host` (501 unset). Stripe unconfigured → limits still enforced, checkout 503.
+- Plan limit refusal = **402** `data.code = 'plan_limit'`; UI (`toastApiError` in `usePlan.ts`) offers Billing link to admins only.
 
 ## Email verification
 
