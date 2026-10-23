@@ -60,12 +60,14 @@ interface VerificationRow {
   name?: string
   invite_id?: string
   first_account_only: boolean
+  /** The plan picked on the signup page, with billing on. See billing.ts. */
+  plan?: 'free' | 'pro'
   expires_at: string
 }
 
 const ROW_COLUMNS = [
   'id', 'purpose', 'email', 'code_hash', 'attempts', 'user_id', 'password_hash', 'name',
-  'invite_id', 'first_account_only', 'expires_at',
+  'invite_id', 'first_account_only', 'plan', 'expires_at',
 ] as const
 
 let warnedSetting = false
@@ -282,7 +284,7 @@ export function clearVerifyCookie(event: H3Event): void {
 }
 
 type StartInput =
-  | { purpose: 'signup', email: string, passwordHash: string, name: string, inviteId?: string, firstAccountOnly: boolean }
+  | { purpose: 'signup', email: string, passwordHash: string, name: string, inviteId?: string, firstAccountOnly: boolean, plan?: 'free' | 'pro' }
   | { purpose: 'email_change', email: string, userId: string }
 
 /**
@@ -320,6 +322,7 @@ export async function startVerification(event: H3Event, input: StartInput): Prom
         name: input.purpose === 'signup' ? input.name : null,
         invite_id: input.purpose === 'signup' ? input.inviteId ?? null : null,
         first_account_only: input.purpose === 'signup' && input.firstAccountOnly,
+        plan: input.purpose === 'signup' ? input.plan ?? null : null,
         expires_at: expiresAt,
       })}
     `
@@ -408,6 +411,12 @@ export interface VerificationResult {
   email: string
   /** Whether this request was signed in. False for a signup confirmed by link in another browser. */
   signedIn: boolean
+  /**
+   * `checkout` when the signup picked Pro and this browser is signed in: the
+   * page sends it on to Stripe. Anywhere else, the trial waits on the Billing
+   * page — the organization is on Free until Stripe confirms either way.
+   */
+  next?: 'checkout'
 }
 
 /** A spent row, with the hash that says which browser was waiting for it. */
@@ -570,7 +579,15 @@ async function complete(
     })
   }
 
-  return { purpose: row.purpose, email: row.email, signedIn }
+  // An invited signup is one more member of the inviting organization: on Pro,
+  // perhaps one more billed seat. After the commit, never undoing the join.
+  if (row.purpose === 'signup' && row.invite_id) {
+    const [invite] = await sql<{ org: string }[]>`SELECT org FROM app.invitations WHERE id = ${row.invite_id}`.catch(() => [])
+    syncSeatsLater(invite?.org)
+  }
+
+  const next = signedIn && row.plan === 'pro' && !row.invite_id && billingEnabled() ? 'checkout' as const : undefined
+  return { purpose: row.purpose, email: row.email, signedIn, ...(next ? { next } : {}) }
 }
 
 /**

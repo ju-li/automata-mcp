@@ -11,7 +11,6 @@ import {
   SendIcon,
   SmartphoneIcon,
 } from '@lucide/vue'
-import { toast } from 'vue-sonner'
 
 /**
  * Pick a kind, then fill in that kind's form.
@@ -24,6 +23,17 @@ import { toast } from 'vue-sonner'
 const kind = ref<InstanceKind | undefined>()
 const label = ref('')
 const busy = ref(false)
+
+// On Free, an organization that already has its one connection is told so
+// before it fills in a form the server will refuse. Never fetched without
+// billing, so a self-hosted deployment makes no such request.
+const { isFree } = usePlan()
+const { data: billingInfo } = await useFetch<{ usage: { connections: number }, limits: { connections: number } | null }>(
+  '/api/billing',
+  { immediate: isFree.value, server: false },
+)
+const atConnectionLimit = computed(() => isFree.value && Boolean(billingInfo.value?.limits)
+  && (billingInfo.value?.usage.connections ?? 0) >= (billingInfo.value?.limits?.connections ?? 1))
 
 interface KindCard {
   title: string
@@ -206,7 +216,7 @@ async function create() {
   catch (err: any) {
     // The server's message is the useful part here — it names the bad host, the
     // refused address or the connection error — so show it rather than a generic.
-    toast.error(apiErrorMessage(err, 'Could not create the connection'))
+    toastApiError(err, 'Could not create the connection', { isAdmin: true })
     busy.value = false
   }
 }
@@ -228,8 +238,22 @@ async function create() {
       </p>
     </div>
 
+    <NoticeCard v-if="atConnectionLimit" title="The Free plan includes one connection">
+      <template #description>
+        <p class="mt-1 text-sm text-muted-foreground">
+          Start a Pro trial for unlimited connections and connector tokens, or
+          delete the existing connection to add a different one.
+        </p>
+      </template>
+      <Button as-child size="sm">
+        <NuxtLink to="/billing">
+          See plans
+        </NuxtLink>
+      </Button>
+    </NoticeCard>
+
     <!-- ── kind ─────────────────────────────────────────────────────────── -->
-    <div v-if="!kind" class="space-y-6">
+    <div v-else-if="!kind" class="space-y-6">
       <section v-for="group in groups" :key="group.heading" class="space-y-3">
         <h2 class="text-xs font-medium uppercase tracking-wide text-muted-foreground">
           {{ group.heading }}

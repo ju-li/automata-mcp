@@ -196,6 +196,11 @@ whoever opens it first. If that window matters, set `SIGNUP_CODE` before you
 start the stack (`openssl rand -base64 24`) and hand the code only to people
 who should get their own organization.
 
+Plans and billing are off on a self-hosted deployment: there is no plan picker,
+no Billing page, and no limit on connections, tokens or members. They exist only
+for the hosted offering, behind `NUXT_BILLING` — see [billing.md](billing.md) —
+and you never need to set it.
+
 **`NUXT_ALLOW_PRIVATE_TARGETS=true` with `SIGNUP=open` is the risky
 combination.** Any stranger who signs up can then paste a database or Evolution
 address such as `postgres://…@192.168.1.20:5432/…` and the server connects to

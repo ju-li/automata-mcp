@@ -48,13 +48,20 @@ export default defineEventHandler(async (event) => {
     }
   }
 
-  const { token, record } = await createToken({
-    instanceId: instance.id,
-    assignedTo,
-    createdBy: actor.user.id,
-    label: parsed.label ?? '',
-    preset: parsed.expiry,
-    scope: scopeFromInput(parsed),
+  // The plan's token limit and the insert in one transaction, under the
+  // organization row lock `assertCanAdd` takes, so two racing mints on Free
+  // cannot both land.
+  const sql = await appDb()
+  const { token, record } = await sql.begin(async (tx) => {
+    await assertCanAdd(tx, actor.org.id, 'token')
+    return await createToken({
+      instanceId: instance.id,
+      assignedTo,
+      createdBy: actor.user.id,
+      label: parsed.label ?? '',
+      preset: parsed.expiry,
+      scope: scopeFromInput(parsed),
+    }, tx)
   })
 
   return { token, record }

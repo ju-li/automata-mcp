@@ -113,20 +113,24 @@ export interface CreateTokenInput {
   scope: McpScope
 }
 
-export async function createToken(input: CreateTokenInput): Promise<{ token: string, record: PublicToken }> {
+export async function createToken(input: CreateTokenInput, db?: Db): Promise<{ token: string, record: PublicToken }> {
   const { token, hash } = mintMcpToken()
-  const record = await insertRow<AppMcpToken>('mcp_tokens', {
-    assigned_to: input.assignedTo,
-    created_by: input.createdBy,
-    instance: input.instanceId,
-    token_hash: hash,
-    label: input.label.trim() || 'Untitled token',
-    expires_at: expiryFromPreset(input.preset),
-    revoked: false,
-    ...scopeFields(input.scope),
-  })
+  const sql = db ?? await appDb()
+  const [record] = await sql<AppMcpToken[]>`
+    INSERT INTO app.mcp_tokens ${sql({
+      assigned_to: input.assignedTo,
+      created_by: input.createdBy,
+      instance: input.instanceId,
+      token_hash: hash,
+      label: input.label.trim() || 'Untitled token',
+      expires_at: expiryFromPreset(input.preset),
+      revoked: false,
+      ...scopeFields(input.scope),
+    })}
+    RETURNING *
+  `
 
-  return { token, record: toPublicToken(record) }
+  return { token, record: toPublicToken(record!) }
 }
 
 /**

@@ -8,7 +8,11 @@ export type OrgRole = 'admin' | 'member'
 
 export interface SessionMembership {
   role: OrgRole
-  org: { id: string, name: string }
+  /**
+   * `plan` and `overLimit` are present only on a deployment with billing on;
+   * see usePlan().
+   */
+  org: { id: string, name: string, plan?: 'free' | 'pro', overLimit?: boolean }
 }
 
 interface MeResponse {

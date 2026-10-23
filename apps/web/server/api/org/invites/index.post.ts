@@ -25,6 +25,10 @@ export default defineEventHandler(async (event) => {
   const actor = await requireOrgAdmin(event)
   const { email, role } = await parseBody(event, body)
 
+  // On Free there is no seat for anyone else, and a pending invitation counts
+  // as one already promised. Checked again, authoritatively, on acceptance.
+  await assertCanAdd(await appDb(), actor.org.id, 'member', { includePendingInvites: true })
+
   const { code, invite } = await createInvite(actor.org.id, actor.user, email, role)
 
   return {
