@@ -185,6 +185,9 @@ export async function createCheckoutSession(orgId: string, admin: AppUser): Prom
       ],
       // Card upfront even for the trial, so day 8 charges without asking.
       payment_method_collection: 'always',
+      // A promotion code field on the Checkout page, for comps and promos.
+      // Codes and their coupons are created in the Stripe dashboard.
+      allow_promotion_codes: true,
       subscription_data: {
         metadata: { org_id: orgId },
         ...(trial ? { trial_period_days: TRIAL_DAYS } : {}),
