@@ -106,7 +106,16 @@ Under **Settings → Billing → Subscriptions and emails**, enable:
 
 The app sends none of these itself.
 
-### 5. Set the environment
+### 5. Promotion codes (optional)
+
+Checkout shows an "Add promotion code" field. To comp an account or run a
+promo, create a coupon under **Product catalog → Coupons** (for example 100% off,
+forever), then add a customer-facing **promotion code** to it — the code is what
+people type, the coupon on its own has none. A code applied at Checkout stays on
+the subscription, so a 100%-off-forever code keeps invoices at $0 while the
+organization reads as Pro.
+
+### 6. Set the environment
 
 ```bash
 NUXT_BILLING=stripe
