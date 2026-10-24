@@ -49,12 +49,12 @@ export default defineEventHandler(async (event) => {
   }
 
   // The plan's token limit and the insert in one transaction, under the
-  // organization row lock `assertCanAdd` takes, so two racing mints on Free
+  // organization row lock `assertCanAdd` takes, so two racing mints at the limit
   // cannot both land.
   const sql = await appDb()
   const { token, record } = await sql.begin(async (tx) => {
     await assertCanAdd(tx, actor.org.id, 'token')
-    return await createToken({
+    const minted = await createToken({
       instanceId: instance.id,
       assignedTo,
       createdBy: actor.user.id,
@@ -62,6 +62,13 @@ export default defineEventHandler(async (event) => {
       preset: parsed.expiry,
       scope: scopeFromInput(parsed),
     }, tx)
+    await recordHostedEvent(tx, {
+      type: 'token.created',
+      org: actor.org.id,
+      userId: assignedTo,
+      payload: { id: minted.record.id, connection: instance.id, kind: instance.kind },
+    })
+    return minted
   })
 
   return { token, record }

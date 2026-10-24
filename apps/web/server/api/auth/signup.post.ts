@@ -97,6 +97,11 @@ export default defineEventHandler(async (event) => {
       passwordHash,
       name: name?.trim() || email.split('@')[0] || '',
     })
+    await recordHostedEvent(tx, {
+      type: 'user.signed_up',
+      userId: created.id,
+      payload: { email: created.email, name: created.name, plan: chosenPlan ?? null, invited: Boolean(invited?.invite) },
+    })
 
     if (invited?.invite) {
       await acceptInviteInto(tx, created, invited.invite.org, invited.invite.role)

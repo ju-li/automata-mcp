@@ -62,6 +62,34 @@ Free allows:
 `past_due` counts as Pro while Stripe is still retrying the charge. Your
 retry settings in Stripe decide how long that lasts.
 
+## How limits are stored
+
+The plan and its limits are kept apart:
+- **Plan:** Stripe status, decided by the billing code.
+- **Limits:** three plain numbers on each organization, `max_connections`, `max_tokens` and `max_members`. NULL means unlimited.
+
+The billing code writes those numbers when a subscription changes, and once at every boot. The checks only ever read the numbers. That keeps enforcement inside the app when selling plans later moves to a separate service.
+
+Turning `NUXT_BILLING` off stops new limits from being written. It does **not** clear limits already written. A deployment that switches billing off after using it should clear them:
+
+```sql
+UPDATE app.organizations SET max_connections = NULL, max_tokens = NULL, max_members = NULL, plan_label = NULL;
+```
+
+## Account events
+
+With billing on, the app also records account and organization changes in `app.hosted_events`. A separate service will turn them into CRM records (Brevo) and product telemetry (PostHog). The changes recorded:
+- signups and email changes;
+- organizations created and deleted;
+- members joining, leaving and changing role;
+- connections and tokens created and removed;
+- plan changes;
+- a per-minute count of MCP tool calls per organization.
+
+Nothing reads the table yet, so rows accumulate. They are the backlog the CRM sync will start from.
+
+Events never contain credentials, connection strings, chat or table names, message content or tool arguments. Email addresses appear only on user events. A self-hosted deployment writes none.
+
 ## Setting up Stripe
 
 ### 1. Create the product and prices

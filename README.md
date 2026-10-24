@@ -9,6 +9,7 @@
 
 <p align="center">
   <a href="https://getautomata.app">Website</a> ·
+  <a href="https://mcp.getautomata.app/signup">Sign up</a> ·
   <a href="https://www.getautomata.app/docs">Documentation</a> ·
   <a href="https://www.getautomata.app/contact">Contact</a>
 </p>
@@ -23,7 +24,9 @@ tables you choose, and paste its URL into Claude as a custom connector. Claude
 can then read, search and summarise your conversations, query your data, and —
 only if you allow it — send messages and write rows.
 
-Run your own with one click on Railway or with Docker Compose.
+Use the hosted version at [mcp.getautomata.app](https://mcp.getautomata.app/signup)
+— free for one connection, with a 7-day trial of Pro — or run your own with one
+click on Railway or with Docker.
 
 ## Screenshots
 
@@ -73,6 +76,13 @@ Run your own with one click on Railway or with Docker Compose.
   or Telegram bridge instead of the deployment's.
 
 ## Quick start
+
+### Hosted
+
+[Sign up at mcp.getautomata.app](https://mcp.getautomata.app/signup) and skip
+to [Connect Claude](#connect-claude). Free covers one connection, one connector
+token and one user; Pro is $19/month after a 7-day trial, with unlimited
+connections and tokens and five users included ($10/user after).
 
 ### Railway (one click)
 

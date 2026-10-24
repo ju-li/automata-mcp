@@ -60,5 +60,6 @@ export default defineEventHandler(async (event) => {
     throw error
   }
 
+  recordHostedEventQuietly({ type: 'user.email_changed', userId: user.id, payload: { from: user.email, to: updated.email } })
   return { email: updated.email, reauthenticated: true }
 })

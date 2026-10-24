@@ -387,4 +387,38 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN plan text CHECK (plan IN ('free', 'pro'));
     `,
   },
+  {
+    name: '0006_entitlements_and_hosted_events',
+    sql: /* sql */ `
+      -- What an organization may hold, as plain numbers. NULL is unlimited,
+      -- which is every organization on a self-hosted deployment: nothing here
+      -- names a plan or a payment provider. Whatever sells plans writes these
+      -- (today stripe.ts, later the separate cloud service) and the web app
+      -- only enforces them — see entitlements.ts. plan_label is for display.
+      ALTER TABLE app.organizations
+        ADD COLUMN max_connections integer CHECK (max_connections >= 0),
+        ADD COLUMN max_tokens      integer CHECK (max_tokens >= 0),
+        ADD COLUMN max_members     integer CHECK (max_members >= 1),
+        ADD COLUMN plan_label      text;
+
+      -- An outbox for the hosted offering: account and organization changes,
+      -- and per-minute MCP usage rollups, for a separate service to turn into
+      -- billing seats, CRM records and telemetry. Written only on a deployment
+      -- that has the hosted offering configured (hosted-events.ts), so a
+      -- self-hosted database never holds a row.
+      --
+      -- No foreign keys on purpose: an event outlives the organization or user
+      -- it describes — "this org was deleted" is itself an event. Payloads
+      -- never carry credentials, connection strings, chat ids, message content
+      -- or tool arguments.
+      CREATE TABLE app.hosted_events (
+        id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        type    text NOT NULL,
+        org     text,
+        user_id text,
+        payload jsonb NOT NULL DEFAULT '{}',
+        created timestamptz NOT NULL DEFAULT now()
+      );
+    `,
+  },
 ]

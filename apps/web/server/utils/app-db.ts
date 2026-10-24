@@ -233,6 +233,16 @@ export interface AppOrganizationBilling {
   seats_billed?: number
 }
 
+/**
+ * What an organization may hold. `undefined` is unlimited — every
+ * organization on a self-hosted deployment. See entitlements.ts.
+ */
+export interface OrgLimits {
+  max_connections?: number
+  max_tokens?: number
+  max_members?: number
+}
+
 export type OrgRole = 'admin' | 'member'
 
 /**

@@ -1,7 +1,7 @@
 import { assertNever } from '#shared/connection'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
-import type { AppInstance, AppMcpToken, AppUser, OrgRole } from './app-db'
+import type { AppInstance, AppMcpToken, AppUser, OrgLimits, OrgRole } from './app-db'
 import type { McpScope } from './mcp-scope'
 import type { EvolutionCredentials } from './evolution'
 import type { TelegramCredentials } from './telegram'
@@ -28,6 +28,12 @@ interface McpAuthBase {
   tokenId: string
   /** Which chats, tables and tools this token may reach. See mcp-scope.ts. */
   scope: McpScope
+  /**
+   * The holder's organization's connection and token limits, read on the same
+   * query as everything else here. Both undefined — every self-hosted
+   * organization — means unlimited. Enforced by `mcpLimitRefusal`.
+   */
+  limits: Pick<OrgLimits, 'max_connections' | 'max_tokens'>
 }
 
 /**
@@ -61,6 +67,8 @@ interface McpTokenFacts extends Pick<AppMcpToken,
   user_name?: string
   member_role?: OrgRole
   member_org?: string
+  max_connections?: number
+  max_tokens?: number
   assigned: boolean
 }
 
@@ -135,6 +143,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
              t.all_chats, t.chat_jids, t.all_tables, t.table_names, t.all_tools, t.tool_names,
              u.email AS user_email, u.name AS user_name,
              m.role AS member_role, m.org AS member_org,
+             o.max_connections, o.max_tokens,
              EXISTS (
                SELECT 1 FROM app.instance_assignments a
                WHERE a.user_id = t.assigned_to AND a.instance = t.instance
@@ -142,6 +151,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
       FROM app.mcp_tokens t
       LEFT JOIN app.users u ON u.id = t.assigned_to
       LEFT JOIN app.memberships m ON m.user_id = t.assigned_to
+      LEFT JOIN app.organizations o ON o.id = m.org
       WHERE t.token_hash = ${hash}
     `
     if (record) instance = await getRow<AppInstance>('instances', record.instance)
@@ -206,7 +216,13 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     console.error(`[mcp-auth] instance ${instance.id} has an unsupported kind; token ${record.id} refused`)
     return undefined
   }
-  const base = { user, instance, tokenId: record.id, scope: scopeFromRecord(record) }
+  const base = {
+    user,
+    instance,
+    tokenId: record.id,
+    scope: scopeFromRecord(record),
+    limits: { max_connections: record.max_connections, max_tokens: record.max_tokens },
+  }
 
   let auth: McpAuth
   switch (kind) {

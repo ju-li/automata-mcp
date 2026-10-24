@@ -600,6 +600,11 @@ async function createVerifiedAccount(tx: Db, row: VerificationRow): Promise<stri
   if (row.first_account_only) await claimFirstAccount(tx)
 
   const created = await createUser(tx, { email: row.email, passwordHash: row.password_hash!, name: row.name ?? '' })
+  await recordHostedEvent(tx, {
+    type: 'user.signed_up',
+    userId: created.id,
+    payload: { email: created.email, name: created.name, plan: row.plan ?? null, invited: Boolean(row.invite_id) },
+  })
 
   if (row.invite_id) {
     const [invite] = await tx<AppInvitation[]>`SELECT * FROM app.invitations WHERE id = ${row.invite_id}`
@@ -625,6 +630,7 @@ async function changeVerifiedEmail(tx: Db, row: VerificationRow): Promise<string
 
   try {
     await tx`UPDATE app.users SET email = ${row.email}, updated = now() WHERE id = ${row.user_id!}`
+    await recordHostedEvent(tx, { type: 'user.email_changed', userId: row.user_id!, payload: { from: current.email, to: row.email } })
   }
   catch (error) {
     if (isUniqueViolation(error)) {
