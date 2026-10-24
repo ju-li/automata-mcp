@@ -33,6 +33,11 @@ Run your own with one click on Railway or with Docker Compose.
 </p>
 
 <p align="center">
+  <img src="docs/images/claude-chat-postgres.png" alt="Claude comparing quarterly sales by product from a PostgreSQL connection, and the connector refusing a query on the payroll table it was not scoped to" width="720">
+  <br><em>Ask about your sales in plain English; tables you didn't share, like payroll, stay out of reach.</em>
+</p>
+
+<p align="center">
   <img src="docs/images/dashboard.png" alt="The Automata connections page with WhatsApp, Telegram and PostgreSQL connections" width="720">
   <br><em>Every connection — WhatsApp, Telegram or PostgreSQL — gets its own Claude connector.</em>
 </p>
