@@ -64,8 +64,8 @@ export default defineEventHandler(async (event) => {
   // The organization is created on Free whatever was picked; Pro begins when
   // Stripe confirms the trial. Picking Pro only decides where the browser goes
   // next: on to Checkout.
-  const chosenPlan = !invited && billingEnabled() ? plan : undefined
-  if (!invited && billingEnabled() && !chosenPlan) {
+  const chosenPlan = !invited && hostedMode() ? plan : undefined
+  if (!invited && hostedMode() && !chosenPlan) {
     throw createError({ statusCode: 422, statusMessage: 'Choose a plan to sign up.' })
   }
   const nextStep = chosenPlan === 'pro' ? 'checkout' as const : undefined
@@ -112,8 +112,6 @@ export default defineEventHandler(async (event) => {
     }
     return created
   })
-
-  if (invited?.invite) syncSeatsLater(invited.invite.org)
 
   await startSession(event, user.id)
   return { id: user.id, email: user.email, next: nextStep }

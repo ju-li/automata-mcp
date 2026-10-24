@@ -198,7 +198,7 @@ who should get their own organization.
 
 Plans and billing are off on a self-hosted deployment: there is no plan picker,
 no Billing page, and no limit on connections, tokens or members. They exist only
-for the hosted offering, behind `NUXT_BILLING` — see [billing.md](billing.md) —
+for the hosted offering, behind `NUXT_CLOUD_URL` — see [billing.md](billing.md) —
 and you never need to set it.
 
 **`NUXT_ALLOW_PRIVATE_TARGETS=true` with `SIGNUP=open` is the risky

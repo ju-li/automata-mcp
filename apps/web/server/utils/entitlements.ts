@@ -7,11 +7,10 @@ import type { Db, OrgLimits } from './app-db'
  * This file knows numbers, not plans. `app.organizations.max_connections`,
  * `max_tokens` and `max_members` say how many of each an organization may
  * have; NULL is unlimited. Nothing here names a plan, a price or a payment
- * provider — whatever sells plans writes the columns (today `stripe.ts` via
- * `applyPlanEntitlements()` in billing.ts, later the separate cloud service)
- * and this file only reads them. On a self-hosted deployment every column is
- * NULL, so every check here passes and nothing is limited, with no setting to
- * get right.
+ * provider — the cloud service (`apps/cloud`) sells plans and writes the
+ * columns, and this file only reads them. On a self-hosted deployment every
+ * column is NULL, so every check here passes and nothing is limited, with no
+ * setting to get right.
  *
  * Why enforcement stays in the web app even once selling plans moves out: the
  * checks run inside the app's own transactions, under the organization row
@@ -39,6 +38,25 @@ export interface OrgUsage {
   tokens: number
   members: number
   pendingInvites: number
+}
+
+/**
+ * The limits a new organization is born with, for `createOrganizationFor`'s
+ * insert. None without the hosted offering. With it, the row the cloud service
+ * writes at boot (`app.entitlement_defaults`) — and a 503 while that row is
+ * missing, since creating the organization unlimited is the one wrong answer.
+ */
+export async function newOrganizationLimits(db: Db): Promise<OrgLimits & { plan_label?: string }> {
+  if (!hostedMode()) return {}
+  const [defaults] = await db<(OrgLimits & { plan_label?: string })[]>`
+    SELECT max_connections, max_tokens, max_members, plan_label
+    FROM app.entitlement_defaults WHERE id = 'new_organization'
+  `
+  if (!defaults) {
+    console.error('[entitlements] no limits for new organizations yet: the cloud service writes them when it starts. Refusing the signup.')
+    throw createError({ statusCode: 503, statusMessage: 'Sign-up is briefly unavailable. Try again in a minute.' })
+  }
+  return defaults
 }
 
 /** Whether any limit applies at all. False for every self-hosted organization. */

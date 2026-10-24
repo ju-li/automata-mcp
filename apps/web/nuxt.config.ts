@@ -55,9 +55,6 @@ export default defineNuxtConfig({
       '0 * * * *': ['alerts:register-webhooks'],
       // Mailbox headers. Safe on several replicas: each mailbox is leased.
       '*/2 * * * *': ['imap:sync'],
-      // Stripe subscriptions and seat counts, behind lost webhooks. Does
-      // nothing unless NUXT_BILLING is on.
-      '17 * * * *': ['billing:reconcile'],
     },
   },
 
@@ -153,17 +150,15 @@ export default defineNuxtConfig({
     webhookUrl: '',
     webhookSecret: '',
 
-    // Plans and Stripe, for the hosted offering only: `off` (the default — no
-    // plans, no limits, no plan picker) or `stripe`. Anything else is read as
-    // `stripe`, so a typo on the hosted deployment cannot hand out unlimited
-    // plans. See server/utils/billing.ts and docs/billing.md.
-    billing: 'off',
-    stripeSecretKey: '',
-    stripeWebhookSecret: '',
-    // The Pro plan's two prices: the flat monthly base, and the per-seat price
-    // charged for every member beyond the included five.
-    stripePriceBase: '',
-    stripePriceSeat: '',
+    // The hosted offering only: the cloud service (apps/cloud) that sells plans
+    // and owns Stripe. Unset — every self-hosted deployment — means no plans,
+    // no limits, no Billing page and no hosted events. See server/utils/cloud.ts
+    // and docs/billing.md.
+    cloudUrl: '',
+    cloudAdminKey: '',
+    // Superseded by cloudUrl. Still read so a hosted deployment that upgrades
+    // without setting the new variables keeps its plans on (fail closed).
+    billing: '',
 
     public: {
       appUrl: '',

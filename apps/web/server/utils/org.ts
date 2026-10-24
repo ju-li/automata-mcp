@@ -145,9 +145,9 @@ export async function requireOrgAdmin(event: H3Event): Promise<Actor> {
  * transaction — signup's, so an account and its organization exist together or
  * not at all.
  *
- * Its limits are written in the same insert (`newOrganizationLimits`): Free's
- * on a deployment that sells plans, none otherwise. An organization never
- * exists unlimited where plans exist, even for a moment.
+ * Its limits are written in the same insert (`newOrganizationLimits`): the
+ * hosted deployment's defaults, none otherwise. An organization never exists
+ * unlimited where plans exist, even for a moment.
  */
 export async function createOrganizationFor(tx: Db, user: AppUser, name?: string): Promise<{ org: AppOrganization, membership: AppMembership }> {
   const label = (name ?? '').trim()
@@ -156,7 +156,7 @@ export async function createOrganizationFor(tx: Db, user: AppUser, name?: string
     || 'Organization'
 
   const [org] = await tx<AppOrganization[]>`
-    INSERT INTO app.organizations ${tx({ name: label.slice(0, 100), ...newOrganizationLimits() })}
+    INSERT INTO app.organizations ${tx({ name: label.slice(0, 100), ...await newOrganizationLimits(tx) })}
     RETURNING id, name, created
   `
   const [membership] = await tx<AppMembership[]>`
@@ -548,9 +548,8 @@ export async function removeMember(orgId: string, member: OrgMember): Promise<{ 
  *
  * The now-empty old organization is deleted in the same transaction. It owns no
  * connections — that was the first refusal — so nothing restricts the delete.
- * With billing on there is a third refusal: that organization still holds a
- * paid subscription not set to cancel, which deleting it would leave billing
- * with nobody able to reach it.
+ * On the hosted deployment the `org.deleted` event it records is what makes
+ * the cloud service cancel whatever that organization still paid for.
  *
  * With billing on, the inviting organization's plan must have a seat for them
  * (`assertCanAdd`): every join goes through here, so this is the one check
@@ -602,17 +601,6 @@ export async function acceptInviteInto(
       statusMessage: 'You are the only admin of your current organization. '
         + 'Make someone else an admin there before joining another one.',
     })
-  }
-
-  if (!others.length && billingEnabled()) {
-    const billing = await loadOrgBilling(tx, previousOrg)
-    if (effectivePlan(billing) === 'pro' && !billing?.cancel_at_period_end) {
-      throw createError({
-        statusCode: 409,
-        statusMessage: 'Your current organization has an active subscription. '
-          + 'Cancel it under Billing before joining another organization.',
-      })
-    }
   }
 
   await tx`UPDATE app.memberships SET org = ${orgId}, role = ${role}, updated = now() WHERE id = ${current.id}`

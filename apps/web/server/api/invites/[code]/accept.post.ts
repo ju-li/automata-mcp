@@ -41,10 +41,5 @@ export default defineEventHandler(async (event) => {
     return moved
   })
 
-  // Seats are billed per member on Pro: one more here, one fewer where they
-  // came from. After the commit, so a Stripe hiccup never undoes the join.
-  syncSeatsLater(invite.org)
-  syncSeatsLater(movedFrom)
-
   return { ok: true, role: invite.role, movedFrom }
 })
