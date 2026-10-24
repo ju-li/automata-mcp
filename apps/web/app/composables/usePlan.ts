@@ -6,8 +6,10 @@ import { toast } from 'vue-sonner'
  * `plan` is the plan's display name, and `undefined` on a deployment without
  * the hosted offering — every self-hosted one — where nothing that reads this
  * may show a plan, a limit or a Billing link. `limited` says the organization
- * has limits at all; it knows numbers, not plan names. It gates UI only: every limit is enforced by the server, which answers
- * 402 `plan_limit` whatever the browser shows.
+ * has limits at all; it knows numbers, not plan names.
+ *
+ * It gates UI only: every limit is enforced by the server, which answers 402
+ * `plan_limit` whatever the browser shows.
  */
 export function usePlan() {
   const { membership } = useSession()
