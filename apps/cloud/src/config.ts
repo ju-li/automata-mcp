@@ -21,6 +21,13 @@ const schema = z.object({
   STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
   STRIPE_PRICE_BASE: z.string().min(1).optional(),
   STRIPE_PRICE_SEAT: z.string().min(1).optional(),
+  // The Brevo CRM sync. Without a key it is off; everything else runs.
+  BREVO_API_KEY: z.string().min(1).optional(),
+  // A contact list every synced contact is added to. Leave unset unless the
+  // people on it agreed to what that list is used for.
+  BREVO_LIST_ID: z.coerce.number().int().positive().optional(),
+  // For tests against a stand-in server; production never sets it.
+  BREVO_API_URL: z.string().url().optional(),
   CLOUD_PORT: z.coerce.number().int().min(1).max(65535).optional(),
   // Railway injects PORT into every service; following it is what makes the
   // service listen where the platform routes to.
@@ -36,12 +43,21 @@ export interface StripeSettings {
   priceSeat: string
 }
 
+export interface BrevoSettings {
+  apiKey: string
+  /** A list every synced contact joins; none when unset. */
+  listId?: number
+  baseUrl: string
+}
+
 export interface CloudConfig {
   adminKey: string
   databaseUrl: string
   appUrl: string
   /** Absent when the service runs without Stripe. */
   stripe?: StripeSettings
+  /** Absent when the service runs without the CRM sync. */
+  brevo?: BrevoSettings
   port: number
 }
 
@@ -76,6 +92,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
           webhookSecret: e.STRIPE_WEBHOOK_SECRET!,
           priceBase: e.STRIPE_PRICE_BASE!,
           priceSeat: e.STRIPE_PRICE_SEAT!,
+        }
+      : undefined,
+    brevo: e.BREVO_API_KEY
+      ? {
+          apiKey: e.BREVO_API_KEY,
+          listId: e.BREVO_LIST_ID,
+          baseUrl: (e.BREVO_API_URL ?? 'https://api.brevo.com/v3').replace(/\/+$/, ''),
         }
       : undefined,
     port: e.CLOUD_PORT ?? e.PORT ?? 8096,

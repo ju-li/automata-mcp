@@ -11,6 +11,7 @@ export default defineEventHandler(async (event) => {
   const { name } = await parseBody(event, body)
 
   const org = await updateRow<AppOrganization>('organizations', actor.org.id, { name })
+  recordHostedEventQuietly({ type: 'org.renamed', org: org.id, userId: actor.user.id, payload: { name: org.name } })
 
   return { org: { id: org.id, name: org.name } }
 })
