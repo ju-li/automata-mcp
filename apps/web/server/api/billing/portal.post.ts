@@ -2,7 +2,7 @@
  * Stripe's Customer Portal: change card, see invoices, cancel. Admin only.
  */
 export default defineEventHandler(async (event) => {
-  requireBillingEnabled()
+  requireHosted()
   const actor = await requireOrgAdmin(event)
-  return { url: await createPortalSession(actor.org.id) }
+  return await cloudFetch<{ url: string }>(`/orgs/${encodeURIComponent(actor.org.id)}/portal`, { method: 'POST' })
 })

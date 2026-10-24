@@ -9,10 +9,10 @@ import type { Db } from './app-db'
  * them; it does not know who consumes them or what they become.
  *
  * **Nothing is written on a self-hosted deployment.** `hostedEventsEnabled()`
- * is the one gate, and today it is "billing is on" — the only deployment that
- * sets it is the hosted one. When the separate cloud service exists it becomes
- * "the cloud service is configured". Until then rows accumulate on the hosted
- * database; that is the backlog the CRM sync starts from, not a leak.
+ * is the one gate: the hosted offering is configured (`hostedMode()`). The
+ * cloud service reads the rows with a cursor per consumer and never deletes
+ * them, so a consumer added later — the CRM sync, telemetry — starts from the
+ * retained backlog.
  *
  * Rules a new event type must keep:
  *
@@ -50,7 +50,7 @@ export interface HostedEvent {
 }
 
 export function hostedEventsEnabled(): boolean {
-  return billingEnabled()
+  return hostedMode()
 }
 
 /**

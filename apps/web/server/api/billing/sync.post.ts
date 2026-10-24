@@ -1,13 +1,10 @@
 /**
- * Re-read the subscription from Stripe now. The Billing page calls this when
- * the browser returns from Checkout, so the plan does not wait on the webhook
- * — which may be seconds behind, or lost and left to the hourly reconcile.
- * Admin only.
+ * Have the cloud service re-read the subscription from Stripe now. The Billing
+ * page calls this when the browser returns from Checkout, so the plan does not
+ * wait on the webhook. Admin only.
  */
 export default defineEventHandler(async (event) => {
-  requireBillingEnabled()
+  requireHosted()
   const actor = await requireOrgAdmin(event)
-  await syncOrgFromStripe(actor.org.id)
-  await syncSeats(actor.org.id)
-  return { ok: true }
+  return await cloudFetch<{ ok: true }>(`/orgs/${encodeURIComponent(actor.org.id)}/sync`, { method: 'POST' })
 })

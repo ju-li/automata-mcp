@@ -1,5 +1,4 @@
 import type { AppUser } from '~~/server/utils/app-db'
-import type { Plan } from '~~/server/utils/billing'
 
 /**
  * Current session, or `{ user: null }`. Deliberately not a 401: the client
@@ -17,20 +16,25 @@ import type { Plan } from '~~/server/utils/billing'
  * still becomes a 503, so an outage is never mistaken for "you were removed".
  */
 /**
- * The plan and whether the organization holds more than it allows, so every
- * page can show limits and the over-limit banner without asking again. Nothing
- * at all without billing — no query, no field — so a self-hosted UI never
- * learns plans exist. A read failure is a 503 like the membership read.
+ * The plan's name and the organization's standing against its limits, so
+ * every page can show the Billing link, limits and the over-limit banner
+ * without asking again. Nothing at all without the hosted offering — no query,
+ * no field — so a self-hosted UI never learns plans exist. A read failure is a
+ * 503 like the membership read.
  */
-async function planSummary(orgId: string): Promise<{ plan: Plan, overLimit: boolean } | undefined> {
-  if (!billingEnabled()) return undefined
+async function planSummary(orgId: string): Promise<{ plan: string, limited: boolean, overLimit: boolean } | undefined> {
+  if (!hostedMode()) return undefined
   try {
     const sql = await appDb()
-    const [org, limits, usage] = await Promise.all([loadOrgBilling(sql, orgId), loadOrgLimits(sql, orgId), orgUsage(sql, orgId)])
-    return { plan: effectivePlan(org), overLimit: overLimit(limits, usage) }
+    const [[org], limits, usage] = await Promise.all([
+      sql<{ plan_label?: string }[]>`SELECT plan_label FROM app.organizations WHERE id = ${orgId}`,
+      loadOrgLimits(sql, orgId),
+      orgUsage(sql, orgId),
+    ])
+    return { plan: org?.plan_label ?? 'Free', limited: hasLimits(limits), overLimit: overLimit(limits, usage) }
   }
   catch (error) {
-    console.error('[billing] could not read the plan for organization', orgId, error)
+    console.error('[entitlements] could not read the plan for organization', orgId, error)
     throw appDbUnavailable(error)
   }
 }

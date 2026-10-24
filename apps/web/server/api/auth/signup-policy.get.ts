@@ -9,6 +9,6 @@ export default defineEventHandler(async () => {
   return {
     selfSignup: await selfSignupPolicy(),
     verification: emailVerificationRequired(),
-    billing: billingEnabled(),
+    billing: hostedMode(),
   }
 })

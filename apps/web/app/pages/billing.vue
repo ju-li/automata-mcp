@@ -25,8 +25,10 @@ interface BillingResponse {
   canStartTrial: boolean
   trialDays: number
   usage: { connections: number, tokens: number, members: number, pendingInvites: number }
-  limits: { connections: number, tokens: number, members: number } | null
+  limits: { connections?: number, tokens?: number, members?: number } | null
   overLimit: boolean
+  /** The cloud service could not be reached; usage and limits are still shown. */
+  billingUnavailable?: boolean
   includedSeats: number
   billedSeats: number
 }
@@ -134,6 +136,15 @@ const meters = computed(() => {
     </p>
 
     <template v-if="data">
+      <NoticeCard v-if="data.billingUnavailable" title="Billing is unavailable right now" tone="error">
+        <template #description>
+          <p class="mt-1 text-sm text-muted-foreground">
+            Your plan and its limits still apply. Starting or managing a
+            subscription will work again shortly.
+          </p>
+        </template>
+      </NoticeCard>
+
       <NoticeCard v-if="data.overLimit" title="This organization is over the Free plan's limits">
         <template #description>
           <p class="mt-1 text-sm text-muted-foreground">

@@ -46,13 +46,15 @@ pnpm services:up:whatsapp   # + redis, evolution
 pnpm services:up:telegram   # + telegram-bridge
 pnpm bridge:dev       # the Telegram bridge on the host, http://localhost:8095
 pnpm bridge:typecheck # the bridge; `pnpm typecheck` does not cover it
+pnpm cloud:dev        # the hosted-only cloud service, http://localhost:8096
+pnpm cloud:typecheck  # the cloud service; not covered by `pnpm typecheck` either
 pnpm dev              # Nuxt on the host, http://localhost:3000
 pnpm typecheck        # nuxt typecheck across app + server
 pnpm build            # production build -> apps/web/.output/
 pnpm services:down / :logs / :ps
 ```
 
-Nuxt deliberately **not** in compose (HMR); no `predev` hook — bring services up yourself. No lint config, **no test framework**; `pnpm typecheck` + `pnpm bridge:typecheck` only automated checks.
+Nuxt deliberately **not** in compose (HMR); no `predev` hook — bring services up yourself. No lint config, **no test framework**; `pnpm typecheck` + `pnpm bridge:typecheck` + `pnpm cloud:typecheck` only automated checks.
 
 ## Environment
 
@@ -86,11 +88,13 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              pg-run, pg-catalog, chats, alerts, mailer,
                              mcp-kind-tool, telegram, telegram-db,
                              telegram-instances, imap-client, imap-sync, imap-db,
-                             mail-format, mfa, totp, webauthn, billing, stripe,
-                             entitlements, hosted-events, …
+                             mail-format, mfa, totp, webauthn, entitlements,
+                             hosted-events, cloud, …
   shared/connection.ts       InstanceKind, assertNever — imported as #shared
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              `telegram` schema of the shared Postgres. See "Telegram bridge".
+apps/cloud/                  hosted offering only: plans, Stripe, outbox consumers. Own
+                             Dockerfile, `cloud` schema. See "Plans and billing".
 docker-compose.dev.yml       services only, NOT Nuxt
 docker/aio/                  all-in-one image: Dockerfile + rootfs/ (s6 service tree,
                              automata-env). See "All-in-one image".
@@ -126,30 +130,37 @@ Three things enforce it:
 
 `server/utils/signup-policy.ts` gates every signup **without** invitation; invitation path untouched in every mode. `NUXT_SIGNUP` = `open` | `invite-only`, default `invite-only`, unknown value read as invite-only (typo must not open door). Invite-only + `NUXT_SIGNUP_CODE` set → code required, **first account included** — else whoever finds fresh public install first becomes admin. Invite-only, no code → first account on empty DB only, decided by `claimFirstAccount()` *inside* signup transaction under `pg_advisory_xact_lock`, so two racing first signups can't both win; read failure = 503, never allow. Wrong code throttled per IP (`login-throttle.ts`, `signup-ip:` key) and logged. `/api/auth/signup-policy` tells UI `open` / `code` / `closed`, never the code. Why it matters: every self-signup = new org admin on our Evolution and bridge, and with `NUXT_ALLOW_PRIVATE_TARGETS` a stranger's DSN reaches the private network.
 
-## Plans and billing
+## Plans and billing (hosted offering)
 
-Hosted offering only. `NUXT_BILLING` = `off` (default) | `stripe`; unknown value read as `stripe` (typo on hosted deploy must not hand out unlimited). **Off = invisible**: `effectivePlan()` answers `unlimited`, every billing route 404, `/api/auth/me` carries no `plan` field, signup-policy says `billing: false` so no plan picker, no limits written, no events written. Self-hosters never set it. `docs/billing.md` = operator side.
+Hosted offering only. **Two services:** web app enforces limits and shows Billing page, never talks to Stripe; **`apps/cloud`** sells plans — owns Stripe (Checkout, Portal, webhook, seats), writes every org's limits; Brevo CRM sync and PostHog telemetry join it later. **Hosted mode = `NUXT_CLOUD_URL` set** (`hostedMode()` in `server/utils/cloud.ts`). Unset = invisible: no plan picker (signup-policy `billing: false`), every billing route 404, `/api/auth/me` carries no `plan`, no limits written, no events written. Self-hosters never set it; no self-host artifact references `apps/cloud`. `docs/billing.md` = operator side.
 
-**Three files, split so selling plans can leave the web app (planned `apps/cloud` service: Stripe, Brevo CRM, PostHog telemetry) while enforcement stays:**
+**Legacy `NUXT_BILLING` still read, fails closed:** set without `NUXT_CLOUD_URL` → still hosted mode (plans enforced, signup needs plan, Billing 503) + startup error naming new vars. Upgraded deployment forgetting new vars must not hand out unlimited.
 
-- `entitlements.ts` — **enforcement, knows numbers not plans.** Reads `app.organizations.max_connections` / `max_tokens` / `max_members`; NULL = unlimited (every self-hosted org). Never names a plan or Stripe. Stays in web for good: checks run inside web's transactions and on every MCP request, so a call to another service there would put its outage on the auth path.
-- `billing.ts` + `stripe.ts` — **selling plans.** `billing.ts` decides which plan; `applyPlanEntitlements()` = only bridge, turns stored Stripe status into `max_*` + `plan_label` (one SQL statement, for one org after sync or all at boot). `newOrganizationLimits()` writes Free's in `createOrganizationFor`'s insert, so org never exists unlimited where plans exist. `stripe.ts` only file importing SDK. Both move to the cloud service later; it will write same columns.
-- `hosted-events.ts` — **outbox `app.hosted_events`** for that service. Closed `HostedEventType` union; same transaction as the change (`recordHostedEvent(tx, …)`), `recordHostedEventQuietly` only for changes made outside one. Payloads never carry credentials, DSNs, hosts, chat ids, folder/table names, message content, tool arguments; email only on user events (CRM keys on it). Written only when `hostedEventsEnabled()` (today = billing on), so self-hosted DB never holds a row. Rows accumulate until consumer exists — that is the CRM backlog. No FKs: event outlives its org. **MCP usage not one row per call:** `countedHandler` in `mcp-kind-tool.ts` counts tool + ok/error in memory, `server/plugins/hosted-usage.ts` flushes one `usage.rollup` row per org per minute. Crash loses ≤ a minute — never bill from rollups.
+**Web app side — knows numbers, not plans:**
 
-**Limits in the database outlive `NUXT_BILLING`.** Turning billing off stops writing them but doesn't clear ones already written; clear `max_*` by hand if a deployment ever does that.
+- `entitlements.ts` — **enforcement.** Reads `app.organizations.max_connections` / `max_tokens` / `max_members`; NULL = unlimited (every self-hosted org). Never names plan or Stripe. Stays in web for good: checks run inside web's transactions and on every MCP request, so call to another service there would put its outage on auth path. `newOrganizationLimits(tx)` reads `app.entitlement_defaults` (row cloud writes at boot) into `createOrganizationFor`'s insert; hosted + row missing → **503, never unlimited org**.
+- `cloud.ts` — `hostedMode()`, `requireHosted()` (404), `cloudFetch()` (admin-key bearer; cloud's 4xx/503 messages relayed as is — written for browser; anything else logged + 503). `api/billing/*` = thin forwards. `GET /api/billing` merges cloud summary with web's own limits + usage, answers with `billingUnavailable: true` rather than failing when cloud down.
+- `hosted-events.ts` — **outbox `app.hosted_events`.** Closed `HostedEventType` union; same transaction as change (`recordHostedEvent(tx, …)`), `recordHostedEventQuietly` only for changes made outside one. Payloads never carry credentials, DSNs, hosts, chat ids, folder/table names, message content, tool arguments; email only on user events (CRM keys on it). Written only when `hostedEventsEnabled()` (= hosted mode). No FKs: event outlives its org. **MCP usage not one row per call:** `countedHandler` in `mcp-kind-tool.ts` counts tool + ok/error in memory, `server/plugins/hosted-usage.ts` flushes one `usage.rollup` row per org per minute. Crash loses ≤ a minute — never bill from rollups.
+- **Web app has no seat sync and no Stripe dependency.** Membership changes reach billing only as outbox events. Never call cloud from inside a transaction.
 
-Free = 1 connection, 1 live token, 1 member. Pro = Stripe status `trialing`/`active`/`past_due` (retry window counts as Pro); 5 seats included, seat price quantity = members − 5.
+**Cloud service (`apps/cloud`, Node type stripping like the bridge, `pnpm cloud:dev` / `pnpm cloud:typecheck`):**
+
+- `plans.ts` = only place plan rules live: Free 1/1/1, Pro = Stripe status `trialing`/`active`/`past_due` (retry window counts as Pro), 5 seats included. `applyPlanEntitlements()` turns stored status into `max_*` + `plan_label` in one statement (one org after sync, all at boot). `writeEntitlementDefaults()` at boot.
+- `billing.ts` = only file importing Stripe SDK. Still reads/writes Stripe columns on `app.organizations` (moving to `cloud` schema = phase 3).
+- **Payload = hint, live read = fact.** Webhook (`POST /webhooks/stripe`, signature-verified) maps customer → org, `syncOrg()` re-lists subscriptions, writes status + limits + `plan.changed` in **one transaction**. Sole writer of `subscription_status`. Non-2xx → Stripe retries. Hourly reconcile = backstop.
+- **Outbox consumer** (`outbox.ts`, every 15 s): cursor per consumer in `cloud.cursors`, **rows never deleted** so later consumers (CRM, telemetry) start from backlog. Cursor advances past every event, incl. ignored ones. `member.*` → `syncSeats`, failures logged and left to reconcile (seats = state). `org.deleted` → `cancelForDeletedOrg` (finds customer by `org_id` metadata via Stripe search — org row already gone), failure **stops cursor** there to retry, since nothing else would cancel it. First run starts at newest event.
+- Waits for web migration `0007_entitlement_defaults` rather than failing (`waitForApp`); `/health` reports `app: waiting|ready`. Admin routes 503 until ready.
+- Stripe vars all-or-none: none → runs, writes limits, billing routes 503; some → refuses to start. `APP_URL` = only source for Checkout/Portal return links, never request.
+- Listens `::`, falls back to `0.0.0.0` on `EAFNOSUPPORT` (IPv6-less host).
 
 Rules easy to undo:
 
-- **Org born Free; Pro only when Stripe says so.** Signup's `plan` (carried on `email_verifications.plan` through verification) only decides whether browser goes on to Checkout. Abandoned checkout = working Free account, never half-state.
-- **Payload = hint, live read = fact** (same as Evolution webhook). Webhook verifies signature, maps customer → org, calls `syncOrgFromStripe()`, which re-lists customer's subscriptions and writes columns. Sole writer of `subscription_status`. Hourly `billing:reconcile` same, backstop for lost deliveries and failed seat syncs. Webhook sync failure answers 500 — Stripe retries, unlike Evolution.
-- **Limit checks at choke points, under org row lock.** `assertCanAdd(db, org, …)` reads `max_*` with `app.organizations` row `FOR UPDATE`, returns if NULL, else counts — takes `Db`, runs in caller's transaction. Token mint wraps check + `createToken` in one tx. Member check lives **inside `acceptInviteInto`** — covers accept, invited signup, invited verify. Invite creation counts pending invites too. Connection check runs before provisioning (remote session reserved before row exists) and can't hold lock across it; race harmless because of next rule.
-- **Over its limits: oldest `max_tokens` live tokens on oldest `max_connections` connections answer, rest 403** (`mcpLimitRefusal`, called in `server/mcp/index.ts` after `resolveMcpAuth`). Limits ride on `resolveMcpAuth`'s existing query (LEFT JOIN `organizations`), so no-limit org pays zero extra queries. **Never 401** — client would discard token that revives on resubscribe. Read failure 503. Nothing deleted on lapse; `overLimit` drives banner.
-- **Seats synced after commit** (`syncSeatsLater`), never inside membership tx — Stripe hiccup must not undo join/removal. Every new path changing membership must call it.
-- **Leaving org with live Pro subscription refused** in `acceptInviteInto` (old org would be deleted while still billing), unless `cancel_at_period_end`.
-- **Stripe links from `NUXT_PUBLIC_APP_URL` only**, never `Host` (501 unset). Stripe unconfigured → limits still enforced, checkout 503.
-- Plan limit refusal = **402** `data.code = 'plan_limit'`; UI (`toastApiError` in `usePlan.ts`) offers Billing link to admins only.
+- **Org born with defaults (Free); Pro only when Stripe says so.** Signup's `plan` (carried on `email_verifications.plan` through verification) only decides whether browser goes on to Checkout. Abandoned checkout = working Free account.
+- **Limit checks at choke points, under org row lock.** `assertCanAdd(db, org, …)` reads `max_*` with `app.organizations` row `FOR UPDATE`, returns if NULL, else counts — takes `Db`, runs in caller's transaction. Token mint wraps check + `createToken` in one tx. Member check lives **inside `acceptInviteInto`** — covers accept, invited signup, invited verify. Invite creation counts pending invites too. Connection check runs before provisioning and can't hold lock across it; race harmless because of next rule.
+- **Over its limits: oldest `max_tokens` live tokens on oldest `max_connections` connections answer, rest 403** (`mcpLimitRefusal`, `server/mcp/index.ts` after `resolveMcpAuth`). Limits ride on `resolveMcpAuth`'s existing query (LEFT JOIN `organizations`), so no-limit org pays zero extra queries. **Never 401** — client would discard token that revives on resubscribe. Read failure 503. Nothing deleted on lapse.
+- **Org deleted by last member leaving cancels its subscription** (cloud, via `org.deleted`). Web no longer refuses the move.
+- **Limits in DB outlive hosted mode.** Unsetting `NUXT_CLOUD_URL` stops writes, doesn't clear `max_*`; clear by hand.
+- Plan limit refusal = **402** `data.code = 'plan_limit'`; UI (`toastApiError` in `usePlan.ts`) offers Billing link to admins only. UI copy outside Billing page words limits by number, not plan name.
 
 ## Email verification
 

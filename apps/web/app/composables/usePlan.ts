@@ -3,10 +3,13 @@ import { toast } from 'vue-sonner'
 /**
  * The organization's plan, as `/api/auth/me` reported it.
  *
- * `plan` is `undefined` on a deployment without billing — every self-hosted
- * one — and nothing that reads this may show a plan, a limit or a Billing link
- * then. It gates UI only: every limit is enforced by the server, which answers
- * 402 `plan_limit` whatever the browser shows.
+ * `plan` is the plan's display name, and `undefined` on a deployment without
+ * the hosted offering — every self-hosted one — where nothing that reads this
+ * may show a plan, a limit or a Billing link. `limited` says the organization
+ * has limits at all; it knows numbers, not plan names.
+ *
+ * It gates UI only: every limit is enforced by the server, which answers 402
+ * `plan_limit` whatever the browser shows.
  */
 export function usePlan() {
   const { membership } = useSession()
@@ -14,7 +17,7 @@ export function usePlan() {
   return {
     plan,
     billing: computed(() => Boolean(plan.value)),
-    isFree: computed(() => plan.value === 'free'),
+    limited: computed(() => Boolean(membership.value?.org.limited)),
     overLimit: computed(() => Boolean(membership.value?.org.overLimit)),
   }
 }

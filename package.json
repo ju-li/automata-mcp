@@ -12,6 +12,8 @@
     "typecheck": "pnpm --filter web typecheck",
     "bridge:dev": "pnpm --filter telegram-bridge dev",
     "bridge:typecheck": "pnpm --filter telegram-bridge typecheck",
+    "cloud:dev": "pnpm --filter cloud dev",
+    "cloud:typecheck": "pnpm --filter cloud typecheck",
     "services:up": "docker compose -f docker-compose.dev.yml up -d",
     "services:up:whatsapp": "docker compose -f docker-compose.dev.yml --profile whatsapp up -d",
     "services:up:telegram": "docker compose -f docker-compose.dev.yml --profile telegram up -d",

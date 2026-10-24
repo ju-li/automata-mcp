@@ -24,16 +24,18 @@ const kind = ref<InstanceKind | undefined>()
 const label = ref('')
 const busy = ref(false)
 
-// On Free, an organization that already has its one connection is told so
-// before it fills in a form the server will refuse. Never fetched without
-// billing, so a self-hosted deployment makes no such request.
-const { isFree } = usePlan()
-const { data: billingInfo } = await useFetch<{ usage: { connections: number }, limits: { connections: number } | null }>(
+// An organization at its connection limit is told so before it fills in a
+// form the server will refuse. Never fetched without limits, so a self-hosted
+// deployment makes no such request.
+const { limited } = usePlan()
+const { data: billingInfo } = await useFetch<{ usage: { connections: number }, limits: { connections?: number } | null }>(
   '/api/billing',
-  { immediate: isFree.value, server: false },
+  { immediate: limited.value, server: false },
 )
-const atConnectionLimit = computed(() => isFree.value && Boolean(billingInfo.value?.limits)
-  && (billingInfo.value?.usage.connections ?? 0) >= (billingInfo.value?.limits?.connections ?? 1))
+const atConnectionLimit = computed(() => {
+  const limit = billingInfo.value?.limits?.connections
+  return limited.value && limit != null && (billingInfo.value?.usage.connections ?? 0) >= limit
+})
 
 interface KindCard {
   title: string
@@ -238,11 +240,14 @@ async function create() {
       </p>
     </div>
 
-    <NoticeCard v-if="atConnectionLimit" title="The Free plan includes one connection">
+    <NoticeCard
+      v-if="atConnectionLimit"
+      :title="`Your plan includes ${billingInfo?.limits?.connections} connection${billingInfo?.limits?.connections === 1 ? '' : 's'}`"
+    >
       <template #description>
         <p class="mt-1 text-sm text-muted-foreground">
-          Start a Pro trial for unlimited connections and connector tokens, or
-          delete the existing connection to add a different one.
+          Upgrade for more connections and connector tokens, or delete an
+          existing connection to add a different one.
         </p>
       </template>
       <Button as-child size="sm">

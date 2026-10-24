@@ -421,4 +421,22 @@ export const APP_MIGRATIONS: AppMigration[] = [
       );
     `,
   },
+  {
+    name: '0007_entitlement_defaults',
+    sql: /* sql */ `
+      -- The limits a new organization is born with on the hosted deployment,
+      -- written by the cloud service (apps/cloud) at every boot. The web app
+      -- reads it inside the signup transaction and refuses a hosted signup while
+      -- it is missing, rather than create an organization with no limits. Empty
+      -- on a self-hosted deployment, where nothing reads it.
+      CREATE TABLE app.entitlement_defaults (
+        id              text PRIMARY KEY CHECK (id = 'new_organization'),
+        max_connections integer CHECK (max_connections >= 0),
+        max_tokens      integer CHECK (max_tokens >= 0),
+        max_members     integer CHECK (max_members >= 1),
+        plan_label      text,
+        updated         timestamptz NOT NULL DEFAULT now()
+      );
+    `,
+  },
 ]

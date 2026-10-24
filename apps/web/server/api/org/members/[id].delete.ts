@@ -17,6 +17,5 @@ export default defineEventHandler(async (event) => {
   const member = await requireOrgMember(actor.org.id, getRouterParam(event, 'id'))
 
   const { revokedTokens } = await removeMember(actor.org.id, member)
-  syncSeatsLater(actor.org.id)
   return { ok: true, revokedTokens }
 })

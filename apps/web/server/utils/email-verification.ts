@@ -579,14 +579,7 @@ async function complete(
     })
   }
 
-  // An invited signup is one more member of the inviting organization: on Pro,
-  // perhaps one more billed seat. After the commit, never undoing the join.
-  if (row.purpose === 'signup' && row.invite_id) {
-    const [invite] = await sql<{ org: string }[]>`SELECT org FROM app.invitations WHERE id = ${row.invite_id}`.catch(() => [])
-    syncSeatsLater(invite?.org)
-  }
-
-  const next = signedIn && row.plan === 'pro' && !row.invite_id && billingEnabled() ? 'checkout' as const : undefined
+  const next = signedIn && row.plan === 'pro' && !row.invite_id && hostedMode() ? 'checkout' as const : undefined
   return { purpose: row.purpose, email: row.email, signedIn, ...(next ? { next } : {}) }
 }
 
