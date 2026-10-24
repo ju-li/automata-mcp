@@ -19,4 +19,20 @@ export default defineNitroPlugin(() => {
   if (!String(useRuntimeConfig().public.appUrl ?? '').trim()) {
     console.error('[startup] NUXT_BILLING is on but NUXT_PUBLIC_APP_URL is unset; Stripe checkout cannot return to the app.')
   }
+
+  // Bring every organization's enforced limits into line with its stored plan.
+  // The first boot after the entitlement columns arrive is what gives existing
+  // organizations their limits; after that it only repairs drift. Idempotent,
+  // so every replica may run it.
+  appDb()
+    .then(sql => applyPlanEntitlements(sql))
+    .then((changed) => {
+      if (changed.length) {
+        console.info(`[billing] set plan limits on ${changed.length} organization(s)`)
+        for (const change of changed) {
+          recordHostedEventQuietly({ type: 'plan.changed', org: change.id, payload: { from: change.from ?? null, to: change.to } })
+        }
+      }
+    })
+    .catch(error => console.error('[billing] could not apply plan limits at boot:', error))
 })

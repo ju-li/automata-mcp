@@ -1,5 +1,6 @@
 import type { ZodRawShape } from 'zod'
 import type { InstanceKind } from './mcp-scope'
+import type { McpAuth } from './mcp-auth'
 
 /**
  * The toolkit's tool definition, taken from `defineMcpTool` itself rather than
@@ -93,6 +94,7 @@ export function defineKindTool<
 
   return defineMcpTool<InputSchema, OutputSchema>({
     ...rest,
+    handler: countedHandler(rest.name, rest.handler),
     // Inferred from the directory too; stated so a move cannot silently change
     // which connections the tool belongs to. For a single-kind tool the group
     // *is* the kind, which is what every existing tool relies on.
@@ -106,4 +108,32 @@ export function defineKindTool<
     enabled: event =>
       kinds.some(k => isToolAllowed(event, rest.name, k)) && (available?.() ?? true),
   })
+}
+
+/**
+ * The tool's handler, counted for the hosted offering's usage rollup — tool
+ * name and outcome only, never arguments or results (see hosted-events.ts).
+ * Counting is synchronous and never throws, so it cannot change what the tool
+ * answers; on a self-hosted deployment it returns at its first check.
+ */
+function countedHandler<H>(name: string, handler: H): H {
+  if (typeof handler !== 'function') return handler
+  const wrapped = async function (this: unknown, ...args: unknown[]) {
+    let ok = false
+    try {
+      const result = await (handler as (...a: unknown[]) => unknown).apply(this, args)
+      ok = !(result && typeof result === 'object' && (result as { isError?: unknown }).isError === true)
+      return result
+    }
+    finally {
+      try {
+        const auth = useEvent().context.mcpAuth as McpAuth | undefined
+        if (auth) countToolCall(auth.instance.org, auth.tokenId, name, ok)
+      }
+      catch {
+        // No request context: nothing to attribute the call to.
+      }
+    }
+  }
+  return wrapped as H
 }

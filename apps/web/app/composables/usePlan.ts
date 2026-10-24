@@ -19,7 +19,7 @@ export function usePlan() {
   }
 }
 
-/** The server refused because the plan has no room — `assertCanAdd` in billing.ts. */
+/** The server refused because the plan has no room — `assertCanAdd` in entitlements.ts. */
 export function isPlanLimitError(error: unknown): boolean {
   const body = (error as { data?: { data?: { code?: unknown } } })?.data
   return body?.data?.code === 'plan_limit'

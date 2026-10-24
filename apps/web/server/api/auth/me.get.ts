@@ -26,9 +26,8 @@ async function planSummary(orgId: string): Promise<{ plan: Plan, overLimit: bool
   if (!billingEnabled()) return undefined
   try {
     const sql = await appDb()
-    const [org, usage] = await Promise.all([loadOrgBilling(sql, orgId), orgUsage(sql, orgId)])
-    const plan = effectivePlan(org)
-    return { plan, overLimit: overLimit(plan, usage) }
+    const [org, limits, usage] = await Promise.all([loadOrgBilling(sql, orgId), loadOrgLimits(sql, orgId), orgUsage(sql, orgId)])
+    return { plan: effectivePlan(org), overLimit: overLimit(limits, usage) }
   }
   catch (error) {
     console.error('[billing] could not read the plan for organization', orgId, error)

@@ -19,10 +19,10 @@ export default defineMcpHandler({
       return mcpUnauthorized()
     }
 
-    // A valid credential its organization's plan does not cover: 403, never
-    // 401, since it works again the moment the organization upgrades. Only
-    // ever answers with billing on. See server/utils/billing.ts.
-    const refusal = await mcpPlanRefusal(auth.instance.org, auth.tokenId)
+    // A valid credential beyond its organization's limits: 403, never 401,
+    // since it works again the moment the limits rise. No limits — every
+    // self-hosted organization — costs nothing here. See entitlements.ts.
+    const refusal = await mcpLimitRefusal(auth.instance.org, auth.tokenId, auth.limits)
     if (refusal) return refusal
 
     // The MCP-only context key. UI code reads `event.context.user`; these two

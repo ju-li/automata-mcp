@@ -263,18 +263,29 @@ export async function syncOrgFromStripe(orgId: string): Promise<void> {
   // Since API version 2025-03-31 the billing period lives on each item.
   const periodEnd = current?.items.data.reduce((latest, item) => Math.max(latest, item.current_period_end ?? 0), 0)
 
+  // The status, the limits it implies and the plan change it records commit
+  // together, so the enforced limits never disagree with the stored status.
   const sql = await appDb()
-  await sql`
-    UPDATE app.organizations SET
-      stripe_subscription_id = ${current?.id ?? null},
-      subscription_status    = ${current?.status ?? null},
-      trial_ends_at          = ${isoFromUnix(current?.trial_end)},
-      current_period_end     = ${isoFromUnix(periodEnd)},
-      cancel_at_period_end   = ${Boolean(current?.cancel_at_period_end || current?.cancel_at)},
-      trial_used             = trial_used OR ${subs.length > 0},
-      updated                = now()
-    WHERE id = ${orgId}
-  `
+  await sql.begin(async (tx) => {
+    await tx`
+      UPDATE app.organizations SET
+        stripe_subscription_id = ${current?.id ?? null},
+        subscription_status    = ${current?.status ?? null},
+        trial_ends_at          = ${isoFromUnix(current?.trial_end)},
+        current_period_end     = ${isoFromUnix(periodEnd)},
+        cancel_at_period_end   = ${Boolean(current?.cancel_at_period_end || current?.cancel_at)},
+        trial_used             = trial_used OR ${subs.length > 0},
+        updated                = now()
+      WHERE id = ${orgId}
+    `
+    for (const change of await applyPlanEntitlements(tx, orgId)) {
+      await recordHostedEvent(tx, {
+        type: 'plan.changed',
+        org: change.id,
+        payload: { from: change.from ?? null, to: change.to, status: current?.status ?? null },
+      })
+    }
+  })
 }
 
 /** The organization a Stripe customer belongs to, or `undefined`. */

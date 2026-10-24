@@ -7,7 +7,11 @@ export default defineEventHandler(async (event) => {
   const actor = await requireOrgAdmin(event)
 
   const sql = await appDb()
-  const [org, usage] = await Promise.all([loadOrgBilling(sql, actor.org.id), orgUsage(sql, actor.org.id)])
+  const [org, limits, usage] = await Promise.all([
+    loadOrgBilling(sql, actor.org.id),
+    loadOrgLimits(sql, actor.org.id),
+    orgUsage(sql, actor.org.id),
+  ])
   const plan = effectivePlan(org)
 
   return {
@@ -20,8 +24,12 @@ export default defineEventHandler(async (event) => {
     canStartTrial: !org?.trial_used,
     trialDays: TRIAL_DAYS,
     usage,
-    limits: plan === 'free' ? FREE_LIMITS : null,
-    overLimit: overLimit(plan, usage),
+    // What is enforced, read from the entitlement columns rather than derived
+    // from the plan, so the page shows exactly what the checks will apply.
+    limits: hasLimits(limits)
+      ? { connections: limits?.max_connections, tokens: limits?.max_tokens, members: limits?.max_members }
+      : null,
+    overLimit: overLimit(limits, usage),
     includedSeats: INCLUDED_SEATS,
     billedSeats: plan === 'pro' ? billableSeats(usage.members) : 0,
   }

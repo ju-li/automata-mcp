@@ -62,12 +62,13 @@ export default defineEventHandler(async (event) => {
   const actor = await requireOrgAdmin(event)
   const parsed = await parseBody(event, body)
 
-  // The plan's connection limit, before anything is provisioned: WhatsApp and
-  // Telegram reserve a live session on a remote server before the row exists,
-  // so a refusal after that would leave one running. Not held across the
-  // insert — provisioning makes remote calls — so two racing creates can both
-  // pass on Free. That is harmless: only the oldest connection's token answers
-  // on Free (`mcpPlanRefusal`), and the org then reads as over its limit.
+  // The organization's connection limit, before anything is provisioned:
+  // WhatsApp and Telegram reserve a live session on a remote server before the
+  // row exists, so a refusal after that would leave one running. Not held
+  // across the insert — provisioning makes remote calls — so two racing
+  // creates can both pass. That is harmless: only the oldest connections'
+  // tokens answer over a limit (`mcpLimitRefusal`), and the org then reads as
+  // over its limit.
   await assertCanAdd(await appDb(), actor.org.id, 'connection')
 
   let instance
@@ -87,6 +88,9 @@ export default defineEventHandler(async (event) => {
     default:
       return assertNever(parsed, 'connection kind')
   }
+
+  // The kind only: hosts, credentials and labels never go into an event.
+  recordHostedEventQuietly({ type: 'connection.created', org: actor.org.id, userId: actor.user.id, payload: { id: instance.id, kind: parsed.kind } })
 
   return { instance: toPublicInstance(instance) }
 })

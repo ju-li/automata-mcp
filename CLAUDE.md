@@ -86,7 +86,8 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              pg-run, pg-catalog, chats, alerts, mailer,
                              mcp-kind-tool, telegram, telegram-db,
                              telegram-instances, imap-client, imap-sync, imap-db,
-                             mail-format, mfa, totp, webauthn, billing, stripe, …
+                             mail-format, mfa, totp, webauthn, billing, stripe,
+                             entitlements, hosted-events, …
   shared/connection.ts       InstanceKind, assertNever — imported as #shared
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              `telegram` schema of the shared Postgres. See "Telegram bridge".
@@ -127,7 +128,15 @@ Three things enforce it:
 
 ## Plans and billing
 
-Hosted offering only. `NUXT_BILLING` = `off` (default) | `stripe`; unknown value read as `stripe` (typo on hosted deploy must not hand out unlimited). **Off = invisible**: `effectivePlan()` answers `unlimited`, `assertCanAdd` no-op, every billing route 404, `/api/auth/me` carries no `plan` field, signup-policy says `billing: false` so no plan picker. Self-hosters never set it. `billing.ts` decides plans; `stripe.ts` only file importing SDK. `docs/billing.md` = operator side.
+Hosted offering only. `NUXT_BILLING` = `off` (default) | `stripe`; unknown value read as `stripe` (typo on hosted deploy must not hand out unlimited). **Off = invisible**: `effectivePlan()` answers `unlimited`, every billing route 404, `/api/auth/me` carries no `plan` field, signup-policy says `billing: false` so no plan picker, no limits written, no events written. Self-hosters never set it. `docs/billing.md` = operator side.
+
+**Three files, split so selling plans can leave the web app (planned `apps/cloud` service: Stripe, Brevo CRM, PostHog telemetry) while enforcement stays:**
+
+- `entitlements.ts` — **enforcement, knows numbers not plans.** Reads `app.organizations.max_connections` / `max_tokens` / `max_members`; NULL = unlimited (every self-hosted org). Never names a plan or Stripe. Stays in web for good: checks run inside web's transactions and on every MCP request, so a call to another service there would put its outage on the auth path.
+- `billing.ts` + `stripe.ts` — **selling plans.** `billing.ts` decides which plan; `applyPlanEntitlements()` = only bridge, turns stored Stripe status into `max_*` + `plan_label` (one SQL statement, for one org after sync or all at boot). `newOrganizationLimits()` writes Free's in `createOrganizationFor`'s insert, so org never exists unlimited where plans exist. `stripe.ts` only file importing SDK. Both move to the cloud service later; it will write same columns.
+- `hosted-events.ts` — **outbox `app.hosted_events`** for that service. Closed `HostedEventType` union; same transaction as the change (`recordHostedEvent(tx, …)`), `recordHostedEventQuietly` only for changes made outside one. Payloads never carry credentials, DSNs, hosts, chat ids, folder/table names, message content, tool arguments; email only on user events (CRM keys on it). Written only when `hostedEventsEnabled()` (today = billing on), so self-hosted DB never holds a row. Rows accumulate until consumer exists — that is the CRM backlog. No FKs: event outlives its org. **MCP usage not one row per call:** `countedHandler` in `mcp-kind-tool.ts` counts tool + ok/error in memory, `server/plugins/hosted-usage.ts` flushes one `usage.rollup` row per org per minute. Crash loses ≤ a minute — never bill from rollups.
+
+**Limits in the database outlive `NUXT_BILLING`.** Turning billing off stops writing them but doesn't clear ones already written; clear `max_*` by hand if a deployment ever does that.
 
 Free = 1 connection, 1 live token, 1 member. Pro = Stripe status `trialing`/`active`/`past_due` (retry window counts as Pro); 5 seats included, seat price quantity = members − 5.
 
@@ -135,8 +144,8 @@ Rules easy to undo:
 
 - **Org born Free; Pro only when Stripe says so.** Signup's `plan` (carried on `email_verifications.plan` through verification) only decides whether browser goes on to Checkout. Abandoned checkout = working Free account, never half-state.
 - **Payload = hint, live read = fact** (same as Evolution webhook). Webhook verifies signature, maps customer → org, calls `syncOrgFromStripe()`, which re-lists customer's subscriptions and writes columns. Sole writer of `subscription_status`. Hourly `billing:reconcile` same, backstop for lost deliveries and failed seat syncs. Webhook sync failure answers 500 — Stripe retries, unlike Evolution.
-- **Limit checks at choke points, under org row lock.** `assertCanAdd(db, org, …)` locks `app.organizations` row `FOR UPDATE` then counts — takes `Db`, runs in caller's transaction. Token mint wraps check + `createToken` in one tx. Member check lives **inside `acceptInviteInto`** — covers accept, invited signup, invited verify. Invite creation counts pending invites too. Connection check runs before provisioning (remote session reserved before row exists) and can't hold lock across it; race harmless because of next rule.
-- **Lapsed Free org: oldest live token on oldest connection answers, rest 403** (`mcpPlanRefusal`, called in `server/mcp/index.ts` after `resolveMcpAuth`). **Never 401** — client would discard token that revives on resubscribe. Read failure 503. Nothing deleted on lapse; `overLimit` drives banner.
+- **Limit checks at choke points, under org row lock.** `assertCanAdd(db, org, …)` reads `max_*` with `app.organizations` row `FOR UPDATE`, returns if NULL, else counts — takes `Db`, runs in caller's transaction. Token mint wraps check + `createToken` in one tx. Member check lives **inside `acceptInviteInto`** — covers accept, invited signup, invited verify. Invite creation counts pending invites too. Connection check runs before provisioning (remote session reserved before row exists) and can't hold lock across it; race harmless because of next rule.
+- **Over its limits: oldest `max_tokens` live tokens on oldest `max_connections` connections answer, rest 403** (`mcpLimitRefusal`, called in `server/mcp/index.ts` after `resolveMcpAuth`). Limits ride on `resolveMcpAuth`'s existing query (LEFT JOIN `organizations`), so no-limit org pays zero extra queries. **Never 401** — client would discard token that revives on resubscribe. Read failure 503. Nothing deleted on lapse; `overLimit` drives banner.
 - **Seats synced after commit** (`syncSeatsLater`), never inside membership tx — Stripe hiccup must not undo join/removal. Every new path changing membership must call it.
 - **Leaving org with live Pro subscription refused** in `acceptInviteInto` (old org would be deleted while still billing), unless `cancel_at_period_end`.
 - **Stripe links from `NUXT_PUBLIC_APP_URL` only**, never `Host` (501 unset). Stripe unconfigured → limits still enforced, checkout 503.
