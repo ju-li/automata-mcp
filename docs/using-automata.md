@@ -134,7 +134,8 @@ before it is accepted.
 
 Scope is read fresh on every request, so **editing a token's scope takes effect
 immediately and does not reissue it**. The connector already configured in Claude
-keeps working; only what it can reach changes.
+keeps working; only what it can reach changes. The same **Edit** dialog renames
+the token, which likewise leaves the connector untouched.
 
 A scoped send refuses when it cannot verify the recipient — if the account is
 disconnected, the message is not sent rather than sent unchecked.

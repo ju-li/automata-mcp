@@ -186,11 +186,14 @@ export async function updateTokenScope(
   token: AppMcpToken,
   scope: McpScope,
   sendDisclaimer?: string | null,
+  label?: string,
 ): Promise<PublicToken> {
-  // `undefined` leaves the disclaimer as it is; `null` turns it off.
+  // `undefined` leaves the disclaimer and the name as they are; a `null`
+  // disclaimer turns it off.
   const record = await updateRow<AppMcpToken>('mcp_tokens', token.id, {
     ...scopeFields(scope),
     ...(sendDisclaimer === undefined ? {} : { send_disclaimer: sendDisclaimer }),
+    ...(label === undefined ? {} : { label }),
   })
   return toPublicToken(record)
 }

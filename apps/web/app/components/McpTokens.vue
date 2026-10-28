@@ -111,11 +111,12 @@ const revealedScope = ref<TokenScope>(openScope())
 const revoking = ref<string | null>(null)
 
 const editing = ref<TokenRow | null>(null)
+const editLabel = ref('')
 const editScope = ref<TokenScope>(openScope())
 const editDisclaimer = ref<string | null>(null)
 
 const { busy: creating, run: runCreate } = useApiAction()
-const { busy: savingScope, run: runSaveScope } = useApiAction()
+const { busy: saving, run: runSave } = useApiAction()
 const { run: runRevoke } = useApiAction()
 const { run: runRotate } = useApiAction()
 
@@ -166,6 +167,7 @@ function openCreate() {
 
 function startEdit(token: TokenRow) {
   editing.value = token
+  editLabel.value = token.label
   // Copied, not referenced — cancelling must not leave the table showing edits
   // that were never saved. Deep, and without naming the array fields: a fifth
   // scope axis would otherwise be shared by reference and silently editable.
@@ -173,24 +175,29 @@ function startEdit(token: TokenRow) {
   editDisclaimer.value = token.send_disclaimer ?? null
 }
 
-async function saveScope() {
+async function saveEdit() {
   const token = editing.value
   if (!token) return
 
-  await runSaveScope(
+  await runSave(
     async () => {
       await $fetch(`/api/tokens/${token.id}`, {
         method: 'PATCH',
-        body: { ...editScope.value, send_disclaimer: disclaimerToSubmit(editScope.value, props.kind, editDisclaimer.value) },
+        body: {
+          ...editScope.value,
+          label: editLabel.value,
+          send_disclaimer: disclaimerToSubmit(editScope.value, props.kind, editDisclaimer.value),
+        },
       })
       editing.value = null
       await refresh()
     },
     {
-      success: 'Scope updated. The connector keeps working with its existing token.',
-      // The server rejects an empty allowlist by name — "Select at least one
-      // action" — which is the whole point of showing its message here.
-      failure: 'Could not update the scope',
+      success: 'Token updated. The connector keeps working with its existing token.',
+      // The server rejects an empty allowlist or name by name — "Select at
+      // least one action", "Give the token a name" — which is the whole point
+      // of showing its message here.
+      failure: 'Could not update the token',
     },
   )
 }
@@ -548,7 +555,14 @@ function statusOf(token: TokenRow) {
           </DialogDescription>
         </DialogHeader>
 
-        <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
+        <div class="flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto">
+          <div class="shrink-0 space-y-2">
+            <Label for="edit-token-label">Name</Label>
+            <Input id="edit-token-label" v-model="editLabel" />
+          </div>
+
+          <Separator class="shrink-0" />
+
           <TokenScopeFields
             v-model="editScope"
             v-model:disclaimer="editDisclaimer"
@@ -561,8 +575,8 @@ function statusOf(token: TokenRow) {
           <Button variant="ghost" @click="editing = null">
             Cancel
           </Button>
-          <Button :disabled="savingScope" @click="saveScope">
-            {{ savingScope ? 'Saving…' : 'Save scope' }}
+          <Button :disabled="saving" @click="saveEdit">
+            {{ saving ? 'Saving…' : 'Save' }}
           </Button>
         </DialogFooter>
       </DialogContent>
