@@ -118,6 +118,22 @@ async function submit() {
       </div>
     </div>
 
+    <div class="mt-4 rounded-lg border border-dashed p-6 text-sm">
+      <div class="flex items-baseline justify-between gap-2">
+        <h2 class="font-heading text-base font-semibold">
+          Self-hosted
+        </h2>
+        <span class="font-medium">Free, open source</span>
+      </div>
+      <p class="mt-1 text-muted-foreground">
+        Run Automata on your own infrastructure with no plan limits.
+        Get the code on
+        <a href="https://github.com/ju-li/automata-mcp" target="_blank" rel="noopener noreferrer" class="text-foreground underline underline-offset-4">GitHub</a>
+        or deploy it in one click with the
+        <a href="https://railway.com/deploy/automata-or-whatsapp-telegram-sql-mcp?referralCode=HxrUPo&utm_medium=integration&utm_source=template&utm_campaign=generic" target="_blank" rel="noopener noreferrer" class="text-foreground underline underline-offset-4">Railway template</a>.
+      </p>
+    </div>
+
     <p class="mt-6 text-center text-sm text-muted-foreground">
       Already have an account?
       <NuxtLink to="/login" class="text-foreground underline underline-offset-4">
