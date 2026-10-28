@@ -92,14 +92,19 @@ export function hashMcpToken(token: string): string {
 /**
  * Pull the presented token off the request.
  *
- * `Authorization: Bearer <token>` is the primary form. The `/mcp/<token>` path
- * segment is a fallback for MCP clients that cannot attach custom headers.
+ * `Authorization: Bearer <token>` is the primary form. A bare
+ * `Authorization: wamcp_…` is accepted too: gateways such as Smithery forward a
+ * user-entered value into the header verbatim, with no scheme. Only a value
+ * carrying our own prefix qualifies, so no other scheme is reinterpreted. The
+ * `/mcp/<token>` path segment is a fallback for MCP clients that cannot attach
+ * custom headers.
  */
 function extractToken(event: H3Event): string | undefined {
   const header = getRequestHeader(event, 'authorization')
   if (header) {
     const match = /^Bearer\s+(.+)$/i.exec(header.trim())
     if (match) return match[1]!.trim()
+    if (header.trim().startsWith(TOKEN_PREFIX)) return header.trim()
     // An Authorization header that is present but malformed is a hard failure —
     // do not silently fall through to the path segment.
     return undefined
