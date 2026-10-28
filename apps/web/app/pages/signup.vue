@@ -201,6 +201,8 @@ async function submit() {
       <Button type="submit" class="w-full" :disabled="busy">
         {{ busy ? 'Creating…' : 'Create account' }}
       </Button>
+
+      <LegalLinks agreement />
     </form>
 
     <p class="mt-6 text-center text-sm text-muted-foreground">

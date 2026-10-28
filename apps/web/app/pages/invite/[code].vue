@@ -152,6 +152,8 @@ async function signUpAndAccept() {
             Create account and join
           </Button>
 
+          <LegalLinks agreement />
+
           <p class="text-center text-sm text-muted-foreground">
             Already have an account?
             <NuxtLink class="underline" to="/login">
