@@ -30,6 +30,8 @@ export interface PublicToken {
   assignedTo: { id: string, email?: string }
   /** Wire shape, identical to what create and patch accept. */
   scope: ScopeInput
+  /** Appended to every message this token sends. Absent = off. */
+  send_disclaimer?: string
 }
 
 export function toPublicToken(token: AppMcpToken, emails?: Map<string, string>): PublicToken {
@@ -44,6 +46,7 @@ export function toPublicToken(token: AppMcpToken, emails?: Map<string, string>):
     expired,
     assignedTo: { id: token.assigned_to, email: emails?.get(token.assigned_to) },
     scope: scopeToInput(scopeFromRecord(token)),
+    send_disclaimer: token.send_disclaimer || undefined,
   }
 }
 
@@ -111,6 +114,8 @@ export interface CreateTokenInput {
   label: string
   preset: ExpiryPreset
   scope: McpScope
+  /** Appended to every message the token sends. Null or absent = off. */
+  sendDisclaimer?: string | null
 }
 
 export async function createToken(input: CreateTokenInput, db?: Db): Promise<{ token: string, record: PublicToken }> {
@@ -125,6 +130,7 @@ export async function createToken(input: CreateTokenInput, db?: Db): Promise<{ t
       label: input.label.trim() || 'Untitled token',
       expires_at: expiryFromPreset(input.preset),
       revoked: false,
+      send_disclaimer: input.sendDisclaimer ?? null,
       ...scopeFields(input.scope),
     })}
     RETURNING *
@@ -176,8 +182,16 @@ export async function rotateToken(token: AppMcpToken): Promise<{ token: string, 
   return { token: plaintext, record: toPublicToken(record) }
 }
 
-export async function updateTokenScope(token: AppMcpToken, scope: McpScope): Promise<PublicToken> {
-  const record = await updateRow<AppMcpToken>('mcp_tokens', token.id, scopeFields(scope))
+export async function updateTokenScope(
+  token: AppMcpToken,
+  scope: McpScope,
+  sendDisclaimer?: string | null,
+): Promise<PublicToken> {
+  // `undefined` leaves the disclaimer as it is; `null` turns it off.
+  const record = await updateRow<AppMcpToken>('mcp_tokens', token.id, {
+    ...scopeFields(scope),
+    ...(sendDisclaimer === undefined ? {} : { send_disclaimer: sendDisclaimer }),
+  })
   return toPublicToken(record)
 }
 

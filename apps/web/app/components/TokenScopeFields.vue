@@ -8,6 +8,18 @@ import { assertNever, connectionFamily } from '#shared/connection'
  */
 const props = defineProps<{ instanceId: string, kind: InstanceKind }>()
 const scope = defineModel<TokenScope>({ required: true })
+/**
+ * The line appended to every message this token sends; `null` is off. Shown
+ * only while the scope allows sending — the parent drops it on submit otherwise
+ * (`disclaimerToSubmit`), so nothing hidden is stored.
+ */
+const disclaimer = defineModel<string | null>('disclaimer', { default: null })
+
+const canSend = computed(() => allowsSending(scope.value, props.kind))
+
+function toggleDisclaimer(on: boolean) {
+  disclaimer.value = on ? DEFAULT_SEND_DISCLAIMER : null
+}
 
 /**
  * Which axis this connection has, asked as a family rather than as
@@ -246,6 +258,57 @@ async function addByNumber() {
           </div>
         </template>
       </div>
+
+      <!--
+        Sending acts on a real phone number or Telegram account, and both
+        services restrict accounts that behave like bulk senders. Said here,
+        where the decision to grant it is made, rather than after the fact.
+      -->
+      <template v-if="canSend">
+        <NoticeCard title="Sending can get this account banned">
+          <template #description>
+            <p class="mt-1 text-xs text-muted-foreground">
+              Claude will send from your real {{ kind === 'telegram' ? 'Telegram' : 'WhatsApp' }}
+              account. Sending many messages, messaging people who have not
+              messaged you first, or repeating the same text can get the account
+              restricted or permanently banned. Keep volume low, and consider
+              limiting the token to selected chats.
+            </p>
+          </template>
+        </NoticeCard>
+
+        <div class="space-y-2 rounded-md border p-3">
+          <div class="flex items-start gap-3">
+            <Checkbox
+              id="send-disclaimer-on"
+              :model-value="disclaimer !== null"
+              class="mt-0.5"
+              @update:model-value="toggleDisclaimer($event === true)"
+            />
+            <div class="min-w-0 flex-1">
+              <Label for="send-disclaimer-on" class="font-normal">
+                Add a disclaimer to sent messages
+              </Label>
+              <p class="mt-0.5 text-xs text-muted-foreground">
+                Added on its own line at the end of every message this token sends,
+                so recipients know it came through an assistant.
+              </p>
+            </div>
+          </div>
+          <div v-if="disclaimer !== null" class="space-y-1 pl-7">
+            <Input
+              :model-value="disclaimer"
+              aria-label="Disclaimer text"
+              maxlength="200"
+              :placeholder="DEFAULT_SEND_DISCLAIMER"
+              @update:model-value="disclaimer = String($event)"
+            />
+            <p v-if="!disclaimer.trim()" class="text-xs text-muted-foreground">
+              Blank — messages will be sent without a disclaimer.
+            </p>
+          </div>
+        </div>
+      </template>
     </section>
 
     <Separator class="shrink-0 md:hidden" />

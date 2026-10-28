@@ -17,7 +17,9 @@ export default defineKindTool({
   description:
     'Send a plain-text WhatsApp message from the connected account. The account '
     + 'must be in the `open` state — check with get-connection-status first. '
-    + 'Messages cannot be unsent once delivered.',
+    + 'Messages cannot be unsent once delivered. The account owner may have set a '
+    + 'disclaimer line that is appended to every message automatically; when one was, '
+    + 'the response names it in `disclaimerAppended`. Do not add a sign-off of your own.',
   annotations: {
     readOnlyHint: false,
     destructiveHint: false,
@@ -29,7 +31,7 @@ export default defineKindTool({
     text: z.string().min(1).describe('Message body'),
   },
   handler: async ({ number, text }) => {
-    const { instance, scope } = useMcpAuth()
+    const { instance, scope, sendDisclaimer } = useMcpAuth()
 
     // Resolves the number through Evolution and compares exact JIDs. Fails
     // closed — an unverifiable recipient is refused, not sent to. No-op when
@@ -37,9 +39,10 @@ export default defineKindTool({
     await assertNumberAllowed(instance, scope, number)
 
     const evolution = useEvolutionClient()
-    return await evolution(`/message/sendText/${encodeURIComponent(instance.name)}`, {
+    const result = await evolution<Record<string, unknown>>(`/message/sendText/${encodeURIComponent(instance.name)}`, {
       method: 'POST',
-      body: { number, text },
+      body: { number, text: withSendDisclaimer(text, sendDisclaimer) },
     })
+    return sendDisclaimer ? { ...result, disclaimerAppended: sendDisclaimer } : result
   },
 })
