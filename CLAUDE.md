@@ -632,11 +632,12 @@ Every image tag in `docker-compose.dev.yml`, `docker-compose.yml` and `docker/ai
 
 ## Releases
 
-Merging `main` into `prod` publishes `ghcr.io/ju-li/automata-mcp-web`, `ghcr.io/ju-li/automata-mcp-telegram-bridge` and `ghcr.io/ju-li/automata-mcp-aio`, tagged with version in **root `package.json`** — only place version lives; `apps/*/package.json` unversioned. `docs/releases.md` = operator's procedure.
+Merging `main` into `prod` publishes `ghcr.io/ju-li/automata-mcp-web`, `ghcr.io/ju-li/automata-mcp-telegram-bridge` and `ghcr.io/ju-li/automata-mcp-aio`, tagged with version in **root `package.json`**; `apps/*/package.json` unversioned. `docs/releases.md` = operator's procedure.
 
 - **`.github/scripts/release-version.sh`** = one version rule: three-part `X.Y.Z`, no existing `vX.Y.Z` tag, strictly above latest. Both workflows call it, so PR check and push guard can't drift.
 - **`release-check.yml`** (PRs into `prod`) runs that, builds all three images without pushing — after merge, bad version or broken Dockerfile already on release branch.
 - **`release.yml`** (push to `prod`) re-runs version guard, pushes all three images, then creates tag and GitHub Release **last**, so tag means images exist. All in one workflow since tag pushed with `GITHUB_TOKEN` doesn't trigger another.
+- **Directory listings repeat version: `server.json` (official MCP Registry) and `lhm.plugin.json` (LobeHub).** `.github/scripts/listings.mjs` = one rule: `pnpm release:version X.Y.Z` writes all three, `check` (run by `release-version.sh`) refuses release whose listings disagree with `package.json` or whose `lhm.plugin.json` tool names differ from `server/mcp/tools/`. Tool list regenerated from live `/.well-known/mcp/server-card.json` (`pnpm listings:tools <url>`) since JSON Schemas exist only at runtime — check compares names only. `release.yml` publishes `server.json` last (`mcp-registry` job, DNS-key secret `MCP_REGISTRY_DNS_KEY`, `mcp-publisher` pinned + checksummed). LobeHub stays manual: its CLI has no non-interactive login.
 - **`main → prod` = merge commit, never squash.** Squash leaves `prod` off `main`'s history; every later release PR re-shows old commits or conflicts.
 
 Templates pin major tag, not `latest`: migrations run at boot, append-only, so image rollback after one isn't clean undo.
