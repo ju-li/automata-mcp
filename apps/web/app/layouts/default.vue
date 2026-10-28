@@ -7,7 +7,7 @@ const { plan, overLimit } = usePlan()
 </script>
 
 <template>
-  <div class="min-h-screen bg-background text-foreground">
+  <div class="flex min-h-screen flex-col bg-background text-foreground">
     <header v-if="user" class="border-b">
       <div class="mx-auto flex h-14 max-w-5xl items-center justify-between gap-4 px-6">
         <div class="flex min-w-0 items-center gap-3">
@@ -102,8 +102,14 @@ const { plan, overLimit } = usePlan()
       </p>
     </div>
 
-    <main class="mx-auto max-w-5xl px-6 py-10">
+    <main class="mx-auto w-full max-w-5xl flex-1 px-6 py-10">
       <slot />
     </main>
+
+    <footer class="border-t">
+      <div class="mx-auto flex max-w-5xl justify-end px-6 py-4">
+        <LegalLinks />
+      </div>
+    </footer>
   </div>
 </template>
