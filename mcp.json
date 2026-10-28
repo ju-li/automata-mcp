@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "automata": {
+      "url": "https://mcp.getautomata.app/mcp",
+      "headers": {
+        "Authorization": "Bearer ${env:AUTOMATA_TOKEN}"
+      }
+    }
+  }
+}

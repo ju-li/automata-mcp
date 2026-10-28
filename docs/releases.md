@@ -19,16 +19,16 @@ Each release is tagged `X.Y.Z`, `X.Y`, `X`, `latest` and `sha-<commit>`, for
 forward, so a major release reaching a deployment on its next restart is not
 something to opt into by accident.
 
-The version is `"version"` in the root `package.json`, always three-part. Two
-directory listings repeat it — `server.json` (official MCP Registry) and
-`lhm.plugin.json` (LobeHub Marketplace) — so set all three with one command
-rather than by hand. To cut a release:
+The version is `"version"` in the root `package.json`, always three-part. Three
+directory listings repeat it — `server.json` (official MCP Registry),
+`lhm.plugin.json` (LobeHub Marketplace) and `.cursor-plugin/plugin.json`
+(cursor.directory) — so set all four with one command rather than by hand. To cut a release:
 
 1. On `main`, through an ordinary PR, run `pnpm release:version X.Y.Z` and
-   commit the three files it changes.
+   commit the four files it changes.
 2. Open a PR from `main` into `prod`. The `release-check` workflow refuses it
    unless the version is `X.Y.Z`, is not already released, is above the latest
-   release, and matches in all three files, and unless `lhm.plugin.json` lists
+   release, and matches in all four files, and unless `lhm.plugin.json` lists
    exactly the tools in `apps/web/server/mcp/tools/`. It also builds all three
    images to prove they still build.
 3. Merge it with **Create a merge commit** — never squash, or `prod` stops being
@@ -53,6 +53,7 @@ rather than by hand. To cut a release:
 | [Official MCP Registry](https://registry.modelcontextprotocol.io) (`app.getautomata/automata`) | `server.json` | `release.yml`, every release |
 | [LobeHub Marketplace](https://lobehub.com/mcp) (`ju-li-automata-mcp`) | `lhm.plugin.json` | by hand, step 4 above |
 | [Docker MCP Catalog](https://hub.docker.com/mcp) | `servers/automata/` in `docker/mcp-registry` | a PR there; carries no version |
+| [cursor.directory](https://cursor.directory) | `mcp.json`, `.cursor-plugin/plugin.json` | read from this repository; version set by `release:version` |
 
 **When a tool is added, renamed or removed,** the release check fails until
 `lhm.plugin.json` lists it. Deploy first, then regenerate from the live server
