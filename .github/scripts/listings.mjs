@@ -5,24 +5,25 @@
 //   node .github/scripts/listings.mjs version X.Y.Z
 //   node .github/scripts/listings.mjs tools <server-card-url>
 //
-// Two files outside the app describe it to directories: server.json (the
-// official MCP Registry, published by release.yml) and lhm.plugin.json (the
-// LobeHub Marketplace, published by hand — its CLI has no non-interactive login).
-// Each carries a version and lhm.plugin.json carries the tool list, and either
+// Three files outside the app describe it to directories: server.json (the
+// official MCP Registry, published by release.yml), lhm.plugin.json (the
+// LobeHub Marketplace, published by hand — its CLI has no non-interactive login)
+// and .cursor-plugin/plugin.json (cursor.directory, read from the repo beside
+// mcp.json). Each carries a version and lhm.plugin.json carries the tool list, and either
 // can drift silently: a stale version on LobeHub merges a release's tools into
 // the previous version's entry, and a stale tool list advertises tools that no
 // longer exist.
 //
 // `check` runs from release-version.sh, so both release workflows refuse a
 // release whose listings disagree with package.json or with the tool files.
-// `version` writes one version into all three files. `tools` regenerates
+// `version` writes one version into all four files. `tools` regenerates
 // lhm.plugin.json's tool list from a running server's
 // /.well-known/mcp/server-card.json — after deploy, since that is the only place
 // the JSON Schemas exist; the check compares names only for that reason.
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-const VERSIONED = ['package.json', 'server.json', 'lhm.plugin.json']
+const VERSIONED = ['package.json', 'server.json', 'lhm.plugin.json', '.cursor-plugin/plugin.json']
 const TOOLS_DIR = 'apps/web/server/mcp/tools'
 const KIND_LABEL = { whatsapp: 'WhatsApp', telegram: 'Telegram', imap: 'Email', postgres: 'PostgreSQL' }
 

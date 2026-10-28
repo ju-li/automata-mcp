@@ -23,6 +23,12 @@
    (Settings → Connectors → Add custom connector), Claude Code
    (`claude mcp add --transport http <name> <url>`), clients that send an
    `Authorization: Bearer` header, and the MCP Inspector.
+   **Cursor** (hosted server only): install the Automata plugin from
+   [cursor.directory](https://cursor.directory), or add this repository's
+   `mcp.json` entry to your own. It sends the token from the `AUTOMATA_TOKEN`
+   environment variable, so set that where Cursor starts — a Cursor opened from
+   the dock or start menu may not see variables exported in your shell profile —
+   and restart Cursor.
 
 **One connection per connector.** A token is bound to the connection it was
 created on, so no tool takes a connection argument, and Claude cannot address the
