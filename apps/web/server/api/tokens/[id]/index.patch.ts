@@ -1,5 +1,6 @@
 /**
- * Change a token's scope in place.
+ * Change a token's scope in place, and its send disclaimer when the body
+ * names one (`null` turns it off).
  *
  * Deliberately does not reissue: the connector already configured in Claude
  * keeps working, and only what it may reach changes. Scope is read fresh on
@@ -13,7 +14,7 @@
  */
 export default defineEventHandler(async (event) => {
   const { token, can } = await resolveTokenForActor(event, getRouterParam(event, 'id'))
-  const parsed = await parseBody(event, scopeSchema)
+  const parsed = await parseBody(event, scopeSchema.and(disclaimerSchema))
 
   if (can !== 'manage') {
     throw createError({
@@ -22,5 +23,5 @@ export default defineEventHandler(async (event) => {
     })
   }
 
-  return { record: await updateTokenScope(token, scopeFromInput(parsed)) }
+  return { record: await updateTokenScope(token, scopeFromInput(parsed), parsed.send_disclaimer) }
 })

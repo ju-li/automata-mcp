@@ -111,6 +111,47 @@ export function describeScope(scope: TokenScope, kind: InstanceKind): string {
   return [data, scope.all_tools ? 'all actions' : plural(scope.tool_names.length, 'action')].join(' · ')
 }
 
+/** What the disclaimer field holds when an admin turns it on. Editable from there. */
+export const DEFAULT_SEND_DISCLAIMER = 'Sent using Automata'
+
+/**
+ * The tool that sends messages on this kind of connection, if it has one.
+ *
+ * Named rather than inferred from "any write tool": the disclaimer is applied
+ * inside these handlers specifically, so a future write tool is not covered by
+ * it until it applies the disclaimer itself and is named here.
+ */
+function sendToolOf(kind: InstanceKind): string | undefined {
+  switch (kind) {
+    case 'whatsapp':
+      return 'send-text-message'
+    case 'telegram':
+      return 'send-telegram-message'
+    case 'postgres':
+    case 'imap':
+      return undefined
+    default:
+      return assertNever(kind, 'connection kind')
+  }
+}
+
+/** Whether a token with this scope may send messages from the account. */
+export function allowsSending(scope: TokenScope, kind: InstanceKind): boolean {
+  const tool = sendToolOf(kind)
+  if (!tool) return false
+  return scope.all_tools || scope.tool_names.includes(tool)
+}
+
+/**
+ * The `send_disclaimer` to submit. A token that cannot send stores none, so
+ * turning sending off and back on later does not revive a disclaimer nobody
+ * could see while it was hidden; a blank field is off, not an empty line.
+ */
+export function disclaimerToSubmit(scope: TokenScope, kind: InstanceKind, disclaimer: string | null): string | null {
+  if (!allowsSending(scope, kind)) return null
+  return disclaimer?.trim() || null
+}
+
 function plural(n: number, noun: string): string {
   return `${n} ${noun}${n === 1 ? '' : 's'}`
 }

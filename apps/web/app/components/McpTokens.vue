@@ -92,6 +92,7 @@ interface TokenRow {
   /** The email is present only for an admin; a member's own list carries none. */
   assignedTo: { id: string, email?: string }
   scope: TokenScope
+  send_disclaimer?: string
 }
 
 const { data, refresh, status } = await useFetch<{ tokens: TokenRow[] }>(
@@ -102,6 +103,8 @@ const createOpen = ref(false)
 const newLabel = ref('')
 const newExpiry = ref<'30d' | '90d' | '1y' | 'never'>('90d')
 const newScope = ref<TokenScope>(openScope())
+/** Off until an admin turns it on; see TokenScopeFields. */
+const newDisclaimer = ref<string | null>(null)
 const revealed = ref<string | null>(null)
 const revealedScope = ref<TokenScope>(openScope())
 /** Which token is mid-revoke, so only that row's button is disabled. */
@@ -109,6 +112,7 @@ const revoking = ref<string | null>(null)
 
 const editing = ref<TokenRow | null>(null)
 const editScope = ref<TokenScope>(openScope())
+const editDisclaimer = ref<string | null>(null)
 
 const { busy: creating, run: runCreate } = useApiAction()
 const { busy: savingScope, run: runSaveScope } = useApiAction()
@@ -154,6 +158,7 @@ function openCreate() {
   newLabel.value = ''
   newExpiry.value = '90d'
   newScope.value = initialScope()
+  newDisclaimer.value = null
   newAssignee.value = user.value?.id ?? ''
   createOpen.value = true
   if (props.canManage) refreshAssignable()
@@ -165,6 +170,7 @@ function startEdit(token: TokenRow) {
   // that were never saved. Deep, and without naming the array fields: a fifth
   // scope axis would otherwise be shared by reference and silently editable.
   editScope.value = structuredClone(token.scope)
+  editDisclaimer.value = token.send_disclaimer ?? null
 }
 
 async function saveScope() {
@@ -173,7 +179,10 @@ async function saveScope() {
 
   await runSaveScope(
     async () => {
-      await $fetch(`/api/tokens/${token.id}`, { method: 'PATCH', body: editScope.value })
+      await $fetch(`/api/tokens/${token.id}`, {
+        method: 'PATCH',
+        body: { ...editScope.value, send_disclaimer: disclaimerToSubmit(editScope.value, props.kind, editDisclaimer.value) },
+      })
       editing.value = null
       await refresh()
     },
@@ -197,6 +206,7 @@ async function create() {
         expiry: newExpiry.value,
         assignedTo: newAssignee.value || undefined,
         ...scope,
+        send_disclaimer: disclaimerToSubmit(scope, props.kind, newDisclaimer.value),
       },
     }),
     { failure: 'Could not create the token' },
@@ -509,7 +519,12 @@ function statusOf(token: TokenRow) {
 
           <Separator class="shrink-0" />
 
-          <TokenScopeFields v-model="newScope" :instance-id="instanceId" :kind="kind" />
+          <TokenScopeFields
+            v-model="newScope"
+            v-model:disclaimer="newDisclaimer"
+            :instance-id="instanceId"
+            :kind="kind"
+          />
         </div>
 
         <DialogFooter class="shrink-0">
@@ -534,7 +549,12 @@ function statusOf(token: TokenRow) {
         </DialogHeader>
 
         <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
-          <TokenScopeFields v-model="editScope" :instance-id="instanceId" :kind="kind" />
+          <TokenScopeFields
+            v-model="editScope"
+            v-model:disclaimer="editDisclaimer"
+            :instance-id="instanceId"
+            :kind="kind"
+          />
         </div>
 
         <DialogFooter class="shrink-0">

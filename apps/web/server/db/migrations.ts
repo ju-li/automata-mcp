@@ -439,4 +439,16 @@ export const APP_MIGRATIONS: AppMigration[] = [
       );
     `,
   },
+  {
+    name: '0008_token_send_disclaimer',
+    sql: /* sql */ `
+      -- A line the send tools append to every message this token sends, so the
+      -- people receiving them can tell they were sent through an assistant. NULL
+      -- is off. Applied server-side in the send handlers rather than asked of
+      -- the model, which could forget or reword it.
+      ALTER TABLE app.mcp_tokens
+        ADD COLUMN send_disclaimer text
+          CHECK (send_disclaimer IS NULL OR length(send_disclaimer) BETWEEN 1 AND 200);
+    `,
+  },
 ]

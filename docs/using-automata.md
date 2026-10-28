@@ -133,6 +133,24 @@ keeps working; only what it can reach changes.
 A scoped send refuses when it cannot verify the recipient — if the account is
 disconnected, the message is not sent rather than sent unchecked.
 
+## Tokens that can send
+
+When a WhatsApp or Telegram token is allowed to send, the token dialog warns that
+the assistant sends from the real account: high volume, messaging people who never
+messaged you, or repeating the same text can get the account restricted or
+banned by WhatsApp or Telegram. Keep sending low-volume and scope the token to the
+chats it needs.
+
+The same dialog offers an optional **disclaimer**, off by default. Turned on, it
+starts as "Sent using Automata" and can be reworded (up to 200 characters). The
+server appends it on its own line to every message that token sends. The model
+isn't asked to add it, so it can't forget it or change the wording. The tool's
+response names the appended text in `disclaimerAppended`. On Telegram the
+disclaimer counts toward the 4096-character limit, and a message that goes over
+it is refused with the number of characters to cut. The disclaimer is per
+token, and admins can edit or remove it in the token's Edit dialog. A token that
+can't send stores none.
+
 The token is shown exactly once — only its SHA-256 hash is stored. Lost tokens
 are replaced, not recovered. Revoking one takes effect immediately, and revoking
 stays available while an account is disconnected or a database is unreachable.

@@ -5,7 +5,7 @@ const body = z.object({
   expiry: z.enum(['30d', '90d', '1y', 'never']).default('90d'),
   /** The member to issue it to. Defaults to the acting admin. */
   assignedTo: z.string().min(1).optional(),
-}).and(scopeSchema)
+}).and(scopeSchema).and(disclaimerSchema)
 
 /**
  * Mint a connector token for this connection.
@@ -61,6 +61,7 @@ export default defineEventHandler(async (event) => {
       label: parsed.label ?? '',
       preset: parsed.expiry,
       scope: scopeFromInput(parsed),
+      sendDisclaimer: parsed.send_disclaimer,
     }, tx)
     await recordHostedEvent(tx, {
       type: 'token.created',

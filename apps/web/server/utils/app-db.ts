@@ -374,4 +374,6 @@ export interface AppMcpToken {
   table_names: unknown
   all_tools: boolean
   tool_names: unknown
+  /** Appended to every message the send tools send with this token. Absent = off. */
+  send_disclaimer?: string
 }
