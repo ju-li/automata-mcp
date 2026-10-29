@@ -44,7 +44,8 @@ const open = computed({
         </p>
         <p v-else-if="kind === 'imap'">
           Anyone with this token can read the email in this mailbox, attachments
-          included. Treat it like a password.
+          included — and save drafts in it, if you granted that action. Treat it
+          like a password.
         </p>
       </div>
 

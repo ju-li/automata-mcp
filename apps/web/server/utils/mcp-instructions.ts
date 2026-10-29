@@ -112,7 +112,8 @@ export const TELEGRAM_INSTRUCTIONS = [
 export const IMAP_INSTRUCTIONS = [
   'This server is bound to exactly one email mailbox, reached over IMAP — the one the connector token',
   'was issued for. There is no mailbox to choose and no tool takes an account argument. It can read',
-  'and search mail; it cannot send, delete, move or mark messages.',
+  'and search mail, and — when the token allows it — save drafts; it cannot send, delete, move or',
+  'mark messages.',
   'Headers (sender, recipients, subject, date, flags, attachment names) are synced into this',
   'connector every few minutes; message bodies and attachments are fetched from the mail server only',
   'when you ask for them. Older mail is synced gradually and within limits, so a folder can hold older',
@@ -133,4 +134,8 @@ export const IMAP_INSTRUCTIONS = [
   'Fetch an attachment with `get-email-attachment` only when its content is needed; images come back',
   'as images, text files as text, and other files (PDFs included) as embedded files. Attachments',
   'above the size limit are refused with their size.',
+  '`create-email-draft` saves a plain-text draft in the mailbox\'s Drafts folder and sends nothing:',
+  'the owner reviews and sends it from their mail client, so say that it is waiting in Drafts rather',
+  'than that it was sent. Pass `replyToEmailId` to thread a reply under an email. Show the user text',
+  'they did not dictate before saving it.',
 ].join(' ')

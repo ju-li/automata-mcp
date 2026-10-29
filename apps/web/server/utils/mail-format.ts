@@ -142,3 +142,37 @@ export async function foldersToRead(
   }
   return { folders: [found], allowed }
 }
+
+/**
+ * Where a draft goes: the folder the server marks `\Drafts`, else the one
+ * folder named "Drafts". Never the caller's choice — a write tool that took a
+ * folder argument could file mail anywhere in the mailbox.
+ *
+ * Looked up across every folder, scope or not, and only then checked against
+ * scope: a scoped token without Drafts gets a 403 naming the folder to add,
+ * where filtering first would answer "this mailbox has no Drafts folder",
+ * which is false and leaves the owner nothing to fix.
+ */
+export async function draftsFolder(instance: Pick<AppInstance, 'id'>, scope: McpScope): Promise<MailFolder> {
+  const all = await listMailFolders(instance)
+  const marked = all.filter(f => f.specialUse === '\\Drafts')
+  const named = all.filter(f => f.name.toLowerCase() === 'drafts')
+  const found = marked.length === 1 ? marked[0] : marked.length === 0 && named.length === 1 ? named[0] : undefined
+
+  if (!found) {
+    if (!all.length) {
+      throw createError({
+        statusCode: 409,
+        message: 'This mailbox has not finished its first sync, so its Drafts folder is not known yet. Try again in a few minutes.',
+      })
+    }
+    throw createError({
+      statusCode: 409,
+      message: marked.length + named.length > 1
+        ? 'This mailbox has more than one Drafts folder, so it is not clear which one the mail client uses. No draft was saved.'
+        : 'This mailbox has no Drafts folder, so there is nowhere to save a draft. No draft was saved.',
+    })
+  }
+  assertFolderAllowed(scope, found.path)
+  return found
+}

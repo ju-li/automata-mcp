@@ -59,8 +59,8 @@ export function openScope(): TokenScope {
 }
 
 /**
- * Initial scope for a new token on a Postgres connection: every read tool, no
- * write tool.
+ * Initial scope for a new token on a Postgres or mailbox connection: every
+ * read tool, no write tool.
  *
  * Read-only is the default because the cost of the two mistakes is not
  * symmetric — a token that turns out to need writes is one edit away, and a
