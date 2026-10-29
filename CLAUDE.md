@@ -14,7 +14,7 @@ Connection = row in `instances` with `kind`; connector token bound to exactly on
 - **`whatsapp`** — [Evolution API](https://doc.evolution-api.com/) instance, paired by QR, on deployment's configured Evolution server *or* user-supplied one.
 - **`postgres`** — user-supplied PostgreSQL DSN.
 - **`telegram`** — personal Telegram account linked by QR through `apps/telegram-bridge`, deployment's own bridge *or* user-supplied one. See "Telegram bridge".
-- **`imap`** — user-supplied IMAP mailbox, username + app password. Read-only. Headers synced, bodies and attachments fetched live. See "IMAP connections".
+- **`imap`** — user-supplied IMAP mailbox, username + app password. Read-only except saving drafts. Headers synced, bodies and attachments fetched live. See "IMAP connections".
 
 `kind` read through `instanceKind()` in `mcp-scope.ts`. Column `NOT NULL` with `CHECK`, but function still refuses value running build doesn't know rather than serving it as WhatsApp — rollback after migration added a kind leaves such rows. Every per-kind branch = `switch` ending in `assertNever` (`shared/connection.ts`), never `if … else`, so adding kind fails to compile everywhere not yet decided.
 
@@ -22,12 +22,12 @@ App's own data (users, sessions, organizations, connections + credentials, token
 
 `README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `imap.md`, `alerts.md`, `using-automata.md`, `releases.md`, `billing.md`. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
 
-**Status:** product loop works end to end for all four kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat, per-folder or per-table scoping. Twenty-one MCP tools, gated by kind:
+**Status:** product loop works end to end for all four kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat, per-folder or per-table scoping. Twenty-two MCP tools, gated by kind:
 
 - `whatsapp`: `get-connection-status`, `list-chats`, `read-messages`, `search-messages`, `send-text-message`
 - `telegram`: `get-telegram-status`, `list-telegram-chats`, `read-telegram-messages`, `search-telegram-messages`, `send-telegram-message`
 - `postgres` (the `sql/` group): `get-database-info`, `list-tables`, `describe-table`, `run-query`, `run-statement` (write)
-- `imap`: `get-mailbox-status`, `list-mail-folders`, `list-emails`, `search-emails`, `read-email`, `get-email-attachment` (all read)
+- `imap`: `get-mailbox-status`, `list-mail-folders`, `list-emails`, `search-emails`, `read-email`, `get-email-attachment`, `create-email-draft` (write)
 
 WhatsApp or Telegram connection that drops emails everyone who can reach it, emails again on recovery — see "Disconnect alerts".
 
@@ -557,7 +557,8 @@ Same split as WhatsApp — `telegram.ts` talks to bridge over HTTP, `telegram-db
 Rules easy to undo:
 
 - **Every connect through `assertPublicTarget`, dials approved address**, hostname as `servername`, `rejectUnauthorized: true`. **No plaintext:** `starttls` sets `doSTARTTLS: true` — imapflow's default carries on in cleartext when STARTTLS absent from (strippable) capabilities.
-- **Read-only everywhere:** every mailbox opened `readOnly` (EXAMINE), parts fetched with BODY.PEEK — reading must not mark mail read for owner. Connector can't send/move/flag; adding that = new write tools, new scope decision.
+- **Read-only everywhere but one APPEND:** every mailbox opened `readOnly` (EXAMINE), parts fetched with BODY.PEEK — reading must not mark mail read for owner. Only write = `appendDraft()`: one APPEND of a `\Draft` `\Seen` message, on its own short-lived connection, never through cached `imapFor` client, never selecting a mailbox read-write, never retried (retry after accepted literal = two drafts). Connector can't send/move/flag/delete; adding that = new write tools, new scope decision. No SMTP — drafting must never grow a send path.
+- **`create-email-draft`: folder never an argument.** `draftsFolder()` (`mail-format.ts`) picks `\Drafts` special-use, else sole folder named `Drafts`, else 409 — ambiguity refused, not guessed. Looked up across all folders, *then* `assertFolderAllowed`, so scoped token without Drafts gets 403 naming it, not false "no Drafts folder". Plain text only, no attachments, From = `imap_user` (422 when not an address). Bcc must survive into draft — why MIME built by nodemailer's stream transport (keeps Bcc) not `MailComposer` (drops it). New IMAP tokens start read-only (`McpTokens.vue` `startsReadOnly`); existing `all_tools` tokens picked it up, by decision.
 - **`error` listener on every ImapFlow** — unhandled `error` on dropped socket crashes process.
 - **UIDVALIDITY checked before every folder (sync) and every live fetch.** Changed value = folder renumbered: sync deletes folder's rows and restarts; live fetch answers 410. `emailId` encodes folder + uidvalidity + uid for this reason.
 - **Completeness decided by date, never UID position.** UIDs follow arrival, not sending; imported mail lands old messages at high UIDs. `finished()` = `SEARCH BEFORE cutoff` empty. Walking UIDs to 1 and calling it complete reported a year of skipped mail as "no older mail" — found in testing.
