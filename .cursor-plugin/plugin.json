@@ -1,6 +1,6 @@
 {
   "name": "automata",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Scoped, revocable access to your WhatsApp, Telegram, IMAP email and PostgreSQL for AI agents.",
   "author": {
     "name": "Ju Li"
