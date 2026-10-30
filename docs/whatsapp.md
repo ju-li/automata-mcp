@@ -147,9 +147,10 @@ scanned:
 New accounts get all three automatically. An account paired before this was
 turned on cannot be backfilled in place — **Import full history** on the
 connection's dashboard sets the flag, signs the device out and puts the QR back
-up; the import rides in on the re-scan. Nothing already stored is lost: Evolution
-skips messages whose `key.id` it already has, so re-importing merges rather than
-duplicates.
+up; the import rides in on the re-scan. Nothing already stored is lost. The
+re-import can write a second copy of a message Evolution already holds (see
+[Reading and searching messages](#reading-and-searching-messages)), but reads and
+searches collapse copies by `key.id`, so each message is still reported once.
 
 Watch it land with `pnpm services:logs` while scanning:
 

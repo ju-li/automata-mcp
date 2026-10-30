@@ -139,12 +139,14 @@ NUXT_SMTP_TLS=false          # false = STARTTLS on 587; true = implicit TLS on 4
 NUXT_MAIL_FROM=<a from address the provider will accept>
 NUXT_MAIL_FROM_NAME=Automata MCP
 
+# Checked on both Evolution's and the Telegram bridge's webhooks
+NUXT_WEBHOOK_SECRET=<openssl rand -hex 32>
+
 # WhatsApp only
 NUXT_EVOLUTION_URL=http://evolution.railway.internal:8080    # matches SERVER_PORT above
 NUXT_EVOLUTION_ADMIN_KEY=${{evolution.AUTHENTICATION_API_KEY}}
 NUXT_EVOLUTION_DATABASE_URL=${{Postgres.DATABASE_URL}}
 NUXT_WEBHOOK_URL=https://<web-domain>/api/webhook/evolution
-NUXT_WEBHOOK_SECRET=<openssl rand -hex 32>   # used by Telegram's webhook too
 
 # Telegram only
 NUXT_TELEGRAM_URL=http://<telegram-bridge-service>.railway.internal:8095   # matches TELEGRAM_BRIDGE_PORT

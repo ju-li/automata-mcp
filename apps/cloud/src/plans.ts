@@ -10,7 +10,7 @@ import type { Db } from './db.ts'
  * The web app enforces limits but knows no plan: it reads three numbers per
  * organization (`max_connections`, `max_tokens`, `max_members`, NULL =
  * unlimited) and the defaults a new organization is born with. This file is
- * what writes both, from the Stripe status `syncOrgFromStripe` stores.
+ * what writes both, from the Stripe status `syncOrg` (billing.ts) stores.
  */
 
 export type PlanName = 'free' | 'pro'

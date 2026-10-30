@@ -80,9 +80,10 @@ The sweep runs in-process on the `alerts:sweep` scheduled task, so keep the web
 service to a single replica or it mails twice. In development the tasks are
 reachable by hand at `/_nitro/tasks/alerts:sweep`.
 
-Registration is re-asserted on every sweep, which is what picks up a connection
-created before this existed, or one whose Evolution server or Telegram bridge was
-rebuilt. It uses the connection's own key, not a global one.
+Registration is re-asserted every hour by a separate scheduled task,
+`alerts:register-webhooks`, which is what picks up a connection created before
+this existed, or one whose Evolution server or Telegram bridge was rebuilt. It
+uses the connection's own key, not a global one.
 
 To try it locally without a mail provider, run a catcher and point
 `NUXT_SMTP_HOST` at it (Nuxt runs on the host, so `localhost`):

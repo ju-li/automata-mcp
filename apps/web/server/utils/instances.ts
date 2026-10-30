@@ -361,6 +361,8 @@ export type ConnectionHealth = {
   /** Human-readable line for the card: profile name, or database and version. */
   detail?: string
   error?: string
+  /** Connected, but something the user should know: a role too privileged to scope. */
+  warning?: string
 }
 
 export async function getPostgresHealth(instance: AppInstance): Promise<ConnectionHealth> {
@@ -373,6 +375,7 @@ export async function getPostgresHealth(instance: AppInstance): Promise<Connecti
       // `identity.server` already names the engine, so this line reads
       // correctly for whichever one answered.
       detail: identity ? `${identity.server} · ${identity.database}` : undefined,
+      warning: identity?.privilegeWarning,
     }
   }
   catch (cause) {
@@ -916,7 +919,7 @@ function settingsBody(current: EvolutionSettings | null, overrides: Partial<Evol
  * truth. `emptyStatus()` is deliberately not reused here for that reason.
  */
 export type ConnectionStateReport =
-  | { state: ConnectionState, detail?: string, error?: string }
+  | { state: ConnectionState, detail?: string, error?: string, warning?: string }
   | InstanceStatus
   | TelegramStatus
 
@@ -928,7 +931,7 @@ export async function connectionState(
   switch (kind) {
     case 'postgres': {
       const health = await getPostgresHealth(instance)
-      return { state: health.state, detail: health.detail, error: health.error }
+      return { state: health.state, detail: health.detail, error: health.error, warning: health.warning }
     }
     case 'whatsapp':
       if (!options.tolerant) return await getInstanceStatus(instance)
