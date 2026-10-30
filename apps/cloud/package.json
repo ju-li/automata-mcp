@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "node --env-file-if-exists=../../.env --watch src/main.ts",
     "start": "node src/main.ts",
+    "crm-backfill": "node --env-file-if-exists=../../.env src/crm-backfill.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -13,8 +13,8 @@ export type Db = postgres.Sql | postgres.TransactionSql
  *           only an organization's billing and entitlement columns, and appends
  *           `plan.changed` to `app.hosted_events`. It never touches `instances`
  *           credentials.
- *   cloud   this service's own state — consumer cursors on the event outbox.
- *           Created here at boot.
+ *   cloud   this service's own state — consumer cursors on the event outbox,
+ *           and CRM updates Brevo refused for good. Created here at boot.
  */
 export const CLOUD_SCHEMA = 'cloud'
 
@@ -66,6 +66,21 @@ export async function ensureCloudSchema(sql: Sql): Promise<void> {
       consumer text PRIMARY KEY,
       last_id  bigint NOT NULL,
       updated  timestamptz NOT NULL DEFAULT now()
+    )
+  `
+
+  // Contact updates Brevo refused for a reason retrying will not fix (an
+  // address it calls invalid, say). Kept so they can be replayed by hand once
+  // the cause is fixed — see "CRM (Brevo)" in docs/billing.md. event_id is
+  // NULL for a refusal during the one-off backfill. Never holds the address.
+  await sql`
+    CREATE TABLE IF NOT EXISTS cloud.crm_skipped (
+      id       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      event_id bigint,
+      user_id  text NOT NULL,
+      status   integer NOT NULL,
+      code     text,
+      at       timestamptz NOT NULL DEFAULT now()
     )
   `
 }

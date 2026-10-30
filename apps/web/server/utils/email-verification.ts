@@ -62,12 +62,14 @@ interface VerificationRow {
   first_account_only: boolean
   /** The plan picked on the signup page, in hosted mode. See cloud.ts. */
   plan?: 'free' | 'pro'
+  /** The hosted signup page's marketing opt-in. Always false outside hosted mode. */
+  marketing_consent: boolean
   expires_at: string
 }
 
 const ROW_COLUMNS = [
   'id', 'purpose', 'email', 'code_hash', 'attempts', 'user_id', 'password_hash', 'name',
-  'invite_id', 'first_account_only', 'plan', 'expires_at',
+  'invite_id', 'first_account_only', 'plan', 'marketing_consent', 'expires_at',
 ] as const
 
 let warnedSetting = false
@@ -284,7 +286,7 @@ export function clearVerifyCookie(event: H3Event): void {
 }
 
 type StartInput =
-  | { purpose: 'signup', email: string, passwordHash: string, name: string, inviteId?: string, firstAccountOnly: boolean, plan?: 'free' | 'pro' }
+  | { purpose: 'signup', email: string, passwordHash: string, name: string, inviteId?: string, firstAccountOnly: boolean, plan?: 'free' | 'pro', marketingConsent: boolean }
   | { purpose: 'email_change', email: string, userId: string }
 
 /**
@@ -323,6 +325,7 @@ export async function startVerification(event: H3Event, input: StartInput): Prom
         invite_id: input.purpose === 'signup' ? input.inviteId ?? null : null,
         first_account_only: input.purpose === 'signup' && input.firstAccountOnly,
         plan: input.purpose === 'signup' ? input.plan ?? null : null,
+        marketing_consent: input.purpose === 'signup' && input.marketingConsent,
         expires_at: expiresAt,
       })}
     `
@@ -592,11 +595,14 @@ async function complete(
 async function createVerifiedAccount(tx: Db, row: VerificationRow): Promise<string> {
   if (row.first_account_only) await claimFirstAccount(tx)
 
-  const created = await createUser(tx, { email: row.email, passwordHash: row.password_hash!, name: row.name ?? '' })
+  // Re-checked here, not only at signup: a row written in hosted mode is
+  // verified by whatever the deployment is now.
+  const marketingConsent = row.marketing_consent && hostedMode()
+  const created = await createUser(tx, { email: row.email, passwordHash: row.password_hash!, name: row.name ?? '', marketingConsent })
   await recordHostedEvent(tx, {
     type: 'user.signed_up',
     userId: created.id,
-    payload: { email: created.email, name: created.name, plan: row.plan ?? null, invited: Boolean(row.invite_id) },
+    payload: { email: created.email, name: created.name, plan: row.plan ?? null, invited: Boolean(row.invite_id), marketingConsent },
   })
 
   if (row.invite_id) {

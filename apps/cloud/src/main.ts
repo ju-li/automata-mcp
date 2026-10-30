@@ -1,15 +1,16 @@
 import { Billing } from './billing.ts'
 import { type CloudConfig, loadConfig } from './config.ts'
+import { Crm } from './crm.ts'
 import { connect, ensureCloudSchema, waitForApp } from './db.ts'
 import { createCloudServer } from './http.ts'
 import { describeError } from './http-error.ts'
-import { consumeBillingEvents } from './outbox.ts'
+import { consumeBillingEvents, consumeCrmEvents } from './outbox.ts'
 import { applyPlanEntitlements, recordPlanChanges, writeEntitlementDefaults } from './plans.ts'
 
 /**
  * The hosted offering's service: everything the hosted deployment does that a
- * self-hosted one never should. Today that is plans and Stripe; the Brevo CRM
- * sync and PostHog telemetry join it, fed by the same outbox.
+ * self-hosted one never should: plans and Stripe, and the Brevo CRM sync, both
+ * fed by the web app's event outbox. PostHog telemetry joins them later.
  *
  * The web app enforces limits from its own database and knows no plan; this
  * service writes those limits. It never serves a browser — the web app calls
@@ -40,8 +41,9 @@ catch (error) {
 }
 
 const billing = new Billing(sql, config.stripe, config.appUrl)
+const crm = new Crm(sql, config.brevo)
 const state = { appReady: false, stopped: false }
-const server = createCloudServer(billing, config, state)
+const server = createCloudServer(billing, crm, config, state)
 
 // :: accepts IPv6 and IPv4 (legacy Railway private networking is IPv6-only).
 // A host with IPv6 disabled refuses :: outright, so fall back to IPv4 there.
@@ -56,13 +58,16 @@ console.info(`[cloud] listening on :${config.port}`)
 if (!billing.configured) {
   console.warn('[cloud] STRIPE_* are not set — running without billing. Plan limits are still written; starting Pro answers 503.')
 }
+if (!crm.configured) {
+  console.info('[cloud] BREVO_* are not set — running without the CRM sync.')
+}
 
 const timers: NodeJS.Timeout[] = []
 
 /**
  * Once the web app's schema is there: publish Free's limits for new
  * organizations, bring every organization's limits into line with its stored
- * plan, then start the outbox consumer and the reconcile.
+ * plan, then start the outbox consumers and the reconcile.
  */
 async function startWork(): Promise<void> {
   await waitForApp(sql, state)
@@ -85,6 +90,19 @@ async function startWork(): Promise<void> {
       .catch(error => console.error(`[outbox] pass failed: ${describeError(error)}`))
       .finally(() => { consuming = false })
   }, OUTBOX_INTERVAL_MS))
+
+  // A separate guard and cursor: a slow or paused Brevo never holds up seats
+  // and cancellations, and the reverse.
+  let syncingCrm = false
+  if (crm.configured) {
+    timers.push(setInterval(() => {
+      if (syncingCrm) return
+      syncingCrm = true
+      consumeCrmEvents(sql, crm)
+        .catch(error => console.error(`[crm] pass failed: ${describeError(error)}`))
+        .finally(() => { syncingCrm = false })
+    }, OUTBOX_INTERVAL_MS))
+  }
 
   // The backstop for a lost webhook and a seat sync that failed: re-read every
   // billed organization. Idempotent, so several replicas may run it.

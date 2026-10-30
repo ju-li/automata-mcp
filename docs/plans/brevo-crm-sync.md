@@ -1,6 +1,6 @@
 # Plan: Brevo CRM sync for hosted signups
 
-Status: **approved** (see "Decisions" at the end). Hosted
+Status: **implemented** (see "Decisions" at the end, and "Implementation notes"). Hosted
 offering only. Nothing here reaches a self-hosted deployment.
 
 ## Goal
@@ -391,3 +391,52 @@ There is no test framework (see `CLAUDE.md`). `pnpm typecheck` and
 - **Checkbox wording.** The label above is a suggestion. Whatever ships, keep
   it matched to what the marketing list is actually used for, since that text
   is what the consent covers.
+
+## Implementation notes
+
+Where the build differs from, or adds to, the design above:
+
+- **Start-up checks are retried, not one-shot.** A failed check (missing list,
+  wrong key, attribute of the wrong type, web migration
+  `0009_marketing_consent` not yet applied) is logged and retried every five
+  minutes, so a Brevo outage at boot does not need a restart. `/health` reports
+  `crm: 'unconfigured' | 'waiting' | 'ready'`.
+- **The two list ids must differ**, or the service refuses to start.
+- **Consent is re-checked at verify time.** A verification row written in
+  hosted mode is honoured only if the deployment is still hosted when the code
+  is entered.
+- **The backfill also replays skips.** Rerunning it upserts every account, so
+  it is how a `cloud.crm_skipped` entry is retried once its cause is fixed.
+- **Attributes a user does not have are left out**, rather than sent empty, so
+  an update never clears `SIGNUP_PLAN` or `INVITED`.
+
+Tested locally against Postgres 16, a stand-in for Brevo's `/v3` API built from
+its API reference, and a local SMTP sink:
+
+- **Configuration:** with no Brevo variables set, there is no cursor row and no
+  traffic. Partial, non-numeric and repeated list ids each refuse to start. A
+  missing list or a wrong key leaves the sync `waiting`, with a log line that
+  names the cause.
+- **Backlog:** signups made before the key was set were synced from the oldest
+  event once it was. The three events of one signup became one call.
+- **Lists and attributes:**
+  - Signups with and without consent, direct and through email verification,
+    landed on the right lists.
+  - An invited signup was recorded with `INVITED`.
+  - An existing Brevo contact for the same address was claimed, keeping its
+    other list.
+  - An email change updated the same contact.
+  - Role and plan changes arrived, and a contact unsubscribed from the
+    marketing list was not re-added.
+- **Failures:** a permanent 400 was recorded in `cloud.crm_skipped` without the
+  address being logged, and the sync moved on. Two 500s held the cursor until
+  the third pass. A 429 waited out its reset. A database outage was recovered
+  from.
+- **Backfill:** an account with no event got a product-list-only contact. A
+  second run created nothing. A previously skipped account was picked up.
+- **Self-hosted:** there was no checkbox, consent sent anyway was stored as
+  NULL, and no events were written.
+
+**Not tested against the real Brevo API.** The behaviours listed under "The
+upsert, per user" still need checking against a free account before the
+variables are set in production.
