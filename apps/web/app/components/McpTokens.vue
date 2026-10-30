@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { PlusIcon } from '@lucide/vue'
-import { assertNever, connectionFamily } from '#shared/connection'
+import { assertNever } from '#shared/connection'
 
 const props = withDefaults(defineProps<{
   instanceId: string
@@ -22,43 +22,56 @@ const props = withDefaults(defineProps<{
 const { user } = useSession()
 
 /**
- * Asked as a family, not as `kind === 'postgres'`.
+ * Whether a new token starts with the read tools only, which is also whether
+ * the tool catalogue is fetched at all.
  *
- * This boolean decides whether the tool catalogue is fetched at all, and a new
- * database kind falling off the wrong side of it is not a cosmetic miss: the
- * catalogue never loads, `initialScope()` returns no tool names, and
- * `scopeSchema` then refuses Create with "Select at least one action" — a
- * validation error the user did nothing to cause.
+ * A switch over the kind rather than a family test: a mailbox is a messaging
+ * kind, yet starts read-only because drafting writes into it. A new kind
+ * falling off the wrong side of this is not a cosmetic miss: the catalogue
+ * never loads, `initialScope()` returns no tool names, and `scopeSchema` then
+ * refuses Create with "Select at least one action" — a validation error the
+ * user did nothing to cause.
  */
-const isDatabase = computed(() => connectionFamily(props.kind) === 'database')
+const startsReadOnly = computed(() => {
+  switch (props.kind) {
+    case 'postgres':
+    case 'imap':
+      return true
+    case 'whatsapp':
+    case 'telegram':
+      return false
+    default:
+      return assertNever(props.kind, 'connection kind')
+  }
+})
 
 /**
  * A new token's starting scope depends on the kind.
  *
- * A WhatsApp token starts open, as it always has. A Postgres token starts
- * read-only — every read tool, no write tool — because the two mistakes do not
+ * A WhatsApp or Telegram token starts open, as it always has. A Postgres or
+ * mailbox token starts read-only — every read tool, no write tool (`run-statement`,
+ * `create-email-draft`) — because the two mistakes do not
  * cost the same: a token that turns out to need writes is one edit away, and one
  * that turns out not to have needed them may already have made some.
  *
  * The read tools come from the server, since only it knows which exist.
  */
-// Only a database token needs this, and only to seed its default scope — a
-// WhatsApp dashboard was fetching it on every load and discarding the answer.
+// Only a read-only-by-default token needs this, and only to seed its default
+// scope — a WhatsApp dashboard was fetching it on every load and discarding the answer.
 // The explicit key is shared with TokenScopeFields, which renders the same list:
 // Nuxt keys per call site by default, so the two were fetching it twice.
 const { data: toolCatalogue } = await useFetch<{ tools: McpToolInfo[] }>(
   () => `/api/instances/${props.instanceId}/mcp-tools`,
-  { key: `mcp-tools-${props.instanceId}`, lazy: true, immediate: isDatabase.value },
+  { key: `mcp-tools-${props.instanceId}`, lazy: true, immediate: startsReadOnly.value },
 )
 
 function initialScope(): TokenScope {
   switch (props.kind) {
     case 'whatsapp':
     case 'telegram':
-    // Every mail tool reads; there is nothing to hold back by default.
-    case 'imap':
       return openScope()
-    case 'postgres': {
+    case 'postgres':
+    case 'imap': {
       const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly).map(t => t.name)
       return readOnlyScope(readTools)
     }
@@ -76,7 +89,7 @@ function initialScope(): TokenScope {
  * user did nothing to cause.
  */
 watch(toolCatalogue, (catalogue) => {
-  if (!createOpen.value || !isDatabase.value || !catalogue) return
+  if (!createOpen.value || !startsReadOnly.value || !catalogue) return
   if (newScope.value.all_tools || newScope.value.tool_names.length > 0) return
   newScope.value = initialScope()
 })

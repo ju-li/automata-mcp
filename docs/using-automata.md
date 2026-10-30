@@ -87,6 +87,7 @@ comes back.
 | `search-emails` | Email | read | `from`, `to`, `subject` against synced headers and `text` through the mail server's own search; filters for date, unread, attachments; 1–100 per page (default 25) |
 | `read-email` | Email | read | One email's headers, body as plain text (fetched live, never stored) and attachment list; `maxChars` 500–100 000 (default 20 000), continued with `offset` |
 | `get-email-attachment` | Email | read | One attachment, fetched live: images as images, text as text (clipped at 100 000 chars, reported as `truncatedAtChars`), other files embedded; 10 MB cap by default |
+| `create-email-draft` | Email | **write** | Saves an unsent plain-text draft in the Drafts folder, optionally threaded as a reply; never sends |
 | `get-database-info` | Postgres | read | Server version, database, connecting role, and what this token is scoped to |
 | `list-tables` | Postgres | read | Tables in scope, filterable by schema and name, paged (1–500, default 100) |
 | `describe-table` | Postgres | read | Columns, keys, constraints, indexes and comments for one table |
@@ -118,8 +119,8 @@ the connection's dashboard. Which axes appear depends on the kind:
 - **Actions** (every kind) — all tools, or a chosen few, listed from the
   connection's own kind. Enforced by refusing to register the others for that
   request, so a tool outside scope is not merely hidden from the tool list:
-  calling it fails. A new Postgres token starts read-only — the read tools
-  ticked, `run-statement` not.
+  calling it fails. A new Postgres or Email token starts read-only — the read
+  tools ticked, `run-statement` or `create-email-draft` not.
 - **Chats** (WhatsApp and Telegram) — all conversations, or an allowlist. `list-chats` returns
   only allowed conversations; `read-messages` and `send-text-message` refuse
   anything else, naming the chat so the assistant can explain why.
@@ -132,7 +133,8 @@ the connection's dashboard. Which axes appear depends on the kind:
 - **Folders** (Email) — all folders, or an allowlist, stored on the chat axis.
   Listings and searches are narrowed in SQL; reading an email or fetching an
   attachment from a folder outside it is refused by name. An email filed in
-  several folders is reachable only through a copy in an allowed one.
+  several folders is reachable only through a copy in an allowed one. Saving a
+  draft needs the Drafts folder in the allowlist.
 - **Tables** (Postgres) — every table the connecting role can read, or an
   allowlist. `list-tables` and `describe-table` apply it in their own SQL, so a
   table outside it is neither listed nor described. `run-query` and

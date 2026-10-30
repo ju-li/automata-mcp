@@ -46,7 +46,7 @@ const chatAxis = computed(() => {
     case 'postgres':
       return { title: 'Chats', blurb: 'Which conversations this token can read and reply in.', all: 'All chats', some: 'Only selected chats', search: 'Search conversations', addable: true }
     case 'imap':
-      return { title: 'Folders', blurb: 'Which folders this token can list, search and read emails in.', all: 'All folders', some: 'Only selected folders', search: 'Search folders', addable: false }
+      return { title: 'Folders', blurb: 'Which folders this token can list, search and read emails in. Saving drafts also needs the Drafts folder.', all: 'All folders', some: 'Only selected folders', search: 'Search folders', addable: false }
     default:
       return assertNever(props.kind, 'connection kind')
   }

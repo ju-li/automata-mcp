@@ -20,6 +20,73 @@
   ],
   "tools": [
     {
+      "name": "create-email-draft",
+      "title": "Create email draft",
+      "description": "[Email] Save a plain-text email as an unsent draft in this mailbox's Drafts folder, for the owner to review and send from their own mail client. This does NOT send anything and cannot: tell the user the draft is waiting in Drafts. When the user did not dictate the text, show it to them before saving. To reply, pass the email's `emailId` (from list-emails, search-emails or read-email) as `replyToEmailId`: the draft is threaded under it, the subject defaults to \"Re: …\" and the recipient to its sender. The original text is not quoted automatically — read it with read-email and include what is needed. `cc` and `bcc` are never filled in for you. The draft appears in list-emails after the next sync, within a few minutes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "description": "Recipient addresses. Required unless replyToEmailId is given, which defaults it to the original sender",
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "email",
+              "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+            }
+          },
+          "cc": {
+            "default": [],
+            "description": "Cc addresses",
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "email",
+              "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+            }
+          },
+          "bcc": {
+            "default": [],
+            "description": "Bcc addresses",
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "email",
+              "pattern": "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$"
+            }
+          },
+          "subject": {
+            "description": "Subject line. Defaults to \"Re: <original subject>\" when replying",
+            "type": "string",
+            "maxLength": 998
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 100000,
+            "description": "The message text, plain text only"
+          },
+          "replyToEmailId": {
+            "description": "The emailId of the email this replies to, unchanged from list-emails, search-emails or read-email",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "body"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
       "name": "describe-table",
       "title": "Describe a database table",
       "description": "[PostgreSQL] Show one table's columns — name, type, nullability, default, identity, and `enumValues` where the type is an enum — plus its primary key, unique and CHECK constraints, indexes, comments, and BOTH directions of its foreign keys: `foreignKeys` is where this table points, `referencedBy` is what points at it. Those two are the join graph — read them before inventing a join condition. `enumValues` and the CHECK constraints are a column's permitted values: a filter on a value outside them returns no rows and reads like an empty result rather than a mistake. For a view, `viewDefinition` is the SQL it is defined as, which names its base tables and join keys. Use the exact `schema` and `name` that list-tables returned; identifiers are case-sensitive. Read this before writing SQL against a table you have not already described in this conversation: guessing a column name costs a round trip, and guessing a type produces a query that runs and quietly returns the wrong thing. A foreign key whose `reachable` is false points at a table this token cannot describe or query, and `referencedByOutOfScope` counts inbound keys from tables it cannot name — in both cases tell the user, since only the account owner can widen the allowlist. If the table itself is not reachable the answer is a refusal, not an empty description — call list-tables to see what is reachable.",

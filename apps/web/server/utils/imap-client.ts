@@ -6,9 +6,10 @@ import type { AppInstance } from './app-db'
 
 /**
  * Everything that speaks IMAP to a user's mail server: opening a connection,
- * proving credentials, and the three things fetched live — a message body, an
- * attachment, a server-side body search. The sync (imap-sync.ts) opens its own
- * connections through `openImap` too, so the host guard and TLS rules live once.
+ * proving credentials, the three things fetched live — a message body, an
+ * attachment, a server-side body search — and the one write, appending a
+ * draft. The sync (imap-sync.ts) opens its own connections through `openImap`
+ * too, so the host guard and TLS rules live once.
  *
  * Rules easy to undo:
  *
@@ -23,6 +24,10 @@ import type { AppInstance } from './app-db'
  * - **Every mailbox is opened read-only (EXAMINE), and parts are fetched with
  *   BODY.PEEK.** Reading a message through this connector must not mark it read
  *   in the user's mail client.
+ * - **The only write is `appendDraft`: one APPEND, on its own connection.** It
+ *   selects no mailbox, so nothing here ever opens one read-write, and it never
+ *   stores flags on, moves, copies or expunges an existing message. Sending is
+ *   not something this file can do — there is no SMTP here.
  * - **An `error` listener on every client.** imapflow emits `error` on a dropped
  *   socket; an EventEmitter with no listener turns that into an uncaught
  *   exception that takes the whole server down.
@@ -515,6 +520,49 @@ export function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${Math.round(bytes / (1024 * 1024) * 10) / 10} MB`
   if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`
   return `${bytes} bytes`
+}
+
+// ── drafts ─────────────────────────────────────────────────────────────────
+
+export interface AppendedDraft {
+  /** The folder path the server stored it under. */
+  folder: string
+  /** Present only when the server supports UIDPLUS. */
+  uid?: string
+}
+
+/**
+ * Store one finished message in `folderPath` flagged `\Draft`, unsent.
+ *
+ * A short-lived connection of its own rather than the cached `imapFor` one:
+ * APPEND needs no selected mailbox, and keeping the write off the shared
+ * client keeps every read on it provably read-only. `\Seen` too, so the draft
+ * does not show up as unread mail in the owner's client.
+ *
+ * Not retried: a dropped connection after the server accepted the literal
+ * would leave a draft behind, and a retry would leave two.
+ */
+export async function appendDraft(instance: AppInstance, folderPath: string, raw: Buffer): Promise<AppendedDraft> {
+  const target = requireTarget(instance)
+  let client: ImapFlow | undefined
+  try {
+    client = await openImap(target)
+    const result = await client.append(folderPath, raw, ['\\Draft', '\\Seen'])
+    if (!result) throw Object.assign(new Error('append returned no result'), { code: 'NoConnection' })
+    return {
+      folder: result.destination || folderPath,
+      ...(result.uid !== undefined && { uid: String(result.uid) }),
+    }
+  }
+  catch (cause) {
+    if ((cause as ImapFlowError)?.mailboxMissing) {
+      throw createError({ statusCode: 410, message: `The folder "${folderPath}" no longer exists on the mail server.` })
+    }
+    throw liveFailure(instance, cause, 'save the draft')
+  }
+  finally {
+    if (client) await closeImap(client)
+  }
 }
 
 // ── server-side body search ────────────────────────────────────────────────

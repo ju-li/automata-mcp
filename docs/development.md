@@ -16,9 +16,9 @@ connection:
   bridge this app is configured with, or one the user supplies. See [Telegram connections](telegram.md).
 - **PostgreSQL**, through a connection string the user supplies. Read-only
   unless a token is explicitly granted the write tool.
-- **Email (IMAP)**, through a mailbox's username and app password. Read-only:
-  headers are synced, bodies and attachments fetched from the mail server when
-  asked for. See [Email (IMAP) connections](imap.md).
+- **Email (IMAP)**, through a mailbox's username and app password. Read-only
+  except saving drafts: headers are synced, bodies and attachments fetched from
+  the mail server when asked for. See [Email (IMAP) connections](imap.md).
 
 The app keeps its own data (users, sessions, organizations, connections and their
 credentials, connector tokens) in Postgres, in an `app` schema it creates and

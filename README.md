@@ -55,9 +55,10 @@ click on Railway or with Docker.
 - **Four kinds of connection.** A WhatsApp account paired by QR, a Telegram
   account linked by QR, an email mailbox over IMAP, or a PostgreSQL database by
   connection string.
-- **Twenty-one MCP tools.** Check status, list chats, read and search
-  messages, send text; list, search and read email and fetch attachments; list
-  and describe tables, run queries and — when granted — write statements. See
+- **Twenty-two MCP tools.** Check status, list chats, read and search
+  messages, send text; list, search and read email, fetch attachments and save
+  drafts; list and describe tables, run queries and — when granted — write
+  statements. See
   [the tool list](docs/using-automata.md#mcp-tools).
 - **Your history, not just what arrives next.** WhatsApp history is imported when
   a number is paired; Telegram chats are synced and backfilled.
