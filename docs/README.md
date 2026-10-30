@@ -8,6 +8,7 @@ here are about running and developing this repository.
 - [Self-hosting](self-hosting.md) — the whole app from published images, as one container or with Docker Compose; backups, the app database
 - [Deploying to Railway](deploy-railway.md) — services, ports and every variable, for the one-click template or by hand
 - [Releases](releases.md) — image tags and how a release is cut
+- [Plans and billing](billing.md) — the hosted offering only: the cloud service, Stripe, limits; nothing a self-hosted deployment sets
 
 **Using it**
 

@@ -20,7 +20,7 @@ Connection = row in `instances` with `kind`; connector token bound to exactly on
 
 App's own data (users, sessions, organizations, connections + credentials, tokens) in Postgres, `app` schema migrated at boot — `NUXT_DATABASE_URL`, required. Same Postgres Evolution writes into (`public`) and Telegram bridge uses (`telegram`); that Postgres is only compose service not behind profile. Evolution API + its Redis needed **only for WhatsApp connections** — behind `whatsapp` compose profile; `NUXT_EVOLUTION_*` vars optional.
 
-`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `imap.md`, `alerts.md`, `using-automata.md`, `releases.md`, `billing.md`. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
+`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `imap.md`, `alerts.md`, `two-factor.md`, `using-automata.md`, `releases.md`, `billing.md`; `docs/README.md` indexes them. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
 
 **Status:** product loop works end to end for all four kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat, per-folder or per-table scoping. Twenty-one MCP tools, gated by kind:
 
@@ -58,7 +58,7 @@ Nuxt deliberately **not** in compose (HMR); no `predev` hook — bring services 
 
 ## Environment
 
-One `.env` at repo root serves all. Compose reads by adjacency; Nuxt reads because every `apps/web` script passes `--dotenv ../../.env`. `.env.example` documents every var.
+One `.env` at repo root serves all. Compose reads by adjacency; Nuxt reads because every `apps/web` script that loads env (`dev`, `build`, `preview`, `generate`) passes `--dotenv ../../.env`. `.env.example` documents every var.
 
 Nuxt overrides `runtimeConfig` only from `NUXT_`-prefixed vars, so some values duplicated under two names (`WEBHOOK_URL` for compose, `NUXT_WEBHOOK_URL` for Nuxt) — **keep pair in sync**. That pair = only dev/prod difference; no environment branch in code.
 
@@ -66,15 +66,15 @@ Nuxt overrides `runtimeConfig` only from `NUXT_`-prefixed vars, so some values d
 
 ```
 apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context = repo root).
-  app/pages/                 login, signup, no-organization, team, profile, invite/[code],
-                             instances/{index,new,[id]}
+  app/pages/                 index, login, signup, verify-email, no-organization, team,
+                             profile, billing, invite/[code], instances/{index,new,[id]}
   app/components/            app components + ui/ (shadcn-vue, bare names)
   app/composables/           useSession (user + org + role), useOrg, useConnectionState,
                              useReconnect, useTablePage, useTokenScope, …
   app/middleware/            auth.global.ts — session + organization gate
   modules/mcp-token-route.ts local Nuxt module — registers /mcp/:token
   server/api/                auth/, org/, invites/, instances/, tokens/, telegram/,
-                             webhook/
+                             webhook/, billing/, hosted.get.ts
   server/mcp/index.ts        default MCP handler (auth middleware)
   server/mcp/tools/<group>/   one file per tool, auto-discovered. A group is
                               usually a kind; `sql/` is the exception and serves
@@ -120,7 +120,7 @@ Three things enforce it:
 - `useEvolutionClient()` reads `event.context.mcpAuth`, no branch reaching session user; throws 401 if key absent, again if connection not WhatsApp.
 - MCP tokens minted by this app (`wamcp_` + 32 random bytes), stored **only** as SHA-256 hash in `app.mcp_tokens`. Browser sessions same: cookie = 32 random bytes, `app.sessions` holds only hash. Token resolves to one `instances` row, which carries that account's Evolution token.
 
-`McpAuth` = **union discriminated on `kind`** — `{ kind: 'whatsapp', evolution }`, `{ kind: 'telegram', telegram }` or `{ kind: 'postgres' }`. Union not optional fields, so handler reaching for `evolution` must first establish it's WhatsApp. Postgres carries no credential object: DSN lives on instance row, `pgFor()` only reader; copying into request context = second live copy of user's DB password for nothing.
+`McpAuth` = **union discriminated on `kind`** — `{ kind: 'whatsapp', evolution }`, `{ kind: 'telegram', telegram }`, `{ kind: 'postgres' }` or `{ kind: 'imap' }`. Union not optional fields, so handler reaching for `evolution` must first establish it's WhatsApp. Postgres and IMAP carry no credential object: DSN lives on instance row, `pgFor()` only reader; copying into request context = second live copy of user's DB password for nothing.
 
 **Failure-mode semantics matter:** DB outage answers **503**, never 401. 401 tells client credential bad — MCP client discards token it should keep, browser user silently signed out mid-outage. Both surfaces distinguish: `resolveMcpAuth` and `getSessionUser` return `undefined` (→ 401) only when query ran and found no usable row; any thrown error → `appDbUnavailable()` (503). `checkPassword` same for login form. Preserve in any new auth code: `catch` on auth read must never produce `undefined`.
 
@@ -298,7 +298,7 @@ Connection far wider than anything else app holds (every user's messages, every 
 
 Three more things `describe-table` reads that obvious query misses. **CHECK constraints = column's value domain** as much as enum — `CHECK (status IN ('open','closed','void'))` on `text` column — so `contype` collects `c` alongside `p` and `u`; filter on value outside returns no rows, reads as empty result not mistake. **Enum column's labels three hops from `atttypid`**: type itself, array's `typelem`, or domain's `typbasetype`, since `order_status[]` and domain over `order_status` as enumerated as bare column; reading only `atttypid` reports neither. **View's `pg_get_viewdef` = its relationship docs** — view has no PK, no FKs, (unmaterialized) no indexes, so without it view describes as bag of columns joined to nothing; clipped at `MAX_VIEW_DEFINITION` since view body = arbitrary user SQL, no natural bound, and tool called before most queries. All four queries still one `Promise.all` on `target.oid`, round-trip cost unchanged.
 
-**Deliberate holes, documented not papered over.** Triggers invisible to `EXPLAIN` without `ANALYZE`, so write to allowed table can cascade anywhere. `postgres_fdw`/`dblink` name local foreign table, not remote object. `pg_catalog` and `information_schema` stay readable, so schema names leak regardless. Superuser DSN makes all of it best-effort — `probePgConnection` detects so UI can say so.
+**Deliberate holes, documented not papered over.** Triggers invisible to `EXPLAIN` without `ANALYZE`, so write to allowed table can cascade anywhere. `postgres_fdw`/`dblink` name local foreign table, not remote object. `pg_catalog` and `information_schema` stay readable, so schema names leak regardless. Superuser DSN makes all of it best-effort — `pgIdentity()` reads `rolsuper` / `rolbypassrls` / `pg_read_server_files` on every health check (live, not stored at save: grants change after), `pgPrivilegeWarning()` words it, Postgres dashboard shows `NoticeCard`, `get-database-info` returns `superuser`.
 
 **Pool cache keyed on connection id, not DSN.** DSN-keyed Map holds every user's DB password as live string visible in heap snapshot; id finds pool, fingerprint notices rotation. Eviction on acquire, not timer — interval outlives nothing useful in worker platform stops/starts. `onnotice` silenced since `RAISE NOTICE` in trigger can carry row data into process log, the one place this must not leak.
 
@@ -392,7 +392,7 @@ All best-effort, degrades to raw id: participants need live socket, so disconnec
 
 ## Webhooks are registered per instance, and the global one is off
 
-`registerConnectionWebhook()` in `instances.ts` does it, at provision and every sweep. `WEBHOOK_GLOBAL_ENABLED` is `false` in `docker-compose.dev.yml` and `docker-compose.yml` and `docs/deploy-railway.md`; turning back on delivers everything twice.
+`registerConnectionWebhook()` in `instances.ts` does it, at provision and from hourly `alerts:register-webhooks` task. `WEBHOOK_GLOBAL_ENABLED` is `false` in `docker-compose.dev.yml` and `docker-compose.yml` and `docs/deploy-railway.md`; turning back on delivers everything twice.
 
 Two independent reasons per-instance route works:
 
@@ -606,9 +606,9 @@ cd apps/web && pnpx shadcn-vue@latest add <component>
 
 **Provisioning click-triggered, not on-mount.** Creating WhatsApp instance reserves live socket on Evolution, so page refresh must never create second account. DB connection proved by actually connecting, refresh shouldn't redo that either.
 
-**Dashboard = two panels, not one with hidden fields.** `pages/instances/[id].vue` picks `InstanceWhatsapp.vue` or `InstancePostgres.vue` from `instance.kind`; database has no QR, profile, message count, and empty version of any suggests state it can be in. Page decides from `/api/instances/:id/summary` — app-DB read, no backend call — since chosen panel makes expensive call itself; deciding from full status fetch = two.
+**Dashboard = one panel per kind, not one with hidden fields.** `pages/instances/[id].vue` picks `InstanceWhatsapp.vue`, `InstanceTelegram.vue`, `InstancePostgres.vue` or `InstanceImap.vue` from `instance.kind`; database has no QR, profile, message count, and empty version of any suggests state it can be in. Page decides from `/api/instances/:id/summary` — app-DB read, no backend call — since chosen panel makes expensive call itself; deciding from full status fetch = two.
 
-**Two messaging panels share markup.** `InstanceWhatsapp.vue` and `InstanceTelegram.vue` keep only genuine differences — pairing flow, mode logic, per-kind copy — render rest through `InstanceHeader` (all three panels), `MessagingOverview` (one-row Profile → Messages → Chats → Contacts strip and its dialogs; Contacts only when `stats.contacts` set, which Telegram never sets), `SessionLostNotice`, `DbUrlNotice`, `NoticeCard`, `ConfirmAction`, `QrFrame` and `useReconnect()` composable. Change layout there, not in panel, or they drift again.
+**Two messaging panels share markup.** `InstanceWhatsapp.vue` and `InstanceTelegram.vue` keep only genuine differences — pairing flow, mode logic, per-kind copy — render rest through `InstanceHeader` (all four panels), `MessagingOverview` (one-row Profile → Messages → Chats → Contacts strip and its dialogs; Contacts only when `stats.contacts` set, which Telegram never sets), `SessionLostNotice`, `DbUrlNotice`, `NoticeCard`, `ConfirmAction`, `QrFrame` and `useReconnect()` composable. Change layout there, not in panel, or they drift again.
 
 **Scope picker fetches only axis kind has.** `TokenScopeFields.vue` sets `immediate` per kind: asking WhatsApp connection for tables answers 404, and console 404 on every dialog open reads as bug. New Postgres token starts read-only, read tools pre-checked from server's own catalogue.
 

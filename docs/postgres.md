@@ -13,8 +13,11 @@ before a row is read — but that keeps a *model* inside the tables you chose, a
 it is not a boundary against a determined caller holding a leaked token. Three
 things it cannot see: what a database trigger does, what a user-defined
 function's body reads (which is why calls outside `pg_catalog` are refused
-outright), and anything at all if the role is a superuser. The app warns when the
-connecting role is a superuser. The boundary is the role:
+outright), and anything at all if the role is a superuser. The connection's
+dashboard shows a notice when the role is a superuser, bypasses row-level
+security, or can read server files (`pg_read_server_files`), checked again on
+every health check, and `get-database-info` reports `superuser`. The boundary is
+the role:
 
 ```sql
 CREATE ROLE claude_reader LOGIN PASSWORD 'change-me';
@@ -55,8 +58,9 @@ this deployment's own database, which holds every user's messages. Set
 `NUXT_ALLOW_PRIVATE_TARGETS=true` for local development and single-tenant
 self-hosting — `.env.example` sets it; the app defaults to off — and leave it off
 for anything shared. Independently of that setting, a target resolving to this
-deployment's own database (`NUXT_DATABASE_URL`), Evolution or Evolution database
-is always refused.
+deployment's own database (`NUXT_DATABASE_URL`), Evolution, Evolution database
+(`NUXT_EVOLUTION_DATABASE_URL`), Telegram bridge (`NUXT_TELEGRAM_URL`) or
+Telegram bridge database (`NUXT_TELEGRAM_DATABASE_URL`) is always refused.
 
 The guard runs whenever a connection is opened, not only when it is saved, so
 turning the setting off stops existing connections to private addresses. The

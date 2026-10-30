@@ -60,7 +60,7 @@ interface VerificationRow {
   name?: string
   invite_id?: string
   first_account_only: boolean
-  /** The plan picked on the signup page, with billing on. See billing.ts. */
+  /** The plan picked on the signup page, in hosted mode. See cloud.ts. */
   plan?: 'free' | 'pro'
   expires_at: string
 }

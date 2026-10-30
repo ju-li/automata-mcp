@@ -27,9 +27,16 @@ account linked by QR code, so it lives in this repo. It is built on
 2. **Generate the two keys:** `TELEGRAM_BRIDGE_ADMIN_KEY` (`openssl rand -hex
    24`) and `TELEGRAM_SESSION_ENCRYPTION_KEY` (`openssl rand -hex 32`). Set
    `NUXT_TELEGRAM_ADMIN_KEY` to the same value as the admin key.
-3. **Point the app at it:** `NUXT_TELEGRAM_URL` and
-   `NUXT_TELEGRAM_DATABASE_URL`. `.env.example` has working development values.
-4. `pnpm services:up:telegram`, restart `pnpm dev`, and create a **Telegram
+3. **Give the bridge its database:** `TELEGRAM_BRIDGE_DATABASE_URL`, required —
+   the bridge refuses to start without it (see
+   [Where the data lives](#where-the-data-lives)).
+4. **Point the app at it:** `NUXT_TELEGRAM_URL` and
+   `NUXT_TELEGRAM_DATABASE_URL`. The bridge reports a dropped or restored
+   connection to `NUXT_TELEGRAM_WEBHOOK_URL`, which drives disconnect alerts and
+   defaults to `NUXT_PUBLIC_APP_URL` + `/api/webhook/telegram`; set it in
+   development, where a bridge in a container cannot reach `localhost` on the
+   host. `.env.example` has working development values.
+5. `pnpm services:up:telegram`, restart `pnpm dev`, and create a **Telegram
    account** connection. Until `NUXT_TELEGRAM_URL` and `NUXT_TELEGRAM_ADMIN_KEY`
    are both set, creating one is refused with "No Telegram bridge is available"
    unless the user supplies their own bridge.
@@ -51,9 +58,9 @@ Evolution has. That is a deliberate trade for a simpler setup: the credential ca
 read every WhatsApp message in that database, so a compromised bridge is a
 compromised Evolution. If you want the app to read Telegram data with less, create
 a role with `LOGIN` and nothing else, set `TELEGRAM_READER_ROLE` to its name on
-the bridge (it re-grants `SELECT` on synced data, column by column, at every
-start — never on sessions, access hashes or phone numbers), and use that role in
-`NUXT_TELEGRAM_DATABASE_URL`.
+the bridge (it re-grants `SELECT` at every start: on `messages` whole, on `chats`
+and `users` column by column so access hashes and phone numbers stay out, and
+never on `sessions`), and use that role in `NUXT_TELEGRAM_DATABASE_URL`.
 
 ## What syncs
 
@@ -63,8 +70,9 @@ text, reactions are counted on the message, and a deleted message loses its
 text rather than staying readable.
 
 Backfill is **slow on purpose**: one page of 100 messages at a time with a pause
-between pages, newest chats first, stopping at `TELEGRAM_BACKFILL_MAX_PER_CHAT`
-messages or `TELEGRAM_BACKFILL_DAYS` days per chat, and skipping broadcast
+of `TELEGRAM_BACKFILL_PAGE_DELAY_MS` (default 1000) between pages, newest chats
+first, stopping at `TELEGRAM_BACKFILL_MAX_PER_CHAT` messages (default 2000) or
+`TELEGRAM_BACKFILL_DAYS` days (default 365) per chat, and skipping broadcast
 channels unless `TELEGRAM_BACKFILL_BROADCAST=true`. An unofficial client that
 hammers history is how an account gets restricted. The read tools say when a
 chat's history stops at what was synced rather than at its first message.

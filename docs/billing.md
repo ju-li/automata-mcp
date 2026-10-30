@@ -26,13 +26,13 @@ Self-hosted deployments never run the cloud service.
 | Users | 1 | 5 included, $10/user/month after |
 | Requests | unlimited | unlimited |
 
-The numbers are set in two places:
+The numbers are set in three places:
 
 - **Limits and plan rules:** `apps/cloud/src/plans.ts`.
 - **Copy:** `apps/web/app/pages/signup.vue` and `billing.vue`.
 - **Prices:** the two Stripe prices below.
 
-Change both together.
+Change all three together.
 
 ## How it behaves
 
@@ -64,7 +64,7 @@ the organization back on Free. **Nothing is deleted.** While it holds more than
 Free allows:
 
 - It cannot add connections, tokens or members. The server answers 402
-  `plan_limit`, and the UI offers the Billing page.
+  `plan_limit`, and the UI offers admins the Billing page.
 - Exactly one connector token keeps working: the oldest live token on the
   oldest connection.
 - Every other token answers **403**, never 401, so the MCP client keeps it.
@@ -181,8 +181,9 @@ The four `STRIPE_*` variables go together. With none set the service still runs 
 
 `GET /health` answers `{ ok, app, billing }`. `app` is `waiting` until the web app has run its migrations; the cloud service waits for them rather than failing.
 
-**Database access.** The service connects to the web app's database. It reads `app` tables, writes only organizations' billing and limit columns and `app.hosted_events`, and keeps its own state in a `cloud` schema it creates. The simplest setup reuses the web app's database URL. To narrow it, give it a role with:
-- `SELECT` on `app.organizations`, `app.memberships`, `app.hosted_events` and `app.migrations`;
+**Database access.** The service connects to the web app's database. It reads `app` tables, writes only organizations' billing and limit columns, `app.hosted_events` and `app.entitlement_defaults`, and keeps its own state in a `cloud` schema it creates. The simplest setup reuses the web app's database URL. To narrow it, give it a role with:
+- `USAGE` on the `app` schema;
+- `SELECT` on `app.organizations`, `app.memberships`, `app.hosted_events`, `app.migrations` and `app.entitlement_defaults` (its `INSERT … ON CONFLICT DO UPDATE` reads the row it replaces);
 - `UPDATE` on `app.organizations`;
 - `INSERT` on `app.hosted_events` and `INSERT, UPDATE` on `app.entitlement_defaults`;
 - `CREATE` on the database, or an existing `cloud` schema it owns.

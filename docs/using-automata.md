@@ -12,8 +12,10 @@
    Telegram → Settings → Devices → Link Desktop Device. An account with two-step
    verification is then asked for its password, which goes to Telegram and is
    stored nowhere. Chats start syncing as soon as it links.
-   **Postgres:** paste a connection string. It is proved by connecting before
-   anything is saved (see [Database connections](postgres.md)).
+   **Postgres:** paste a connection string, or fill in host, port, database,
+   user, password and SSL mode on the **Parameters** tab, which builds one. It
+   is proved by connecting before anything is saved (see
+   [Database connections](postgres.md)).
    **Email:** enter the IMAP server and an app password. It is proved by logging
    in before anything is saved, and headers start syncing at once (see
    [Email (IMAP) connections](imap.md)).
@@ -75,16 +77,16 @@ comes back.
 | `search-messages` | WhatsApp | read | Messages containing every word of `query`, across chats in scope or one `jid`; optional date range and `fromMe`; up to 100 matches (default 20) |
 | `send-text-message` | WhatsApp | **write** | Send text to a number in international format |
 | `get-telegram-status` | Telegram | read | Whether the account is linked and online, who it is signed in as, and how far sync has got |
-| `list-telegram-chats` | Telegram | read | Synced chats in scope — private, groups, supergroups, channels — most recently active first, with the `chatId` other tools take |
+| `list-telegram-chats` | Telegram | read | Synced chats in scope — private, groups, supergroups, channels — most recently active first, with the `chatId` other tools take; 1–200 per page (default 100) |
 | `read-telegram-messages` | Telegram | read | One chat, newest first, with the same paging envelope as `read-messages`; optional forum `topicId`; says when older history was never synced |
 | `search-telegram-messages` | Telegram | read | Messages containing every word of `query` (text and captions), across chats in scope or one `chatId` |
-| `send-telegram-message` | Telegram | **write** | Send plain text to a `chatId` or an @username |
+| `send-telegram-message` | Telegram | **write** | Send plain text (≤ 4096 chars) to exactly one of `chatId` or `username` — an @username, a t.me link or a phone number |
 | `get-mailbox-status` | Email | read | Which mailbox, whether its sync works, when it last ran, and which folders are still backfilling |
 | `list-mail-folders` | Email | read | Folders in scope with synced and unread counts; skipped folders (All Mail, Junk, Trash) marked `synced: false` |
-| `list-emails` | Email | read | Headers newest first from one folder or all in scope, 1–100 per page; filters for date, unread, flagged, attachments |
-| `search-emails` | Email | read | `from`, `to`, `subject` against synced headers and `text` through the mail server's own search |
-| `read-email` | Email | read | One email's headers, body as plain text (fetched live, never stored) and attachment list |
-| `get-email-attachment` | Email | read | One attachment, fetched live: images as images, text as text, other files embedded; 10 MB cap by default |
+| `list-emails` | Email | read | Headers newest first from one folder or all in scope, 1–100 per page (default 25); filters for date, unread, flagged, attachments |
+| `search-emails` | Email | read | `from`, `to`, `subject` against synced headers and `text` through the mail server's own search; filters for date, unread, attachments; 1–100 per page (default 25) |
+| `read-email` | Email | read | One email's headers, body as plain text (fetched live, never stored) and attachment list; `maxChars` 500–100 000 (default 20 000), continued with `offset` |
+| `get-email-attachment` | Email | read | One attachment, fetched live: images as images, text as text (clipped at 100 000 chars, reported as `truncatedAtChars`), other files embedded; 10 MB cap by default |
 | `get-database-info` | Postgres | read | Server version, database, connecting role, and what this token is scoped to |
 | `list-tables` | Postgres | read | Tables in scope, filterable by schema and name, paged (1–500, default 100) |
 | `describe-table` | Postgres | read | Columns, keys, constraints, indexes and comments for one table |
@@ -93,6 +95,20 @@ comes back.
 
 `read-messages` and `search-messages` leave reactions out unless called with
 `includeReactions: true`, and say so with `reactionsExcluded`.
+
+Limits and options worth knowing:
+
+- `search-messages` and `search-telegram-messages` need a `query` of at least
+  two characters, as does the `text` of `search-emails`. Both message searches
+  return up to 100 matches (default 20).
+- `read-telegram-messages` leaves deleted and service messages (joins, pins,
+  title changes) out unless called with `includeDeleted: true` or
+  `includeService: true`, and counts what it left out as `deletedExcluded` and
+  `serviceMessagesExcluded`. A group later upgraded to a supergroup names the
+  new chat in `migratedTo`.
+- `read-email` fetches at most 2 MB of a body from the mail server; anything
+  past that is cut before `maxChars` applies.
+- `run-query` and `run-statement` take a `sql` of at most 20 000 characters.
 
 ## Scoping a token
 

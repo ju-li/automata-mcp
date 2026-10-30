@@ -25,8 +25,8 @@ import { BlockList, isIP } from 'node:net'
  *      Turned off wholesale by `NUXT_ALLOW_PRIVATE_TARGETS`, which a
  *      single-tenant self-hosted deployment genuinely needs.
  *   2. Our own infrastructure — reject anything resolving to the host:port of
- *      this app's own database, Evolution or Evolution's database, whatever its address
- *      class. This one is never disabled, and it is what still stops
+ *      this app's own database, Evolution, Evolution's database, the Telegram
+ *      bridge or the bridge's database, whatever its address class. This one is never disabled, and it is what still stops
  *      `postgres:5432` on a deployment that had to turn (1) off.
  *
  * The opt-out is deployment-wide and deliberately not a per-connection setting.
