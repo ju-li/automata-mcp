@@ -31,8 +31,8 @@ click on Railway or with Docker.
 ## Screenshots
 
 <p align="center">
-  <img src="docs/images/claude-chat.png" alt="Claude reading today's inbox and WhatsApp chats, summarising what matters, listing action items with due dates, and saving a reply in Drafts without sending it" width="720">
-  <br><em>Today's emails and WhatsApps in one summary, with action items — and a reply waiting in Drafts, not sent.</em>
+  <img src="docs/images/claude-chat.png" alt="Claude reading today's inbox and WhatsApp chats, listing what needs doing most important first, and what can be ignored" width="720">
+  <br><em>Today's emails and WhatsApps in one answer: what needs you, and what doesn't.</em>
 </p>
 
 <p align="center">
