@@ -37,7 +37,7 @@ cut that short.
 | Process | Version | Listens on (inside the container) |
 |---|---|---|
 | Web app | this release | `3000`, or `$PORT` — the only port to publish |
-| Postgres | 16 (Alpine's `postgresql16`) | `127.0.0.1:5432` |
+| Postgres | 16 (Alpine's `postgresql16`) | loopback, port `5432` |
 | Redis | 8.2.9 | `127.0.0.1:6379` |
 | Evolution API | v2.3.7 | `18080` |
 | Telegram bridge | this release | `18095` |
@@ -79,21 +79,23 @@ how to update. **`docker volume rm automata_data` is the single-container
 
 Everything is optional. The names are the ones `.env.selfhost.example` uses, so
 a filled-in copy works as `docker run --env-file .env …`; blank values are
-ignored.
+ignored. `PORT` is the one extra; it has no line there.
 
 | Variable | For |
 |---|---|
 | `NUXT_PUBLIC_APP_URL` | the public address (above) |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Telegram — from <https://my.telegram.org>, both or neither. Without them the app tells an admin what to set. See [Telegram connections](telegram.md). |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS`, `MAIL_FROM`, `MAIL_FROM_NAME` | [connection alerts](alerts.md) and invitation emails |
-| `NUXT_ALLOW_PRIVATE_TARGETS` | `true` lets connections reach private and loopback addresses — see below |
+| `ALLOW_PRIVATE_TARGETS` | `true` lets connections reach private and loopback addresses — see below |
 | `SIGNUP`, `SIGNUP_CODE` | who can create an account — see [Who can sign up](#who-can-sign-up) |
 | `PORT` | the web app's port inside the container (default 3000) |
 
-`NUXT_ALLOW_PRIVATE_TARGETS=true` means more here than with Compose: every
-backend is on the container's loopback. The app still refuses its own Postgres,
-Evolution and bridge by address and port, but not Redis on `127.0.0.1:6379`, so
-turn it on only where everyone with an account is trusted.
+`ALLOW_PRIVATE_TARGETS=true` (or `NUXT_ALLOW_PRIVATE_TARGETS=true`) reaches
+further in the single container than with Compose: every backend is on the
+container's loopback. The app still refuses its own Postgres, Evolution and
+bridge by address and port, but not Redis on `127.0.0.1:6379`, so turn it on
+only where everyone with an account is trusted — see
+[the risky combination](#who-can-sign-up) below.
 
 ### Updating
 
@@ -143,6 +145,11 @@ admin what to set. See [Telegram connections](telegram.md).
 Mail is optional: with `SMTP_HOST` empty, [connection alerts](alerts.md) and
 invitation emails are not delivered; an invitation link is still shown on
 screen when it is created.
+
+`ALLOW_PRIVATE_TARGETS=true` lets connections reach private and loopback
+addresses, such as a database on your LAN. It is off by default; read the
+risky combination under [Who can sign up](#who-can-sign-up) before turning it
+on.
 
 ### What it runs
 
@@ -196,11 +203,17 @@ whoever opens it first. If that window matters, set `SIGNUP_CODE` before you
 start the stack (`openssl rand -base64 24`) and hand the code only to people
 who should get their own organization.
 
-**`NUXT_ALLOW_PRIVATE_TARGETS=true` with `SIGNUP=open` is the risky
-combination.** Any stranger who signs up can then paste a database or Evolution
-address such as `postgres://…@192.168.1.20:5432/…` and the server connects to
-it for them. The app still refuses its own Postgres, Evolution and bridge, but
-not anything else on your network. Keep private targets for deployments where
+Plans and billing are off on a self-hosted deployment: there is no plan picker,
+no Billing page, and no limit on connections, tokens or members. They exist only
+for the hosted offering, behind `NUXT_CLOUD_URL` — see [billing.md](billing.md) —
+and you never need to set it.
+
+**`ALLOW_PRIVATE_TARGETS=true` with `SIGNUP=open` is the risky
+combination**, with Compose and the single container alike. Any stranger who
+signs up can then paste a database or Evolution address such as
+`postgres://…@192.168.1.20:5432/…` and the server connects to it for them. The
+app still refuses its own Postgres, Evolution and bridge, but not anything else
+on your network — in the single container, not Redis either. Keep private targets for deployments where
 everyone with an account is trusted, and keep sign-up closed there.
 
 ### Email verification
@@ -262,11 +275,14 @@ has.
 | `users` | email (stored lower-cased), display name, password hash |
 | `sessions` | browser sessions — SHA-256 of the cookie, expiry |
 | `organizations`, `memberships` | one membership per user (a unique index), with its role |
-| `instances` | one row per connection, `kind` of `whatsapp`, `postgres` or `telegram` |
+| `instances` | one row per connection, `kind` of `whatsapp`, `postgres`, `telegram` or `imap` |
 | `instance_assignments` | "may use, not manage" grants to members |
 | `invitations` | SHA-256 of the invitation code, address, role, expiry |
 | `mcp_tokens` | SHA-256 of the connector token, holder, scope, expiry, `last_used_at` |
 | `totp_credentials`, `webauthn_credentials`, `recovery_codes`, `mfa_challenges` | second sign-in factors — see [Two-factor authentication](two-factor.md) |
+| `email_verifications` | signups and address changes waiting to be confirmed — see [Email verification](#email-verification) |
+| `mail_sync_state`, `mail_folders`, `mail_messages` | synced IMAP headers, never bodies — see [Email (IMAP) connections](imap.md) |
+| `hosted_events`, `entitlement_defaults` | the hosted offering only; empty on a self-hosted deployment — see [billing.md](billing.md) |
 
 An `instances` row carries, by kind:
 
@@ -277,12 +293,14 @@ An `instances` row carries, by kind:
   display. Nothing connects through the display three.
 - **Telegram** — the bridge's `base_url`, the session's `instance_id` and
   `api_key`, and for a bring-your-own bridge its `admin_key` and `telegram_db_url`.
+- **IMAP** — `imap_host`, `imap_port`, `imap_security`, `imap_user` and
+  `imap_password`.
 
 Two more columns, `down_since` and `alerted_at`, carry outage state — see
 [Connection alerts](alerts.md).
 
-`api_key`, `admin_key`, `dsn`, `evolution_db_url` and `telegram_db_url` never
-leave the server — `toPublicInstance()` is the only projection the UI receives —
+`api_key`, `admin_key`, `dsn`, `evolution_db_url`, `telegram_db_url` and
+`imap_password` never leave the server — `toPublicInstance()` is the only projection the UI receives —
 but they are **not encrypted**: they sit in clear in the database and in every
 backup of it. So treat `NUXT_DATABASE_URL` and the database's backups as holding
 every connected account.

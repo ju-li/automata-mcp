@@ -3,8 +3,8 @@
 ## Getting started
 
 1. Sign up at your deployment's address (<http://localhost:3000> locally).
-2. Create a connection: pick **WhatsApp account**, **Telegram account** or
-   **PostgreSQL database**, and name it.
+2. Create a connection: pick **WhatsApp account**, **Telegram account**,
+   **Email (IMAP)** or **PostgreSQL database**, and name it.
 3. **WhatsApp:** continue to the QR code and scan it — WhatsApp → Settings →
    Linked devices → Link a device. To use an Evolution server other than this
    app's, tick **Use my own Evolution API server** first (see [Bring your own Evolution server](whatsapp.md#bring-your-own-evolution-server)).
@@ -12,14 +12,25 @@
    Telegram → Settings → Devices → Link Desktop Device. An account with two-step
    verification is then asked for its password, which goes to Telegram and is
    stored nowhere. Chats start syncing as soon as it links.
-   **Postgres:** paste a connection string. It is proved by connecting before
-   anything is saved (see [Database connections](postgres.md)).
+   **Postgres:** paste a connection string, or fill in host, port, database,
+   user, password and SSL mode on the **Parameters** tab, which builds one. It
+   is proved by connecting before anything is saved (see
+   [Database connections](postgres.md)).
+   **Email:** enter the IMAP server and an app password. It is proved by logging
+   in before anything is saved, and headers start syncing at once (see
+   [Email (IMAP) connections](imap.md)).
 4. On the connection's dashboard, create a **New connector token**: a name, an
    expiry (30 days, 90 days — the default — 1 year, or never) and a scope.
 5. Add it to Claude. The **How to connect** dialog has the steps for Claude.ai
    (Settings → Connectors → Add custom connector), Claude Code
    (`claude mcp add --transport http <name> <url>`), clients that send an
    `Authorization: Bearer` header, and the MCP Inspector.
+   **Cursor** (hosted server only): install the Automata plugin from
+   [cursor.directory](https://cursor.directory), or add this repository's
+   `mcp.json` entry to your own. It sends the token from the `AUTOMATA_TOKEN`
+   environment variable, so set that where Cursor starts — a Cursor opened from
+   the dock or start menu may not see variables exported in your shell profile —
+   and restart Cursor.
 
 **One connection per connector.** A token is bound to the connection it was
 created on, so no tool takes a connection argument, and Claude cannot address the
@@ -66,10 +77,17 @@ comes back.
 | `search-messages` | WhatsApp | read | Messages containing every word of `query`, across chats in scope or one `jid`; optional date range and `fromMe`; up to 100 matches (default 20) |
 | `send-text-message` | WhatsApp | **write** | Send text to a number in international format |
 | `get-telegram-status` | Telegram | read | Whether the account is linked and online, who it is signed in as, and how far sync has got |
-| `list-telegram-chats` | Telegram | read | Synced chats in scope — private, groups, supergroups, channels — most recently active first, with the `chatId` other tools take |
+| `list-telegram-chats` | Telegram | read | Synced chats in scope — private, groups, supergroups, channels — most recently active first, with the `chatId` other tools take; 1–200 per page (default 100) |
 | `read-telegram-messages` | Telegram | read | One chat, newest first, with the same paging envelope as `read-messages`; optional forum `topicId`; says when older history was never synced |
 | `search-telegram-messages` | Telegram | read | Messages containing every word of `query` (text and captions), across chats in scope or one `chatId` |
-| `send-telegram-message` | Telegram | **write** | Send plain text to a `chatId` or an @username |
+| `send-telegram-message` | Telegram | **write** | Send plain text (≤ 4096 chars) to exactly one of `chatId` or `username` — an @username, a t.me link or a phone number |
+| `get-mailbox-status` | Email | read | Which mailbox, whether its sync works, when it last ran, and which folders are still backfilling |
+| `list-mail-folders` | Email | read | Folders in scope with synced and unread counts; skipped folders (All Mail, Junk, Trash) marked `synced: false` |
+| `list-emails` | Email | read | Headers newest first from one folder or all in scope, 1–100 per page (default 25); filters for date, unread, flagged, attachments |
+| `search-emails` | Email | read | `from`, `to`, `subject` against synced headers and `text` through the mail server's own search; filters for date, unread, attachments; 1–100 per page (default 25) |
+| `read-email` | Email | read | One email's headers, body as plain text (fetched live, never stored) and attachment list; `maxChars` 500–100 000 (default 20 000), continued with `offset` |
+| `get-email-attachment` | Email | read | One attachment, fetched live: images as images, text as text (clipped at 100 000 chars, reported as `truncatedAtChars`), other files embedded; 10 MB cap by default |
+| `create-email-draft` | Email | **write** | Saves an unsent plain-text draft in the Drafts folder, optionally threaded as a reply; never sends |
 | `get-database-info` | Postgres | read | Server version, database, connecting role, and what this token is scoped to |
 | `list-tables` | Postgres | read | Tables in scope, filterable by schema and name, paged (1–500, default 100) |
 | `describe-table` | Postgres | read | Columns, keys, constraints, indexes and comments for one table |
@@ -79,6 +97,20 @@ comes back.
 `read-messages` and `search-messages` leave reactions out unless called with
 `includeReactions: true`, and say so with `reactionsExcluded`.
 
+Limits and options worth knowing:
+
+- `search-messages` and `search-telegram-messages` need a `query` of at least
+  two characters, as does the `text` of `search-emails`. Both message searches
+  return up to 100 matches (default 20).
+- `read-telegram-messages` leaves deleted and service messages (joins, pins,
+  title changes) out unless called with `includeDeleted: true` or
+  `includeService: true`, and counts what it left out as `deletedExcluded` and
+  `serviceMessagesExcluded`. A group later upgraded to a supergroup names the
+  new chat in `migratedTo`.
+- `read-email` fetches at most 2 MB of a body from the mail server; anything
+  past that is cut before `maxChars` applies.
+- `run-query` and `run-statement` take a `sql` of at most 20 000 characters.
+
 ## Scoping a token
 
 A token is narrowed on independent axes, set when it is created and editable from
@@ -87,8 +119,8 @@ the connection's dashboard. Which axes appear depends on the kind:
 - **Actions** (every kind) — all tools, or a chosen few, listed from the
   connection's own kind. Enforced by refusing to register the others for that
   request, so a tool outside scope is not merely hidden from the tool list:
-  calling it fails. A new Postgres token starts read-only — the read tools
-  ticked, `run-statement` not.
+  calling it fails. A new Postgres or Email token starts read-only — the read
+  tools ticked, `run-statement` or `create-email-draft` not.
 - **Chats** (WhatsApp and Telegram) — all conversations, or an allowlist. `list-chats` returns
   only allowed conversations; `read-messages` and `send-text-message` refuse
   anything else, naming the chat so the assistant can explain why.
@@ -98,6 +130,11 @@ the connection's dashboard. Which axes appear depends on the kind:
   **Telegram** works the same way through its own tools, with chats named by
   `chatId`; a send to an @username is resolved first and then checked against
   the allowlist, so a name cannot reach a chat the id could not.
+- **Folders** (Email) — all folders, or an allowlist, stored on the chat axis.
+  Listings and searches are narrowed in SQL; reading an email or fetching an
+  attachment from a folder outside it is refused by name. An email filed in
+  several folders is reachable only through a copy in an allowed one. Saving a
+  draft needs the Drafts folder in the allowlist.
 - **Tables** (Postgres) — every table the connecting role can read, or an
   allowlist. `list-tables` and `describe-table` apply it in their own SQL, so a
   table outside it is neither listed nor described. `run-query` and
@@ -115,10 +152,29 @@ before it is accepted.
 
 Scope is read fresh on every request, so **editing a token's scope takes effect
 immediately and does not reissue it**. The connector already configured in Claude
-keeps working; only what it can reach changes.
+keeps working; only what it can reach changes. The same **Edit** dialog renames
+the token, which likewise leaves the connector untouched.
 
 A scoped send refuses when it cannot verify the recipient — if the account is
 disconnected, the message is not sent rather than sent unchecked.
+
+## Tokens that can send
+
+When a WhatsApp or Telegram token is allowed to send, the token dialog warns that
+the assistant sends from the real account: high volume, messaging people who never
+messaged you, or repeating the same text can get the account restricted or
+banned by WhatsApp or Telegram. Keep sending low-volume and scope the token to the
+chats it needs.
+
+The same dialog offers an optional **disclaimer**, off by default. Turned on, it
+starts as "Sent using Automata" and can be reworded (up to 200 characters). The
+server appends it on its own line to every message that token sends. The model
+isn't asked to add it, so it can't forget it or change the wording. The tool's
+response names the appended text in `disclaimerAppended`. On Telegram the
+disclaimer counts toward the 4096-character limit, and a message that goes over
+it is refused with the number of characters to cut. The disclaimer is per
+token, and admins can edit or remove it in the token's Edit dialog. A token that
+can't send stores none.
 
 The token is shown exactly once — only its SHA-256 hash is stored. Lost tokens
 are replaced, not recovered. Revoking one takes effect immediately, and revoking

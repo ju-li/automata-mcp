@@ -66,6 +66,8 @@ export function describeKind(kind: InstanceKind): string {
       return 'WhatsApp account'
     case 'telegram':
       return 'Telegram account'
+    case 'imap':
+      return 'mailbox'
     default:
       return assertNever(kind, 'connection kind')
   }
@@ -83,4 +85,34 @@ export function describeKind(kind: InstanceKind): string {
 export function apiErrorMessage(error: unknown, fallback: string): string {
   const data = (error as { data?: { message?: string, statusMessage?: string } })?.data
   return data?.message || data?.statusMessage || fallback
+}
+
+/**
+ * What an IMAP connection is created or updated with. `port` stays a string
+ * while it is typed; `imapCredentialsBody()` turns it into what the server
+ * validates.
+ */
+export interface ImapCredentials {
+  host: string
+  port: string
+  security: 'tls' | 'starttls'
+  user: string
+  password: string
+}
+
+export function emptyImapCredentials(): ImapCredentials {
+  return { host: '', port: '993', security: 'tls', user: '', password: '' }
+}
+
+/** The request body, or undefined while a field the server requires is missing. */
+export function imapCredentialsBody(value: ImapCredentials) {
+  const port = Number(value.port.trim() || (value.security === 'tls' ? 993 : 143))
+  if (!value.host.trim() || !value.user.trim() || !value.password || !Number.isInteger(port)) return undefined
+  return {
+    host: value.host.trim(),
+    port,
+    security: value.security,
+    user: value.user.trim(),
+    password: value.password,
+  }
 }

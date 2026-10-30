@@ -1,0 +1,45 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "app.getautomata/automata",
+  "title": "Automata",
+  "description": "Scoped, revocable access to your WhatsApp, Telegram, IMAP email and PostgreSQL for AI agents.",
+  "websiteUrl": "https://getautomata.app",
+  "repository": {
+    "url": "https://github.com/ju-li/automata-mcp",
+    "source": "github"
+  },
+  "version": "1.2.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.getautomata.app/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Connector token minted for one connection at mcp.getautomata.app (starts with wamcp_).",
+          "value": "Bearer {token}",
+          "isRequired": true,
+          "isSecret": true,
+          "variables": {
+            "token": {
+              "description": "Connector token (wamcp_…)",
+              "isRequired": true,
+              "isSecret": true
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.getautomata.app/mcp/{token}",
+      "variables": {
+        "token": {
+          "description": "Connector token minted for one connection at mcp.getautomata.app (starts with wamcp_). For clients that cannot send headers.",
+          "isRequired": true,
+          "isSecret": true
+        }
+      }
+    }
+  ]
+}

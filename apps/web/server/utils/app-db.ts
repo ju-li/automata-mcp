@@ -216,6 +216,16 @@ export interface AppOrganization {
   created?: string
 }
 
+/**
+ * What an organization may hold. `undefined` is unlimited — every
+ * organization on a self-hosted deployment. See entitlements.ts.
+ */
+export interface OrgLimits {
+  max_connections?: number
+  max_tokens?: number
+  max_members?: number
+}
+
 export type OrgRole = 'admin' | 'member'
 
 /**
@@ -264,8 +274,8 @@ export interface AppInvitation {
  * according to it, and it decides which MCP tools a token on this row can see.
  * Read it through `instanceKind()` in mcp-scope.ts rather than directly.
  *
- * Four fields are secrets — `api_key`, `admin_key`, `dsn` and
- * `evolution_db_url` (and `telegram_db_url`). They never leave the server:
+ * Six fields are secrets — `api_key`, `admin_key`, `dsn`,
+ * `evolution_db_url`, `telegram_db_url` and `imap_password`. They never leave the server:
  * `toPublicInstance()` is the only projection the UI receives. They sit in
  * clear in the database and in every backup of it.
  *
@@ -320,6 +330,15 @@ export interface AppInstance {
   db_host?: string
   db_port?: number
   db_database?: string
+  /**
+   * IMAP only: the mailbox. `imap_password` is a secret like `dsn`; the other
+   * four are what the dashboard shows. Read only by imap-client.ts.
+   */
+  imap_host?: string
+  imap_port?: number
+  imap_security?: '' | 'tls' | 'starttls'
+  imap_user?: string
+  imap_password?: string
   label?: string
   created?: string
   /**
@@ -355,4 +374,6 @@ export interface AppMcpToken {
   table_names: unknown
   all_tools: boolean
   tool_names: unknown
+  /** Appended to every message the send tools send with this token. Absent = off. */
+  send_disclaimer?: string
 }

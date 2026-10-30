@@ -8,7 +8,8 @@
  * this cannot be used to probe which ids exist.
  */
 export default defineEventHandler(async (event) => {
-  const { token } = await resolveTokenForActor(event, getRouterParam(event, 'id'))
+  const { token, instance, actor } = await resolveTokenForActor(event, getRouterParam(event, 'id'))
   await revokeToken(token)
+  recordHostedEventQuietly({ type: 'token.revoked', org: actor.org.id, userId: token.assigned_to, payload: { id: token.id, connection: instance.id } })
   return { ok: true }
 })

@@ -28,8 +28,8 @@ import { tools } from '#nuxt-mcp-toolkit/tools.mjs'
  * plugins/evolution-db-check.ts. Hiding one of the two here would be the worst
  * of both: a scope editor that disagrees with the tool list a client sees.
  *
- * `readOnly` drives the default selection for a new Postgres token, so it has to
- * be right — it comes from the tool's own `readOnlyHint`.
+ * `readOnly` drives the default selection for a new Postgres or mailbox token,
+ * so it has to be right — it comes from the tool's own `readOnlyHint`.
  */
 export default defineEventHandler(async (event) => {
   const { instance } = await requireReadableInstance(event, getRouterParam(event, 'id'))

@@ -45,7 +45,7 @@ const VERIFY_ROUTE = '/verify-email'
  * browser gets you a 403, not an action.
  */
 export default defineNuxtRouteMiddleware(async (to) => {
-  const { user, hasOrg, isAdmin, ensureLoaded } = useSession()
+  const { user, hasOrg, isAdmin, membership, ensureLoaded } = useSession()
   await ensureLoaded()
 
   if (isInviteRoute(to.path) || to.path === VERIFY_ROUTE) return
@@ -74,6 +74,12 @@ export default defineNuxtRouteMiddleware(async (to) => {
   // a member. The team page is not gated: a member seeing who the admins are is
   // what makes "ask an admin to assign you a connection" actionable.
   if (!isAdmin.value && to.path === '/instances/new') {
+    return navigateTo('/instances')
+  }
+
+  // Billing is an admin's page, and exists only where plans do: a deployment
+  // without billing reports no plan, and has no such page to show.
+  if (to.path === '/billing' && (!isAdmin.value || !membership.value?.org.plan)) {
     return navigateTo('/instances')
   }
 })

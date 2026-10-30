@@ -107,3 +107,41 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "v$VERSION" \
             --generate-notes
+
+  # The official MCP Registry entry for the hosted server (server.json). After the
+  # release, so a failure here leaves a complete release with a stale listing
+  # rather than a listing ahead of its images. Re-running it after a fix is safe.
+  #
+  # The name app.getautomata/* is proved by a DNS TXT record on getautomata.app;
+  # MCP_REGISTRY_DNS_KEY is the hex Ed25519 private key that record's public key
+  # belongs to. GitHub OIDC login would need no secret but only grants
+  # io.github.<owner>/*, a different listing. See docs/releases.md.
+  mcp-registry:
+    needs: [version, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Pinned and checksummed, like every image this repo builds on.
+      - name: Install mcp-publisher
+        env:
+          PUBLISHER_VERSION: v1.8.1
+          PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/$PUBLISHER_VERSION/mcp-publisher_linux_amd64.tar.gz"
+          echo "$PUBLISHER_SHA256  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+          rm mcp-publisher.tar.gz
+
+      - name: Publish server.json
+        env:
+          DNS_KEY: ${{ secrets.MCP_REGISTRY_DNS_KEY }}
+        run: |
+          if [ -z "$DNS_KEY" ]; then
+            echo "::error::MCP_REGISTRY_DNS_KEY is not set; the release is published but the MCP Registry entry is not. See docs/releases.md."
+            exit 1
+          fi
+          ./mcp-publisher login dns --domain getautomata.app --private-key "$DNS_KEY"
+          ./mcp-publisher publish server.json
+          ./mcp-publisher logout

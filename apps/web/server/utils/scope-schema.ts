@@ -32,6 +32,18 @@ export const scopeSchema = z.object({
 
 export type ScopeInput = z.infer<typeof scopeSchema>
 
+/**
+ * The line a messaging token's send tools append to every message. Not scope —
+ * it changes what a send says, not what the token reaches — so it is its own
+ * schema, merged into the create and edit bodies beside `scopeSchema`.
+ *
+ * `null` turns it off; absent leaves it as it is, so a PATCH from a client that
+ * does not know about it cannot clear it by accident.
+ */
+export const disclaimerSchema = z.object({
+  send_disclaimer: z.string().trim().min(1).max(200).nullable().optional(),
+})
+
 export function scopeFromInput(input: ScopeInput): McpScope {
   return {
     allTools: input.all_tools,

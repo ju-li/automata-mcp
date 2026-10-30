@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Reads the release version from the root package.json and refuses one that
-# cannot be released: not X.Y.Z, already tagged, or not above the latest tag.
+# cannot be released: not X.Y.Z, already tagged, not above the latest tag, or
+# not matched by the directory listings (see listings.mjs).
 #
 # Run by release-check.yml on every PR into prod, so a bad version cannot merge,
 # and again by release.yml on the push, in case something reached prod without
@@ -29,6 +30,10 @@ latest=$(sort -V <<<"$tags" | tail -n 1)
 if [[ -n $latest ]] && [[ $(printf '%s\n%s\n' "$latest" "v$version" | sort -V | tail -n 1) != "v$version" ]]; then
   fail "v$version is not above the latest release, $latest. Bump \"version\" in package.json on main."
 fi
+
+# server.json and lhm.plugin.json carry the version (and the tool list) to the
+# MCP Registry and LobeHub; refuse a release they would misdescribe.
+node .github/scripts/listings.mjs check
 
 echo "Release version: $version (latest released: ${latest:-none})"
 if [[ -n ${GITHUB_OUTPUT:-} ]]; then echo "version=$version" >> "$GITHUB_OUTPUT"; fi

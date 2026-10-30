@@ -144,6 +144,10 @@ export async function requireOrgAdmin(event: H3Event): Promise<Actor> {
  * Create an organization and make one user its admin, inside the caller's
  * transaction — signup's, so an account and its organization exist together or
  * not at all.
+ *
+ * Its limits are written in the same insert (`newOrganizationLimits`): the
+ * hosted deployment's defaults, none otherwise. An organization never exists
+ * unlimited where plans exist, even for a moment.
  */
 export async function createOrganizationFor(tx: Db, user: AppUser, name?: string): Promise<{ org: AppOrganization, membership: AppMembership }> {
   const label = (name ?? '').trim()
@@ -152,11 +156,14 @@ export async function createOrganizationFor(tx: Db, user: AppUser, name?: string
     || 'Organization'
 
   const [org] = await tx<AppOrganization[]>`
-    INSERT INTO app.organizations (name) VALUES (${label.slice(0, 100)}) RETURNING id, name, created
+    INSERT INTO app.organizations ${tx({ name: label.slice(0, 100), ...await newOrganizationLimits(tx) })}
+    RETURNING id, name, created
   `
   const [membership] = await tx<AppMembership[]>`
     INSERT INTO app.memberships (org, user_id, role) VALUES (${org!.id}, ${user.id}, 'admin') RETURNING *
   `
+  await recordHostedEvent(tx, { type: 'org.created', org: org!.id, userId: user.id, payload: { name: org!.name } })
+  await recordHostedEvent(tx, { type: 'member.joined', org: org!.id, userId: user.id, payload: { role: 'admin' } })
   return { org: org!, membership: membership! }
 }
 
@@ -472,6 +479,7 @@ export async function changeMemberRole(
   return await sql.begin(async (tx) => {
     assertAdminSurvives(await lockOrgAdmins(tx, orgId), member, role)
     await tx`UPDATE app.memberships SET role = ${role}, updated = now() WHERE id = ${member.membershipId}`
+    await recordHostedEvent(tx, { type: 'member.role_changed', org: orgId, userId: member.userId, payload: { from: member.role, to: role } })
 
     if (role !== 'member') return { revokedTokens: 0 }
 
@@ -511,6 +519,7 @@ export async function removeMember(orgId: string, member: OrgMember): Promise<{ 
     assertAdminSurvives(await lockOrgAdmins(tx, orgId), member)
 
     await tx`DELETE FROM app.memberships WHERE id = ${member.membershipId}`
+    await recordHostedEvent(tx, { type: 'member.removed', org: orgId, userId: member.userId, payload: { role: member.role } })
     const revokedTokens = await revokeTokensFor(member.userId, {}, tx)
     await tx`DELETE FROM app.instance_assignments WHERE user_id = ${member.userId}`
 
@@ -539,6 +548,13 @@ export async function removeMember(orgId: string, member: OrgMember): Promise<{ 
  *
  * The now-empty old organization is deleted in the same transaction. It owns no
  * connections — that was the first refusal — so nothing restricts the delete.
+ * On the hosted deployment the `org.deleted` event it records is what makes
+ * the cloud service cancel whatever that organization still paid for.
+ *
+ * With billing on, the inviting organization's plan must have a seat for them
+ * (`assertCanAdd`): every join goes through here, so this is the one check
+ * that covers accepting signed in, invited signup, and invited verification.
+ * The caller syncs the billed seat count once its transaction has committed.
  */
 export async function acceptInviteInto(
   tx: Db,
@@ -550,14 +566,17 @@ export async function acceptInviteInto(
     SELECT * FROM app.memberships WHERE user_id = ${user.id} FOR UPDATE
   `
 
-  if (!current) {
-    await tx`INSERT INTO app.memberships (org, user_id, role) VALUES (${orgId}, ${user.id}, ${role})`
+  if (current?.org === orgId) {
+    // Already here. Idempotent rather than an error: a double-clicked link, or a
+    // second copy of the same mail, must not read as a failure.
     return {}
   }
 
-  if (current.org === orgId) {
-    // Already here. Idempotent rather than an error: a double-clicked link, or a
-    // second copy of the same mail, must not read as a failure.
+  await assertCanAdd(tx, orgId, 'member')
+
+  if (!current) {
+    await tx`INSERT INTO app.memberships (org, user_id, role) VALUES (${orgId}, ${user.id}, ${role})`
+    await recordHostedEvent(tx, { type: 'member.joined', org: orgId, userId: user.id, payload: { role } })
     return {}
   }
 
@@ -585,6 +604,8 @@ export async function acceptInviteInto(
   }
 
   await tx`UPDATE app.memberships SET org = ${orgId}, role = ${role}, updated = now() WHERE id = ${current.id}`
+  await recordHostedEvent(tx, { type: 'member.removed', org: previousOrg, userId: user.id, payload: { role: current.role, movedTo: orgId } })
+  await recordHostedEvent(tx, { type: 'member.joined', org: orgId, userId: user.id, payload: { role, movedFrom: previousOrg } })
 
   // Nobody carries live connector tokens across a boundary. In the ordinary case
   // there are none — leaving requires owning no connections, and a token names
@@ -593,6 +614,7 @@ export async function acceptInviteInto(
 
   if (!others.length) {
     await tx`DELETE FROM app.organizations WHERE id = ${previousOrg}`
+    await recordHostedEvent(tx, { type: 'org.deleted', org: previousOrg, userId: user.id })
   }
 
   return { movedFrom: previousOrg }

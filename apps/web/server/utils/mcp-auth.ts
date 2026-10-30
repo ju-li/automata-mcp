@@ -1,7 +1,7 @@
 import { assertNever } from '#shared/connection'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
-import type { AppInstance, AppMcpToken, AppUser, OrgRole } from './app-db'
+import type { AppInstance, AppMcpToken, AppUser, OrgLimits, OrgRole } from './app-db'
 import type { McpScope } from './mcp-scope'
 import type { EvolutionCredentials } from './evolution'
 import type { TelegramCredentials } from './telegram'
@@ -28,6 +28,18 @@ interface McpAuthBase {
   tokenId: string
   /** Which chats, tables and tools this token may reach. See mcp-scope.ts. */
   scope: McpScope
+  /**
+   * The holder's organization's connection and token limits, read on the same
+   * query as everything else here. Both undefined — every self-hosted
+   * organization — means unlimited. Enforced by `mcpLimitRefusal`.
+   */
+  limits: Pick<OrgLimits, 'max_connections' | 'max_tokens'>
+  /**
+   * The line the send tools append to every message, chosen by an admin when
+   * the token was minted or edited. Read with everything else, so a change
+   * applies from the next request. Undefined = off.
+   */
+  sendDisclaimer?: string
 }
 
 /**
@@ -40,12 +52,14 @@ interface McpAuthBase {
  * Postgres carries no separate credential object: the DSN lives on the instance
  * row and `pgFor(instance)` is the only thing that reads it, so copying it here
  * would put a second live copy of a user's database password in request context
- * for no gain.
+ * for no gain. IMAP follows the same rule for the mailbox password, which only
+ * imap-client.ts reads.
  */
 export type McpAuth =
   | (McpAuthBase & { kind: 'whatsapp', evolution: EvolutionCredentials })
   | (McpAuthBase & { kind: 'postgres' })
   | (McpAuthBase & { kind: 'telegram', telegram: TelegramCredentials })
+  | (McpAuthBase & { kind: 'imap' })
 
 /**
  * One row per token, joined to everything that decides whether it still works.
@@ -54,11 +68,14 @@ export type McpAuth =
  */
 interface McpTokenFacts extends Pick<AppMcpToken,
   'id' | 'assigned_to' | 'instance' | 'token_hash' | 'expires_at' | 'revoked'
-  | 'all_chats' | 'chat_jids' | 'all_tables' | 'table_names' | 'all_tools' | 'tool_names'> {
+  | 'all_chats' | 'chat_jids' | 'all_tables' | 'table_names' | 'all_tools' | 'tool_names'
+  | 'send_disclaimer'> {
   user_email?: string
   user_name?: string
   member_role?: OrgRole
   member_org?: string
+  max_connections?: number
+  max_tokens?: number
   assigned: boolean
 }
 
@@ -75,14 +92,19 @@ export function hashMcpToken(token: string): string {
 /**
  * Pull the presented token off the request.
  *
- * `Authorization: Bearer <token>` is the primary form. The `/mcp/<token>` path
- * segment is a fallback for MCP clients that cannot attach custom headers.
+ * `Authorization: Bearer <token>` is the primary form. A bare
+ * `Authorization: wamcp_…` is accepted too: gateways such as Smithery forward a
+ * user-entered value into the header verbatim, with no scheme. Only a value
+ * carrying our own prefix qualifies, so no other scheme is reinterpreted. The
+ * `/mcp/<token>` path segment is a fallback for MCP clients that cannot attach
+ * custom headers.
  */
 function extractToken(event: H3Event): string | undefined {
   const header = getRequestHeader(event, 'authorization')
   if (header) {
     const match = /^Bearer\s+(.+)$/i.exec(header.trim())
     if (match) return match[1]!.trim()
+    if (header.trim().startsWith(TOKEN_PREFIX)) return header.trim()
     // An Authorization header that is present but malformed is a hard failure —
     // do not silently fall through to the path segment.
     return undefined
@@ -131,8 +153,10 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     ;[record] = await sql<McpTokenFacts[]>`
       SELECT t.id, t.assigned_to, t.instance, t.token_hash, t.expires_at, t.revoked,
              t.all_chats, t.chat_jids, t.all_tables, t.table_names, t.all_tools, t.tool_names,
+             t.send_disclaimer,
              u.email AS user_email, u.name AS user_name,
              m.role AS member_role, m.org AS member_org,
+             o.max_connections, o.max_tokens,
              EXISTS (
                SELECT 1 FROM app.instance_assignments a
                WHERE a.user_id = t.assigned_to AND a.instance = t.instance
@@ -140,6 +164,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
       FROM app.mcp_tokens t
       LEFT JOIN app.users u ON u.id = t.assigned_to
       LEFT JOIN app.memberships m ON m.user_id = t.assigned_to
+      LEFT JOIN app.organizations o ON o.id = m.org
       WHERE t.token_hash = ${hash}
     `
     if (record) instance = await getRow<AppInstance>('instances', record.instance)
@@ -204,7 +229,14 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     console.error(`[mcp-auth] instance ${instance.id} has an unsupported kind; token ${record.id} refused`)
     return undefined
   }
-  const base = { user, instance, tokenId: record.id, scope: scopeFromRecord(record) }
+  const base = {
+    user,
+    instance,
+    tokenId: record.id,
+    scope: scopeFromRecord(record),
+    sendDisclaimer: record.send_disclaimer || undefined,
+    limits: { max_connections: record.max_connections, max_tokens: record.max_tokens },
+  }
 
   let auth: McpAuth
   switch (kind) {
@@ -232,6 +264,14 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
         return undefined
       }
       auth = { ...base, kind: 'telegram', telegram }
+      break
+    }
+    case 'imap': {
+      if (!instance.imap_host || !instance.imap_user) {
+        console.error(`[mcp-auth] instance ${instance.id} is kind=imap with no mailbox; token ${record.id} refused`)
+        return undefined
+      }
+      auth = { ...base, kind: 'imap' }
       break
     }
     default:

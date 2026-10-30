@@ -45,6 +45,7 @@ export function sqlKindOf(instance: Pick<AppInstance, 'kind'>): SqlKind | undefi
       return kind
     case 'whatsapp':
     case 'telegram':
+    case 'imap':
       return undefined
     default:
       return assertNever(kind, 'connection kind')
@@ -95,6 +96,10 @@ export interface SqlIdentity {
   server: string
   database: string
   currentUser: string
+  /** Whether the role bypasses every grant, so table scoping is best-effort. */
+  superuser: boolean
+  /** Why table scoping is best-effort on this role, in words; absent when it is not. */
+  privilegeWarning?: string
 }
 
 export async function listSqlTables(
@@ -175,6 +180,8 @@ export async function sqlIdentity(
         server: `PostgreSQL ${identity.serverVersion}`,
         database: identity.database,
         currentUser: identity.currentUser,
+        superuser: identity.superuser,
+        privilegeWarning: pgPrivilegeWarning(identity),
       }
     }
     default:

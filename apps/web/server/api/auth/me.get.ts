@@ -15,16 +15,41 @@ import type { AppUser } from '~~/server/utils/app-db'
  * state and lets the client route somewhere that explains it. A backend fault
  * still becomes a 503, so an outage is never mistaken for "you were removed".
  */
+/**
+ * The plan's name and the organization's standing against its limits, so
+ * every page can show the Billing link, limits and the over-limit banner
+ * without asking again. Nothing at all without the hosted offering — no query,
+ * no field — so a self-hosted UI never learns plans exist. A read failure is a
+ * 503 like the membership read.
+ */
+async function planSummary(orgId: string): Promise<{ plan: string, limited: boolean, overLimit: boolean } | undefined> {
+  if (!hostedMode()) return undefined
+  try {
+    const sql = await appDb()
+    const [[org], limits, usage] = await Promise.all([
+      sql<{ plan_label?: string }[]>`SELECT plan_label FROM app.organizations WHERE id = ${orgId}`,
+      loadOrgLimits(sql, orgId),
+      orgUsage(sql, orgId),
+    ])
+    return { plan: org?.plan_label ?? 'Free', limited: hasLimits(limits), overLimit: overLimit(limits, usage) }
+  }
+  catch (error) {
+    console.error('[entitlements] could not read the plan for organization', orgId, error)
+    throw appDbUnavailable(error)
+  }
+}
+
 export default defineEventHandler(async (event) => {
   const user = event.context.user as AppUser | undefined
   if (!user) return { user: null }
 
   const actor = await loadActor(user)
+  const plan = actor ? await planSummary(actor.org.id) : undefined
 
   return {
     user: { id: user.id, email: user.email, name: user.name },
     membership: actor
-      ? { role: actor.role, org: { id: actor.org.id, name: actor.org.name } }
+      ? { role: actor.role, org: { id: actor.org.id, name: actor.org.name, ...plan } }
       : null,
   }
 })

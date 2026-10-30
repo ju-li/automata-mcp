@@ -5,7 +5,7 @@ A Nuxt app that serves two surfaces from one Nitro server:
 1. **Web UI** — users create *connections* and mint connector tokens for them.
 2. **MCP endpoint** — Claude connects to `/mcp` as a custom connector.
 
-A connection is one of three kinds, and a connector token reaches exactly one
+A connection is one of four kinds, and a connector token reaches exactly one
 connection:
 
 - **WhatsApp**, through [Evolution API](https://doc.evolution-api.com/). Paired
@@ -16,6 +16,9 @@ connection:
   bridge this app is configured with, or one the user supplies. See [Telegram connections](telegram.md).
 - **PostgreSQL**, through a connection string the user supplies. Read-only
   unless a token is explicitly granted the write tool.
+- **Email (IMAP)**, through a mailbox's username and app password. Read-only
+  except saving drafts: headers are synced, bodies and attachments fetched from
+  the mail server when asked for. See [Email (IMAP) connections](imap.md).
 
 The app keeps its own data (users, sessions, organizations, connections and their
 credentials, connector tokens) in Postgres, in an `app` schema it creates and
@@ -33,30 +36,41 @@ until you do.
 
 ```
 apps/web/                    Nuxt 4 + TypeScript. Own Dockerfile, built from the repo root.
-  app/pages/                 login, signup, team, no-organization, invite/[code],
+  app/pages/                 index, login, signup, verify-email, team, profile,
+                             billing, no-organization, invite/[code],
                              instances/{index,new,[id]}
   app/components/            app components + ui/ (shadcn-vue)
   app/composables/           session, organization, connection state, token scope,
                              table paging, API actions
   modules/                   local Nuxt modules (registers /mcp/:token)
   shared/                    types used by both the app and the server
-  server/api/                auth, org, invites, instances, tokens,
-                             Evolution and Telegram webhooks
+  server/api/                auth (incl. two-factor and email verification), org,
+                             invites, instances, tokens, billing, hosted flag,
+                             Telegram readiness, Evolution and Telegram webhooks
   server/mcp/index.ts        MCP handler + auth middleware
-  server/mcp/tools/<group>/  one file per tool: whatsapp/, telegram/, sql/
+  server/mcp/tools/<group>/  one file per tool: whatsapp/, telegram/, sql/, imap/
   server/plugins/            app database, token redaction, per-kind instructions,
-                             Evolution and Telegram database startup checks
+                             Evolution and Telegram database, cloud and email
+                             verification startup checks, hosted usage rollups
+  server/tasks/              scheduled: alert sweep, webhook re-registration,
+                             IMAP sync
   server/db/migrations.ts    the app schema, applied at boot
   server/utils/              app database, auth, organizations, invitations, instances,
                              tokens, Evolution and Telegram clients and message
                              databases, mentions, alerts, mailer, outbound host
                              guard, keyed handle cache, row serialisation, SQL
-                             engine seam, Postgres pool / plan guard / runner / catalog
+                             engine seam, Postgres pool / plan guard / runner / catalog,
+                             IMAP client / sync / reads, two-factor (TOTP, WebAuthn),
+                             email verification, cloud client, entitlements
 apps/telegram-bridge/        Node + teleproto. Links Telegram accounts, syncs chats to Postgres.
                              Own Dockerfile, built from the repo root.
   src/                       HTTP API, sessions, locks, webhook
   src/sync/                  live updates, catch-up, backfill
+apps/cloud/                  hosted offering only: plans, Stripe, outbox consumers.
+                             Own Dockerfile. See docs/billing.md.
+docker/aio/                  the all-in-one image: Dockerfile + s6 service tree
 docker-compose.dev.yml       services only — NOT Nuxt
+docker-compose.yml           the full self-hosting stack, published images
 .zed/                        tasks + language server config
 .env.example                 every variable, documented
 ```
@@ -110,13 +124,23 @@ There is no `predev` hook — bring the services up yourself.
 |---|---|
 | `pnpm dev` | Nuxt dev server on the host |
 | `pnpm build` / `pnpm preview` | production build / serve it |
-| `pnpm typecheck` | `nuxt typecheck` across app + server — the only automated check |
+| `pnpm generate` | `nuxt generate` |
+| `pnpm typecheck` | `nuxt typecheck` across app + server — with `bridge:typecheck` and `cloud:typecheck`, the only local checks; there is no test framework |
 | `pnpm services:up` | Postgres only |
 | `pnpm services:up:whatsapp` | + Evolution and Redis |
 | `pnpm services:up:telegram` | + the Telegram bridge |
 | `pnpm services:down` / `:logs` / `:ps` | the whole stack, profiles included |
 | `pnpm bridge:dev` | the Telegram bridge on the host instead of in compose |
 | `pnpm bridge:typecheck` | `tsc` for the bridge — `pnpm typecheck` does not cover it |
+| `pnpm cloud:dev` | the hosted-only cloud service on the host, <http://localhost:8096> |
+| `pnpm cloud:typecheck` | `tsc` for the cloud service — not covered by `pnpm typecheck` either |
+| `pnpm release:version X.Y.Z` | write the release version into `package.json` and every directory listing |
+| `pnpm listings:check` | refuse listings whose version or tool names disagree with the code |
+| `pnpm listings:tools <server-card-url>` | regenerate `lhm.plugin.json`'s tool list from a running server's `/.well-known/mcp/server-card.json` |
+
+The only CI is `release-check.yml`, on pull requests into `prod`: it validates
+the version and builds the three images without pushing. See
+[Releases](releases.md).
 
 ## Networking
 
@@ -140,8 +164,9 @@ evolution and telegram-bridge services declare
 `extra_hosts: ["host.docker.internal:host-gateway"]`. The firewall rule below
 covers both, since they share the compose subnet and the port.
 
-The webhook URL comes from `WEBHOOK_URL` / `NUXT_WEBHOOK_URL`, so dev and prod
-differ by configuration only — no code change.
+The webhook URL each connection registers comes from `NUXT_WEBHOOK_URL`, so dev
+and prod differ by configuration only — no code change. `WEBHOOK_URL` feeds only
+Evolution's global webhook, which `docker-compose.dev.yml` leaves disabled.
 
 `pnpm dev` runs `nuxt dev --host 0.0.0.0`. It has to: bound to `localhost`, Nuxt
 is unreachable from the Evolution container.

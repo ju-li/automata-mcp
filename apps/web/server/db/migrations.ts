@@ -260,4 +260,195 @@ export const APP_MIGRATIONS: AppMigration[] = [
       CREATE INDEX email_verifications_user_idx ON app.email_verifications (user_id);
     `,
   },
+  {
+    name: '0004_imap',
+    sql: /* sql */ `
+      -- A fourth kind: a user-supplied IMAP mailbox. The CHECK was declared
+      -- inline in 0001_init, so it carries Postgres' default name.
+      ALTER TABLE app.instances DROP CONSTRAINT instances_kind_check;
+      ALTER TABLE app.instances ADD CONSTRAINT instances_kind_check
+        CHECK (kind IN ('whatsapp', 'postgres', 'telegram', 'imap'));
+
+      -- The mailbox's credentials. imap_password is a secret like dsn: plain,
+      -- never projected. There is no plaintext transport — 'starttls' must
+      -- upgrade or the connection is refused.
+      ALTER TABLE app.instances
+        ADD COLUMN imap_host     text NOT NULL DEFAULT '',
+        ADD COLUMN imap_port     integer,
+        ADD COLUMN imap_security text NOT NULL DEFAULT ''
+          CHECK (imap_security IN ('', 'tls', 'starttls')),
+        ADD COLUMN imap_user     text NOT NULL DEFAULT '',
+        ADD COLUMN imap_password text NOT NULL DEFAULT '';
+
+      -- What the sync knows about a mailbox. Headers only: bodies and
+      -- attachments are fetched from the mail server when a tool asks, and are
+      -- never written here. See server/utils/imap-sync.ts.
+      --
+      -- identity is lower(user@host): when new credentials name another
+      -- mailbox, everything synced under the old one is deleted. lease_until is
+      -- claimed by conditional UPDATE, so two replicas never sync one mailbox
+      -- at once.
+      CREATE TABLE app.mail_sync_state (
+        instance_id     text PRIMARY KEY REFERENCES app.instances (id) ON DELETE CASCADE,
+        identity        text NOT NULL DEFAULT '',
+        lease_until     timestamptz NOT NULL DEFAULT '-infinity',
+        runs            integer NOT NULL DEFAULT 0,
+        last_attempt_at timestamptz,
+        last_success_at timestamptz,
+        last_error_code text,
+        last_error_at   timestamptz,
+        auth_failed     boolean NOT NULL DEFAULT false
+      );
+
+      -- One row per folder the server lists, synced or not, so a listing can
+      -- say a folder exists and was skipped. oldest_uid is how far down the
+      -- backfill has walked; backfill_stopped says why it stopped short of the
+      -- folder's first message ('days' or 'count'), backfill_complete that it
+      -- did not.
+      CREATE TABLE app.mail_folders (
+        instance_id       text NOT NULL REFERENCES app.instances (id) ON DELETE CASCADE,
+        path              text NOT NULL,
+        name              text NOT NULL DEFAULT '',
+        delimiter         text,
+        special_use       text,
+        synced            boolean NOT NULL DEFAULT false,
+        uidvalidity       bigint,
+        last_uid          bigint NOT NULL DEFAULT 0,
+        oldest_uid        bigint,
+        highest_modseq    numeric,
+        backfill_complete boolean NOT NULL DEFAULT false,
+        backfill_stopped  text CHECK (backfill_stopped IN ('days', 'count')),
+        server_messages   integer,
+        last_synced_at    timestamptz,
+        PRIMARY KEY (instance_id, path)
+      );
+
+      -- One row per message per folder. A message filed in two folders (a
+      -- Gmail label) is two rows sharing message_id; cross-folder reads
+      -- collapse them. text_part / html_part are BODYSTRUCTURE part ids, and
+      -- attachments lists parts with name, type and size — the bytes stay on
+      -- the mail server.
+      CREATE TABLE app.mail_messages (
+        instance_id     text NOT NULL REFERENCES app.instances (id) ON DELETE CASCADE,
+        folder_path     text NOT NULL,
+        uidvalidity     bigint NOT NULL,
+        uid             bigint NOT NULL,
+        message_id      text,
+        in_reply_to     text,
+        refs            text[] NOT NULL DEFAULT '{}',
+        subject         text NOT NULL DEFAULT '',
+        from_addr       jsonb NOT NULL DEFAULT '[]',
+        to_addr         jsonb NOT NULL DEFAULT '[]',
+        cc_addr         jsonb NOT NULL DEFAULT '[]',
+        sent_at         timestamptz,
+        received_at     timestamptz NOT NULL,
+        flags           text[] NOT NULL DEFAULT '{}',
+        size            integer,
+        text_part       text,
+        html_part       text,
+        attachments     jsonb NOT NULL DEFAULT '[]',
+        subject_tsv     tsvector GENERATED ALWAYS AS (to_tsvector('simple', subject)) STORED,
+        PRIMARY KEY (instance_id, folder_path, uid),
+        FOREIGN KEY (instance_id, folder_path) REFERENCES app.mail_folders (instance_id, path) ON DELETE CASCADE
+      );
+      CREATE INDEX mail_messages_received_idx ON app.mail_messages (instance_id, received_at DESC, uid DESC);
+      CREATE INDEX mail_messages_message_id_idx ON app.mail_messages (instance_id, message_id);
+      CREATE INDEX mail_messages_subject_idx ON app.mail_messages USING gin (subject_tsv);
+    `,
+  },
+  {
+    name: '0005_billing',
+    sql: /* sql */ `
+      -- Plans, for a deployment with NUXT_BILLING=stripe. Every column is
+      -- inert when billing is off, which is every self-hosted deployment.
+      --
+      -- subscription_status is Stripe's own status, verbatim, as last read
+      -- from Stripe — never from a webhook payload. An organization with none
+      -- is on Free; see effectivePlan() in server/utils/billing.ts.
+      -- trial_used survives the subscription, so cancelling and resubscribing
+      -- does not buy a second trial. seats_billed is the quantity last pushed
+      -- to the seat price, so the reconcile task can tell when it drifted.
+      ALTER TABLE app.organizations
+        ADD COLUMN stripe_customer_id     text,
+        ADD COLUMN stripe_subscription_id text,
+        ADD COLUMN subscription_status    text,
+        ADD COLUMN trial_ends_at          timestamptz,
+        ADD COLUMN current_period_end     timestamptz,
+        ADD COLUMN cancel_at_period_end   boolean NOT NULL DEFAULT false,
+        ADD COLUMN trial_used             boolean NOT NULL DEFAULT false,
+        ADD COLUMN seats_billed           integer;
+      CREATE UNIQUE INDEX organizations_stripe_customer_key
+        ON app.organizations (stripe_customer_id) WHERE stripe_customer_id IS NOT NULL;
+
+      -- The plan picked on the signup page, carried through verification so
+      -- the verified signup can send the browser on to checkout. NULL for an
+      -- invited signup, an email change, and any deployment without billing.
+      ALTER TABLE app.email_verifications
+        ADD COLUMN plan text CHECK (plan IN ('free', 'pro'));
+    `,
+  },
+  {
+    name: '0006_entitlements_and_hosted_events',
+    sql: /* sql */ `
+      -- What an organization may hold, as plain numbers. NULL is unlimited,
+      -- which is every organization on a self-hosted deployment: nothing here
+      -- names a plan or a payment provider. Whatever sells plans writes these
+      -- (today stripe.ts, later the separate cloud service) and the web app
+      -- only enforces them — see entitlements.ts. plan_label is for display.
+      ALTER TABLE app.organizations
+        ADD COLUMN max_connections integer CHECK (max_connections >= 0),
+        ADD COLUMN max_tokens      integer CHECK (max_tokens >= 0),
+        ADD COLUMN max_members     integer CHECK (max_members >= 1),
+        ADD COLUMN plan_label      text;
+
+      -- An outbox for the hosted offering: account and organization changes,
+      -- and per-minute MCP usage rollups, for a separate service to turn into
+      -- billing seats, CRM records and telemetry. Written only on a deployment
+      -- that has the hosted offering configured (hosted-events.ts), so a
+      -- self-hosted database never holds a row.
+      --
+      -- No foreign keys on purpose: an event outlives the organization or user
+      -- it describes — "this org was deleted" is itself an event. Payloads
+      -- never carry credentials, connection strings, chat ids, message content
+      -- or tool arguments.
+      CREATE TABLE app.hosted_events (
+        id      bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        type    text NOT NULL,
+        org     text,
+        user_id text,
+        payload jsonb NOT NULL DEFAULT '{}',
+        created timestamptz NOT NULL DEFAULT now()
+      );
+    `,
+  },
+  {
+    name: '0007_entitlement_defaults',
+    sql: /* sql */ `
+      -- The limits a new organization is born with on the hosted deployment,
+      -- written by the cloud service (apps/cloud) at every boot. The web app
+      -- reads it inside the signup transaction and refuses a hosted signup while
+      -- it is missing, rather than create an organization with no limits. Empty
+      -- on a self-hosted deployment, where nothing reads it.
+      CREATE TABLE app.entitlement_defaults (
+        id              text PRIMARY KEY CHECK (id = 'new_organization'),
+        max_connections integer CHECK (max_connections >= 0),
+        max_tokens      integer CHECK (max_tokens >= 0),
+        max_members     integer CHECK (max_members >= 1),
+        plan_label      text,
+        updated         timestamptz NOT NULL DEFAULT now()
+      );
+    `,
+  },
+  {
+    name: '0008_token_send_disclaimer',
+    sql: /* sql */ `
+      -- A line the send tools append to every message this token sends, so the
+      -- people receiving them can tell they were sent through an assistant. NULL
+      -- is off. Applied server-side in the send handlers rather than asked of
+      -- the model, which could forget or reword it.
+      ALTER TABLE app.mcp_tokens
+        ADD COLUMN send_disclaimer text
+          CHECK (send_disclaimer IS NULL OR length(send_disclaimer) BETWEEN 1 AND 200);
+    `,
+  },
 ]

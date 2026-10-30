@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { PlusIcon, SearchIcon, UsersIcon, XIcon } from '@lucide/vue'
-import { connectionFamily } from '#shared/connection'
+import { FolderIcon, PlusIcon, SearchIcon, UsersIcon, XIcon } from '@lucide/vue'
+import { assertNever, connectionFamily } from '#shared/connection'
 
 /**
  * The scope editor, shared by the create and edit dialogs so the two cannot
@@ -8,6 +8,18 @@ import { connectionFamily } from '#shared/connection'
  */
 const props = defineProps<{ instanceId: string, kind: InstanceKind }>()
 const scope = defineModel<TokenScope>({ required: true })
+/**
+ * The line appended to every message this token sends; `null` is off. Shown
+ * only while the scope allows sending — the parent drops it on submit otherwise
+ * (`disclaimerToSubmit`), so nothing hidden is stored.
+ */
+const disclaimer = defineModel<string | null>('disclaimer', { default: null })
+
+const canSend = computed(() => allowsSending(scope.value, props.kind))
+
+function toggleDisclaimer(on: boolean) {
+  disclaimer.value = on ? DEFAULT_SEND_DISCLAIMER : null
+}
 
 /**
  * Which axis this connection has, asked as a family rather than as
@@ -19,6 +31,26 @@ const scope = defineModel<TokenScope>({ required: true })
  * compile until the new kind has been placed, which is the whole point.
  */
 const isDatabase = computed(() => connectionFamily(props.kind) === 'database')
+
+/**
+ * The chat axis's words. A mailbox scopes by folder on the same axis — its
+ * token stores folder paths in `chat_jids` — so the section is shared and only
+ * the vocabulary changes. A switch so a new messaging kind has to say what its
+ * conversations are called rather than inheriting WhatsApp's.
+ */
+const chatAxis = computed(() => {
+  switch (props.kind) {
+    case 'whatsapp':
+    case 'telegram':
+    // A database never renders this section (it has the table axis instead).
+    case 'postgres':
+      return { title: 'Chats', blurb: 'Which conversations this token can read and reply in.', all: 'All chats', some: 'Only selected chats', search: 'Search conversations', addable: true }
+    case 'imap':
+      return { title: 'Folders', blurb: 'Which folders this token can list, search and read emails in. Saving drafts also needs the Drafts folder.', all: 'All folders', some: 'Only selected folders', search: 'Search folders', addable: false }
+    default:
+      return assertNever(props.kind, 'connection kind')
+  }
+})
 
 // Deliberately not awaited. A top-level await makes setup() async, and Vue then
 // withholds the entire component until every fetch settles — so the chats call,
@@ -110,6 +142,8 @@ function toggle(key: ScopeList, value: string, on: boolean) {
  * country-specific rules, and this app never applies those locally.
  */
 function secondaryLine(chat: ScopedChat): string {
+  if (chat.synced === false) return 'not synced'
+  if (chat.messages !== undefined) return chat.messages === 1 ? '1 email synced' : `${chat.messages} emails synced`
   if (chat.username) return `@${chat.username}`
   if (chat.isGroup) {
     if (!chat.participantCount) return ''
@@ -224,6 +258,57 @@ async function addByNumber() {
           </div>
         </template>
       </div>
+
+      <!--
+        Sending acts on a real phone number or Telegram account, and both
+        services restrict accounts that behave like bulk senders. Said here,
+        where the decision to grant it is made, rather than after the fact.
+      -->
+      <template v-if="canSend">
+        <NoticeCard title="Sending can get this account banned">
+          <template #description>
+            <p class="mt-1 text-xs text-muted-foreground">
+              Claude will send from your real {{ kind === 'telegram' ? 'Telegram' : 'WhatsApp' }}
+              account. Sending many messages, messaging people who have not
+              messaged you first, or repeating the same text can get the account
+              restricted or permanently banned. Keep volume low, and consider
+              limiting the token to selected chats.
+            </p>
+          </template>
+        </NoticeCard>
+
+        <div class="space-y-2 rounded-md border p-3">
+          <div class="flex items-start gap-3">
+            <Checkbox
+              id="send-disclaimer-on"
+              :model-value="disclaimer !== null"
+              class="mt-0.5"
+              @update:model-value="toggleDisclaimer($event === true)"
+            />
+            <div class="min-w-0 flex-1">
+              <Label for="send-disclaimer-on" class="font-normal">
+                Add a disclaimer to sent messages
+              </Label>
+              <p class="mt-0.5 text-xs text-muted-foreground">
+                Added on its own line at the end of every message this token sends,
+                so recipients know it came through an assistant.
+              </p>
+            </div>
+          </div>
+          <div v-if="disclaimer !== null" class="space-y-1 pl-7">
+            <Input
+              :model-value="disclaimer"
+              aria-label="Disclaimer text"
+              maxlength="200"
+              :placeholder="DEFAULT_SEND_DISCLAIMER"
+              @update:model-value="disclaimer = String($event)"
+            />
+            <p v-if="!disclaimer.trim()" class="text-xs text-muted-foreground">
+              Blank — messages will be sent without a disclaimer.
+            </p>
+          </div>
+        </div>
+      </template>
     </section>
 
     <Separator class="shrink-0 md:hidden" />
@@ -306,14 +391,14 @@ async function addByNumber() {
       </div>
     </section>
 
-    <!-- ── chats (WhatsApp and Telegram) ───────────────────────────────── -->
+    <!-- ── chats (WhatsApp and Telegram), folders (IMAP) ───────────────── -->
     <section v-else class="flex min-h-0 min-w-0 flex-1 flex-col gap-3">
       <div class="shrink-0">
         <h3 class="text-sm font-medium">
-          Chats
+          {{ chatAxis.title }}
         </h3>
         <p class="text-xs text-muted-foreground">
-          Which conversations this token can read and reply in.
+          {{ chatAxis.blurb }}
         </p>
       </div>
 
@@ -321,8 +406,8 @@ async function addByNumber() {
         class="shrink-0"
         :model-value="scope.all_chats"
         name="chats"
-        all-label="All chats"
-        some-label="Only selected chats"
+        :all-label="chatAxis.all"
+        :some-label="chatAxis.some"
         @update:model-value="scope = { ...scope, all_chats: $event }"
       />
 
@@ -344,7 +429,7 @@ async function addByNumber() {
 
         <div class="relative shrink-0">
           <SearchIcon class="absolute top-1/2 left-2 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input v-model="search" placeholder="Search conversations" class="pl-8" />
+          <Input v-model="search" :placeholder="chatAxis.search" class="pl-8" />
         </div>
 
         <div class="min-h-28 flex-1 space-y-1 overflow-y-auto">
@@ -364,6 +449,10 @@ async function addByNumber() {
             <template v-if="kind === 'telegram'">
               No chats synced yet — they appear once the account is linked. Add one by
               username below.
+            </template>
+            <template v-else-if="kind === 'imap'">
+              No folders yet — they appear after the mailbox's first sync, a minute or
+              two after it is connected.
             </template>
             <template v-else>
               No conversations recorded yet — they appear here once messages are
@@ -386,7 +475,8 @@ async function addByNumber() {
             />
             <img v-if="chat.profilePicUrl" :src="chat.profilePicUrl" alt="" class="size-8 rounded-full object-cover">
             <span v-else class="flex size-8 items-center justify-center rounded-full bg-muted">
-              <UsersIcon v-if="chat.isGroup" class="size-3.5" />
+              <FolderIcon v-if="kind === 'imap'" class="size-3.5" />
+              <UsersIcon v-else-if="chat.isGroup" class="size-3.5" />
             </span>
             <span class="min-w-0 flex-1">
               <span class="block truncate text-sm">{{ chat.name }}</span>
@@ -401,7 +491,7 @@ async function addByNumber() {
           </label>
         </div>
 
-        <div class="shrink-0 space-y-1 border-t pt-3">
+        <div v-if="chatAxis.addable" class="shrink-0 space-y-1 border-t pt-3">
           <Label for="manual-number" class="text-xs">{{ kind === 'telegram' ? 'Add by @username or t.me link' : 'Add by phone number' }}</Label>
           <div class="flex gap-2">
             <Input

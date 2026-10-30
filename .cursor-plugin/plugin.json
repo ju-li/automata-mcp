@@ -1,0 +1,12 @@
+{
+  "name": "automata",
+  "version": "1.2.0",
+  "description": "Scoped, revocable access to your WhatsApp, Telegram, IMAP email and PostgreSQL for AI agents.",
+  "author": {
+    "name": "Ju Li"
+  },
+  "homepage": "https://getautomata.app",
+  "repository": "https://github.com/ju-li/automata-mcp",
+  "license": "MIT",
+  "keywords": ["whatsapp", "telegram", "email", "imap", "postgresql", "mcp"]
+}

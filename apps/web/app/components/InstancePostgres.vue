@@ -34,6 +34,7 @@ interface StatusResponse {
   state: ConnectionState
   detail?: string
   error?: string
+  warning?: string
 }
 
 const id = computed(() => props.id)
@@ -211,6 +212,17 @@ async function saveDsn() {
         </div>
       </CardContent>
     </Card>
+
+    <!-- Read live on every health check, so it appears and clears with the
+         role's grants rather than with the DSN. Shown to members too: it is a
+         fact about what their tokens can reach, not an action to take. -->
+    <NoticeCard v-if="connected && data?.warning" title="This role can reach more than its tokens are scoped to">
+      <template #description>
+        <p class="text-sm text-muted-foreground">
+          {{ data.warning }}
+        </p>
+      </template>
+    </NoticeCard>
 
     <!-- ── tables ──────────────────────────────────────────────────────── -->
     <section class="space-y-3">

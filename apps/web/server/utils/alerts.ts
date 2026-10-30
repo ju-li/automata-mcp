@@ -111,7 +111,11 @@ async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 't
   }
 }
 
-/** The kinds alerting covers. Postgres has no liveness signal short of a timed connection. */
+/**
+ * The kinds alerting covers. Postgres has no liveness signal short of a timed
+ * connection. A mailbox's sync failing shows on its dashboard but is not mailed
+ * yet — the sync's `auth_failed` is the signal that would drive it.
+ */
 function alertableKind(instance: AppInstance): 'whatsapp' | 'telegram' | undefined {
   const kind: InstanceKind = instanceKind(instance)
   switch (kind) {
@@ -119,6 +123,7 @@ function alertableKind(instance: AppInstance): 'whatsapp' | 'telegram' | undefin
     case 'telegram':
       return kind
     case 'postgres':
+    case 'imap':
       return undefined
     default:
       return assertNever(kind)

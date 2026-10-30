@@ -43,6 +43,16 @@ const body = z.discriminatedUnion('kind', [
       dbUrl: z.string().min(1).max(2000).optional(),
     }).optional(),
   }),
+  // A mailbox. No plaintext option: `starttls` must upgrade or it fails.
+  z.object({
+    kind: z.literal('imap'),
+    label: z.string().max(100).optional(),
+    host: z.string().trim().min(1).max(253),
+    port: z.number().int().min(1).max(65535),
+    security: z.enum(['tls', 'starttls']),
+    user: z.string().trim().min(1).max(320),
+    password: z.string().min(1).max(1000),
+  }),
 ])
 
 export default defineEventHandler(async (event) => {
@@ -51,6 +61,15 @@ export default defineEventHandler(async (event) => {
   // as its creator and gains nothing extra by it.
   const actor = await requireOrgAdmin(event)
   const parsed = await parseBody(event, body)
+
+  // The organization's connection limit, before anything is provisioned:
+  // WhatsApp and Telegram reserve a live session on a remote server before the
+  // row exists, so a refusal after that would leave one running. Not held
+  // across the insert — provisioning makes remote calls — so two racing
+  // creates can both pass. That is harmless: only the oldest connections'
+  // tokens answer over a limit (`mcpLimitRefusal`), and the org then reads as
+  // over its limit.
+  await assertCanAdd(await appDb(), actor.org.id, 'connection')
 
   let instance
   switch (parsed.kind) {
@@ -63,9 +82,15 @@ export default defineEventHandler(async (event) => {
     case 'telegram':
       instance = await provisionTelegramInstance(actor, { label: parsed.label, server: parsed.server })
       break
+    case 'imap':
+      instance = await provisionImapInstance(actor, parsed)
+      break
     default:
       return assertNever(parsed, 'connection kind')
   }
+
+  // The kind only: hosts, credentials and labels never go into an event.
+  recordHostedEventQuietly({ type: 'connection.created', org: actor.org.id, userId: actor.user.id, payload: { id: instance.id, kind: parsed.kind } })
 
   return { instance: toPublicInstance(instance) }
 })

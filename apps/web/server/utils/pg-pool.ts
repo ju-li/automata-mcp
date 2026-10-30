@@ -248,23 +248,15 @@ export function closePgPool(instanceId: string): Promise<void> {
 }
 
 
-/** What a connection says about itself. One query, three callers. */
+/**
+ * What a connection says about itself. One query, three callers: the probe at
+ * save time, the dashboard's health check and `get-database-info`.
+ *
+ * The privilege half is read live rather than remembered from the probe: a
+ * role can be granted superuser after its DSN was accepted, and a warning
+ * stored at save time would then say nothing.
+ */
 export interface PgIdentity {
-  serverVersion: string
-  currentUser: string
-  database: string
-}
-
-export async function pgIdentity(sql: Sql): Promise<PgIdentity | undefined> {
-  const [row] = await sql<Array<{ version: string, current_user: string, database: string }>>`
-    SELECT current_setting('server_version') AS version,
-           current_user,
-           current_database() AS database`
-  if (!row) return undefined
-  return { serverVersion: row.version, currentUser: row.current_user, database: row.database }
-}
-
-export interface PgProbe {
   serverVersion: string
   currentUser: string
   database: string
@@ -272,6 +264,56 @@ export interface PgProbe {
   bypassRls: boolean
   canReadServerFiles: boolean
 }
+
+export async function pgIdentity(sql: Sql): Promise<PgIdentity | undefined> {
+  const [row] = await sql<Array<{
+    version: string
+    current_user: string
+    database: string
+    superuser: boolean
+    bypass_rls: boolean
+    can_read_files: boolean
+  }>>`
+    SELECT current_setting('server_version') AS version,
+           current_user,
+           current_database() AS database,
+           r.rolsuper       AS superuser,
+           r.rolbypassrls   AS bypass_rls,
+           EXISTS (
+             SELECT 1 FROM pg_catalog.pg_roles m
+             WHERE m.rolname = 'pg_read_server_files'
+               AND pg_catalog.pg_has_role(current_user, m.oid, 'MEMBER')
+           ) AS can_read_files
+    FROM pg_catalog.pg_roles r
+    WHERE r.rolname = current_user`
+  if (!row) return undefined
+  return {
+    serverVersion: row.version,
+    currentUser: row.current_user,
+    database: row.database,
+    superuser: row.superuser,
+    bypassRls: row.bypass_rls,
+    canReadServerFiles: row.can_read_files,
+  }
+}
+
+/**
+ * Privileges that make the per-token table allowlist best-effort, in words for
+ * the dashboard, or `undefined` when the role has none of them.
+ */
+export function pgPrivilegeWarning(identity: PgIdentity): string | undefined {
+  const reasons = [
+    identity.superuser && 'is a superuser',
+    identity.bypassRls && 'bypasses row-level security',
+    identity.canReadServerFiles && 'can read files on the database server',
+  ].filter(Boolean)
+  if (!reasons.length) return undefined
+  return `The role ${identity.currentUser} ${reasons.join(', ')}. `
+    + 'Table scoping on tokens for this connection is then best-effort: a query can reach data '
+    + 'the plan check cannot see. Connect with a role granted only the tables you mean to share.'
+}
+
+export type PgProbe = PgIdentity
 
 /**
  * Open a throwaway connection to prove a DSN works, and report what is behind
@@ -281,6 +323,8 @@ export interface PgProbe {
  * The privilege report is not decoration. A superuser DSN makes the per-token
  * table allowlist best-effort — a superuser can read anything through a
  * function the planner cannot see into — so the UI has to be able to say so.
+ * The dashboard reads it again on every health check (`pgIdentity`), not from
+ * here.
  */
 export async function probePgConnection(dsn: string, options: {
   /**
@@ -302,28 +346,7 @@ export async function probePgConnection(dsn: string, options: {
   const sql = postgres(dsn, driverOptions(target, { guard: true, max: 1, statementTimeoutMs: 5000 }))
 
   try {
-    const [row] = await sql<Array<{
-      version: string
-      current_user: string
-      database: string
-      superuser: boolean
-      bypass_rls: boolean
-      can_read_files: boolean
-    }>>`
-      -- A superset of pgIdentity's columns: the privilege half is only ever
-      -- needed here, at the moment a DSN is accepted.
-      SELECT current_setting('server_version') AS version,
-             current_user,
-             current_database() AS database,
-             r.rolsuper       AS superuser,
-             r.rolbypassrls   AS bypass_rls,
-             EXISTS (
-               SELECT 1 FROM pg_catalog.pg_roles m
-               WHERE m.rolname = 'pg_read_server_files'
-                 AND pg_catalog.pg_has_role(current_user, m.oid, 'MEMBER')
-             ) AS can_read_files
-      FROM pg_catalog.pg_roles r
-      WHERE r.rolname = current_user`
+    const row = await pgIdentity(sql)
 
     if (!row) {
       throw createError({ statusCode: 502, message: 'The database did not identify itself.' })
@@ -339,20 +362,13 @@ export async function probePgConnection(dsn: string, options: {
         throw createError({
           statusCode: 422,
           message: `Connected to ${target.host}:${target.port}/${row.database}, but its `
-            + `${options.requireTable} table is not there or not readable by ${row.current_user}. `
+            + `${options.requireTable} table is not there or not readable by ${row.currentUser}. `
             + 'Check that this is the right database and that the role has SELECT on it.',
         })
       }
     }
 
-    return {
-      serverVersion: row.version,
-      currentUser: row.current_user,
-      database: row.database,
-      superuser: row.superuser,
-      bypassRls: row.bypass_rls,
-      canReadServerFiles: row.can_read_files,
-    }
+    return row
   }
   catch (cause) {
     if ((cause as { statusCode?: number })?.statusCode) throw cause

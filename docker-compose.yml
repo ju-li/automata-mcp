@@ -58,6 +58,10 @@ services:
       NUXT_SIGNUP_CODE: ${SIGNUP_CODE:-}
       NUXT_EMAIL_VERIFICATION: ${EMAIL_VERIFICATION:-auto}
 
+      # Private and loopback connection targets. Off unless set; see
+      # docs/self-hosting.md before turning it on.
+      NUXT_ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+
       # WhatsApp. Harmless without the whatsapp profile: nothing answers there,
       # and the create page says WhatsApp is unavailable.
       NUXT_EVOLUTION_URL: http://evolution:8080

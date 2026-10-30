@@ -9,23 +9,25 @@ One Nuxt/Nitro server, two surfaces:
 1. **Web UI** — users create *connections*, mint connector tokens for them. Session cookie.
 2. **MCP endpoint** — Claude connects to `/mcp` as custom connector. App-minted bearer token.
 
-Connection = row in `instances` with `kind`; connector token bound to exactly one row. Three kinds:
+Connection = row in `instances` with `kind`; connector token bound to exactly one row. Four kinds:
 
 - **`whatsapp`** — [Evolution API](https://doc.evolution-api.com/) instance, paired by QR, on deployment's configured Evolution server *or* user-supplied one.
 - **`postgres`** — user-supplied PostgreSQL DSN.
 - **`telegram`** — personal Telegram account linked by QR through `apps/telegram-bridge`, deployment's own bridge *or* user-supplied one. See "Telegram bridge".
+- **`imap`** — user-supplied IMAP mailbox, username + app password. Read-only except saving drafts. Headers synced, bodies and attachments fetched live. See "IMAP connections".
 
 `kind` read through `instanceKind()` in `mcp-scope.ts`. Column `NOT NULL` with `CHECK`, but function still refuses value running build doesn't know rather than serving it as WhatsApp — rollback after migration added a kind leaves such rows. Every per-kind branch = `switch` ending in `assertNever` (`shared/connection.ts`), never `if … else`, so adding kind fails to compile everywhere not yet decided.
 
 App's own data (users, sessions, organizations, connections + credentials, tokens) in Postgres, `app` schema migrated at boot — `NUXT_DATABASE_URL`, required. Same Postgres Evolution writes into (`public`) and Telegram bridge uses (`telegram`); that Postgres is only compose service not behind profile. Evolution API + its Redis needed **only for WhatsApp connections** — behind `whatsapp` compose profile; `NUXT_EVOLUTION_*` vars optional.
 
-`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `alerts.md`, `using-automata.md`, `releases.md`. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
+`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `imap.md`, `alerts.md`, `two-factor.md`, `using-automata.md`, `releases.md`, `billing.md`; `docs/README.md` indexes them. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
 
-**Status:** product loop works end to end for all three kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat or per-table scoping. Fifteen MCP tools, gated by kind:
+**Status:** product loop works end to end for all four kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat, per-folder or per-table scoping. Twenty-two MCP tools, gated by kind:
 
 - `whatsapp`: `get-connection-status`, `list-chats`, `read-messages`, `search-messages`, `send-text-message`
 - `telegram`: `get-telegram-status`, `list-telegram-chats`, `read-telegram-messages`, `search-telegram-messages`, `send-telegram-message`
 - `postgres` (the `sql/` group): `get-database-info`, `list-tables`, `describe-table`, `run-query`, `run-statement` (write)
+- `imap`: `get-mailbox-status`, `list-mail-folders`, `list-emails`, `search-emails`, `read-email`, `get-email-attachment`, `create-email-draft` (write)
 
 WhatsApp or Telegram connection that drops emails everyone who can reach it, emails again on recovery — see "Disconnect alerts".
 
@@ -44,17 +46,19 @@ pnpm services:up:whatsapp   # + redis, evolution
 pnpm services:up:telegram   # + telegram-bridge
 pnpm bridge:dev       # the Telegram bridge on the host, http://localhost:8095
 pnpm bridge:typecheck # the bridge; `pnpm typecheck` does not cover it
+pnpm cloud:dev        # the hosted-only cloud service, http://localhost:8096
+pnpm cloud:typecheck  # the cloud service; not covered by `pnpm typecheck` either
 pnpm dev              # Nuxt on the host, http://localhost:3000
 pnpm typecheck        # nuxt typecheck across app + server
 pnpm build            # production build -> apps/web/.output/
 pnpm services:down / :logs / :ps
 ```
 
-Nuxt deliberately **not** in compose (HMR); no `predev` hook — bring services up yourself. No lint config, **no test framework**; `pnpm typecheck` + `pnpm bridge:typecheck` only automated checks.
+Nuxt deliberately **not** in compose (HMR); no `predev` hook — bring services up yourself. No lint config, **no test framework**; `pnpm typecheck` + `pnpm bridge:typecheck` + `pnpm cloud:typecheck` only automated checks.
 
 ## Environment
 
-One `.env` at repo root serves all. Compose reads by adjacency; Nuxt reads because every `apps/web` script passes `--dotenv ../../.env`. `.env.example` documents every var.
+One `.env` at repo root serves all. Compose reads by adjacency; Nuxt reads because every `apps/web` script that loads env (`dev`, `build`, `preview`, `generate`) passes `--dotenv ../../.env`. `.env.example` documents every var.
 
 Nuxt overrides `runtimeConfig` only from `NUXT_`-prefixed vars, so some values duplicated under two names (`WEBHOOK_URL` for compose, `NUXT_WEBHOOK_URL` for Nuxt) — **keep pair in sync**. That pair = only dev/prod difference; no environment branch in code.
 
@@ -62,15 +66,15 @@ Nuxt overrides `runtimeConfig` only from `NUXT_`-prefixed vars, so some values d
 
 ```
 apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context = repo root).
-  app/pages/                 login, signup, no-organization, team, profile, invite/[code],
-                             instances/{index,new,[id]}
+  app/pages/                 index, login, signup, verify-email, no-organization, team,
+                             profile, billing, invite/[code], instances/{index,new,[id]}
   app/components/            app components + ui/ (shadcn-vue, bare names)
   app/composables/           useSession (user + org + role), useOrg, useConnectionState,
                              useReconnect, useTablePage, useTokenScope, …
   app/middleware/            auth.global.ts — session + organization gate
   modules/mcp-token-route.ts local Nuxt module — registers /mcp/:token
   server/api/                auth/, org/, invites/, instances/, tokens/, telegram/,
-                             webhook/
+                             webhook/, billing/, hosted.get.ts
   server/mcp/index.ts        default MCP handler (auth middleware)
   server/mcp/tools/<group>/   one file per tool, auto-discovered. A group is
                               usually a kind; `sql/` is the exception and serves
@@ -83,10 +87,14 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              db-rows, sql-engine, pg-pool, pg-guard,
                              pg-run, pg-catalog, chats, alerts, mailer,
                              mcp-kind-tool, telegram, telegram-db,
-                             telegram-instances, mfa, totp, webauthn, …
+                             telegram-instances, imap-client, imap-sync, imap-db,
+                             mail-format, mfa, totp, webauthn, entitlements,
+                             hosted-events, cloud, …
   shared/connection.ts       InstanceKind, assertNever — imported as #shared
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              `telegram` schema of the shared Postgres. See "Telegram bridge".
+apps/cloud/                  hosted offering only: plans, Stripe, outbox consumers. Own
+                             Dockerfile, `cloud` schema. See "Plans and billing".
 docker-compose.dev.yml       services only, NOT Nuxt
 docker/aio/                  all-in-one image: Dockerfile + rootfs/ (s6 service tree,
                              automata-env). See "All-in-one image".
@@ -112,7 +120,7 @@ Three things enforce it:
 - `useEvolutionClient()` reads `event.context.mcpAuth`, no branch reaching session user; throws 401 if key absent, again if connection not WhatsApp.
 - MCP tokens minted by this app (`wamcp_` + 32 random bytes), stored **only** as SHA-256 hash in `app.mcp_tokens`. Browser sessions same: cookie = 32 random bytes, `app.sessions` holds only hash. Token resolves to one `instances` row, which carries that account's Evolution token.
 
-`McpAuth` = **union discriminated on `kind`** — `{ kind: 'whatsapp', evolution }`, `{ kind: 'telegram', telegram }` or `{ kind: 'postgres' }`. Union not optional fields, so handler reaching for `evolution` must first establish it's WhatsApp. Postgres carries no credential object: DSN lives on instance row, `pgFor()` only reader; copying into request context = second live copy of user's DB password for nothing.
+`McpAuth` = **union discriminated on `kind`** — `{ kind: 'whatsapp', evolution }`, `{ kind: 'telegram', telegram }`, `{ kind: 'postgres' }` or `{ kind: 'imap' }`. Union not optional fields, so handler reaching for `evolution` must first establish it's WhatsApp. Postgres and IMAP carry no credential object: DSN lives on instance row, `pgFor()` only reader; copying into request context = second live copy of user's DB password for nothing.
 
 **Failure-mode semantics matter:** DB outage answers **503**, never 401. 401 tells client credential bad — MCP client discards token it should keep, browser user silently signed out mid-outage. Both surfaces distinguish: `resolveMcpAuth` and `getSessionUser` return `undefined` (→ 401) only when query ran and found no usable row; any thrown error → `appDbUnavailable()` (503). `checkPassword` same for login form. Preserve in any new auth code: `catch` on auth read must never produce `undefined`.
 
@@ -121,6 +129,38 @@ Three things enforce it:
 ## Who may sign up
 
 `server/utils/signup-policy.ts` gates every signup **without** invitation; invitation path untouched in every mode. `NUXT_SIGNUP` = `open` | `invite-only`, default `invite-only`, unknown value read as invite-only (typo must not open door). Invite-only + `NUXT_SIGNUP_CODE` set → code required, **first account included** — else whoever finds fresh public install first becomes admin. Invite-only, no code → first account on empty DB only, decided by `claimFirstAccount()` *inside* signup transaction under `pg_advisory_xact_lock`, so two racing first signups can't both win; read failure = 503, never allow. Wrong code throttled per IP (`login-throttle.ts`, `signup-ip:` key) and logged. `/api/auth/signup-policy` tells UI `open` / `code` / `closed`, never the code. Why it matters: every self-signup = new org admin on our Evolution and bridge, and with `NUXT_ALLOW_PRIVATE_TARGETS` a stranger's DSN reaches the private network.
+
+## Plans and billing (hosted offering)
+
+Hosted offering only. **Two services:** web app enforces limits and shows Billing page, never talks to Stripe; **`apps/cloud`** sells plans — owns Stripe (Checkout, Portal, webhook, seats), writes every org's limits; Brevo CRM sync and PostHog telemetry join it later. **Hosted mode = `NUXT_CLOUD_URL` set** (`hostedMode()` in `server/utils/cloud.ts`). Unset = invisible: no plan picker (signup-policy `billing: false`), every billing route 404, `/api/auth/me` carries no `plan`, no limits written, no events written. Self-hosters never set it; no self-host artifact references `apps/cloud`. `docs/billing.md` = operator side.
+
+**Legacy `NUXT_BILLING` still read, fails closed:** set without `NUXT_CLOUD_URL` → still hosted mode (plans enforced, signup needs plan, Billing 503) + startup error naming new vars. Upgraded deployment forgetting new vars must not hand out unlimited.
+
+**Web app side — knows numbers, not plans:**
+
+- `entitlements.ts` — **enforcement.** Reads `app.organizations.max_connections` / `max_tokens` / `max_members`; NULL = unlimited (every self-hosted org). Never names plan or Stripe. Stays in web for good: checks run inside web's transactions and on every MCP request, so call to another service there would put its outage on auth path. `newOrganizationLimits(tx)` reads `app.entitlement_defaults` (row cloud writes at boot) into `createOrganizationFor`'s insert; hosted + row missing → **503, never unlimited org**.
+- `cloud.ts` — `hostedMode()`, `requireHosted()` (404), `cloudFetch()` (admin-key bearer; cloud's 4xx/503 messages relayed as is — written for browser; anything else logged + 503). `api/billing/*` = thin forwards. `GET /api/billing` merges cloud summary with web's own limits + usage, answers with `billingUnavailable: true` rather than failing when cloud down.
+- `hosted-events.ts` — **outbox `app.hosted_events`.** Closed `HostedEventType` union; same transaction as change (`recordHostedEvent(tx, …)`), `recordHostedEventQuietly` only for changes made outside one. Payloads never carry credentials, DSNs, hosts, chat ids, folder/table names, message content, tool arguments; email only on user events (CRM keys on it). Written only when `hostedEventsEnabled()` (= hosted mode). No FKs: event outlives its org. **MCP usage not one row per call:** `countedHandler` in `mcp-kind-tool.ts` counts tool + ok/error in memory, `server/plugins/hosted-usage.ts` flushes one `usage.rollup` row per org per minute. Crash loses ≤ a minute — never bill from rollups.
+- **Web app has no seat sync and no Stripe dependency.** Membership changes reach billing only as outbox events. Never call cloud from inside a transaction.
+
+**Cloud service (`apps/cloud`, Node type stripping like the bridge, `pnpm cloud:dev` / `pnpm cloud:typecheck`):**
+
+- `plans.ts` = only place plan rules live: Free 1/1/1, Pro = Stripe status `trialing`/`active`/`past_due` (retry window counts as Pro), 5 seats included. `applyPlanEntitlements()` turns stored status into `max_*` + `plan_label` in one statement (one org after sync, all at boot). `writeEntitlementDefaults()` at boot.
+- `billing.ts` = only file importing Stripe SDK. Still reads/writes Stripe columns on `app.organizations` (moving to `cloud` schema = phase 3).
+- **Payload = hint, live read = fact.** Webhook (`POST /webhooks/stripe`, signature-verified) maps customer → org, `syncOrg()` re-lists subscriptions, writes status + limits + `plan.changed` in **one transaction**. Sole writer of `subscription_status`. Non-2xx → Stripe retries. Hourly reconcile = backstop.
+- **Outbox consumer** (`outbox.ts`, every 15 s): cursor per consumer in `cloud.cursors`, **rows never deleted** so later consumers (CRM, telemetry) start from backlog. Cursor advances past every event, incl. ignored ones. `member.*` → `syncSeats`, failures logged and left to reconcile (seats = state). `org.deleted` → `cancelForDeletedOrg` (finds customer by `org_id` metadata via Stripe search — org row already gone), failure **stops cursor** there to retry, since nothing else would cancel it. First run starts at newest event.
+- Waits for web migration `0007_entitlement_defaults` rather than failing (`waitForApp`); `/health` reports `app: waiting|ready`. Admin routes 503 until ready.
+- Stripe vars all-or-none: none → runs, writes limits, billing routes 503; some → refuses to start. `APP_URL` = only source for Checkout/Portal return links, never request.
+- Listens `::`, falls back to `0.0.0.0` on `EAFNOSUPPORT` (IPv6-less host).
+
+Rules easy to undo:
+
+- **Org born with defaults (Free); Pro only when Stripe says so.** Signup's `plan` (carried on `email_verifications.plan` through verification) only decides whether browser goes on to Checkout. Abandoned checkout = working Free account.
+- **Limit checks at choke points, under org row lock.** `assertCanAdd(db, org, …)` reads `max_*` with `app.organizations` row `FOR UPDATE`, returns if NULL, else counts — takes `Db`, runs in caller's transaction. Token mint wraps check + `createToken` in one tx. Member check lives **inside `acceptInviteInto`** — covers accept, invited signup, invited verify. Invite creation counts pending invites too. Connection check runs before provisioning and can't hold lock across it; race harmless because of next rule.
+- **Over its limits: oldest `max_tokens` live tokens on oldest `max_connections` connections answer, rest 403** (`mcpLimitRefusal`, `server/mcp/index.ts` after `resolveMcpAuth`). Limits ride on `resolveMcpAuth`'s existing query (LEFT JOIN `organizations`), so no-limit org pays zero extra queries. **Never 401** — client would discard token that revives on resubscribe. Read failure 503. Nothing deleted on lapse.
+- **Org deleted by last member leaving cancels its subscription** (cloud, via `org.deleted`). Web no longer refuses the move.
+- **Limits in DB outlive hosted mode.** Unsetting `NUXT_CLOUD_URL` stops writes, doesn't clear `max_*`; clear by hand.
+- Plan limit refusal = **402** `data.code = 'plan_limit'`; UI (`toastApiError` in `usePlan.ts`) offers Billing link to admins only. UI copy outside Billing page words limits by number, not plan name.
 
 ## Email verification
 
@@ -209,7 +249,7 @@ Sharper edge now: global key can sit **on instance row itself** — `instances.a
 
 Only Postgres **pins** approved address (`postgres({ host })`, driver never resolves name itself). Evolution path re-checks before every request but can't pin, because `$fetch` resolves DNS itself; closing window needs undici `Agent` with `connect` hook, and `undici` not direct dependency. Residual rebinding window documented at call site in `evolution.ts` — don't delete note without closing hole.
 
-**Secrets on `instances` are plain columns, not encrypted.** `api_key`, `admin_key`, `dsn`, `evolution_db_url`, `telegram_db_url` never leave server — `toPublicInstance()` only projection UI receives — sit in clear in DB and every backup. `NUXT_DATABASE_URL` in `net-guard`'s own-backends list, so user DSN resolving to it refused regardless of `NUXT_ALLOW_PRIVATE_TARGETS`.
+**Secrets on `instances` are plain columns, not encrypted.** `api_key`, `admin_key`, `dsn`, `evolution_db_url`, `telegram_db_url`, `imap_password` never leave server — `toPublicInstance()` only projection UI receives — sit in clear in DB and every backup. `NUXT_DATABASE_URL` in `net-guard`'s own-backends list, so user DSN resolving to it refused regardless of `NUXT_ALLOW_PRIVATE_TARGETS`.
 
 **Evolution DB connection read-only, and now only way messages are read.** `server/utils/evolution-db.ts` = one file talking to Evolution's Postgres. Began as search escape hatch — 2.3.7's `POST /chat/findMessages` accepts `where.message` and never reads it, so content search returns unfiltered page that reads as result set; that field is trap — and `read-messages` joined for second reason, below. `NUXT_EVOLUTION_DATABASE_URL` therefore **required**; no HTTP fallback; missing value announced once at startup (`server/plugins/evolution-db-check.ts`), answers 500 not 503, since retry won't fix it.
 
@@ -258,7 +298,7 @@ Connection far wider than anything else app holds (every user's messages, every 
 
 Three more things `describe-table` reads that obvious query misses. **CHECK constraints = column's value domain** as much as enum — `CHECK (status IN ('open','closed','void'))` on `text` column — so `contype` collects `c` alongside `p` and `u`; filter on value outside returns no rows, reads as empty result not mistake. **Enum column's labels three hops from `atttypid`**: type itself, array's `typelem`, or domain's `typbasetype`, since `order_status[]` and domain over `order_status` as enumerated as bare column; reading only `atttypid` reports neither. **View's `pg_get_viewdef` = its relationship docs** — view has no PK, no FKs, (unmaterialized) no indexes, so without it view describes as bag of columns joined to nothing; clipped at `MAX_VIEW_DEFINITION` since view body = arbitrary user SQL, no natural bound, and tool called before most queries. All four queries still one `Promise.all` on `target.oid`, round-trip cost unchanged.
 
-**Deliberate holes, documented not papered over.** Triggers invisible to `EXPLAIN` without `ANALYZE`, so write to allowed table can cascade anywhere. `postgres_fdw`/`dblink` name local foreign table, not remote object. `pg_catalog` and `information_schema` stay readable, so schema names leak regardless. Superuser DSN makes all of it best-effort — `probePgConnection` detects so UI can say so.
+**Deliberate holes, documented not papered over.** Triggers invisible to `EXPLAIN` without `ANALYZE`, so write to allowed table can cascade anywhere. `postgres_fdw`/`dblink` name local foreign table, not remote object. `pg_catalog` and `information_schema` stay readable, so schema names leak regardless. Superuser DSN makes all of it best-effort — `pgIdentity()` reads `rolsuper` / `rolbypassrls` / `pg_read_server_files` on every health check (live, not stored at save: grants change after), `pgPrivilegeWarning()` words it, Postgres dashboard shows `NoticeCard`, `get-database-info` returns `superuser`.
 
 **Pool cache keyed on connection id, not DSN.** DSN-keyed Map holds every user's DB password as live string visible in heap snapshot; id finds pool, fingerprint notices rotation. Eviction on acquire, not timer — interval outlives nothing useful in worker platform stops/starts. `onnotice` silenced since `RAISE NOTICE` in trigger can carry row data into process log, the one place this must not leak.
 
@@ -352,7 +392,7 @@ All best-effort, degrades to raw id: participants need live socket, so disconnec
 
 ## Webhooks are registered per instance, and the global one is off
 
-`registerConnectionWebhook()` in `instances.ts` does it, at provision and every sweep. `WEBHOOK_GLOBAL_ENABLED` is `false` in `docker-compose.dev.yml` and `docker-compose.yml` and `docs/deploy-railway.md`; turning back on delivers everything twice.
+`registerConnectionWebhook()` in `instances.ts` does it, at provision and from hourly `alerts:register-webhooks` task. `WEBHOOK_GLOBAL_ENABLED` is `false` in `docker-compose.dev.yml` and `docker-compose.yml` and `docs/deploy-railway.md`; turning back on delivers everything twice.
 
 Two independent reasons per-instance route works:
 
@@ -508,6 +548,32 @@ Same split as WhatsApp — `telegram.ts` talks to bridge over HTTP, `telegram-db
 
 **Tool names carry `telegram`** (`read-telegram-messages`, …) since tool basenames global across groups.
 
+## IMAP connections
+
+`imap-client.ts` = only file speaking IMAP (imapflow): connect, probe, live body / attachment / body-search. `imap-sync.ts` = header sync. `imap-db.ts` = SQL reads over `app.mail_*`. `mail-format.ts` = tool presentation + folder resolution. Tools in `server/mcp/tools/imap/`. `docs/imap.md` = operator side.
+
+**Hybrid by decision: headers synced, bodies and attachments never stored.** Row ≈ 1 KB (envelope, flags, BODYSTRUCTURE part ids, attachment name/type/size). `read-email` downloads text part live, `get-email-attachment` streams one part into memory, `search-emails`' `text` = server's own `SEARCH BODY` (Gmail: `X-GM-RAW`), UIDs joined back onto synced rows. Never add body or attachment columns — storage was the stated constraint.
+
+Rules easy to undo:
+
+- **Every connect through `assertPublicTarget`, dials approved address**, hostname as `servername`, `rejectUnauthorized: true`. **No plaintext:** `starttls` sets `doSTARTTLS: true` — imapflow's default carries on in cleartext when STARTTLS absent from (strippable) capabilities.
+- **Read-only everywhere but one APPEND:** every mailbox opened `readOnly` (EXAMINE), parts fetched with BODY.PEEK — reading must not mark mail read for owner. Only write = `appendDraft()`: one APPEND of a `\Draft` `\Seen` message, on its own short-lived connection, never through cached `imapFor` client, never selecting a mailbox read-write, never retried (retry after accepted literal = two drafts). Connector can't send/move/flag/delete; adding that = new write tools, new scope decision. No SMTP — drafting must never grow a send path.
+- **`create-email-draft`: folder never an argument.** `draftsFolder()` (`mail-format.ts`) picks `\Drafts` special-use, else sole folder named `Drafts`, else 409 — ambiguity refused, not guessed. Looked up across all folders, *then* `assertFolderAllowed`, so scoped token without Drafts gets 403 naming it, not false "no Drafts folder". Plain text only, no attachments, From = `imap_user` (422 when not an address). Bcc must survive into draft — why MIME built by nodemailer's stream transport (keeps Bcc) not `MailComposer` (drops it). New IMAP tokens start read-only (`McpTokens.vue` `startsReadOnly`); existing `all_tools` tokens picked it up, by decision.
+- **`error` listener on every ImapFlow** — unhandled `error` on dropped socket crashes process.
+- **UIDVALIDITY checked before every folder (sync) and every live fetch.** Changed value = folder renumbered: sync deletes folder's rows and restarts; live fetch answers 410. `emailId` encodes folder + uidvalidity + uid for this reason.
+- **Completeness decided by date, never UID position.** UIDs follow arrival, not sending; imported mail lands old messages at high UIDs. `finished()` = `SEARCH BEFORE cutoff` empty. Walking UIDs to 1 and calling it complete reported a year of skipped mail as "no older mail" — found in testing.
+- **Lease by conditional UPDATE** (`lease_until < now()`), not advisory lock — no DB connection held across minutes of IMAP. Scheduled task safe on several replicas (unlike alert sweep). Crash mid-run holds lease ≤ 10 min.
+- **`auth_failed` stops scheduled sync** until credentials change or Sync now — retrying refused password every 2 min gets accounts locked.
+- **Identity (`lower(user@host)`) change wipes synced rows** (`resetIfIdentityChanged`), in credential update and before every run.
+- **`part` checked against row's stored `attachments`** before any download — arbitrary part id = read body / nested messages through file route. Size refused from BODYSTRUCTURE before download, cap re-enforced on bytes.
+- **Folder scope rides `chat_jids`** (paths), `connectionFamily('imap') = 'messaging'`. Predicate in SQL for listings; `assertFolderAllowed` before live fetch. Cross-folder listings collapse by `Message-ID` (`DISTINCT ON`) inside scope only — `folders` never names a folder token can't see.
+- **Health = sync's last outcome, not live login** (`getImapHealth`) — dashboard polls, login per poll = rate-limit. Stale (>15 min) reads `unknown`, never `open`. Listings carry `staleSyncNote`.
+- **All Mail / Junk / Trash / `\Noselect` listed, not synced** — All Mail duplicates everything.
+- Live connection cached via `keyedResource('imap:<id>')` with build de-dupe; one retry on dropped connection (`isDropped`). Sync uses own short-lived connection so backfill never holds mailbox tool call waits on.
+- Tool result with `content: [...]` passes through toolkit's `normalizeToolResult` untouched — how attachments return `image` / `resource` blocks. Never return plain object with array `content` key from other tools.
+
+Not alertable yet (`alertableKind` → `undefined`); `auth_failed` is the signal that would drive it. OAuth (Gmail/Microsoft XOAUTH2) not supported.
+
 ## The app database
 
 `server/utils/app-db.ts` owns pool; `server/db/migrations.ts` = schema.
@@ -541,9 +607,9 @@ cd apps/web && pnpx shadcn-vue@latest add <component>
 
 **Provisioning click-triggered, not on-mount.** Creating WhatsApp instance reserves live socket on Evolution, so page refresh must never create second account. DB connection proved by actually connecting, refresh shouldn't redo that either.
 
-**Dashboard = two panels, not one with hidden fields.** `pages/instances/[id].vue` picks `InstanceWhatsapp.vue` or `InstancePostgres.vue` from `instance.kind`; database has no QR, profile, message count, and empty version of any suggests state it can be in. Page decides from `/api/instances/:id/summary` — app-DB read, no backend call — since chosen panel makes expensive call itself; deciding from full status fetch = two.
+**Dashboard = one panel per kind, not one with hidden fields.** `pages/instances/[id].vue` picks `InstanceWhatsapp.vue`, `InstanceTelegram.vue`, `InstancePostgres.vue` or `InstanceImap.vue` from `instance.kind`; database has no QR, profile, message count, and empty version of any suggests state it can be in. Page decides from `/api/instances/:id/summary` — app-DB read, no backend call — since chosen panel makes expensive call itself; deciding from full status fetch = two.
 
-**Two messaging panels share markup.** `InstanceWhatsapp.vue` and `InstanceTelegram.vue` keep only genuine differences — pairing flow, mode logic, per-kind copy — render rest through `InstanceHeader` (all three panels), `MessagingOverview` (one-row Profile → Messages → Chats → Contacts strip and its dialogs; Contacts only when `stats.contacts` set, which Telegram never sets), `SessionLostNotice`, `DbUrlNotice`, `NoticeCard`, `ConfirmAction`, `QrFrame` and `useReconnect()` composable. Change layout there, not in panel, or they drift again.
+**Two messaging panels share markup.** `InstanceWhatsapp.vue` and `InstanceTelegram.vue` keep only genuine differences — pairing flow, mode logic, per-kind copy — render rest through `InstanceHeader` (all four panels), `MessagingOverview` (one-row Profile → Messages → Chats → Contacts strip and its dialogs; Contacts only when `stats.contacts` set, which Telegram never sets), `SessionLostNotice`, `DbUrlNotice`, `NoticeCard`, `ConfirmAction`, `QrFrame` and `useReconnect()` composable. Change layout there, not in panel, or they drift again.
 
 **Scope picker fetches only axis kind has.** `TokenScopeFields.vue` sets `immediate` per kind: asking WhatsApp connection for tables answers 404, and console 404 on every dialog open reads as bug. New Postgres token starts read-only, read tools pre-checked from server's own catalogue.
 
@@ -567,11 +633,12 @@ Every image tag in `docker-compose.dev.yml`, `docker-compose.yml` and `docker/ai
 
 ## Releases
 
-Merging `main` into `prod` publishes `ghcr.io/ju-li/automata-mcp-web`, `ghcr.io/ju-li/automata-mcp-telegram-bridge` and `ghcr.io/ju-li/automata-mcp-aio`, tagged with version in **root `package.json`** — only place version lives; `apps/*/package.json` unversioned. `docs/releases.md` = operator's procedure.
+Merging `main` into `prod` publishes `ghcr.io/ju-li/automata-mcp-web`, `ghcr.io/ju-li/automata-mcp-telegram-bridge` and `ghcr.io/ju-li/automata-mcp-aio`, tagged with version in **root `package.json`**; `apps/*/package.json` unversioned. `docs/releases.md` = operator's procedure.
 
 - **`.github/scripts/release-version.sh`** = one version rule: three-part `X.Y.Z`, no existing `vX.Y.Z` tag, strictly above latest. Both workflows call it, so PR check and push guard can't drift.
 - **`release-check.yml`** (PRs into `prod`) runs that, builds all three images without pushing — after merge, bad version or broken Dockerfile already on release branch.
 - **`release.yml`** (push to `prod`) re-runs version guard, pushes all three images, then creates tag and GitHub Release **last**, so tag means images exist. All in one workflow since tag pushed with `GITHUB_TOKEN` doesn't trigger another.
+- **Directory listings repeat version: `server.json` (official MCP Registry), `lhm.plugin.json` (LobeHub), `.cursor-plugin/plugin.json` (cursor.directory, beside root `mcp.json`).** `.github/scripts/listings.mjs` = one rule: `pnpm release:version X.Y.Z` writes all four, `check` (run by `release-version.sh`) refuses release whose listings disagree with `package.json` or whose `lhm.plugin.json` tool names differ from `server/mcp/tools/`. Tool list regenerated from live `/.well-known/mcp/server-card.json` (`pnpm listings:tools <url>`) since JSON Schemas exist only at runtime — check compares names only. `release.yml` publishes `server.json` last (`mcp-registry` job, DNS-key secret `MCP_REGISTRY_DNS_KEY`, `mcp-publisher` pinned + checksummed). LobeHub stays manual: its CLI has no non-interactive login. Root `mcp.json` is Cursor's format (`${env:AUTOMATA_TOKEN}` in header) — Agent Plugins spec forbids that expansion but has no credential mechanism, and server has no OAuth; never `.mcp.json`, which Claude Code would load as this repo's own project config.
 - **`main → prod` = merge commit, never squash.** Squash leaves `prod` off `main`'s history; every later release PR re-shows old commits or conflicts.
 
 Templates pin major tag, not `latest`: migrations run at boot, append-only, so image rollback after one isn't clean undo.

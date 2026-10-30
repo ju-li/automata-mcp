@@ -8,6 +8,12 @@ const body = z.object({
   invite: z.string().max(200).optional(),
   /** `NUXT_SIGNUP_CODE`, when the deployment is invite-only and has one. */
   signupCode: z.string().max(200).optional(),
+  /**
+   * The plan picked on the signup page, with billing on. Required then for a
+   * signup that creates an organization; ignored for an invited one, which
+   * joins an organization that already has a plan, and without billing.
+   */
+  plan: z.enum(['free', 'pro']).optional(),
 })
 
 /**
@@ -36,7 +42,7 @@ const body = z.object({
  * whether the address already had an account — that mail says so instead.
  */
 export default defineEventHandler(async (event) => {
-  const { email, password, name, invite: code, signupCode } = await parseBody(event, body)
+  const { email, password, name, invite: code, signupCode, plan } = await parseBody(event, body)
 
   const invited = code ? await resolveInvite(code) : undefined
   const { firstAccountOnly } = invited ? { firstAccountOnly: false } : checkSelfSignup(event, signupCode)
@@ -55,6 +61,15 @@ export default defineEventHandler(async (event) => {
     }
   }
 
+  // The organization is created on Free whatever was picked; Pro begins when
+  // Stripe confirms the trial. Picking Pro only decides where the browser goes
+  // next: on to Checkout.
+  const chosenPlan = !invited && hostedMode() ? plan : undefined
+  if (!invited && hostedMode() && !chosenPlan) {
+    throw createError({ statusCode: 422, statusMessage: 'Choose a plan to sign up.' })
+  }
+  const nextStep = chosenPlan === 'pro' ? 'checkout' as const : undefined
+
   const verify = emailVerificationRequired()
   if (verify && verificationSetting() === 'required') assertVerificationDeliverable()
 
@@ -68,6 +83,7 @@ export default defineEventHandler(async (event) => {
       name: name?.trim() || email.split('@')[0] || '',
       inviteId: invited?.invite?.id,
       firstAccountOnly,
+      plan: chosenPlan,
     })
     return { verificationRequired: true, email: pending.email }
   }
@@ -81,6 +97,11 @@ export default defineEventHandler(async (event) => {
       passwordHash,
       name: name?.trim() || email.split('@')[0] || '',
     })
+    await recordHostedEvent(tx, {
+      type: 'user.signed_up',
+      userId: created.id,
+      payload: { email: created.email, name: created.name, plan: chosenPlan ?? null, invited: Boolean(invited?.invite) },
+    })
 
     if (invited?.invite) {
       await acceptInviteInto(tx, created, invited.invite.org, invited.invite.role)
@@ -93,5 +114,5 @@ export default defineEventHandler(async (event) => {
   })
 
   await startSession(event, user.id)
-  return { id: user.id, email: user.email }
+  return { id: user.id, email: user.email, next: nextStep }
 })

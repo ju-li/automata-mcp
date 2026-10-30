@@ -6,11 +6,11 @@ import {
   DatabaseIcon,
   HardDriveIcon,
   LeafIcon,
+  MailIcon,
   MessageCircleIcon,
   SendIcon,
   SmartphoneIcon,
 } from '@lucide/vue'
-import { toast } from 'vue-sonner'
 
 /**
  * Pick a kind, then fill in that kind's form.
@@ -23,6 +23,19 @@ import { toast } from 'vue-sonner'
 const kind = ref<InstanceKind | undefined>()
 const label = ref('')
 const busy = ref(false)
+
+// An organization at its connection limit is told so before it fills in a
+// form the server will refuse. Never fetched without limits, so a self-hosted
+// deployment makes no such request.
+const { limited } = usePlan()
+const { data: billingInfo } = await useFetch<{ usage: { connections: number }, limits: { connections?: number } | null }>(
+  '/api/billing',
+  { immediate: limited.value, server: false },
+)
+const atConnectionLimit = computed(() => {
+  const limit = billingInfo.value?.limits?.connections
+  return limited.value && limit != null && (billingInfo.value?.usage.connections ?? 0) >= limit
+})
 
 interface KindCard {
   title: string
@@ -53,6 +66,11 @@ const kindCards: Record<InstanceKind, KindCard> = {
     description: 'Point Claude at a database with a connection string or its parameters. Read-only by default.',
     icon: DatabaseIcon,
   },
+  imap: {
+    title: 'Email (IMAP)',
+    description: 'Connect a mailbox with its IMAP login. Claude can list, search and read email and its attachments.',
+    icon: MailIcon,
+  },
 }
 
 /**
@@ -80,6 +98,11 @@ const groups: {
         icon: SmartphoneIcon,
       },
     ],
+  },
+  {
+    heading: 'Email',
+    kinds: ['imap'],
+    soon: [],
   },
   {
     heading: 'Databases',
@@ -123,6 +146,9 @@ const serverDbUrl = ref('')
 // Postgres
 const dsn = ref('')
 
+// IMAP
+const imap = ref<ImapCredentials>(emptyImapCredentials())
+
 // Whether this deployment's own Telegram bridge can serve Telegram — asked when
 // Telegram is picked, so a bridge running without its API credentials says what
 // to set before the form is filled in rather than on the click. Re-asked on every
@@ -154,6 +180,7 @@ const telegramBlocked = computed(() =>
 const canSubmit = computed(() => {
   if (busy.value) return false
   if (kind.value === 'postgres') return dsn.value.trim().length > 0
+  if (kind.value === 'imap') return imapCredentialsBody(imap.value) !== undefined
   if (kind.value === 'whatsapp' || kind.value === 'telegram') {
     if (!ownServer.value) return !telegramBlocked.value
     return serverUrl.value.trim().length > 0 && serverKey.value.trim().length > 0
@@ -167,6 +194,8 @@ async function create() {
 
   const body = kind.value === 'postgres'
     ? { kind: 'postgres', label: label.value, dsn: dsn.value.trim() }
+    : kind.value === 'imap'
+    ? { kind: 'imap', label: label.value, ...imapCredentialsBody(imap.value) }
     : {
         kind: kind.value,
         label: label.value,
@@ -189,14 +218,18 @@ async function create() {
   catch (err: any) {
     // The server's message is the useful part here — it names the bad host, the
     // refused address or the connection error — so show it rather than a generic.
-    toast.error(apiErrorMessage(err, 'Could not create the connection'))
+    toastApiError(err, 'Could not create the connection', { isAdmin: true })
     busy.value = false
   }
 }
 </script>
 
 <template>
-  <div class="mx-auto max-w-md space-y-6">
+  <!--
+    The picker takes the layout's full width so its cards sit in a grid; the
+    form for a chosen kind is a single column of inputs and stays narrow.
+  -->
+  <div class="mx-auto space-y-6" :class="kind ? 'max-w-md' : 'max-w-5xl'">
     <div>
       <h1 class="font-heading text-2xl font-semibold">
         Add a connection
@@ -207,19 +240,36 @@ async function create() {
       </p>
     </div>
 
+    <NoticeCard
+      v-if="atConnectionLimit"
+      :title="`Your plan includes ${billingInfo?.limits?.connections} connection${billingInfo?.limits?.connections === 1 ? '' : 's'}`"
+    >
+      <template #description>
+        <p class="mt-1 text-sm text-muted-foreground">
+          Upgrade for more connections and connector tokens, or delete an
+          existing connection to add a different one.
+        </p>
+      </template>
+      <Button as-child size="sm">
+        <NuxtLink to="/billing">
+          See plans
+        </NuxtLink>
+      </Button>
+    </NoticeCard>
+
     <!-- ── kind ─────────────────────────────────────────────────────────── -->
-    <div v-if="!kind" class="space-y-6">
+    <div v-else-if="!kind" class="space-y-6">
       <section v-for="group in groups" :key="group.heading" class="space-y-3">
         <h2 class="text-xs font-medium uppercase tracking-wide text-muted-foreground">
           {{ group.heading }}
         </h2>
 
-        <div class="grid gap-3">
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <button
             v-for="available in group.kinds"
             :key="available"
             type="button"
-            class="flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-accent"
+            class="flex h-full items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:bg-accent"
             @click="kind = available"
           >
             <component :is="kindCards[available].icon" class="mt-0.5 size-5 shrink-0 text-muted-foreground" />
@@ -238,11 +288,11 @@ async function create() {
           <div
             v-for="card in group.soon"
             :key="card.title"
-            class="flex items-start gap-3 rounded-lg border border-dashed p-4 opacity-60"
+            class="flex h-full items-start gap-3 rounded-lg border border-dashed p-4 opacity-60"
           >
             <component :is="card.icon" class="mt-0.5 size-5 shrink-0 text-muted-foreground" />
             <div>
-              <div class="flex items-center gap-2">
+              <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
                 <span class="font-medium">{{ card.title }}</span>
                 <Badge variant="secondary">
                   Coming soon
@@ -266,7 +316,7 @@ async function create() {
             <Input
               id="label"
               v-model="label"
-              :placeholder="kind === 'postgres' ? 'Production analytics' : kind === 'telegram' ? 'Personal Telegram' : 'Work phone'"
+              :placeholder="kind === 'postgres' ? 'Production analytics' : kind === 'telegram' ? 'Personal Telegram' : kind === 'imap' ? 'Work inbox' : 'Work phone'"
               @keydown.enter="create"
             />
             <p class="text-xs text-muted-foreground">
@@ -283,6 +333,19 @@ async function create() {
                 Checked by actually connecting before it is saved, and never shown
                 again afterwards. It is stored so this app can reconnect, so treat
                 the password in it as one this server holds.
+              </p>
+            </div>
+          </template>
+
+          <!-- IMAP -->
+          <template v-else-if="kind === 'imap'">
+            <Separator />
+            <div class="space-y-2">
+              <ImapCredentialsInput v-model="imap" id-prefix="imap" />
+              <p class="text-xs text-muted-foreground">
+                Checked by logging in before it is saved, and never shown again
+                afterwards. The password is stored so this app can sync, so use an
+                app password you can revoke on its own.
               </p>
             </div>
           </template>
@@ -461,10 +524,10 @@ async function create() {
 
           <Button class="w-full" :disabled="!canSubmit" @click="create">
             <template v-if="busy">
-              {{ kind === 'postgres' ? 'Connecting…' : 'Setting up…' }}
+              {{ kind === 'postgres' || kind === 'imap' ? 'Connecting…' : 'Setting up…' }}
             </template>
             <template v-else>
-              {{ kind === 'postgres' ? 'Connect database' : 'Continue to QR code' }}
+              {{ kind === 'postgres' ? 'Connect database' : kind === 'imap' ? 'Connect mailbox' : 'Continue to QR code' }}
             </template>
           </Button>
 
@@ -485,6 +548,18 @@ async function create() {
             everything can be talked into reading everything. Create a role with
             <span class="font-mono">GRANT SELECT</span> on just the tables you
             want, and use that here.
+          </p>
+        </template>
+        <template v-else-if="kind === 'imap'">
+          <p class="font-medium">
+            Use an app password, not your account password.
+          </p>
+          <p class="mt-1 text-muted-foreground">
+            Most providers issue app passwords for exactly this: one you can revoke
+            without changing your main password. Microsoft 365 and Outlook.com no
+            longer accept passwords over IMAP and cannot be connected this way.
+            Headers sync here; message bodies and attachments are fetched from your
+            mail server only when Claude asks, and never stored.
           </p>
         </template>
         <template v-else-if="kind === 'telegram'">

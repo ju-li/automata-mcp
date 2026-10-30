@@ -34,6 +34,9 @@ export default defineKindTool({
       serverVersion: identity?.server ?? 'unknown',
       database: identity?.database ?? instance.db_database ?? 'unknown',
       role: identity?.currentUser ?? 'unknown',
+      // A superuser bypasses every grant, so the table scope below is
+      // best-effort; worth knowing before trusting a refusal or an empty result.
+      ...(identity && { superuser: identity.superuser }),
       host: instance.db_host,
       port: instance.db_port,
       allTables: scope.allTables,

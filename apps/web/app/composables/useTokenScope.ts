@@ -15,6 +15,10 @@ export interface ScopedChat {
   number?: string
   /** Telegram only: the chat's public @username, without the @. */
   username?: string
+  /** IMAP only: emails synced in this folder. */
+  messages?: number
+  /** IMAP only: false for a folder that exists but is not synced (Junk, Trash, All Mail). */
+  synced?: boolean
   /** Members in a group. Absent when the group lookup was skipped as unnecessary. */
   participantCount?: number
   profilePicUrl?: string
@@ -55,8 +59,8 @@ export function openScope(): TokenScope {
 }
 
 /**
- * Initial scope for a new token on a Postgres connection: every read tool, no
- * write tool.
+ * Initial scope for a new token on a Postgres or mailbox connection: every
+ * read tool, no write tool.
  *
  * Read-only is the default because the cost of the two mistakes is not
  * symmetric — a token that turns out to need writes is one edit away, and a
@@ -94,12 +98,58 @@ export function describeScope(scope: TokenScope, kind: InstanceKind): string {
       dataOpen = scope.all_chats
       data = scope.all_chats ? 'All chats' : plural(scope.chat_jids.length, 'chat')
       break
+    // Folders ride the chat axis (`chat_jids` holds paths on a mail token).
+    case 'imap':
+      dataOpen = scope.all_chats
+      data = scope.all_chats ? 'All folders' : plural(scope.chat_jids.length, 'folder')
+      break
     default:
       return assertNever(kind, 'connection kind')
   }
 
   if (scope.all_tools && dataOpen) return 'Full access'
   return [data, scope.all_tools ? 'all actions' : plural(scope.tool_names.length, 'action')].join(' · ')
+}
+
+/** What the disclaimer field holds when an admin turns it on. Editable from there. */
+export const DEFAULT_SEND_DISCLAIMER = 'Sent using Automata'
+
+/**
+ * The tool that sends messages on this kind of connection, if it has one.
+ *
+ * Named rather than inferred from "any write tool": the disclaimer is applied
+ * inside these handlers specifically, so a future write tool is not covered by
+ * it until it applies the disclaimer itself and is named here.
+ */
+function sendToolOf(kind: InstanceKind): string | undefined {
+  switch (kind) {
+    case 'whatsapp':
+      return 'send-text-message'
+    case 'telegram':
+      return 'send-telegram-message'
+    case 'postgres':
+    case 'imap':
+      return undefined
+    default:
+      return assertNever(kind, 'connection kind')
+  }
+}
+
+/** Whether a token with this scope may send messages from the account. */
+export function allowsSending(scope: TokenScope, kind: InstanceKind): boolean {
+  const tool = sendToolOf(kind)
+  if (!tool) return false
+  return scope.all_tools || scope.tool_names.includes(tool)
+}
+
+/**
+ * The `send_disclaimer` to submit. A token that cannot send stores none, so
+ * turning sending off and back on later does not revive a disclaimer nobody
+ * could see while it was hidden; a blank field is off, not an empty line.
+ */
+export function disclaimerToSubmit(scope: TokenScope, kind: InstanceKind, disclaimer: string | null): string | null {
+  if (!allowsSending(scope, kind)) return null
+  return disclaimer?.trim() || null
 }
 
 function plural(n: number, noun: string): string {

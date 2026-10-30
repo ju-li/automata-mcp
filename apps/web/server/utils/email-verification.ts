@@ -60,12 +60,14 @@ interface VerificationRow {
   name?: string
   invite_id?: string
   first_account_only: boolean
+  /** The plan picked on the signup page, in hosted mode. See cloud.ts. */
+  plan?: 'free' | 'pro'
   expires_at: string
 }
 
 const ROW_COLUMNS = [
   'id', 'purpose', 'email', 'code_hash', 'attempts', 'user_id', 'password_hash', 'name',
-  'invite_id', 'first_account_only', 'expires_at',
+  'invite_id', 'first_account_only', 'plan', 'expires_at',
 ] as const
 
 let warnedSetting = false
@@ -282,7 +284,7 @@ export function clearVerifyCookie(event: H3Event): void {
 }
 
 type StartInput =
-  | { purpose: 'signup', email: string, passwordHash: string, name: string, inviteId?: string, firstAccountOnly: boolean }
+  | { purpose: 'signup', email: string, passwordHash: string, name: string, inviteId?: string, firstAccountOnly: boolean, plan?: 'free' | 'pro' }
   | { purpose: 'email_change', email: string, userId: string }
 
 /**
@@ -320,6 +322,7 @@ export async function startVerification(event: H3Event, input: StartInput): Prom
         name: input.purpose === 'signup' ? input.name : null,
         invite_id: input.purpose === 'signup' ? input.inviteId ?? null : null,
         first_account_only: input.purpose === 'signup' && input.firstAccountOnly,
+        plan: input.purpose === 'signup' ? input.plan ?? null : null,
         expires_at: expiresAt,
       })}
     `
@@ -408,6 +411,12 @@ export interface VerificationResult {
   email: string
   /** Whether this request was signed in. False for a signup confirmed by link in another browser. */
   signedIn: boolean
+  /**
+   * `checkout` when the signup picked Pro and this browser is signed in: the
+   * page sends it on to Stripe. Anywhere else, the trial waits on the Billing
+   * page — the organization is on Free until Stripe confirms either way.
+   */
+  next?: 'checkout'
 }
 
 /** A spent row, with the hash that says which browser was waiting for it. */
@@ -570,7 +579,8 @@ async function complete(
     })
   }
 
-  return { purpose: row.purpose, email: row.email, signedIn }
+  const next = signedIn && row.plan === 'pro' && !row.invite_id && hostedMode() ? 'checkout' as const : undefined
+  return { purpose: row.purpose, email: row.email, signedIn, ...(next ? { next } : {}) }
 }
 
 /**
@@ -583,6 +593,11 @@ async function createVerifiedAccount(tx: Db, row: VerificationRow): Promise<stri
   if (row.first_account_only) await claimFirstAccount(tx)
 
   const created = await createUser(tx, { email: row.email, passwordHash: row.password_hash!, name: row.name ?? '' })
+  await recordHostedEvent(tx, {
+    type: 'user.signed_up',
+    userId: created.id,
+    payload: { email: created.email, name: created.name, plan: row.plan ?? null, invited: Boolean(row.invite_id) },
+  })
 
   if (row.invite_id) {
     const [invite] = await tx<AppInvitation[]>`SELECT * FROM app.invitations WHERE id = ${row.invite_id}`
@@ -608,6 +623,7 @@ async function changeVerifiedEmail(tx: Db, row: VerificationRow): Promise<string
 
   try {
     await tx`UPDATE app.users SET email = ${row.email}, updated = now() WHERE id = ${row.user_id!}`
+    await recordHostedEvent(tx, { type: 'user.email_changed', userId: row.user_id!, payload: { from: current.email, to: row.email } })
   }
   catch (error) {
     if (isUniqueViolation(error)) {

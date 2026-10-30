@@ -5,7 +5,7 @@ const body = z.object({
   expiry: z.enum(['30d', '90d', '1y', 'never']).default('90d'),
   /** The member to issue it to. Defaults to the acting admin. */
   assignedTo: z.string().min(1).optional(),
-}).and(scopeSchema)
+}).and(scopeSchema).and(disclaimerSchema)
 
 /**
  * Mint a connector token for this connection.
@@ -48,13 +48,28 @@ export default defineEventHandler(async (event) => {
     }
   }
 
-  const { token, record } = await createToken({
-    instanceId: instance.id,
-    assignedTo,
-    createdBy: actor.user.id,
-    label: parsed.label ?? '',
-    preset: parsed.expiry,
-    scope: scopeFromInput(parsed),
+  // The plan's token limit and the insert in one transaction, under the
+  // organization row lock `assertCanAdd` takes, so two racing mints at the limit
+  // cannot both land.
+  const sql = await appDb()
+  const { token, record } = await sql.begin(async (tx) => {
+    await assertCanAdd(tx, actor.org.id, 'token')
+    const minted = await createToken({
+      instanceId: instance.id,
+      assignedTo,
+      createdBy: actor.user.id,
+      label: parsed.label ?? '',
+      preset: parsed.expiry,
+      scope: scopeFromInput(parsed),
+      sendDisclaimer: parsed.send_disclaimer,
+    }, tx)
+    await recordHostedEvent(tx, {
+      type: 'token.created',
+      org: actor.org.id,
+      userId: assignedTo,
+      payload: { id: minted.record.id, connection: instance.id, kind: instance.kind },
+    })
+    return minted
   })
 
   return { token, record }

@@ -1,6 +1,7 @@
 import { assertNever } from '#shared/connection'
 import { randomBytes } from 'node:crypto'
 import type { AppInstance } from './app-db'
+import type { ImapSecurity, ImapTarget } from './imap-client'
 import type { Actor } from './org'
 import type { ConnectionState } from '#shared/connection'
 
@@ -100,6 +101,15 @@ export function toPublicInstance(instance: AppInstance): PublicInstance {
         ownServer: Boolean(instance.admin_key),
         // Telegram's own rule, not Evolution's: see `telegramDbUrlFor`.
         canReadMessages: canReadTelegramMessages(instance),
+      }
+    case 'imap':
+      return {
+        ...base,
+        label: instance.label || 'Mailbox',
+        // The login and the server, never the password.
+        target: instance.imap_user && instance.imap_host
+          ? `${instance.imap_user} @ ${instance.imap_host}:${instance.imap_port ?? ''}`
+          : undefined,
       }
     default:
       return assertNever(kind, 'connection kind')
@@ -351,6 +361,8 @@ export type ConnectionHealth = {
   /** Human-readable line for the card: profile name, or database and version. */
   detail?: string
   error?: string
+  /** Connected, but something the user should know: a role too privileged to scope. */
+  warning?: string
 }
 
 export async function getPostgresHealth(instance: AppInstance): Promise<ConnectionHealth> {
@@ -363,6 +375,7 @@ export async function getPostgresHealth(instance: AppInstance): Promise<Connecti
       // `identity.server` already names the engine, so this line reads
       // correctly for whichever one answered.
       detail: identity ? `${identity.server} · ${identity.database}` : undefined,
+      warning: identity?.privilegeWarning,
     }
   }
   catch (cause) {
@@ -452,6 +465,103 @@ export async function updatePostgresDsn(instance: AppInstance, dsn: string): Pro
   await closeSqlPool(instance)
 
   return updated
+}
+
+/**
+ * Record an IMAP mailbox. Like Postgres, nothing is provisioned — but the
+ * credentials are proved by logging in *before* the row is written, so a wrong
+ * app password is a failed create rather than a connection that syncs nothing.
+ * The first sync starts at once rather than at the next two-minute tick.
+ */
+export interface ImapCredentialsInput {
+  host: string
+  port: number
+  security: ImapSecurity
+  user: string
+  password: string
+}
+
+export async function provisionImapInstance(
+  actor: Actor,
+  input: ImapCredentialsInput & { label?: string },
+): Promise<AppInstance> {
+  const fields = await imapFields(input)
+
+  const instance = await insertRow<AppInstance>('instances', {
+    org: actor.org.id,
+    created_by: actor.user.id,
+    kind: 'imap',
+    name: generateInstanceName(),
+    ...fields,
+    label: input.label?.trim() || fields.imap_user,
+  })
+  await requestImapSync(instance).catch(cause => console.error(`[imap] first sync of ${instance.id} did not start`, cause))
+  return instance
+}
+
+/**
+ * Replace a mailbox's credentials. Tokens keep working, as for a DSN. When the
+ * new login names a different mailbox, everything synced from the old one is
+ * deleted first — headers from one person's inbox must not appear under
+ * another's.
+ */
+export async function updateImapCredentials(instance: AppInstance, input: ImapCredentialsInput): Promise<AppInstance> {
+  const fields = await imapFields(input)
+
+  const updated = await updateRow<AppInstance>('instances', instance.id, fields)
+  await resetIfIdentityChanged(updated, { host: fields.imap_host, user: fields.imap_user })
+  // New credentials end any stop an old, refused password put on the sync.
+  const sql = await appDb()
+  await sql`UPDATE app.mail_sync_state SET auth_failed = false WHERE instance_id = ${instance.id}`
+  await closeImapFor(instance)
+  await requestImapSync(updated).catch(cause => console.error(`[imap] sync of ${instance.id} did not start`, cause))
+  return updated
+}
+
+/** Prove the credentials and build the columns that hold them, for create and update alike. */
+async function imapFields(input: ImapCredentialsInput) {
+  const target: ImapTarget = {
+    host: input.host.trim(),
+    port: input.port,
+    security: input.security,
+    user: input.user.trim(),
+    password: input.password,
+  }
+  await probeImapConnection(target)
+  return {
+    imap_host: target.host,
+    imap_port: target.port,
+    imap_security: target.security,
+    imap_user: target.user,
+    imap_password: target.password,
+  }
+}
+
+/**
+ * A mailbox's state, from what the sync last saw rather than a fresh login.
+ *
+ * The dashboard polls this, and a login every thirty seconds per open tab is
+ * exactly the traffic that gets an account rate-limited. The sync logs in every
+ * two minutes regardless, so its outcome *is* a recent live observation; how
+ * recent is reported, and a sync that has gone quiet reads as `unknown`, not
+ * as healthy.
+ */
+export async function getImapHealth(instance: AppInstance): Promise<ConnectionHealth> {
+  if (!imapTargetOf(instance)) return { state: 'unknown', error: 'No mailbox credentials are stored for this connection.' }
+
+  const state = await mailSyncState(instance)
+  if (!state?.lastAttemptAt) return { state: 'connecting', detail: 'Waiting for the first sync.' }
+  if (state.authFailed) return { state: 'close', error: imapErrorMessage('auth') }
+
+  const failedLast = state.lastErrorAt && (!state.lastSuccessAt || state.lastErrorAt > state.lastSuccessAt)
+  if (failedLast) return { state: 'close', error: imapErrorMessage(state.lastErrorCode ?? 'connection failed') }
+
+  if (!state.lastSuccessAt) return { state: 'connecting', detail: 'The first sync is running.' }
+  const age = Date.now() - Date.parse(state.lastSuccessAt)
+  if (age > 15 * 60_000) {
+    return { state: 'unknown', detail: `Last synced ${Math.round(age / 60_000)} minutes ago.` }
+  }
+  return { state: 'open', detail: `Synced ${Math.max(0, Math.round(age / 60_000))} min ago` }
 }
 
 /**
@@ -683,6 +793,11 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
   else if (kind === 'postgres') {
     await closeSqlPool(instance)
   }
+  else if (kind === 'imap') {
+    // Nothing remote to release — the mailbox is the user's. The synced
+    // headers go with the row (ON DELETE CASCADE); the live connection is ours.
+    await closeImapFor(instance)
+  }
   else if (kind === 'whatsapp') {
     // A connection on its own server may hold a pool onto that server's message
     // database. Keyed on the row, so it outlives the row unless dropped here.
@@ -804,7 +919,7 @@ function settingsBody(current: EvolutionSettings | null, overrides: Partial<Evol
  * truth. `emptyStatus()` is deliberately not reused here for that reason.
  */
 export type ConnectionStateReport =
-  | { state: ConnectionState, detail?: string, error?: string }
+  | { state: ConnectionState, detail?: string, error?: string, warning?: string }
   | InstanceStatus
   | TelegramStatus
 
@@ -816,7 +931,7 @@ export async function connectionState(
   switch (kind) {
     case 'postgres': {
       const health = await getPostgresHealth(instance)
-      return { state: health.state, detail: health.detail, error: health.error }
+      return { state: health.state, detail: health.detail, error: health.error, warning: health.warning }
     }
     case 'whatsapp':
       if (!options.tolerant) return await getInstanceStatus(instance)
@@ -825,6 +940,8 @@ export async function connectionState(
       // Never throws: a bridge that cannot be asked answers `unknown`, for the
       // reason given above.
       return await getTelegramStatus(instance)
+    case 'imap':
+      return await getImapHealth(instance)
     default:
       return assertNever(kind, 'connection kind')
   }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { PlusIcon } from '@lucide/vue'
-import { assertNever, connectionFamily } from '#shared/connection'
+import { assertNever } from '#shared/connection'
 
 const props = withDefaults(defineProps<{
   instanceId: string
@@ -22,33 +22,47 @@ const props = withDefaults(defineProps<{
 const { user } = useSession()
 
 /**
- * Asked as a family, not as `kind === 'postgres'`.
+ * Whether a new token starts with the read tools only, which is also whether
+ * the tool catalogue is fetched at all.
  *
- * This boolean decides whether the tool catalogue is fetched at all, and a new
- * database kind falling off the wrong side of it is not a cosmetic miss: the
- * catalogue never loads, `initialScope()` returns no tool names, and
- * `scopeSchema` then refuses Create with "Select at least one action" — a
- * validation error the user did nothing to cause.
+ * A switch over the kind rather than a family test: a mailbox is a messaging
+ * kind, yet starts read-only because drafting writes into it. A new kind
+ * falling off the wrong side of this is not a cosmetic miss: the catalogue
+ * never loads, `initialScope()` returns no tool names, and `scopeSchema` then
+ * refuses Create with "Select at least one action" — a validation error the
+ * user did nothing to cause.
  */
-const isDatabase = computed(() => connectionFamily(props.kind) === 'database')
+const startsReadOnly = computed(() => {
+  switch (props.kind) {
+    case 'postgres':
+    case 'imap':
+      return true
+    case 'whatsapp':
+    case 'telegram':
+      return false
+    default:
+      return assertNever(props.kind, 'connection kind')
+  }
+})
 
 /**
  * A new token's starting scope depends on the kind.
  *
- * A WhatsApp token starts open, as it always has. A Postgres token starts
- * read-only — every read tool, no write tool — because the two mistakes do not
+ * A WhatsApp or Telegram token starts open, as it always has. A Postgres or
+ * mailbox token starts read-only — every read tool, no write tool (`run-statement`,
+ * `create-email-draft`) — because the two mistakes do not
  * cost the same: a token that turns out to need writes is one edit away, and one
  * that turns out not to have needed them may already have made some.
  *
  * The read tools come from the server, since only it knows which exist.
  */
-// Only a database token needs this, and only to seed its default scope — a
-// WhatsApp dashboard was fetching it on every load and discarding the answer.
+// Only a read-only-by-default token needs this, and only to seed its default
+// scope — a WhatsApp dashboard was fetching it on every load and discarding the answer.
 // The explicit key is shared with TokenScopeFields, which renders the same list:
 // Nuxt keys per call site by default, so the two were fetching it twice.
 const { data: toolCatalogue } = await useFetch<{ tools: McpToolInfo[] }>(
   () => `/api/instances/${props.instanceId}/mcp-tools`,
-  { key: `mcp-tools-${props.instanceId}`, lazy: true, immediate: isDatabase.value },
+  { key: `mcp-tools-${props.instanceId}`, lazy: true, immediate: startsReadOnly.value },
 )
 
 function initialScope(): TokenScope {
@@ -56,7 +70,8 @@ function initialScope(): TokenScope {
     case 'whatsapp':
     case 'telegram':
       return openScope()
-    case 'postgres': {
+    case 'postgres':
+    case 'imap': {
       const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly).map(t => t.name)
       return readOnlyScope(readTools)
     }
@@ -74,7 +89,7 @@ function initialScope(): TokenScope {
  * user did nothing to cause.
  */
 watch(toolCatalogue, (catalogue) => {
-  if (!createOpen.value || !isDatabase.value || !catalogue) return
+  if (!createOpen.value || !startsReadOnly.value || !catalogue) return
   if (newScope.value.all_tools || newScope.value.tool_names.length > 0) return
   newScope.value = initialScope()
 })
@@ -90,6 +105,7 @@ interface TokenRow {
   /** The email is present only for an admin; a member's own list carries none. */
   assignedTo: { id: string, email?: string }
   scope: TokenScope
+  send_disclaimer?: string
 }
 
 const { data, refresh, status } = await useFetch<{ tokens: TokenRow[] }>(
@@ -100,16 +116,20 @@ const createOpen = ref(false)
 const newLabel = ref('')
 const newExpiry = ref<'30d' | '90d' | '1y' | 'never'>('90d')
 const newScope = ref<TokenScope>(openScope())
+/** Off until an admin turns it on; see TokenScopeFields. */
+const newDisclaimer = ref<string | null>(null)
 const revealed = ref<string | null>(null)
 const revealedScope = ref<TokenScope>(openScope())
 /** Which token is mid-revoke, so only that row's button is disabled. */
 const revoking = ref<string | null>(null)
 
 const editing = ref<TokenRow | null>(null)
+const editLabel = ref('')
 const editScope = ref<TokenScope>(openScope())
+const editDisclaimer = ref<string | null>(null)
 
 const { busy: creating, run: runCreate } = useApiAction()
-const { busy: savingScope, run: runSaveScope } = useApiAction()
+const { busy: saving, run: runSave } = useApiAction()
 const { run: runRevoke } = useApiAction()
 const { run: runRotate } = useApiAction()
 
@@ -152,6 +172,7 @@ function openCreate() {
   newLabel.value = ''
   newExpiry.value = '90d'
   newScope.value = initialScope()
+  newDisclaimer.value = null
   newAssignee.value = user.value?.id ?? ''
   createOpen.value = true
   if (props.canManage) refreshAssignable()
@@ -159,27 +180,37 @@ function openCreate() {
 
 function startEdit(token: TokenRow) {
   editing.value = token
+  editLabel.value = token.label
   // Copied, not referenced — cancelling must not leave the table showing edits
   // that were never saved. Deep, and without naming the array fields: a fifth
   // scope axis would otherwise be shared by reference and silently editable.
   editScope.value = structuredClone(token.scope)
+  editDisclaimer.value = token.send_disclaimer ?? null
 }
 
-async function saveScope() {
+async function saveEdit() {
   const token = editing.value
   if (!token) return
 
-  await runSaveScope(
+  await runSave(
     async () => {
-      await $fetch(`/api/tokens/${token.id}`, { method: 'PATCH', body: editScope.value })
+      await $fetch(`/api/tokens/${token.id}`, {
+        method: 'PATCH',
+        body: {
+          ...editScope.value,
+          label: editLabel.value,
+          send_disclaimer: disclaimerToSubmit(editScope.value, props.kind, editDisclaimer.value),
+        },
+      })
       editing.value = null
       await refresh()
     },
     {
-      success: 'Scope updated. The connector keeps working with its existing token.',
-      // The server rejects an empty allowlist by name — "Select at least one
-      // action" — which is the whole point of showing its message here.
-      failure: 'Could not update the scope',
+      success: 'Token updated. The connector keeps working with its existing token.',
+      // The server rejects an empty allowlist or name by name — "Select at
+      // least one action", "Give the token a name" — which is the whole point
+      // of showing its message here.
+      failure: 'Could not update the token',
     },
   )
 }
@@ -195,6 +226,7 @@ async function create() {
         expiry: newExpiry.value,
         assignedTo: newAssignee.value || undefined,
         ...scope,
+        send_disclaimer: disclaimerToSubmit(scope, props.kind, newDisclaimer.value),
       },
     }),
     { failure: 'Could not create the token' },
@@ -285,6 +317,11 @@ function statusOf(token: TokenRow) {
           <template v-else-if="kind === 'telegram'">
             This account is not connected, so tokens cannot send or read anything
             until it is linked again. You can still revoke them.
+          </template>
+          <template v-else-if="kind === 'imap'">
+            This mailbox is not syncing, so tokens see only what was synced
+            before and cannot fetch bodies or attachments until it works again.
+            You can still revoke them.
           </template>
         </p>
       </div>
@@ -502,7 +539,12 @@ function statusOf(token: TokenRow) {
 
           <Separator class="shrink-0" />
 
-          <TokenScopeFields v-model="newScope" :instance-id="instanceId" :kind="kind" />
+          <TokenScopeFields
+            v-model="newScope"
+            v-model:disclaimer="newDisclaimer"
+            :instance-id="instanceId"
+            :kind="kind"
+          />
         </div>
 
         <DialogFooter class="shrink-0">
@@ -526,16 +568,28 @@ function statusOf(token: TokenRow) {
           </DialogDescription>
         </DialogHeader>
 
-        <div class="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
-          <TokenScopeFields v-model="editScope" :instance-id="instanceId" :kind="kind" />
+        <div class="flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto">
+          <div class="shrink-0 space-y-2">
+            <Label for="edit-token-label">Name</Label>
+            <Input id="edit-token-label" v-model="editLabel" />
+          </div>
+
+          <Separator class="shrink-0" />
+
+          <TokenScopeFields
+            v-model="editScope"
+            v-model:disclaimer="editDisclaimer"
+            :instance-id="instanceId"
+            :kind="kind"
+          />
         </div>
 
         <DialogFooter class="shrink-0">
           <Button variant="ghost" @click="editing = null">
             Cancel
           </Button>
-          <Button :disabled="savingScope" @click="saveScope">
-            {{ savingScope ? 'Saving…' : 'Save scope' }}
+          <Button :disabled="saving" @click="saveEdit">
+            {{ saving ? 'Saving…' : 'Save' }}
           </Button>
         </DialogFooter>
       </DialogContent>

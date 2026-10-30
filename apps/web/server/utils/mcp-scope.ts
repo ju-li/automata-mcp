@@ -42,6 +42,7 @@ export function instanceKind(instance: Pick<AppInstance, 'kind'>): InstanceKind 
     case 'whatsapp':
     case 'postgres':
     case 'telegram':
+    case 'imap':
       return kind
     default:
       console.error(`[kind] connection kind ${JSON.stringify(kind)} is not supported by this build`)
