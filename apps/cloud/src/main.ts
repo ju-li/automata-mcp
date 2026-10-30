@@ -1,5 +1,6 @@
 import { Billing } from './billing.ts'
 import { type CloudConfig, loadConfig } from './config.ts'
+import { ConsentRegions } from './consent-region.ts'
 import { Crm } from './crm.ts'
 import { connect, ensureCloudSchema, waitForApp } from './db.ts'
 import { createCloudServer } from './http.ts'
@@ -43,7 +44,8 @@ catch (error) {
 const billing = new Billing(sql, config.stripe, config.appUrl)
 const crm = new Crm(sql, config.brevo)
 const state = { appReady: false, stopped: false }
-const server = createCloudServer(billing, crm, config, state)
+const regions = new ConsentRegions(config.ipLookupUrl)
+const server = createCloudServer(billing, crm, regions, config, state)
 
 // :: accepts IPv6 and IPv4 (legacy Railway private networking is IPv6-only).
 // A host with IPv6 disabled refuses :: outright, so fall back to IPv4 there.

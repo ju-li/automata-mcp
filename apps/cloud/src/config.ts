@@ -27,6 +27,9 @@ const schema = z.object({
   BREVO_API_KEY: z.string().min(1).optional(),
   BREVO_PRODUCT_LIST: z.string().regex(/^\d+$/, 'must be a numeric Brevo list id').optional(),
   BREVO_MARKETING_LIST: z.string().regex(/^\d+$/, 'must be a numeric Brevo list id').optional(),
+  // The IP lookup that decides where the signup page's marketing box may start
+  // ticked (consent-region.ts). Defaults to RevBull's zip-prepop service.
+  IP_LOOKUP_URL: z.string().url().refine(url => /^https?:\/\//i.test(url), 'must be http or https').optional(),
   // Only for pointing the sync at a local stub while testing failure handling.
   BREVO_API_URL: z.string().url().refine(url => /^https?:\/\//i.test(url), 'must be http or https').optional(),
   CLOUD_PORT: z.coerce.number().int().min(1).max(65535).optional(),
@@ -61,6 +64,8 @@ export interface CloudConfig {
   stripe?: StripeSettings
   /** Absent when the service runs without the CRM sync. */
   brevo?: BrevoSettings
+  /** zip-prepop's `POST /zip`. */
+  ipLookupUrl: string
   port: number
 }
 
@@ -116,6 +121,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
           marketingList: Number(e.BREVO_MARKETING_LIST),
         }
       : undefined,
+    ipLookupUrl: e.IP_LOOKUP_URL ?? 'https://api.revbull-services.com/ip-to-zip/zip',
     port: e.CLOUD_PORT ?? e.PORT ?? 8096,
   }
 }

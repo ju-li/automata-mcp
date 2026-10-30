@@ -30,51 +30,24 @@ const OPT_IN_ZONES = new Set([
   'America/Eirunepe', 'America/Rio_Branco', 'America/Porto_Acre',
 ])
 
-/**
- * The same regions as countries, for the IP lookup. The service answers with
- * an English country name ("United States of America"), not a code, so names
- * are matched after `normalizeCountry` and as a prefix — "Netherlands (Kingdom
- * of the)" and "United Kingdom of Great Britain and Northern Ireland" both
- * match. Two-letter codes are accepted too, should the answer ever be one.
- * Crown dependencies, Gibraltar, Åland and the Faroes are included as the
- * cautious side of "is GDPR-like law in play".
- */
-const OPT_IN_COUNTRY_NAMES = [
-  'austria', 'belgium', 'bulgaria', 'croatia', 'cyprus', 'czechia', 'czech republic', 'denmark',
-  'estonia', 'finland', 'france', 'germany', 'greece', 'hungary', 'ireland', 'republic of ireland',
-  'italy', 'latvia', 'lithuania', 'luxembourg', 'malta', 'netherlands', 'the netherlands', 'holland',
-  'poland', 'portugal', 'romania', 'slovakia', 'slovak republic', 'slovenia', 'spain', 'sweden',
-  'iceland', 'liechtenstein', 'norway', 'svalbard',
-  'united kingdom', 'great britain', 'england', 'scotland', 'wales', 'northern ireland',
-  'gibraltar', 'jersey', 'guernsey', 'isle of man', 'switzerland', 'aland', 'faroe',
-  'guadeloupe', 'martinique', 'french guiana', 'reunion', 'mayotte', 'saint martin',
-  'canada', 'brazil',
-]
-const OPT_IN_COUNTRY_CODES = new Set([
-  'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'DE', 'GR', 'EL', 'HU', 'IE', 'IT',
-  'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO', 'SK', 'SI', 'ES', 'SE', 'IS', 'LI', 'NO', 'SJ',
-  'GB', 'UK', 'GI', 'JE', 'GG', 'IM', 'CH', 'AX', 'FO', 'GP', 'MQ', 'GF', 'RE', 'YT', 'MF',
-  'CA', 'BR',
-])
-
-/** The visitor's country, as seen by the IP lookup; hosted offering only. */
-const COUNTRY_LOOKUP_URL = 'https://api.revbull-services.com/ip-to-zip/zip'
-const COUNTRY_LOOKUP_TIMEOUT_MS = 3000
+/** How long the page waits for the country before deciding without it. */
+const REGION_LOOKUP_TIMEOUT_MS = 5000
 
 /**
  * Whether the marketing checkbox may start ticked for this visitor: only when
  * neither signal places them in an opt-in region. The browser's time zone is
  * asked first, and a zone inside one ends it there, with no lookup; no zone,
  * or `UTC`/`Etc/*`, which privacy-hardened browsers report in place of the
- * real one, counts as inside. Otherwise the IP lookup gets a veto — it catches
- * a European on a laptop set to New York time. A lookup that fails or names no
- * country leaves the decision to the time zone rather than unticking everyone.
- * A guess that leaves the box unticked costs a subscriber; the other kind
- * costs consent.
+ * real one, counts as inside. Otherwise the visitor's country, looked up from
+ * their IP address by the cloud service (`/api/auth/consent-region`), gets a
+ * veto — it catches a European on a laptop set to New York time. A lookup that
+ * fails or names no country leaves the decision to the time zone rather than
+ * unticking everyone. A guess that leaves the box unticked costs a subscriber;
+ * the other kind costs consent.
  *
  * `lookup` is the caller's switch for the second signal: pass false off the
- * hosted offering, so a self-hosted deployment's signup page never sends its
- * visitors' addresses to our service.
+ * hosted offering, where the route answers 404 and there is no cloud service
+ * to ask.
  *
  * Client-only by nature, so call it from `onMounted`: deciding on the server
  * would flip the box during hydration.
@@ -83,8 +56,7 @@ export async function marketingMayStartTicked({ lookup }: { lookup: boolean }): 
   if (import.meta.server) return false
   if (!zoneMayStartTicked()) return false
   if (!lookup) return true
-  const country = await visitorCountry()
-  return country === undefined || !inOptInCountry(country)
+  return await consentRegion() !== 'opt-in'
 }
 
 function zoneMayStartTicked(): boolean {
@@ -94,34 +66,17 @@ function zoneMayStartTicked(): boolean {
   return !OPT_IN_ZONE_PREFIXES.some(prefix => zone.startsWith(prefix))
 }
 
-async function visitorCountry(): Promise<string | undefined> {
+async function consentRegion(): Promise<'opt-in' | 'other' | 'unknown'> {
   try {
-    const answer = await $fetch<{ country?: unknown }>(COUNTRY_LOOKUP_URL, {
-      signal: AbortSignal.timeout(COUNTRY_LOOKUP_TIMEOUT_MS),
+    const answer = await $fetch<{ region?: unknown }>('/api/auth/consent-region', {
+      signal: AbortSignal.timeout(REGION_LOOKUP_TIMEOUT_MS),
       retry: 0,
     })
-    return typeof answer?.country === 'string' && answer.country.trim() ? answer.country : undefined
+    return answer?.region === 'opt-in' || answer?.region === 'other' ? answer.region : 'unknown'
   }
   catch {
-    return undefined
+    return 'unknown'
   }
-}
-
-function inOptInCountry(country: string): boolean {
-  const code = country.trim().toUpperCase()
-  if (/^[A-Z]{2}$/.test(code)) return OPT_IN_COUNTRY_CODES.has(code)
-  const name = normalizeCountry(country)
-  return OPT_IN_COUNTRY_NAMES.some(listed => name === listed || name.startsWith(`${listed} `))
-}
-
-/** Lower case, accents and punctuation dropped: "Réunion" → "reunion". */
-function normalizeCountry(country: string): string {
-  return country
-    .normalize('NFD')
-    .replace(/[\u0300-\u036F]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z]+/g, ' ')
-    .trim()
 }
 
 function browserTimeZone(): string | undefined {

@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { z } from 'zod'
 import type { Billing } from './billing.ts'
 import type { CloudConfig } from './config.ts'
+import type { ConsentRegions } from './consent-region.ts'
 import type { Crm } from './crm.ts'
 import { HttpError, describeError } from './http-error.ts'
 
@@ -14,6 +15,8 @@ import { HttpError, describeError } from './http-error.ts'
  *            CLOUD_ADMIN_KEY as a bearer. The web app has already decided the
  *            caller is an admin of that organization; this service trusts that
  *            decision and never sees a browser session.
+ *            POST /consent-region — the signup page's visitor, by the address
+ *            the web app took from the request; no session involved.
  *
  * Request bodies and URLs are never logged; errors are logged against the
  * route's label. Messages in 4xx answers are written for the person in the
@@ -43,6 +46,7 @@ interface Route {
 }
 
 const checkoutBody = z.object({ email: z.string().email().max(320) })
+const consentRegionBody = z.object({ ip: z.string().max(64) })
 
 /** Webhook events that can change an organization's subscription. */
 const STRIPE_EVENTS = new Set([
@@ -55,7 +59,7 @@ const STRIPE_EVENTS = new Set([
   'customer.subscription.trial_will_end',
 ])
 
-export function createCloudServer(billing: Billing, crm: Crm, config: CloudConfig, state: { appReady: boolean }): Server {
+export function createCloudServer(billing: Billing, crm: Crm, regions: ConsentRegions, config: CloudConfig, state: { appReady: boolean }): Server {
   const adminDigest = sha256(config.adminKey)
 
   const routes: Route[] = [
@@ -110,6 +114,12 @@ export function createCloudServer(billing: Billing, crm: Crm, config: CloudConfi
         await billing.syncSeats(orgId)
         return { status: 200, body: { received: true } }
       },
+    },
+    {
+      // Never fails for want of an answer: `unknown` is an answer, and the web
+      // app falls back to the browser's time zone on it.
+      label: 'POST /consent-region', method: 'POST', pattern: /^\/consent-region$/, access: 'admin',
+      handle: async ({ body }) => ({ status: 200, body: { region: await regions.regionFor(parse(consentRegionBody, body).ip) } }),
     },
     {
       label: 'GET /orgs/:id/billing', method: 'GET', pattern: /^\/orgs\/([^/]+)\/billing$/, access: 'admin', needsApp: true,
