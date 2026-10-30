@@ -1,6 +1,6 @@
 # Plan: Brevo CRM sync for hosted signups
 
-Status: **proposed, decisions settled** (see "Decisions" at the end). Hosted
+Status: **approved** (see "Decisions" at the end). Hosted
 offering only. Nothing here reaches a self-hosted deployment.
 
 ## Goal
