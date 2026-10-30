@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { z } from 'zod'
 import type { Billing } from './billing.ts'
 import type { CloudConfig } from './config.ts'
+import type { Crm } from './crm.ts'
 import { HttpError, describeError } from './http-error.ts'
 
 /**
@@ -54,7 +55,7 @@ const STRIPE_EVENTS = new Set([
   'customer.subscription.trial_will_end',
 ])
 
-export function createCloudServer(billing: Billing, config: CloudConfig, state: { appReady: boolean }): Server {
+export function createCloudServer(billing: Billing, crm: Crm, config: CloudConfig, state: { appReady: boolean }): Server {
   const adminDigest = sha256(config.adminKey)
 
   const routes: Route[] = [
@@ -62,7 +63,12 @@ export function createCloudServer(billing: Billing, config: CloudConfig, state: 
       label: 'GET /health', method: 'GET', pattern: /^\/health$/, access: 'public',
       handle: async () => ({
         status: 200,
-        body: { ok: true, app: state.appReady ? 'ready' : 'waiting', billing: billing.configured ? 'configured' : 'unconfigured' },
+        body: {
+          ok: true,
+          app: state.appReady ? 'ready' : 'waiting',
+          billing: billing.configured ? 'configured' : 'unconfigured',
+          crm: crm.status,
+        },
       }),
     },
     {

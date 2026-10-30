@@ -23,3 +23,4 @@ here are about running and developing this repository.
 **Working on it**
 
 - [Development](development.md) — layout, local setup, networking and the Linux firewall rule, auth, adding tools
+- [Plans](plans/) — design notes for larger changes: [Brevo CRM sync](plans/brevo-crm-sync.md)

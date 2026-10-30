@@ -11,8 +11,8 @@ The hosted offering is two services:
   to Stripe.
 - **The cloud service** (`apps/cloud`) sells plans. It owns Stripe (Checkout,
   the Customer Portal, the webhook, seat billing) and writes each
-  organization's limits. Later it will also run the Brevo CRM sync and PostHog
-  telemetry.
+  organization's limits. It also keeps a Brevo CRM contact for every user
+  (see [CRM (Brevo)](#crm-brevo)). PostHog telemetry joins it later.
 
 Self-hosted deployments never run the cloud service.
 
@@ -92,7 +92,7 @@ UPDATE app.organizations SET max_connections = NULL, max_tokens = NULL, max_memb
 
 ## Account events
 
-On the hosted deployment the web app also records account and organization changes in `app.hosted_events`. The cloud service reads them. Today it acts only on membership changes (to bill seats) and on deleted organizations (to cancel what they were paying for). The CRM sync (Brevo) and telemetry (PostHog) will read the same rows. The changes recorded:
+On the hosted deployment the web app also records account and organization changes in `app.hosted_events`. The cloud service reads them. Billing acts on membership changes (to bill seats) and on deleted organizations (to cancel what they were paying for). The CRM sync acts on signups, email and membership changes, and plan changes. Telemetry (PostHog) will read the same rows later. The changes recorded:
 - signups and email changes;
 - organizations created and deleted;
 - members joining, leaving and changing role;
@@ -103,6 +103,84 @@ On the hosted deployment the web app also records account and organization chang
 Each consumer keeps its own position in `cloud.cursors`, and nothing deletes rows. A consumer added later therefore starts from the whole backlog.
 
 Events never contain credentials, connection strings, chat or table names, message content or tool arguments. Email addresses appear only on user events. A self-hosted deployment writes none.
+
+## CRM (Brevo)
+
+The cloud service keeps one Brevo contact per user. A signup appears in Brevo within about 15 seconds. Later changes to the email address, organization, role and plan update the same contact.
+
+### Marketing consent
+
+The hosted signup page, and the signup form behind an invitation link, show an unticked checkbox: "Send me product news and tips by email. You can unsubscribe at any time." Ticking it records the time in `app.users.marketing_consent_at`. That column records consent **given at signup**, not whether the person is still subscribed: Brevo owns that, and nothing here re-adds someone who unsubscribed. The checkbox's wording on any date is in the git history of `apps/web/app/components/MarketingConsent.vue`.
+
+A self-hosted deployment shows no checkbox and ignores the field if a client sends it.
+
+### Lists
+
+- **Product list** (`BREVO_PRODUCT_LIST`): everyone.
+- **Marketing list** (`BREVO_MARKETING_LIST`): only those who ticked the box.
+
+Lists are set **only when a contact is created**, or when an existing contact for the same address (a newsletter signup, say) is claimed by a new account. Later updates never touch list membership, so an unsubscribe is never undone.
+
+### What a contact holds
+
+A contact is keyed on the user's id (Brevo's `ext_id`), so an email change updates the same contact rather than creating a second one.
+
+| Brevo attribute | Holds |
+|---|---|
+| `FULL_NAME` | the account name, whole |
+| `SIGNUP_DATE` | the date the account was created |
+| `SIGNUP_PLAN` | `free` or `pro` as picked at signup; empty for invited signups |
+| `INVITED` | whether they signed up through an invitation |
+| `ORG_ID`, `ORG_NAME`, `ORG_ROLE` | their organization and role (`admin` / `member`) |
+| `PLAN` | the organization's current plan (`Free`, `Pro`, `Pro (trial)`) |
+
+That is the whole list. Nothing about connections, tokens or usage is sent. The service creates any missing attribute when it starts, and refuses to start the sync if one exists with a different type.
+
+### Setting it up
+
+1. In Brevo, create an API key (**SMTP & API → API keys**) and two contact lists. Note each list's numeric id.
+2. If your Brevo account restricts API keys to authorised IP addresses, allow the cloud service's outbound address.
+3. On the cloud service, set:
+
+   ```bash
+   BREVO_API_KEY=xkeysib-…
+   BREVO_PRODUCT_LIST=…      # numeric list id
+   BREVO_MARKETING_LIST=…    # numeric list id, different from the product list
+   ```
+
+   The three go together. With none set, there is no sync. With only some set, or with a non-numeric or repeated list id, the service refuses to start.
+4. Redeploy. `GET /health` reports `crm`:
+   - `unconfigured`: no Brevo variables are set.
+   - `waiting`: the start-up checks have not passed yet. The log says why: the web app's migration `0009_marketing_consent` is missing, a list doesn't exist, the key is wrong, or an attribute exists with the wrong type. The service tries again every five minutes; billing is unaffected.
+   - `ready`: the sync is running.
+
+   The first time the sync runs, it starts from the **oldest** retained event, so every signup since the event log existed becomes a contact.
+5. Run the backfill once (below) for accounts created before the event log existed.
+
+### Backfill
+
+Accounts created before the event log have no signup event, so the sync never sees them. The backfill upserts a contact for every account:
+
+```bash
+node src/crm-backfill.ts      # in the cloud service's container (e.g. `railway ssh`)
+pnpm cloud:crm-backfill       # locally, with the variables in the root .env
+```
+
+- It is safe to rerun, and safe to run while the service is running. An account that already has a contact is updated, and updates never touch lists.
+- New contacts go on the product list only, because none of these accounts were asked for consent.
+- It sends no `SIGNUP_PLAN` or `INVITED`, because none were recorded for these accounts.
+
+### When Brevo says no
+
+| Brevo answers | The sync |
+|---|---|
+| nothing, 5xx, or 429 | stops just before that user's event and retries on a later pass, after Brevo's rate-limit reset if it gave one |
+| 401 or 403 | stops and logs once a minute that the key, or Brevo's authorised IPs, is wrong |
+| any other 4xx (for example, an address Brevo calls invalid) | records it in `cloud.crm_skipped` and moves on |
+
+`cloud.crm_skipped` holds the event id, user id, status and Brevo's error code, but never the address. Once the cause is fixed, rerun the backfill: it updates or creates every contact, including skipped ones.
+
+Logs never contain an address, a name, the API key or a request body.
 
 ## Setting up Stripe
 
@@ -179,11 +257,12 @@ STRIPE_PRICE_SEAT=price_…
 
 The four `STRIPE_*` variables go together. With none set the service still runs and still writes limits, but starting Pro answers 503. With some but not all set, it refuses to start.
 
-`GET /health` answers `{ ok, app, billing }`. `app` is `waiting` until the web app has run its migrations; the cloud service waits for them rather than failing.
+`GET /health` answers `{ ok, app, billing, crm }`. `app` is `waiting` until the web app has run its migrations; the cloud service waits for them rather than failing.
 
 **Database access.** The service connects to the web app's database. It reads `app` tables, writes only organizations' billing and limit columns, `app.hosted_events` and `app.entitlement_defaults`, and keeps its own state in a `cloud` schema it creates. The simplest setup reuses the web app's database URL. To narrow it, give it a role with:
 - `USAGE` on the `app` schema;
 - `SELECT` on `app.organizations`, `app.memberships`, `app.hosted_events`, `app.migrations` and `app.entitlement_defaults` (its `INSERT … ON CONFLICT DO UPDATE` reads the row it replaces);
+- with the CRM sync on, `SELECT (id, email, name, created, marketing_consent_at)` on `app.users`;
 - `UPDATE` on `app.organizations`;
 - `INSERT` on `app.hosted_events` and `INSERT, UPDATE` on `app.entitlement_defaults`;
 - `CREATE` on the database, or an existing `cloud` schema it owns.
@@ -223,7 +302,7 @@ If the web app is upgraded with `NUXT_BILLING` still set and no `NUXT_CLOUD_URL`
 
 ## Testing locally
 
-1. Start the cloud service with `pnpm cloud:dev`. It reads the same root `.env`, so set `CLOUD_*`, `APP_URL` and `STRIPE_*` there. Point the web app at it with `NUXT_CLOUD_URL=http://localhost:8096`.
+1. Start the cloud service with `pnpm cloud:dev`. It reads the same root `.env`, so set `CLOUD_*`, `APP_URL`, `STRIPE_*` and `BREVO_*` there. Point the web app at it with `NUXT_CLOUD_URL=http://localhost:8096`. To test the CRM sync's failure handling, set `BREVO_API_URL` to a local stub that answers like Brevo's `/v3` API.
 2. Run `stripe listen --forward-to localhost:8096/webhooks/stripe` and use
    the `whsec_…` it prints.
 3. Use test-mode keys and prices, and card `4242 4242 4242 4242`.

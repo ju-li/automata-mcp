@@ -37,6 +37,7 @@ const { data, status } = await useFetch<InvitePreview>(() => `/api/invites/${cod
 
 const password = ref('')
 const name = ref('')
+const marketingConsent = ref(false)
 const { busy, run } = useApiAction()
 
 const signedIn = computed(() => Boolean(user.value))
@@ -59,6 +60,7 @@ async function signUpAndAccept() {
         password: password.value,
         name: name.value.trim() || undefined,
         invite: code.value,
+        marketingConsent: marketingConsent.value,
       },
     })
     // The invitation is accepted when the mailed code comes back, not before:
@@ -147,6 +149,8 @@ async function signUpAndAccept() {
               autocomplete="new-password"
             />
           </div>
+
+          <MarketingConsent v-model="marketingConsent" />
 
           <Button type="submit" class="w-full" :disabled="busy || password.length < 8">
             Create account and join

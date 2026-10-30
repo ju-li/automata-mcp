@@ -7,6 +7,7 @@ const route = useRoute()
 const email = ref('')
 const password = ref('')
 const signupCode = ref('')
+const marketingConsent = ref(false)
 const error = ref('')
 const busy = ref(false)
 
@@ -57,6 +58,7 @@ async function submit() {
         password: password.value,
         signupCode: selfSignup.value === 'code' ? signupCode.value : undefined,
         plan: billing.value ? plan.value : undefined,
+        marketingConsent: marketingConsent.value,
       },
     })
     // With verification on, the account does not exist yet: the mailed code
@@ -193,6 +195,8 @@ async function submit() {
           organization? Use the invitation link instead.
         </p>
       </div>
+
+      <MarketingConsent v-model="marketingConsent" />
 
       <p v-if="error" class="text-sm text-destructive">
         {{ error }}
