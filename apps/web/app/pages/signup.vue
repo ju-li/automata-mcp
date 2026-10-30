@@ -7,8 +7,13 @@ const route = useRoute()
 const email = ref('')
 const password = ref('')
 const signupCode = ref('')
-// Ticked by default here; the invitation signup form leaves it unticked.
-const marketingConsent = ref(true)
+// Starts unticked, and is ticked once mounted only for a visitor outside the
+// regions where a pre-ticked box is not consent. The invitation signup form
+// always starts unticked.
+const marketingConsent = ref(false)
+onMounted(() => {
+  if (marketingMayStartTicked()) marketingConsent.value = true
+})
 const error = ref('')
 const busy = ref(false)
 
