@@ -7,7 +7,8 @@ const route = useRoute()
 const email = ref('')
 const password = ref('')
 const signupCode = ref('')
-const marketingConsent = ref(false)
+// Ticked by default here; the invitation signup form leaves it unticked.
+const marketingConsent = ref(true)
 const error = ref('')
 const busy = ref(false)
 
