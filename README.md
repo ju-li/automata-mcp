@@ -31,8 +31,8 @@ click on Railway or with Docker.
 ## Screenshots
 
 <p align="center">
-  <img src="docs/images/claude-chat.png" alt="Claude searching a WhatsApp team chat and a Telegram client group to recap a project and its action items" width="720">
-  <br><em>Claude pulls a meeting plan from a WhatsApp group and the numbers from your database, in one answer.</em>
+  <img src="docs/images/claude-chat.png" alt="Claude reading today's inbox and WhatsApp chats, summarising what matters, listing action items with due dates, and saving a reply in Drafts without sending it" width="720">
+  <br><em>Today's emails and WhatsApps in one summary, with action items — and a reply waiting in Drafts, not sent.</em>
 </p>
 
 <p align="center">
