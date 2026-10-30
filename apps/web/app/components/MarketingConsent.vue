@@ -1,8 +1,10 @@
 <script setup lang="ts">
 // The marketing opt-in on every form that creates an account, hosted offering
 // only — like LegalLinks, a self-hosted deployment shows nothing, and the
-// server ignores the field there anyway. Never ticked by default and never
-// required. Ticking it puts the contact on the marketing list in the CRM;
+// server ignores the field there anyway. Never required; the initial state is
+// the caller's (signup.vue ticks it outside opt-in regions, see
+// marketingOptIn.ts; the invitation form leaves it unticked).
+// Ticked at submit puts the contact on the marketing list in the CRM;
 // everyone gets product email regardless. The label is what the consent
 // covers, so change it only together with what that list is used for.
 const consent = defineModel<boolean>({ default: false })

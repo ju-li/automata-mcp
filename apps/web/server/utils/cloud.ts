@@ -57,7 +57,7 @@ export function requireHosted(): void {
  * it is relayed as is. Anything else — the service down, a 5xx, a timeout — is
  * logged here, because a handled error is invisible to Nitro, and answered 503.
  */
-export async function cloudFetch<T>(path: string, options: { method?: 'GET' | 'POST', body?: Record<string, unknown> } = {}): Promise<T> {
+export async function cloudFetch<T>(path: string, options: { method?: 'GET' | 'POST', body?: Record<string, unknown>, timeout?: number } = {}): Promise<T> {
   const base = cloudUrl()
   const key = String(useRuntimeConfig().cloudAdminKey ?? '').trim()
   if (!base || !key) {
@@ -70,7 +70,7 @@ export async function cloudFetch<T>(path: string, options: { method?: 'GET' | 'P
       method: options.method ?? 'GET',
       body: options.body,
       headers: { authorization: `Bearer ${key}` },
-      timeout: 15_000,
+      timeout: options.timeout ?? 15_000,
       retry: 0,
     })
   }
