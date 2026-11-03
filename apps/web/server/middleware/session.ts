@@ -12,5 +12,10 @@ export default defineEventHandler(async (event) => {
   // Webhooks authenticate with a shared secret, not a cookie.
   if (event.path.startsWith('/api/webhook/')) return
 
+  // The OAuth endpoints an MCP client calls authenticate with a code, a PKCE
+  // verifier or a refresh token — never a cookie, so one is never parsed there.
+  // The consent routes (`/api/oauth/authorize…`) are the web surface and do read it.
+  if (isOAuthClientPath(event.path)) return
+
   event.context.user = await getSessionUser(event)
 })

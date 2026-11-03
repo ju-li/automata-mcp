@@ -69,7 +69,7 @@ export type McpAuth =
 interface McpTokenFacts extends Pick<AppMcpToken,
   'id' | 'assigned_to' | 'instance' | 'token_hash' | 'expires_at' | 'revoked'
   | 'all_chats' | 'chat_jids' | 'all_tables' | 'table_names' | 'all_tools' | 'tool_names'
-  | 'send_disclaimer'> {
+  | 'send_disclaimer' | 'auth_method' | 'access_expires_at'> {
   user_email?: string
   user_name?: string
   member_role?: OrgRole
@@ -122,7 +122,10 @@ function extractToken(event: H3Event): string | undefined {
  */
 export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefined> {
   const token = extractToken(event)
-  if (!token || !token.startsWith(TOKEN_PREFIX)) return undefined
+  // A static token or an OAuth access token. A refresh token carries its own
+  // prefix and its hash lives in another column, so presenting one here matches
+  // nothing.
+  if (!token || !(token.startsWith(TOKEN_PREFIX) || token.startsWith(ACCESS_TOKEN_PREFIX))) return undefined
 
   // ── who this token still reaches ─────────────────────────────────────────
   //
@@ -153,7 +156,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     ;[record] = await sql<McpTokenFacts[]>`
       SELECT t.id, t.assigned_to, t.instance, t.token_hash, t.expires_at, t.revoked,
              t.all_chats, t.chat_jids, t.all_tables, t.table_names, t.all_tools, t.tool_names,
-             t.send_disclaimer,
+             t.send_disclaimer, t.auth_method, t.access_expires_at,
              u.email AS user_email, u.name AS user_name,
              m.role AS member_role, m.org AS member_org,
              o.max_connections, o.max_tokens,
@@ -180,7 +183,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   // Defence in depth: the lookup above already proves equality, but compare the
   // stored hash explicitly so a future change to the query cannot weaken this.
   const presented = Buffer.from(hash)
-  const stored = Buffer.from(record.token_hash)
+  const stored = Buffer.from(record.token_hash ?? '')
   if (presented.length !== stored.length || !timingSafeEqual(presented, stored)) {
     return undefined
   }
@@ -188,6 +191,14 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   if (record.revoked) return undefined
   if (record.expires_at && new Date(record.expires_at).getTime() <= Date.now()) {
     return undefined
+  }
+  // An OAuth access token lives an hour; past that the client refreshes, which
+  // the 401 below prompts. A missing expiry on an OAuth row is refused, never
+  // read as "forever".
+  if (record.auth_method === 'oauth') {
+    if (!record.access_expires_at || new Date(record.access_expires_at).getTime() <= Date.now()) {
+      return undefined
+    }
   }
 
   // The token points at a row that is gone. A dead credential, not an outage.
@@ -307,7 +318,14 @@ export function useMcpAuth(): McpAuth {
  * clients can surface something useful. Never return 200 on an auth failure —
  * a 200 with an error body reads as "the tool ran and said no".
  */
-export function mcpUnauthorized(reason = 'invalid_token'): Response {
+export function mcpUnauthorized(event?: H3Event, reason = 'invalid_token'): Response {
+  // Point OAuth-capable clients at discovery (RFC 9728), so a 401 on plain
+  // `/mcp` is where signing in starts. Not on `/mcp/<token>`: that URL is not
+  // the resource the metadata names, and a client holding a dead path token
+  // needs a new token, not a sign-in against a different address.
+  const metadata = event && !getRouterParam(event, 'token') ? resourceMetadataUrl() : undefined
+  const challenge = `Bearer realm="claude-whatsapp-mcp", error="${reason}"`
+    + (metadata ? `, resource_metadata="${metadata}"` : '')
   return new Response(
     JSON.stringify({
       jsonrpc: '2.0',
@@ -318,7 +336,7 @@ export function mcpUnauthorized(reason = 'invalid_token'): Response {
       status: 401,
       headers: {
         'content-type': 'application/json',
-        'www-authenticate': `Bearer realm="claude-whatsapp-mcp", error="${reason}"`,
+        'www-authenticate': challenge,
       },
     },
   )

@@ -53,11 +53,16 @@ export default defineNuxtRouteMiddleware(async (to) => {
   const isPublic = PUBLIC_ROUTES.has(to.path)
 
   if (!user.value && !isPublic) {
+    // An MCP client's sign-in must come back to its consent page after the
+    // password (and second factor), or the client waits forever.
+    if (to.path === OAUTH_CONSENT_ROUTE) {
+      return navigateTo({ path: '/login', query: { next: to.fullPath } })
+    }
     return navigateTo('/login')
   }
 
   if (user.value && isPublic) {
-    return navigateTo('/instances')
+    return navigateTo(safeNext(to.query.next) ?? '/instances')
   }
 
   if (!user.value) return

@@ -26,9 +26,13 @@ const methods = ref<Method[]>([])
 const method = ref<Method>('totp')
 const code = ref('')
 
+const route = useRoute()
+
 async function finish() {
   await refresh()
-  await navigateTo('/instances')
+  // Back to an MCP client's consent page when that is what sent us here;
+  // `safeNext` accepts nothing else.
+  await navigateTo(safeNext(route.query.next) ?? '/instances')
 }
 
 function errorCode(err: unknown): string | undefined {

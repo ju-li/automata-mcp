@@ -164,7 +164,7 @@ export function isUniqueViolation(error: unknown): boolean {
 // Table names are a closed union and go through `sql(identifier)`; values are
 // always bind parameters. Nothing here builds SQL text from a request.
 
-type AppTable = 'users' | 'organizations' | 'memberships' | 'instances' | 'instance_assignments' | 'invitations' | 'mcp_tokens'
+type AppTable = 'users' | 'organizations' | 'memberships' | 'instances' | 'instance_assignments' | 'invitations' | 'mcp_tokens' | 'oauth_clients'
 
 type Writable = Record<string, unknown>
 
@@ -361,7 +361,11 @@ export interface AppMcpToken {
   /** Who minted it. Provenance only; it confers nothing. */
   created_by?: string
   instance: string
-  token_hash: string
+  /**
+   * The current secret's hash. Always set on a static token; on an OAuth grant,
+   * absent while no client holds it ("awaiting sign-in").
+   */
+  token_hash?: string
   label?: string
   last_used_at?: string
   expires_at?: string
@@ -376,4 +380,12 @@ export interface AppMcpToken {
   tool_names: unknown
   /** Appended to every message the send tools send with this token. Absent = off. */
   send_disclaimer?: string
+  /** How the secret reaches the client. See server/utils/oauth.ts. */
+  auth_method: 'static' | 'oauth'
+  oauth_client?: string
+  claimed_at?: string
+  access_expires_at?: string
+  refresh_hash?: string
+  prev_refresh_hash?: string
+  refreshed_at?: string
 }

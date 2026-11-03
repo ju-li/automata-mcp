@@ -1,5 +1,8 @@
-import type { AppMcpToken, Db } from './app-db'
-import type { McpScope } from './mcp-scope'
+import { assertNever } from '#shared/connection'
+import { tools } from '#nuxt-mcp-toolkit/tools.mjs'
+import type { AppInstance, AppMcpToken, Db } from './app-db'
+import type { InstanceKind, McpScope } from './mcp-scope'
+import type { Actor } from './org'
 import type { ScopeInput } from './scope-schema'
 
 /**
@@ -32,9 +35,23 @@ export interface PublicToken {
   scope: ScopeInput
   /** Appended to every message this token sends. Absent = off. */
   send_disclaimer?: string
+  /**
+   * How its secret reaches the client. `static` is shown once at mint;
+   * `oauth` is never shown at all — its holder signs in from the client.
+   */
+  authMethod: 'static' | 'oauth'
+  /**
+   * An OAuth grant's state. `claimed` false is "awaiting sign-in": it
+   * authenticates nothing until its holder signs in. `client` is the name the
+   * application registered itself under — its own choice, not verified.
+   */
+  oauth?: { claimed: boolean, client?: string, claimedAt?: string }
 }
 
-export function toPublicToken(token: AppMcpToken, emails?: Map<string, string>): PublicToken {
+export function toPublicToken(
+  token: AppMcpToken & { oauth_client_name?: string },
+  emails?: Map<string, string>,
+): PublicToken {
   const expired = Boolean(token.expires_at) && new Date(token.expires_at!).getTime() <= Date.now()
   return {
     id: token.id,
@@ -47,6 +64,14 @@ export function toPublicToken(token: AppMcpToken, emails?: Map<string, string>):
     assignedTo: { id: token.assigned_to, email: emails?.get(token.assigned_to) },
     scope: scopeToInput(scopeFromRecord(token)),
     send_disclaimer: token.send_disclaimer || undefined,
+    authMethod: token.auth_method === 'oauth' ? 'oauth' : 'static',
+    oauth: token.auth_method === 'oauth'
+      ? {
+          claimed: Boolean(token.claimed_at),
+          client: token.claimed_at ? token.oauth_client_name : undefined,
+          claimedAt: token.claimed_at,
+        }
+      : undefined,
   }
 }
 
@@ -64,11 +89,13 @@ export async function listTokens(
 ): Promise<PublicToken[]> {
   const sql = await appDb()
 
-  const rows = await sql<AppMcpToken[]>`
-    SELECT * FROM app.mcp_tokens
-    WHERE instance = ${instanceId}
-      ${options.assignedTo ? sql`AND assigned_to = ${options.assignedTo}` : sql``}
-    ORDER BY created DESC
+  const rows = await sql<(AppMcpToken & { oauth_client_name?: string })[]>`
+    SELECT t.*, c.name AS oauth_client_name
+    FROM app.mcp_tokens t
+    LEFT JOIN app.oauth_clients c ON c.id = t.oauth_client
+    WHERE t.instance = ${instanceId}
+      ${options.assignedTo ? sql`AND t.assigned_to = ${options.assignedTo}` : sql``}
+    ORDER BY t.created DESC
   `
   return rows.map(row => toPublicToken(row, options.emails))
 }
@@ -116,17 +143,23 @@ export interface CreateTokenInput {
   scope: McpScope
   /** Appended to every message the token sends. Null or absent = off. */
   sendDisclaimer?: string | null
+  /**
+   * An OAuth grant: minted with no secret ("awaiting sign-in"), claimed later
+   * by its holder signing in from an MCP client. See server/utils/oauth.ts.
+   */
+  oauth?: boolean
 }
 
-export async function createToken(input: CreateTokenInput, db?: Db): Promise<{ token: string, record: PublicToken }> {
-  const { token, hash } = mintMcpToken()
+export async function createToken(input: CreateTokenInput, db?: Db): Promise<{ token?: string, record: PublicToken }> {
+  const minted = input.oauth ? undefined : mintMcpToken()
   const sql = db ?? await appDb()
   const [record] = await sql<AppMcpToken[]>`
     INSERT INTO app.mcp_tokens ${sql({
       assigned_to: input.assignedTo,
       created_by: input.createdBy,
       instance: input.instanceId,
-      token_hash: hash,
+      token_hash: minted?.hash ?? null,
+      auth_method: input.oauth ? 'oauth' : 'static',
       label: input.label.trim() || 'Untitled token',
       expires_at: expiryFromPreset(input.preset),
       revoked: false,
@@ -136,7 +169,86 @@ export async function createToken(input: CreateTokenInput, db?: Db): Promise<{ t
     RETURNING *
   `
 
-  return { token, record: toPublicToken(record!) }
+  return { token: minted?.token, record: toPublicToken(record!) }
+}
+
+/**
+ * Mint a token on a connection the caller has already authorized as a manager
+ * of — the whole of minting, shared by the token dialog and the OAuth consent
+ * page's shortcut so the two cannot drift.
+ *
+ * The holder must already reach the connection: a token issued to someone who
+ * does not is born dead (renders "Active", answers 401, nothing logged). The
+ * plan limit and the insert share one transaction under the organization row
+ * lock `assertCanAdd` takes, so two racing mints at the limit cannot both land.
+ */
+export async function issueConnectorToken(input: {
+  actor: Actor
+  instance: AppInstance
+  assignedTo: string
+  label: string
+  preset: ExpiryPreset
+  scope: McpScope
+  sendDisclaimer?: string | null
+  oauth?: boolean
+}): Promise<{ token?: string, record: PublicToken }> {
+  const { actor, instance, assignedTo } = input
+
+  if (assignedTo !== actor.user.id) {
+    const member = await requireOrgMember(actor.org.id, assignedTo)
+    const reaches = member.role === 'admin'
+      || (await listInstanceAssignees(instance.id)).includes(assignedTo)
+
+    if (!reaches) {
+      throw createError({
+        statusCode: 422,
+        statusMessage: `${member.email} cannot reach this connection, so a token issued to them `
+          + 'would not work. Assign the connection to them first.',
+      })
+    }
+  }
+
+  const sql = await appDb()
+  return await sql.begin(async (tx) => {
+    await assertCanAdd(tx, actor.org.id, 'token')
+    const minted = await createToken({
+      instanceId: instance.id,
+      assignedTo,
+      createdBy: actor.user.id,
+      label: input.label,
+      preset: input.preset,
+      scope: input.scope,
+      sendDisclaimer: input.sendDisclaimer,
+      oauth: input.oauth,
+    }, tx)
+    await recordHostedEvent(tx, {
+      type: 'token.created',
+      org: actor.org.id,
+      userId: assignedTo,
+      payload: { id: minted.record.id, connection: instance.id, kind: instance.kind, auth: input.oauth ? 'oauth' : 'static' },
+    })
+    return minted
+  })
+}
+
+/**
+ * The scope a token starts with when nobody picked one — the consent page's
+ * shortcut. Same rule as the token dialog's `initialScope()`: a messaging token
+ * starts open, a database or mailbox token with its read tools only, since a
+ * token that turns out to need writes is one edit away and one that did not may
+ * already have made some.
+ */
+export function defaultScopeFor(kind: InstanceKind): McpScope {
+  switch (kind) {
+    case 'whatsapp':
+    case 'telegram':
+      return OPEN_SCOPE
+    case 'postgres':
+    case 'imap':
+      return { ...OPEN_SCOPE, allTools: false, toolNames: readOnlyToolsFor(kind) }
+    default:
+      return assertNever(kind, 'connection kind')
+  }
 }
 
 /**
@@ -162,7 +274,7 @@ export async function createToken(input: CreateTokenInput, db?: Db): Promise<{ t
  *
  * The plaintext is returned here and nowhere else, exactly as at creation.
  */
-export async function rotateToken(token: AppMcpToken): Promise<{ token: string, record: PublicToken }> {
+export async function rotateToken(token: AppMcpToken): Promise<{ token?: string, record: PublicToken }> {
   if (token.revoked) {
     throw createError({
       statusCode: 422,
@@ -175,6 +287,14 @@ export async function rotateToken(token: AppMcpToken): Promise<{ token: string, 
       statusMessage: 'This token has expired, so a new secret for it would not work. '
         + 'Ask an admin for a new one instead.',
     })
+  }
+
+  // An OAuth grant's secret is never shown, so "a new secret" means signing out
+  // whichever client holds it: its holder signs in again to get a new one.
+  if (token.auth_method === 'oauth') {
+    await clearGrantSecrets(await appDb(), token.id)
+    const record = await getRow<AppMcpToken>('mcp_tokens', token.id)
+    return { record: toPublicToken(record!) }
   }
 
   const { token: plaintext, hash } = mintMcpToken()
@@ -233,4 +353,12 @@ export async function revokeTokensFor(
       ${options.instanceId ? sql`AND instance = ${options.instanceId}` : sql``}
   `
   return result.count
+}
+
+/** The read tools of one kind, from the toolkit's own registry (as `mcp-tools.get.ts` reads it). */
+function readOnlyToolsFor(kind: InstanceKind): string[] {
+  return tools
+    .filter(tool => typeof tool.name === 'string' && tool.name.length > 0)
+    .filter(tool => toolServesKind(tool.name!, kind) && tool.annotations?.readOnlyHint === true)
+    .map(tool => tool.name!)
 }

@@ -20,6 +20,15 @@ const props = withDefaults(defineProps<{
 }>(), { canManage: false })
 
 const { user } = useSession()
+const config = useRuntimeConfig()
+
+/**
+ * Whether this deployment can offer sign-in from Claude (OAuth). Mirrors
+ * `oauthSettings()` on the server, which refuses the option anyway when off.
+ */
+const oauthAvailable = computed(() =>
+  Boolean(config.public.appUrl) && String(config.public.oauth ?? '').trim().toLowerCase() !== 'off',
+)
 
 /**
  * Whether a new token starts with the read tools only, which is also whether
@@ -106,6 +115,9 @@ interface TokenRow {
   assignedTo: { id: string, email?: string }
   scope: TokenScope
   send_disclaimer?: string
+  authMethod: 'static' | 'oauth'
+  /** An OAuth grant's state; `claimed` false is "awaiting sign-in". */
+  oauth?: { claimed: boolean, client?: string, claimedAt?: string }
 }
 
 const { data, refresh, status } = await useFetch<{ tokens: TokenRow[] }>(
@@ -118,6 +130,13 @@ const newExpiry = ref<'30d' | '90d' | '1y' | 'never'>('90d')
 const newScope = ref<TokenScope>(openScope())
 /** Off until an admin turns it on; see TokenScopeFields. */
 const newDisclaimer = ref<string | null>(null)
+/**
+ * How the secret reaches Claude: signing in (OAuth — nothing to copy, nothing
+ * to leak) or a token in the URL. Sign-in is the default wherever it works.
+ */
+const newMethod = ref<'oauth' | 'static'>('oauth')
+/** The OAuth instructions, after creating a grant or from "How to". */
+const oauthHowTo = ref<{ label: string, scope: TokenScope, holderEmail?: string } | null>(null)
 const revealed = ref<string | null>(null)
 const revealedScope = ref<TokenScope>(openScope())
 /** Which token is mid-revoke, so only that row's button is disabled. */
@@ -174,6 +193,7 @@ function openCreate() {
   newScope.value = initialScope()
   newDisclaimer.value = null
   newAssignee.value = user.value?.id ?? ''
+  newMethod.value = oauthAvailable.value ? 'oauth' : 'static'
   createOpen.value = true
   if (props.canManage) refreshAssignable()
 }
@@ -217,14 +237,16 @@ async function saveEdit() {
 
 async function create() {
   const scope = newScope.value
+  const oauth = newMethod.value === 'oauth'
 
   const result = await runCreate(
-    () => $fetch<{ token: string }>(`/api/instances/${props.instanceId}/tokens`, {
+    () => $fetch<{ token?: string, record: TokenRow }>(`/api/instances/${props.instanceId}/tokens`, {
       method: 'POST',
       body: {
         label: newLabel.value,
         expiry: newExpiry.value,
         assignedTo: newAssignee.value || undefined,
+        oauth,
         ...scope,
         send_disclaimer: disclaimerToSubmit(scope, props.kind, newDisclaimer.value),
       },
@@ -233,10 +255,19 @@ async function create() {
   )
   if (!result) return
 
-  // The plaintext exists only in this response, so the reveal dialog is opened
-  // from the value in hand rather than from a refetch.
-  revealed.value = result.token
-  revealedScope.value = scope
+  if (result.token) {
+    // The plaintext exists only in this response, so the reveal dialog is opened
+    // from the value in hand rather than from a refetch.
+    revealed.value = result.token
+    revealedScope.value = scope
+  }
+  else {
+    oauthHowTo.value = {
+      label: result.record.label,
+      scope,
+      holderEmail: holderEmailFor(newAssignee.value),
+    }
+  }
   createOpen.value = false
   newLabel.value = ''
   newScope.value = openScope()
@@ -271,13 +302,21 @@ async function revoke(id: string) {
  */
 async function rotate(token: TokenRow) {
   rotating.value = token.id
+  const oauth = token.authMethod === 'oauth'
   const result = await runRotate(
-    () => $fetch<{ token: string }>(`/api/tokens/${token.id}/rotate`, { method: 'POST' }),
-    { failure: 'Could not issue a new secret' },
+    () => $fetch<{ token?: string }>(`/api/tokens/${token.id}/rotate`, { method: 'POST' }),
+    oauth
+      ? { success: 'Signed out. Sign in again from Claude to reconnect.', failure: 'Could not sign it out' }
+      : { failure: 'Could not issue a new secret' },
   )
   rotating.value = null
   if (!result) return
 
+  // An OAuth grant is signed out instead: there is no secret to show.
+  if (!result.token) {
+    await refresh()
+    return
+  }
   revealed.value = result.token
   revealedScope.value = token.scope
   await refresh()
@@ -291,7 +330,27 @@ function formatDate(value?: string) {
 function statusOf(token: TokenRow) {
   if (token.revoked) return { label: 'Revoked', variant: 'outline' as const }
   if (token.expired) return { label: 'Expired', variant: 'outline' as const }
+  if (token.authMethod === 'oauth' && !token.oauth?.claimed) return { label: 'Awaiting sign-in', variant: 'secondary' as const }
   return { label: 'Active', variant: 'default' as const }
+}
+
+/** The holder's address when it is not the viewer — who must sign in to claim a grant. */
+function holderEmailFor(userId: string | undefined): string | undefined {
+  if (!userId || userId === user.value?.id) return undefined
+  return assigneeOptions.value.find(m => m.userId === userId)?.email
+}
+
+function showHowTo(token: TokenRow) {
+  if (token.authMethod === 'oauth') {
+    oauthHowTo.value = {
+      label: token.label,
+      scope: token.scope,
+      holderEmail: token.assignedTo.id === user.value?.id ? undefined : token.assignedTo.email,
+    }
+  }
+  else {
+    howTo.value = token
+  }
 }
 </script>
 
@@ -344,7 +403,7 @@ function statusOf(token: TokenRow) {
 
         <p v-else-if="!data?.tokens?.length" class="p-6 text-sm text-muted-foreground">
           <template v-if="canManage">
-            No tokens yet. Create one, then paste its URL into Claude as a custom connector.
+            No tokens yet. Create one, then add it to Claude as a custom connector.
           </template>
           <template v-else>
             You have no connector tokens for this connection yet. An admin of your
@@ -392,13 +451,18 @@ function statusOf(token: TokenRow) {
                 <Badge :variant="statusOf(token).variant">
                   {{ statusOf(token).label }}
                 </Badge>
+                <!-- The client's own name for itself, as it registered: shown so
+                     the holder recognises it, not as a verified identity. -->
+                <div v-if="token.authMethod === 'oauth' && token.oauth?.claimed && !token.revoked" class="mt-1 text-xs text-muted-foreground">
+                  Signed in via {{ token.oauth.client || 'an app' }}
+                </div>
               </TableCell>
               <TableCell class="whitespace-nowrap">
                 <Button
                   v-if="!token.revoked"
                   variant="ghost"
                   size="sm"
-                  @click="howTo = token"
+                  @click="showHowTo(token)"
                 >
                   How to
                 </Button>
@@ -412,7 +476,32 @@ function statusOf(token: TokenRow) {
                 >
                   Edit
                 </Button>
-                <AlertDialog v-if="!token.revoked && !token.expired">
+                <!-- An OAuth grant's secret is never shown, so its "new secret" is
+                     signing out whichever client holds it. -->
+                <AlertDialog v-if="token.authMethod === 'oauth' && token.oauth?.claimed && !token.revoked && !token.expired">
+                  <AlertDialogTrigger as-child>
+                    <Button variant="ghost" size="sm" :disabled="rotating === token.id">
+                      Sign out
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Sign “{{ token.label }}” out of {{ token.oauth.client || 'its app' }}?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        That app stops working with it immediately. The connector
+                        stays, with the same scope, and its holder can sign in to it
+                        again from any app. Use this if a device was lost.
+                      </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <AlertDialogAction @click="rotate(token)">
+                        Sign out
+                      </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+                <AlertDialog v-if="token.authMethod === 'static' && !token.revoked && !token.expired">
                   <AlertDialogTrigger as-child>
                     <Button variant="ghost" size="sm" :disabled="rotating === token.id">
                       New secret
@@ -485,6 +574,32 @@ function statusOf(token: TokenRow) {
             <Input id="token-label" v-model="newLabel" placeholder="Claude desktop" />
           </div>
 
+          <!-- How the secret reaches Claude. Offered only where the deployment
+               can do OAuth (NUXT_PUBLIC_APP_URL set). -->
+          <div v-if="oauthAvailable" class="shrink-0 space-y-2">
+            <Label>How Claude connects</Label>
+            <RadioGroup v-model="newMethod" class="gap-2">
+              <label class="flex cursor-pointer items-start gap-2 text-sm">
+                <RadioGroupItem value="oauth" class="mt-0.5" />
+                <span>
+                  <span class="font-medium">Sign in from Claude</span>
+                  <span class="block text-xs text-muted-foreground">
+                    Add the app's URL in Claude and sign in. Nothing to copy or leak.
+                  </span>
+                </span>
+              </label>
+              <label class="flex cursor-pointer items-start gap-2 text-sm">
+                <RadioGroupItem value="static" class="mt-0.5" />
+                <span>
+                  <span class="font-medium">Token in the URL</span>
+                  <span class="block text-xs text-muted-foreground">
+                    For clients that cannot sign in. Shown once; treat it like a password.
+                  </span>
+                </span>
+              </label>
+            </RadioGroup>
+          </div>
+
           <!--
             Only people who already reach this connection are offered: the
             server refuses a token for anyone else, because it would authenticate
@@ -552,7 +667,7 @@ function statusOf(token: TokenRow) {
             Cancel
           </Button>
           <Button :disabled="creating" @click="create">
-            {{ creating ? 'Creating…' : 'Create token' }}
+            {{ creating ? 'Creating…' : newMethod === 'oauth' && oauthAvailable ? 'Create connector' : 'Create token' }}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -605,5 +720,14 @@ function statusOf(token: TokenRow) {
     />
 
     <RevealTokenDialog :token="revealed" :kind="kind" :scope="revealedScope" @close="revealed = null" />
+
+    <OAuthConnectDialog
+      :open="Boolean(oauthHowTo)"
+      :kind="kind"
+      :label="oauthHowTo?.label"
+      :scope="oauthHowTo?.scope"
+      :holder-email="oauthHowTo?.holderEmail"
+      @update:open="value => { if (!value) oauthHowTo = null }"
+    />
   </section>
 </template>

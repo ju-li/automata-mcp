@@ -20,7 +20,7 @@ Connection = row in `instances` with `kind`; connector token bound to exactly on
 
 App's own data (users, sessions, organizations, connections + credentials, tokens) in Postgres, `app` schema migrated at boot — `NUXT_DATABASE_URL`, required. Same Postgres Evolution writes into (`public`) and Telegram bridge uses (`telegram`); that Postgres is only compose service not behind profile. Evolution API + its Redis needed **only for WhatsApp connections** — behind `whatsapp` compose profile; `NUXT_EVOLUTION_*` vars optional.
 
-`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `imap.md`, `alerts.md`, `two-factor.md`, `using-automata.md`, `releases.md`, `billing.md`; `docs/README.md` indexes them. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
+`README.md` = public landing page (logo, links, screenshots, features, quick start) — keep short. Operator's manual lives in `docs/`: `self-hosting.md` (root `docker-compose.yml` + `.env.selfhost.example`, published images), `deploy-railway.md`, `development.md` (local setup, networking tables, Linux firewall rule), `whatsapp.md`, `telegram.md`, `postgres.md`, `imap.md`, `alerts.md`, `two-factor.md`, `oauth.md`, `using-automata.md`, `releases.md`, `billing.md`; `docs/README.md` indexes them. Read before anything involving Docker or local stack; this file covers code. Two compose files: `docker-compose.dev.yml` = services only for dev; `docker-compose.yml` = full self-host stack, separate project name `automata`. Third self-host path: `docker/aio/` = all-in-one image, everything in one container — see "All-in-one image".
 
 **Status:** product loop works end to end for all four kinds — sign up (creates organization), invite colleagues, create connection, pair by QR (importing number's WhatsApp history as it connects), link Telegram by QR, or paste DSN, per-connection dashboard, assign connections to members, connector token provisioning with per-chat, per-folder or per-table scoping. Twenty-two MCP tools, gated by kind:
 
@@ -67,14 +67,16 @@ Nuxt overrides `runtimeConfig` only from `NUXT_`-prefixed vars, so some values d
 ```
 apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context = repo root).
   app/pages/                 index, login, signup, verify-email, no-organization, team,
-                             profile, billing, invite/[code], instances/{index,new,[id]}
+                             profile, billing, invite/[code], instances/{index,new,[id]},
+                             oauth/authorize
   app/components/            app components + ui/ (shadcn-vue, bare names)
   app/composables/           useSession (user + org + role), useOrg, useConnectionState,
                              useReconnect, useTablePage, useTokenScope, …
   app/middleware/            auth.global.ts — session + organization gate
   modules/mcp-token-route.ts local Nuxt module — registers /mcp/:token
   server/api/                auth/, org/, invites/, instances/, tokens/, telegram/,
-                             webhook/, billing/, hosted.get.ts
+                             webhook/, billing/, oauth/, hosted.get.ts
+  server/routes/.well-known/ OAuth discovery (RFC 9728 / 8414)
   server/mcp/index.ts        default MCP handler (auth middleware)
   server/mcp/tools/<group>/   one file per tool, auto-discovered. A group is
                               usually a kind; `sql/` is the exception and serves
@@ -89,7 +91,7 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              mcp-kind-tool, telegram, telegram-db,
                              telegram-instances, imap-client, imap-sync, imap-db,
                              mail-format, mfa, totp, webauthn, entitlements,
-                             hosted-events, cloud, …
+                             hosted-events, cloud, oauth, …
   shared/connection.ts       InstanceKind, assertNever — imported as #shared
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              `telegram` schema of the shared Postgres. See "Telegram bridge".
@@ -114,6 +116,8 @@ Two surfaces have **entirely separate** credential paths; no shared "get current
 | Backend client | `evolutionClientForInstance(instance)` / `pgFor(instance)` | `useEvolutionClient()` / `pgFor(instance)` |
 | On failure | 401 JSON | 401 **+ `WWW-Authenticate`**, JSON-RPC shaped |
 
+OAuth (below) adds a second way for the MCP credential to *arrive*, not a second credential path: its access token is a `mcp_tokens` row's `token_hash`, resolved by same `resolveMcpAuth`.
+
 Three things enforce it:
 
 - `server/middleware/session.ts` returns early on any `/mcp*` path, so cookies never parsed there. Without early return, browser signed into app could authenticate MCP tool call with cookie.
@@ -125,6 +129,30 @@ Three things enforce it:
 **Failure-mode semantics matter:** DB outage answers **503**, never 401. 401 tells client credential bad — MCP client discards token it should keep, browser user silently signed out mid-outage. Both surfaces distinguish: `resolveMcpAuth` and `getSessionUser` return `undefined` (→ 401) only when query ran and found no usable row; any thrown error → `appDbUnavailable()` (503). `checkPassword` same for login form. Preserve in any new auth code: `catch` on auth read must never produce `undefined`.
 
 **Handled `createError` not logged by Nitro.** Only unhandled/fatal errors reach its error handler, so deliberate 503 produces response with *nothing* in server logs — outage becomes guesswork. Admin-auth and session failures log underlying cause themselves, say which of two fixes applies. Do same for any handled error operator needs to diagnose.
+
+## OAuth for MCP clients
+
+`server/utils/oauth.ts` = only file minting or spending codes, OAuth access tokens (`wamcpo_`) and refresh tokens (`wamcpr_`). App is both authorization server and resource server. `docs/oauth.md` = operator side. Static tokens untouched and stay — Cursor, gateways, scripts can't sign in.
+
+**OAuth changes how secret arrives, never what it reaches.** Grant = ordinary `app.mcp_tokens` row, `auth_method = 'oauth'`, minted through same `issueConnectorToken()` (`tokens.ts`) as static token — admin-only, holder must reach connection, `assertCanAdd` + hosted event in one tx — but with `token_hash` NULL = "awaiting sign-in", authenticates nothing. Holder claims by signing in from client; consent page lists **only grants issued to signed-in user**, edits no scope. So member can't widen anything by approving, and `resolveMcpAuth`, kind/scope gates, `mcpLimitRefusal`, four token-killing operations all apply unchanged. Admin with nothing waiting may mint own grant from consent page (`api/oauth/authorize/grant.post.ts`, `requireManagedInstance` → `issueConnectorToken`, `defaultScopeFor(kind)` = dialog's default). Never add a consent-time scope editor or a member mint path here.
+
+Auth split holds: cookie read only on consent page and `api/oauth/authorize*` (web surface); `session.ts` skips `isOAuthClientPath()` (token, register, revoke, `/.well-known/`), so token endpoint can't authenticate by cookie even by accident.
+
+Rules easy to undo:
+
+- **URLs only from `NUXT_PUBLIC_APP_URL`**, never `Host`. Unset (or `NUXT_PUBLIC_OAUTH=off`) → discovery 404, 401 carries no `resource_metadata`, token dialog hides the option, mint refuses `oauth: true` with 422.
+- **Discovery routes are `.get.ts` on purpose.** Toolkit 0.19.0 registers method-less 404 handlers on `/.well-known/oauth-*` (`module.mjs` `registerServerHandlers`), added after scanned routes; h3 picks method-specific over `all` on same path, but a method-less file of ours would be overwritten. OPTIONS answered by `server/middleware/oauth-cors.ts` before routing for same reason. `…/oauth-protected-resource/mcp` static route beats toolkit's `/**`. **Toolkit bump = re-check.**
+- **No `resource_metadata` on `/mcp/<token>` 401** — not the resource metadata names; dead path token needs new token, not sign-in.
+- **Writes before a refusal must not throw inside `sql.begin`.** Throw rolls back: code `DELETE` would un-spend, reuse sign-out would undo — both found in testing. Return a sentinel, throw after commit.
+- **Code spent by `DELETE … RETURNING` first, on any attempt**, right or wrong. PKCE `S256` only, required. Redirect URI exact match; bad client/redirect = 400 on page, **never redirected**.
+- **Refresh rotates; reuse signs grant out, never revokes it.** Presented hash = `prev_refresh_hash` → `clearGrantSecrets` (row survives, "awaiting sign-in", holder re-claims). Within 30 s (`refreshed_at`) = client racing itself: refused, nothing cleared. Revoking row on reuse would make member wait on admin for a new grant.
+- **Sign out ≠ revoke.** `rotateToken` on oauth row and RFC 7009 `/revoke` both `clearGrantSecrets`. Re-claim on consent also clears first, so previous client dies at approval, not next refresh.
+- **DB failure on token endpoint = 503 `temporarily_unavailable`, never `invalid_grant`** (`answerOAuth`) — invalid_grant makes client discard refresh token = every connector signed out by outage. Same rule as 503-not-401.
+- **Access token 1 h, capped by grant's `expires_at`**; `resolveMcpAuth` refuses oauth row with missing or past `access_expires_at`, never reads absent as forever.
+- **Unclaimed grant never takes a working token's place** over limits: `mcpLimitRefusal` filters `token_hash IS NOT NULL`. `assertCanAdd` still counts it (creating one is minting).
+- **Consent POST checks `Origin`** (`assertSameOrigin`) beyond SameSite=Lax; `/oauth/**` sends `X-Frame-Options: DENY` + `frame-ancestors 'none'` (routeRules). Client name = client's own claim, shown as such; redirect host shown as what's verifiable.
+- **DCR open by design**, public clients only, `https` or loopback `http` redirects, per-IP in-memory throttle (speed bump). `NUXT_OAUTH_REDIRECT_HOSTS` = deployment-wide allowlist, loopback always allowed.
+- **`/login?next=` accepts only `/oauth/authorize…`** (`safeNext()`, `app/composables/safeNext.ts`) — anything wider is open redirect.
 
 ## Who may sign up
 

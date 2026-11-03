@@ -25,8 +25,9 @@ Evolution's and the app's migrations; `docker logs -f automata` shows each
 service starting.
 
 `NUXT_PUBLIC_APP_URL` is the address people will open — every connector URL is
-built from it. Left out, it defaults to `http://localhost:3000`, which is fine
-for trying it and wrong for anything Claude has to reach.
+built from it, and so is [sign-in from Claude](oauth.md). Left out, it defaults to
+`http://localhost:3000`, which is fine for trying it and wrong for anything
+Claude has to reach.
 
 `--stop-timeout 30` gives the services time to stop in order — the web app,
 Evolution and the bridge first, Postgres last. Docker's default 10 seconds can

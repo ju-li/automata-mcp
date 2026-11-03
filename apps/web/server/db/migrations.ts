@@ -467,4 +467,65 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN marketing_consent boolean NOT NULL DEFAULT false;
     `,
   },
+  {
+    name: '0010_oauth',
+    sql: /* sql */ `
+      -- OAuth clients that registered themselves (RFC 7591). Public clients only:
+      -- no secret, PKCE on every authorization. The name is the client's own
+      -- choice and is shown on the consent page as such, never as verified.
+      CREATE TABLE app.oauth_clients (
+        id            text PRIMARY KEY,
+        name          text NOT NULL CHECK (length(name) BETWEEN 1 AND 100),
+        redirect_uris jsonb NOT NULL,
+        created       timestamptz NOT NULL DEFAULT now(),
+        last_used_at  timestamptz
+      );
+
+      -- An OAuth grant is an ordinary connector token row: same connection,
+      -- holder, scope and disclaimer, so every rule that keeps a token alive or
+      -- kills it applies unchanged. An admin creates it with no secret
+      -- ("awaiting sign-in"); its holder claims it by signing in from an MCP
+      -- client, which is when token_hash first gets a value.
+      --
+      --   token_hash         the current access token's hash. NULL = no client
+      --                      holds this grant right now, so it authenticates
+      --                      nothing (a NULL never equals a lookup).
+      --   access_expires_at  when that access token stops working.
+      --   refresh_hash       the current refresh token's hash.
+      --   prev_refresh_hash  the one it replaced, kept to recognise reuse.
+      --   refreshed_at       when it was replaced, for the concurrent-retry grace.
+      --   expires_at         unchanged meaning: the whole grant's lifetime.
+      ALTER TABLE app.mcp_tokens
+        ADD COLUMN auth_method text NOT NULL DEFAULT 'static'
+          CHECK (auth_method IN ('static', 'oauth')),
+        ADD COLUMN oauth_client text REFERENCES app.oauth_clients (id) ON DELETE SET NULL,
+        ADD COLUMN claimed_at timestamptz,
+        ADD COLUMN access_expires_at timestamptz,
+        ADD COLUMN refresh_hash text CHECK (refresh_hash IS NULL OR length(refresh_hash) = 64),
+        ADD COLUMN prev_refresh_hash text CHECK (prev_refresh_hash IS NULL OR length(prev_refresh_hash) = 64),
+        ADD COLUMN refreshed_at timestamptz,
+        ALTER COLUMN token_hash DROP NOT NULL,
+        ADD CONSTRAINT mcp_tokens_static_has_secret
+          CHECK (auth_method = 'oauth' OR token_hash IS NOT NULL),
+        ADD CONSTRAINT mcp_tokens_static_has_no_refresh
+          CHECK (auth_method = 'oauth' OR (refresh_hash IS NULL AND prev_refresh_hash IS NULL));
+      CREATE UNIQUE INDEX mcp_tokens_refresh_hash_key ON app.mcp_tokens (refresh_hash);
+      CREATE INDEX mcp_tokens_prev_refresh_hash_idx ON app.mcp_tokens (prev_refresh_hash);
+
+      -- Authorization codes: single use, about a minute long, stored as a hash.
+      -- Spent by DELETE ... RETURNING, so two exchanges of one code cannot both
+      -- succeed.
+      CREATE TABLE app.oauth_codes (
+        code_hash      text PRIMARY KEY CHECK (length(code_hash) = 64),
+        token          text NOT NULL REFERENCES app.mcp_tokens (id) ON DELETE CASCADE,
+        client         text NOT NULL REFERENCES app.oauth_clients (id) ON DELETE CASCADE,
+        redirect_uri   text NOT NULL,
+        code_challenge text NOT NULL,
+        resource       text,
+        expires_at     timestamptz NOT NULL,
+        created        timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX oauth_codes_expires_idx ON app.oauth_codes (expires_at);
+    `,
+  },
 ]

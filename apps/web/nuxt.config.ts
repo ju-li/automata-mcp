@@ -160,8 +160,27 @@ export default defineNuxtConfig({
     // without setting the new variables keeps its plans on (fail closed).
     billing: '',
 
+    // OAuth sign-in for MCP clients (server/utils/oauth.ts). On whenever
+    // NUXT_PUBLIC_APP_URL is set; NUXT_PUBLIC_OAUTH=off turns it off. This list,
+    // comma-separated, restricts which hosts a client may register a redirect
+    // for (e.g. "claude.ai,claude.com"); empty allows any https host. Loopback
+    // is always allowed, for native clients.
+    oauthRedirectHosts: '',
+
     public: {
       appUrl: '',
+      oauth: '',
+    },
+  },
+
+  // The consent page hands a credential to another application with one click,
+  // so it must never render inside someone else's frame.
+  routeRules: {
+    '/oauth/**': {
+      headers: {
+        'x-frame-options': 'DENY',
+        'content-security-policy': "frame-ancestors 'none'",
+      },
     },
   },
 

@@ -16,7 +16,7 @@ export default defineMcpHandler({
     if (!auth) {
       // 401 + WWW-Authenticate. Never 200-with-an-error-body: to a client that
       // reads like a tool that ran and declined.
-      return mcpUnauthorized()
+      return mcpUnauthorized(event)
     }
 
     // A valid credential beyond its organization's limits: 403, never 401,

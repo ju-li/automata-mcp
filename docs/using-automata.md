@@ -21,7 +21,13 @@
    [Email (IMAP) connections](imap.md)).
 4. On the connection's dashboard, create a **New connector token**: a name, an
    expiry (30 days, 90 days — the default — 1 year, or never) and a scope.
-5. Add it to Claude. The **How to connect** dialog has the steps for Claude.ai
+   Choose **Sign in from Claude** (the default where the deployment supports it)
+   or **Token in the URL**.
+5. **Sign in from Claude:** add `https://<your-app>/mcp` as a custom connector,
+   press Connect, sign in to this app and approve. The holder signs in as
+   themselves, so an admin creating one for a colleague just sends them the
+   address. See [Sign-in from Claude (OAuth)](oauth.md).
+   **Token in the URL:** add it to Claude. The **How to connect** dialog has the steps for Claude.ai
    (Settings → Connectors → Add custom connector), Claude Code
    (`claude mcp add --transport http <name> <url>`), clients that send an
    `Authorization: Bearer` header, and the MCP Inspector.

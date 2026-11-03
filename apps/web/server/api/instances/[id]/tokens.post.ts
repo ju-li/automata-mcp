@@ -5,6 +5,11 @@ const body = z.object({
   expiry: z.enum(['30d', '90d', '1y', 'never']).default('90d'),
   /** The member to issue it to. Defaults to the acting admin. */
   assignedTo: z.string().min(1).optional(),
+  /**
+   * Issue it as an OAuth grant: no plaintext in the response, and the holder
+   * signs in from their MCP client to claim it. See server/utils/oauth.ts.
+   */
+  oauth: z.boolean().default(false),
 }).and(scopeSchema).and(disclaimerSchema)
 
 /**
@@ -26,51 +31,30 @@ const body = z.object({
  * That would quietly make "give them a token" mean "give them the dashboard".
  *
  * The plaintext is in this response and nowhere else — only its SHA-256 hash is
- * stored. The UI must show it once and say so.
+ * stored. The UI must show it once and say so. An OAuth grant has no plaintext
+ * at all: `token` is absent and the record reads "awaiting sign-in".
  */
 export default defineEventHandler(async (event) => {
   const { instance, actor } = await requireManagedInstance(event, getRouterParam(event, 'id'))
   const parsed = await parseBody(event, body)
 
-  const assignedTo = parsed.assignedTo ?? actor.user.id
-
-  if (assignedTo !== actor.user.id) {
-    const member = await requireOrgMember(actor.org.id, assignedTo)
-    const reaches = member.role === 'admin'
-      || (await listInstanceAssignees(instance.id)).includes(assignedTo)
-
-    if (!reaches) {
-      throw createError({
-        statusCode: 422,
-        statusMessage: `${member.email} cannot reach this connection, so a token issued to them `
-          + 'would not work. Assign the connection to them first.',
-      })
-    }
+  // An OAuth grant is useless without discovery to find it; refuse rather than
+  // mint one nobody can ever claim.
+  if (parsed.oauth && !oauthSettings()) {
+    throw createError({
+      statusCode: 422,
+      statusMessage: 'Sign-in from Claude needs NUXT_PUBLIC_APP_URL set on this deployment. Create a token instead.',
+    })
   }
 
-  // The plan's token limit and the insert in one transaction, under the
-  // organization row lock `assertCanAdd` takes, so two racing mints at the limit
-  // cannot both land.
-  const sql = await appDb()
-  const { token, record } = await sql.begin(async (tx) => {
-    await assertCanAdd(tx, actor.org.id, 'token')
-    const minted = await createToken({
-      instanceId: instance.id,
-      assignedTo,
-      createdBy: actor.user.id,
-      label: parsed.label ?? '',
-      preset: parsed.expiry,
-      scope: scopeFromInput(parsed),
-      sendDisclaimer: parsed.send_disclaimer,
-    }, tx)
-    await recordHostedEvent(tx, {
-      type: 'token.created',
-      org: actor.org.id,
-      userId: assignedTo,
-      payload: { id: minted.record.id, connection: instance.id, kind: instance.kind },
-    })
-    return minted
+  return await issueConnectorToken({
+    actor,
+    instance,
+    assignedTo: parsed.assignedTo ?? actor.user.id,
+    label: parsed.label ?? '',
+    preset: parsed.expiry,
+    scope: scopeFromInput(parsed),
+    sendDisclaimer: parsed.send_disclaimer,
+    oauth: parsed.oauth,
   })
-
-  return { token, record }
 })

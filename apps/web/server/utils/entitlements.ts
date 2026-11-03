@@ -195,6 +195,9 @@ export async function mcpLimitRefusal(
         SELECT t.id FROM app.mcp_tokens t
         WHERE t.instance IN (SELECT id FROM conns)
           AND NOT t.revoked AND (t.expires_at IS NULL OR t.expires_at > now())
+          -- An OAuth grant nobody has signed in to yet answers nothing, so it
+          -- must not take a working token's place among the ones that may.
+          AND t.token_hash IS NOT NULL
         ORDER BY t.created, t.id LIMIT ${limits.max_tokens ?? null}
       )
       SELECT EXISTS (SELECT 1 FROM toks WHERE id = ${tokenId}) AS allowed
