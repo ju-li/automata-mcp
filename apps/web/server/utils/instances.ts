@@ -50,6 +50,8 @@ export interface PublicInstance {
   kind: InstanceKind
   name: string
   label: string
+  /** The prefix of this connection's tool names in an OAuth sign-in. */
+  handle: string
   created?: string
   /**
    * Where this connection points, for display. The Evolution base URL is not a
@@ -72,7 +74,7 @@ export interface PublicInstance {
 
 export function toPublicInstance(instance: AppInstance): PublicInstance {
   const kind = instanceKind(instance)
-  const base = { id: instance.id, kind, name: instance.name, created: instance.created }
+  const base = { id: instance.id, kind, name: instance.name, handle: instance.handle, created: instance.created }
 
   switch (kind) {
     case 'postgres':

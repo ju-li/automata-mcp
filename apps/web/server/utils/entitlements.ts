@@ -159,6 +159,21 @@ export async function assertCanAdd(
 }
 
 /**
+ * A read-only pre-check that `count` more tokens fit, for the OAuth consent page:
+ * one sign-in mints a token per connection picked, and saying so on the page
+ * beats a failure the client can only show as "sign-in failed". `freed` is how
+ * many live tokens the sign-in replaces (an earlier sign-in from the same app).
+ * Not the control — the exchange still runs `assertCanAdd` per token under the
+ * organization row lock.
+ */
+export async function assertRoomForTokens(db: Db, orgId: string, count: number, freed = 0): Promise<void> {
+  const limits = await loadOrgLimits(db, orgId)
+  if (limits?.max_tokens == null) return
+  const usage = await orgUsage(db, orgId)
+  if (usage.tokens - freed + count > limits.max_tokens) throw limitError('token', limits.max_tokens)
+}
+
+/**
  * Whether one connector token may answer on the MCP surface under its
  * organization's limits, or the refusal to send instead.
  *
@@ -195,9 +210,6 @@ export async function mcpLimitRefusal(
         SELECT t.id FROM app.mcp_tokens t
         WHERE t.instance IN (SELECT id FROM conns)
           AND NOT t.revoked AND (t.expires_at IS NULL OR t.expires_at > now())
-          -- An OAuth grant nobody has signed in to yet answers nothing, so it
-          -- must not take a working token's place among the ones that may.
-          AND t.token_hash IS NOT NULL
         ORDER BY t.created, t.id LIMIT ${limits.max_tokens ?? null}
       )
       SELECT EXISTS (SELECT 1 FROM toks WHERE id = ${tokenId}) AS allowed

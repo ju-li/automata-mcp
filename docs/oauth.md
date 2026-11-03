@@ -1,9 +1,15 @@
 # Sign-in from Claude (OAuth)
 
-Besides tokens in the URL, a connector can **sign in**: you add the app's plain
-`https://<your-app>/mcp` address in Claude, Claude opens this app, you sign in
-and approve, and Claude gets tokens of its own. There is nothing to copy and
-nothing that can leak from a chat log or a screenshot.
+Besides tokens in the URL, Claude can **sign in**:
+
+1. Add the app's plain `https://<your-app>/mcp` address in Claude.
+2. Claude opens this app. Sign in, tick the connections you want it to have,
+   and approve.
+3. Claude gets credentials of its own.
+
+There is nothing to copy and nothing that can leak from a chat log or a
+screenshot. **One sign-in can cover several connections**, so one connector in
+Claude can reach your WhatsApp number, your database and your mailbox together.
 
 Static tokens keep working exactly as before. Use them for clients that can't
 sign in: Cursor's `mcp.json`, gateways that forward a header, scripts.
@@ -21,42 +27,68 @@ from a request's `Host` header, so it has to be right.
 | `NUXT_PUBLIC_OAUTH=off` | Turns OAuth off even with the URL set. |
 | `NUXT_OAUTH_REDIRECT_HOSTS` | Optional, comma-separated, e.g. `claude.ai,claude.com`. When set, a client may register redirects only to these hosts (subdomains included) or to loopback. Empty allows any `https` host. |
 
-## How it works
+## What a sign-in covers
 
-**An admin decides, the holder claims.** On a connection's dashboard an admin
-creates a **New token** and picks **Sign in from Claude**. This makes a
-connector with a name, an expiry, a scope and a holder, like any token, but
-with no secret. It reads **Awaiting sign-in** and authenticates nothing.
+**Connections.** On the consent page:
 
-The holder then adds `https://<your-app>/mcp` in Claude (Settings →
-Connectors → Add custom connector, leaving the advanced OAuth fields empty) or
-runs `claude mcp add --transport http <name> https://<your-app>/mcp` in Claude
-Code. Claude opens this app, the holder signs in (with their second factor, if
-they have one) and picks the connector.
+- Users tick connections from the ones they reach. For an admin that is every
+  connection in the organization; for a member, the ones assigned to them.
+- "All current connections" ticks them all as a **snapshot**. A connection
+  added later is not included until the user signs in again from the same app,
+  which replaces the earlier sign-in.
 
-- **The consent page lists only your own connectors.** They must be issued to
-  you, alive, and on a connection you still reach. Nothing on it changes
-  scope, so a member can't widen anything by approving.
-- **An admin with nothing waiting** can create a connector for themselves right
-  on the consent page. It uses the same default access a new token gets
-  (read-only for a database or mailbox), expires in 90 days, and can be edited
-  on the connection's page afterwards.
-- **A member with nothing waiting** is told which admins to ask.
+**What each connection may do.** Each ticked connection starts at the same
+default a new token gets: everything for WhatsApp and Telegram, read-only for a
+database or mailbox.
 
-What the client gets is short-lived: an access token for an hour and a refresh
-token that rotates on every use.
+- **Customize** narrows it.
+- An **admin** can grant anything, with the same editor as the token dialog.
+- A **member** can grant at most what the connection's **sign-in policy**
+  allows, and can only untick actions within it.
+
+**Sign-in policy (admins).** Each connection's page has a **Sign in from
+Claude** card. Under **Members…** an admin chooses:
+
+- whether members may sign the connection in at all (off by default)
+- the most they may grant
+- a disclaimer for messaging connections
+
+The policy applies on every request, so narrowing it or switching it off takes
+effect immediately for sign-ins members already made.
+
+**Tool names.** Every tool in a sign-in is prefixed with its connection's
+**handle**, e.g. `orders_db__run-query` or `us_number__send-text-message`.
+
+- One sign-in can hold two connections of the same kind, and each tool still
+  reaches exactly one connection.
+- The handle is generated from the connection's name, is unique in the
+  organization, and can be changed on the card. Renaming it renames the tools in
+  every signed-in app, which resets any per-tool permissions set there.
+- Static tokens keep un-prefixed tool names.
+
+## Lifetime and revocation
+
+Behind the scenes, a sign-in is a session holding the credentials, plus one
+connector row per connection it covers. Each row has its own scope.
+Everything that ends a token ends that one connection, the same as before:
+Revoke on the dashboard, unassigning the connection, removing the member, or
+demoting an admin. A sign-in that loses every connection asks the user to sign
+in again.
 
 | What happens | Effect |
 | --- | --- |
-| **Revoke** on the dashboard, removing the member, unassigning the connection, demoting an admin | Kills the connector, the same as a static token. |
-| **Sign out** on the dashboard | That client stops working. The connector stays, and its holder can sign in again from any client. This is the OAuth form of "issue a new secret". |
-| Signing in again from another client | Moves the connector there. The previous client is signed out. |
-| A refresh token used twice (someone else has a copy) | The connector is signed out until its holder signs in again. A repeat within 30 seconds counts as the client racing itself: that request is refused and nothing is signed out. |
-| "Disconnect" in the client (RFC 7009 revocation) | Same as **Sign out**. |
+| **Revoke** on a connection's token list | That connection leaves the sign-in. Its other connections keep working. |
+| **Sign out** on a connection's token list | The whole sign-in ends, every connection it covered. |
+| Signing in again from the same app | Replaces the earlier sign-in. |
+| A refresh token used twice (someone else has a copy) | The sign-in ends. A repeat within 30 seconds counts as the client racing itself: that request is refused and nothing ends. |
+| No refresh for 30 days | The sign-in ends; the user signs in again. |
+| "Disconnect" in the client (RFC 7009 revocation) | The sign-in ends. |
 
-**Plan limits** count a connector from the moment it is created. A connector
-nobody has signed in to yet never takes a working token's place when an
-organization is over its limits.
+Access tokens last an hour, and refresh tokens rotate on every use.
+
+**Plan limits** count each connection in a sign-in as one connector token.
+- The consent page refuses a sign-in that would exceed the limit, and says why.
+- Over its limits, a sign-in keeps the connections still within them.
 
 ## Endpoints
 
@@ -69,15 +101,18 @@ organization is over its limits.
 | `/api/oauth/token` | `authorization_code` with PKCE `S256` (required), and `refresh_token`. |
 | `/api/oauth/revoke` | RFC 7009. |
 
-Registration is open by design, because that is what lets Claude add the
-connector with no setup. A registered client can do nothing until a signed-in
-person approves it. The consent page shows the client's name as the client's
-own claim and shows the host it will send the browser back to, which is the
-part that can be verified. `NUXT_OAUTH_REDIRECT_HOSTS` narrows registration
-further if you want that.
+**Registration is open by design**, because that is what lets Claude add the
+connector with no setup.
 
-A path-token URL (`/mcp/wamcp_…`) never starts OAuth: its 401 carries no
-metadata pointer, because a dead path token needs a new token, not a sign-in.
+- A registered client can do nothing until a signed-in person approves it.
+- The consent page shows the client's name as the client's own claim.
+- It also shows the host it will send the browser back to, which is the part
+  that can be verified.
+- `NUXT_OAUTH_REDIRECT_HOSTS` narrows registration further if you want that.
+
+**OAuth access tokens are accepted only in the `Authorization` header**, never
+in the `/mcp/<token>` path. That path form is for static tokens, and its 401
+carries no metadata pointer.
 
 ## Operational notes
 
@@ -85,10 +120,11 @@ metadata pointer, because a dead path token needs a new token, not a sign-in.
   tell Claude to throw its refresh token away and sign every connector out. The
   same rule keeps a 401 off the MCP endpoint during an outage.
 - **Codes, access and refresh tokens are stored only as SHA-256 hashes**, like
-  static tokens. They only ever travel in request bodies and the
-  `Authorization` header.
-- **Codes and grants live in the database, not in memory**, so several replicas
-  can serve one flow.
+  static tokens.
+- **Codes and sessions live in the database, not in memory**, so several
+  replicas can serve one flow.
+- **Connections are created at code exchange, not approval**, so a consent the
+  client never completes leaves nothing behind.
 - **Changing the domain** in `NUXT_PUBLIC_APP_URL` changes the issuer and the
   resource, and every OAuth client has to connect again. Static tokens are
   unaffected.

@@ -36,20 +36,23 @@ export interface PublicToken {
   /** Appended to every message this token sends. Absent = off. */
   send_disclaimer?: string
   /**
-   * How its secret reaches the client. `static` is shown once at mint;
-   * `oauth` is never shown at all — its holder signs in from the client.
+   * How its secret reaches the client. `static`: shown once at mint. `oauth`:
+   * one connection of an OAuth sign-in, which holds the secret; this row never
+   * has one.
    */
   authMethod: 'static' | 'oauth'
   /**
-   * An OAuth grant's state. `claimed` false is "awaiting sign-in": it
-   * authenticates nothing until its holder signs in. `client` is the name the
-   * application registered itself under — its own choice, not verified.
+   * For an OAuth connection: the app it was signed in from (the name the app
+   * registered itself under — its own claim, not verified) and how many
+   * connections that sign-in covers, so "Sign out" can say what else it ends.
    */
-  oauth?: { claimed: boolean, client?: string, claimedAt?: string }
+  oauth?: { client?: string, sessionConnections: number }
 }
 
+type TokenListRow = AppMcpToken & { oauth_client_name?: string, session_connections?: number }
+
 export function toPublicToken(
-  token: AppMcpToken & { oauth_client_name?: string },
+  token: TokenListRow,
   emails?: Map<string, string>,
 ): PublicToken {
   const expired = Boolean(token.expires_at) && new Date(token.expires_at!).getTime() <= Date.now()
@@ -66,11 +69,7 @@ export function toPublicToken(
     send_disclaimer: token.send_disclaimer || undefined,
     authMethod: token.auth_method === 'oauth' ? 'oauth' : 'static',
     oauth: token.auth_method === 'oauth'
-      ? {
-          claimed: Boolean(token.claimed_at),
-          client: token.claimed_at ? token.oauth_client_name : undefined,
-          claimedAt: token.claimed_at,
-        }
+      ? { client: token.oauth_client_name, sessionConnections: token.session_connections ?? 1 }
       : undefined,
   }
 }
@@ -89,10 +88,13 @@ export async function listTokens(
 ): Promise<PublicToken[]> {
   const sql = await appDb()
 
-  const rows = await sql<(AppMcpToken & { oauth_client_name?: string })[]>`
-    SELECT t.*, c.name AS oauth_client_name
+  const rows = await sql<TokenListRow[]>`
+    SELECT t.*, c.name AS oauth_client_name,
+           (SELECT count(*)::int FROM app.mcp_tokens x
+            WHERE x.oauth_session = t.oauth_session AND NOT x.revoked) AS session_connections
     FROM app.mcp_tokens t
-    LEFT JOIN app.oauth_clients c ON c.id = t.oauth_client
+    LEFT JOIN app.oauth_sessions s ON s.id = t.oauth_session
+    LEFT JOIN app.oauth_clients c ON c.id = s.client
     WHERE t.instance = ${instanceId}
       ${options.assignedTo ? sql`AND t.assigned_to = ${options.assignedTo}` : sql``}
     ORDER BY t.created DESC
@@ -144,14 +146,14 @@ export interface CreateTokenInput {
   /** Appended to every message the token sends. Null or absent = off. */
   sendDisclaimer?: string | null
   /**
-   * An OAuth grant: minted with no secret ("awaiting sign-in"), claimed later
-   * by its holder signing in from an MCP client. See server/utils/oauth.ts.
+   * One connection of an OAuth sign-in: no secret of its own — the session
+   * holds it. Only `exchangeAuthorizationCode` (oauth.ts) passes this.
    */
-  oauth?: boolean
+  oauthSession?: string
 }
 
 export async function createToken(input: CreateTokenInput, db?: Db): Promise<{ token?: string, record: PublicToken }> {
-  const minted = input.oauth ? undefined : mintMcpToken()
+  const minted = input.oauthSession ? undefined : mintMcpToken()
   const sql = db ?? await appDb()
   const [record] = await sql<AppMcpToken[]>`
     INSERT INTO app.mcp_tokens ${sql({
@@ -159,7 +161,8 @@ export async function createToken(input: CreateTokenInput, db?: Db): Promise<{ t
       created_by: input.createdBy,
       instance: input.instanceId,
       token_hash: minted?.hash ?? null,
-      auth_method: input.oauth ? 'oauth' : 'static',
+      auth_method: input.oauthSession ? 'oauth' : 'static',
+      oauth_session: input.oauthSession ?? null,
       label: input.label.trim() || 'Untitled token',
       expires_at: expiryFromPreset(input.preset),
       revoked: false,
@@ -190,7 +193,6 @@ export async function issueConnectorToken(input: {
   preset: ExpiryPreset
   scope: McpScope
   sendDisclaimer?: string | null
-  oauth?: boolean
 }): Promise<{ token?: string, record: PublicToken }> {
   const { actor, instance, assignedTo } = input
 
@@ -219,13 +221,12 @@ export async function issueConnectorToken(input: {
       preset: input.preset,
       scope: input.scope,
       sendDisclaimer: input.sendDisclaimer,
-      oauth: input.oauth,
     }, tx)
     await recordHostedEvent(tx, {
       type: 'token.created',
       org: actor.org.id,
       userId: assignedTo,
-      payload: { id: minted.record.id, connection: instance.id, kind: instance.kind, auth: input.oauth ? 'oauth' : 'static' },
+      payload: { id: minted.record.id, connection: instance.id, kind: instance.kind, auth: 'static' },
     })
     return minted
   })
@@ -274,7 +275,7 @@ export function defaultScopeFor(kind: InstanceKind): McpScope {
  *
  * The plaintext is returned here and nowhere else, exactly as at creation.
  */
-export async function rotateToken(token: AppMcpToken): Promise<{ token?: string, record: PublicToken }> {
+export async function rotateToken(token: AppMcpToken): Promise<{ token?: string, record?: PublicToken, signedOut?: boolean }> {
   if (token.revoked) {
     throw createError({
       statusCode: 422,
@@ -289,12 +290,13 @@ export async function rotateToken(token: AppMcpToken): Promise<{ token?: string,
     })
   }
 
-  // An OAuth grant's secret is never shown, so "a new secret" means signing out
-  // whichever client holds it: its holder signs in again to get a new one.
+  // An OAuth connection has no secret of its own, so "a new secret" means
+  // ending the sign-in it belongs to — every connection that sign-in covers
+  // goes with it, and the user signs in again to pick them anew.
   if (token.auth_method === 'oauth') {
-    await clearGrantSecrets(await appDb(), token.id)
-    const record = await getRow<AppMcpToken>('mcp_tokens', token.id)
-    return { record: toPublicToken(record!) }
+    const sql = await appDb()
+    if (token.oauth_session) await sql.begin(tx => endOAuthSessions(tx, [token.oauth_session!]))
+    return { signedOut: true }
   }
 
   const { token: plaintext, hash } = mintMcpToken()

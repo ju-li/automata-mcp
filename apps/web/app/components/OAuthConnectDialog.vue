@@ -2,36 +2,29 @@
 import { LogInIcon } from '@lucide/vue'
 
 /**
- * How to use an OAuth connector: add the plain `/mcp` URL in the client and
- * sign in. There is no secret to show — that is the point — so this is the
- * same dialog right after creating one and from "How to" later.
- *
- * The holder must sign in as themselves: the consent page offers only the
- * signed-in user's own connectors, so an admin who created one for a colleague
- * hands over the URL and the address, never a credential.
+ * How to connect by signing in: add the plain `/mcp` URL in the client, sign in
+ * to this app, pick connections. There is no secret to show — that is the
+ * point — and nothing to create first: one sign-in can cover several
+ * connections, each picked on the consent page.
  */
-const props = defineProps<{
+defineProps<{
   open: boolean
   kind: InstanceKind
-  label?: string
-  scope?: TokenScope
-  /** Who must sign in to claim it. Absent when it is the viewer. */
-  holderEmail?: string
 }>()
 
 const emit = defineEmits<{ 'update:open': [boolean] }>()
 
 const { bearerUrl } = useConnectorUrl()
-const cliCommand = computed(() => `claude mcp add --transport http ${props.kind} ${bearerUrl.value}`)
+// One sign-in can cover several kinds, so the server is named after the app,
+// not after this connection's kind.
+const cliCommand = computed(() => `claude mcp add --transport http automata ${bearerUrl.value}`)
 </script>
 
 <template>
   <Dialog :open="open" @update:open="value => emit('update:open', value)">
     <DialogContent class="max-h-[85vh] overflow-y-auto sm:max-w-lg">
       <DialogHeader>
-        <DialogTitle>
-          {{ label ? `Connect “${label}” from Claude` : 'Connect from Claude' }}
-        </DialogTitle>
+        <DialogTitle>Connect from Claude</DialogTitle>
         <DialogDescription>
           No token to copy: add the address below in Claude, then sign in to this
           app when it asks.
@@ -40,19 +33,12 @@ const cliCommand = computed(() => `claude mcp add --transport http ${props.kind}
 
       <div class="flex items-start gap-2 rounded-md border bg-muted/40 p-3 text-sm">
         <LogInIcon class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-        <p v-if="holderEmail">
-          This connector is issued to <strong class="font-semibold">{{ holderEmail }}</strong>.
-          Send them the address — they sign in as themselves to claim it. Nobody
-          else can.
-        </p>
-        <p v-else>
-          Sign in as yourself when Claude opens this app, then choose this connector.
+        <p>
+          One sign-in can cover several connections: pick them on the page this
+          app shows, and each one's tools appear under its own prefix. Anyone this
+          connection is assigned to can do the same as themselves.
         </p>
       </div>
-
-      <p v-if="scope" class="text-sm">
-        <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope, kind) }}
-      </p>
 
       <div class="min-w-0 space-y-2">
         <Label>Connector URL</Label>
@@ -73,7 +59,7 @@ const cliCommand = computed(() => `claude mcp add --transport http ${props.kind}
           <ol class="list-decimal space-y-2 pl-5 text-sm marker:text-muted-foreground">
             <li>In Claude on the web or the desktop app, open <strong class="font-semibold">Settings → Connectors</strong>.</li>
             <li>Click <strong class="font-semibold">Add custom connector</strong> and paste the URL above. Leave the advanced OAuth fields empty.</li>
-            <li>Click <strong class="font-semibold">Connect</strong>. This app opens; sign in, choose the connector and approve.</li>
+            <li>Click <strong class="font-semibold">Connect</strong>. This app opens; sign in, pick connections and approve.</li>
           </ol>
         </TabsContent>
 
@@ -87,8 +73,8 @@ const cliCommand = computed(() => `claude mcp add --transport http ${props.kind}
       </Tabs>
 
       <p class="text-xs text-muted-foreground">
-        Already connected somewhere else? Signing in again moves the connector to
-        the new place, and the old one stops working.
+        Signing in again from the same app replaces its earlier sign-in — the way
+        to add or drop connections later.
       </p>
 
       <DialogFooter>

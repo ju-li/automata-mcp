@@ -116,7 +116,7 @@ Two surfaces have **entirely separate** credential paths; no shared "get current
 | Backend client | `evolutionClientForInstance(instance)` / `pgFor(instance)` | `useEvolutionClient()` / `pgFor(instance)` |
 | On failure | 401 JSON | 401 **+ `WWW-Authenticate`**, JSON-RPC shaped |
 
-OAuth (below) adds a second way for the MCP credential to *arrive*, not a second credential path: its access token is a `mcp_tokens` row's `token_hash`, resolved by same `resolveMcpAuth`.
+OAuth (below) adds a second way for the MCP credential to *arrive*, not a second credential path: its session resolves to ordinary `mcp_tokens` rows, each checked by the same `authorizeTokenFacts` a static token goes through (`resolveMcpCredential` in `mcp-auth.ts`).
 
 Three things enforce it:
 
@@ -126,7 +126,7 @@ Three things enforce it:
 
 `McpAuth` = **union discriminated on `kind`** — `{ kind: 'whatsapp', evolution }`, `{ kind: 'telegram', telegram }`, `{ kind: 'postgres' }` or `{ kind: 'imap' }`. Union not optional fields, so handler reaching for `evolution` must first establish it's WhatsApp. Postgres and IMAP carry no credential object: DSN lives on instance row, `pgFor()` only reader; copying into request context = second live copy of user's DB password for nothing.
 
-**Failure-mode semantics matter:** DB outage answers **503**, never 401. 401 tells client credential bad — MCP client discards token it should keep, browser user silently signed out mid-outage. Both surfaces distinguish: `resolveMcpAuth` and `getSessionUser` return `undefined` (→ 401) only when query ran and found no usable row; any thrown error → `appDbUnavailable()` (503). `checkPassword` same for login form. Preserve in any new auth code: `catch` on auth read must never produce `undefined`.
+**Failure-mode semantics matter:** DB outage answers **503**, never 401. 401 tells client credential bad — MCP client discards token it should keep, browser user silently signed out mid-outage. Both surfaces distinguish: `resolveMcpAuth` (and `resolveOAuthSession`) and `getSessionUser` return `undefined` (→ 401) only when query ran and found no usable row; any thrown error → `appDbUnavailable()` (503). `checkPassword` same for login form. Preserve in any new auth code: `catch` on auth read must never produce `undefined`.
 
 **Handled `createError` not logged by Nitro.** Only unhandled/fatal errors reach its error handler, so deliberate 503 produces response with *nothing* in server logs — outage becomes guesswork. Admin-auth and session failures log underlying cause themselves, say which of two fixes applies. Do same for any handled error operator needs to diagnose.
 
@@ -134,25 +134,32 @@ Three things enforce it:
 
 `server/utils/oauth.ts` = only file minting or spending codes, OAuth access tokens (`wamcpo_`) and refresh tokens (`wamcpr_`). App is both authorization server and resource server. `docs/oauth.md` = operator side. Static tokens untouched and stay — Cursor, gateways, scripts can't sign in.
 
-**OAuth changes how secret arrives, never what it reaches.** Grant = ordinary `app.mcp_tokens` row, `auth_method = 'oauth'`, minted through same `issueConnectorToken()` (`tokens.ts`) as static token — admin-only, holder must reach connection, `assertCanAdd` + hosted event in one tx — but with `token_hash` NULL = "awaiting sign-in", authenticates nothing. Holder claims by signing in from client; consent page lists **only grants issued to signed-in user**, edits no scope. So member can't widen anything by approving, and `resolveMcpAuth`, kind/scope gates, `mcpLimitRefusal`, four token-killing operations all apply unchanged. Admin with nothing waiting may mint own grant from consent page (`api/oauth/authorize/grant.post.ts`, `requireManagedInstance` → `issueConnectorToken`, `defaultScopeFor(kind)` = dialog's default). Never add a consent-time scope editor or a member mint path here.
+**One sign-in = `app.oauth_sessions` row (holds access/refresh) + one child `app.mcp_tokens` row per connection picked** (`auth_method = 'oauth'`, `oauth_session` FK CASCADE, `token_hash` always NULL — CHECKs enforce both). Child = ordinary token row: own connection, holder, scope, disclaimer. So per connection `authorizeTokenFacts` (shared with static tokens), kind/scope gates, `mcpLimitRefusal`, `revokeTokensFor` (four token-killing operations) all apply unchanged. Children created at **code exchange**, not approval — abandoned consent mints nothing. `resolveMcpCredential` returns `{ type: 'token', auth }` or `{ type: 'session', connections: McpAuth[] }`; failing child **dropped and logged**, never fails request; none left → 401.
 
-Auth split holds: cookie read only on consent page and `api/oauth/authorize*` (web surface); `session.ts` skips `isOAuthClientPath()` (token, register, revoke, `/.well-known/`), so token endpoint can't authenticate by cookie even by accident.
+**Who may grant what.** Consent lists connections actor reaches (`authorizesInstance`). Admin ceiling = open. Member ceiling = `app.connection_oauth_policy` row (`members_allowed` + six scope columns + disclaimer); no row / off → not pickable (fail closed). User may narrow (`scopeWithin(ceiling, scope)`), never widen; checked at approve **and** exchange. Member children also `intersectScope`d with **current** ceiling at every resolve, and get ceiling's disclaimer — admin narrowing/disabling applies next request, nothing rewritten. Policy editable only via `requireManagedInstance`. Never add a member path around the ceiling.
+
+**Tools in a session are generated, prefixed by connection `handle`** (`mcp-session-tools.ts`): `${handle}__${tool}`, always — even one connection ("bundle only"); static tokens keep bare names. Copy runs original handler inside `mcpAuthContext.run(connection, …)` (AsyncLocalStorage, per call — JSON-RPC batch may run concurrently, so never write per-connection auth onto shared event). Every MCP-side reader goes through `currentMcpAuth()` (`useMcpAuth`, `useEvolutionClient`, `useTelegramBridge`, `countedHandler`) — **new reader of `event.context.mcpAuth` must too**, else it sees nothing in a session. Session sets `event.context.mcpSession`, **not** `mcpAuth`, so every static tool's `enabled` stays off. `defineMcpHandler({ tools: event => … })` is resolved in toolkit's `resolveDynamicDefinitions`, *after* middleware `next()` (0.19.0 `utils.js`), unlike `instructions`; `mcp-instructions.ts` prepends handle list for sessions. "Tools take no connection argument" now reads: **each tool reaches exactly one connection**. `toolAvailable()` (`mcp-kind-tool.ts`) carries `available` prerequisite to copies.
+
+**`instances.handle`** `^[a-z][a-z0-9_]{0,19}$`, unique per org, set on insert by trigger (`app.next_instance_handle`) so no insert path must remember, never follows label. Rename = `PATCH /api/instances/:id/handle` (admin, 409 on taken) — renames tools in every signed-in client.
+
+Auth split holds: cookie read only on consent page and `api/oauth/authorize*` (web surface); `session.ts` skips `isOAuthClientPath()` (token, register, revoke, `/.well-known/`). OAuth access token accepted **only from `Authorization` header**, never `/mcp/<token>` path.
 
 Rules easy to undo:
 
-- **URLs only from `NUXT_PUBLIC_APP_URL`**, never `Host`. Unset (or `NUXT_PUBLIC_OAUTH=off`) → discovery 404, 401 carries no `resource_metadata`, token dialog hides the option, mint refuses `oauth: true` with 422.
-- **Discovery routes are `.get.ts` on purpose.** Toolkit 0.19.0 registers method-less 404 handlers on `/.well-known/oauth-*` (`module.mjs` `registerServerHandlers`), added after scanned routes; h3 picks method-specific over `all` on same path, but a method-less file of ours would be overwritten. OPTIONS answered by `server/middleware/oauth-cors.ts` before routing for same reason. `…/oauth-protected-resource/mcp` static route beats toolkit's `/**`. **Toolkit bump = re-check.**
+- **URLs only from `NUXT_PUBLIC_APP_URL`**, never `Host`. Unset (or `NUXT_PUBLIC_OAUTH=off`) → discovery 404, 401 carries no `resource_metadata`, policy card hidden.
+- **Discovery routes are `.get.ts` on purpose.** Toolkit 0.19.0 registers method-less 404 handlers on `/.well-known/oauth-*` (`module.mjs` `registerServerHandlers`), added after scanned routes; h3 picks method-specific over `all` on same path, but a method-less file of ours would be overwritten. OPTIONS answered by `server/middleware/oauth-cors.ts` before routing for same reason. `…/oauth-protected-resource/mcp` static route beats toolkit's `/**`. **Toolkit bump = re-check, along with `tools` function ordering above.**
 - **No `resource_metadata` on `/mcp/<token>` 401** — not the resource metadata names; dead path token needs new token, not sign-in.
-- **Writes before a refusal must not throw inside `sql.begin`.** Throw rolls back: code `DELETE` would un-spend, reuse sign-out would undo — both found in testing. Return a sentinel, throw after commit.
+- **Writes before a refusal must not throw inside `sql.begin`.** Throw rolls back: code `DELETE` would un-spend, reuse sign-out would undo — both found in testing. Return a sentinel, throw after commit. Exchange creates session + children inside `tx.savepoint`, so a 402 from `assertCanAdd` rolls those back while the code stays spent.
 - **Code spent by `DELETE … RETURNING` first, on any attempt**, right or wrong. PKCE `S256` only, required. Redirect URI exact match; bad client/redirect = 400 on page, **never redirected**.
-- **Refresh rotates; reuse signs grant out, never revokes it.** Presented hash = `prev_refresh_hash` → `clearGrantSecrets` (row survives, "awaiting sign-in", holder re-claims). Within 30 s (`refreshed_at`) = client racing itself: refused, nothing cleared. Revoking row on reuse would make member wait on admin for a new grant.
-- **Sign out ≠ revoke.** `rotateToken` on oauth row and RFC 7009 `/revoke` both `clearGrantSecrets`. Re-claim on consent also clears first, so previous client dies at approval, not next refresh.
+- **Refresh rotates on session; reuse ends session** (`endOAuthSessions` → cascades children, records `token.revoked` per child). Within 30 s (`refreshed_at`) = client racing itself: refused, nothing ended. 30 days without refresh → ended. Session with no live child → ended at refresh.
+- **Re-sign-in from same user + client ends earlier session** at exchange — how connections are added or dropped later. **Sign out** (dashboard, = `rotateToken` on oauth child) and RFC 7009 `/revoke` end whole session; **Revoke** drops one connection only.
 - **DB failure on token endpoint = 503 `temporarily_unavailable`, never `invalid_grant`** (`answerOAuth`) — invalid_grant makes client discard refresh token = every connector signed out by outage. Same rule as 503-not-401.
-- **Access token 1 h, capped by grant's `expires_at`**; `resolveMcpAuth` refuses oauth row with missing or past `access_expires_at`, never reads absent as forever.
-- **Unclaimed grant never takes a working token's place** over limits: `mcpLimitRefusal` filters `token_hash IS NOT NULL`. `assertCanAdd` still counts it (creating one is minting).
+- **Access token 1 h**; `resolveOAuthSession` refuses missing or past `access_expires_at`, never reads absent as forever.
+- **Limits count each child as a token.** Approve pre-checks (`assertRoomForTokens`, says so on page with 402); exchange `assertCanAdd` per child under row lock. Over limits, refused children dropped from session's tools; all refused → 403, never 401.
 - **Consent POST checks `Origin`** (`assertSameOrigin`) beyond SameSite=Lax; `/oauth/**` sends `X-Frame-Options: DENY` + `frame-ancestors 'none'` (routeRules). Client name = client's own claim, shown as such; redirect host shown as what's verifiable.
 - **DCR open by design**, public clients only, `https` or loopback `http` redirects, per-IP in-memory throttle (speed bump). `NUXT_OAUTH_REDIRECT_HOSTS` = deployment-wide allowlist, loopback always allowed.
 - **`/login?next=` accepts only `/oauth/authorize…`** (`safeNext()`, `app/composables/safeNext.ts`) — anything wider is open redirect.
+- **Consent page clones scope with JSON, not `structuredClone`** — picked scopes are reactive proxies, which `structuredClone` throws on.
 
 ## Who may sign up
 
@@ -259,7 +266,7 @@ Four easy-to-break-later points. **`protocolMessage.type` is integer, absent mea
 
 Deliberate non-goals, not oversights: deletion dropped like any control record, not surfaced as "retracted" (original row stays with text, nothing marks it); `ephemeralMessage` and `viewOnceMessage*` family *not* unwrapped — flattening view-once photo to bare `[image]` presents it as ordinary photo; honest version needs own marker; album items surfaced individually, not grouped by `messageContextInfo.messageAssociation.parentMessageKey`.
 
-**Tools take no connection argument.** Token bound to one instance, so `useMcpAuth()`, `useEvolutionClient()` and `pgFor()` already resolve to it. Instance param would reintroduce addressing wrong number — now wrong database. Never accept Evolution API key or DSN as tool argument.
+**Tools take no connection argument.** Static token bound to one instance; OAuth session's tools are generated per connection, each bound to one (see "OAuth for MCP clients") — so `useMcpAuth()`, `useEvolutionClient()` and `pgFor()` already resolve to it. Instance param would reintroduce addressing wrong number — now wrong database. Never accept Evolution API key or DSN as tool argument.
 
 **`nitro.experimental.asyncContext: true` required — don't turn off.** MCP SDK invokes tool handlers with its `RequestHandlerExtra`, not H3 event, so `useEvent()` only way to reach per-request credentials; needs async context.
 

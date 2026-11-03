@@ -113,6 +113,50 @@ function toStringArray(value: unknown): string[] {
   return value.filter((v): v is string => typeof v === 'string' && v.length > 0)
 }
 
+// ── ceilings ───────────────────────────────────────────────────────────────
+
+type Axis = [all: 'allChats' | 'allTables' | 'allTools', list: 'chatJids' | 'tableNames' | 'toolNames']
+const AXES: Axis[] = [['allChats', 'chatJids'], ['allTables', 'tableNames'], ['allTools', 'toolNames']]
+
+/**
+ * Whether `scope` asks for nothing `ceiling` does not allow, on every axis.
+ *
+ * The check behind "members may narrow, never widen" on the OAuth consent page:
+ * an open ceiling allows anything; a listed one allows only a listed subset —
+ * never "all", which would reach whatever is added later.
+ */
+export function scopeWithin(ceiling: McpScope, scope: McpScope): boolean {
+  return AXES.every(([all, list]) => {
+    if (ceiling[all]) return true
+    if (scope[all]) return false
+    const allowed = new Set(ceiling[list])
+    return scope[list].every(item => allowed.has(item))
+  })
+}
+
+/**
+ * What both scopes allow. Applied on every MCP request to an OAuth child held
+ * by a member, against the connection's current ceiling — so an admin narrowing
+ * or switching off a ceiling takes effect on the next request, with no rows to
+ * rewrite. An axis can come out as an empty list: that reaches nothing, which is
+ * what the two together allow.
+ */
+export function intersectScope(a: McpScope, b: McpScope): McpScope {
+  const out = { ...OPEN_SCOPE }
+  for (const [all, list] of AXES) {
+    if (a[all] && b[all]) {
+      out[all] = true
+      out[list] = []
+    }
+    else {
+      out[all] = false
+      const keep = new Set(b[all] ? a[list] : b[list])
+      out[list] = (a[all] ? b[list] : a[list]).filter(item => keep.has(item))
+    }
+  }
+  return out
+}
+
 // ── tools ──────────────────────────────────────────────────────────────────
 
 /**
@@ -132,7 +176,15 @@ function toStringArray(value: unknown): string[] {
  * tool — once in `filterRawDefinitions`, once again in its own `filterByEnabled`.
  */
 export function isToolAllowed(event: H3Event, toolName: string, kind: InstanceKind): boolean {
-  const auth = event.context.mcpAuth as McpAuth | undefined
+  return authAllowsTool(event.context.mcpAuth as McpAuth | undefined, toolName, kind)
+}
+
+/**
+ * The same two gates over an already-resolved connection, for the tools an
+ * OAuth sign-in generates per connection (`mcp-session-tools.ts`), where there
+ * is no single `event.context.mcpAuth` to read.
+ */
+export function authAllowsTool(auth: McpAuth | undefined, toolName: string, kind: InstanceKind): boolean {
   if (!auth) return false
   // `auth.kind` and not `instanceKind(auth.instance)`: the discriminant is
   // resolved once in `resolveMcpAuth`, and reading it here is what makes the

@@ -1,20 +1,24 @@
 import { z } from 'zod'
 
+const selection = z.object({
+  connection: z.string().min(1),
+  // Optional: absent means the connection's default for this user. When given,
+  // the same schema as minting, so an empty allowlist is refused by name.
+  scope: scopeSchema.optional(),
+}).and(disclaimerSchema)
+
 const body = z.object({
   params: z.record(z.string(), z.unknown()),
   decision: z.enum(['approve', 'deny']),
-  grant: z.string().min(1).optional(),
+  selections: z.array(selection).max(50).default([]),
 })
 
 /**
- * The consent decision. Approve binds one of the user's own grants to the
- * client and answers the redirect carrying a single-use code; deny answers the
- * redirect carrying `access_denied`. Either way the browser, not this route,
- * goes there — the page navigates to `redirect`.
- *
- * Nothing here can widen a grant: the user picks one of their own, as an admin
- * made it, and its scope is what the client gets. The request is re-validated
- * from scratch and the grant re-checked under a row lock (`approveAuthorization`).
+ * The consent decision. Approve checks what was picked against what the user
+ * may grant now (`validateSelections` — reach, and for a member the
+ * connection's ceiling) and answers the redirect carrying a single-use code;
+ * deny answers the redirect carrying `access_denied`. Either way the browser,
+ * not this route, goes there — the page navigates to `redirect`.
  */
 export default defineEventHandler(async (event) => {
   const settings = requireOAuth()
@@ -28,8 +32,5 @@ export default defineEventHandler(async (event) => {
   if (parsed.decision === 'deny') {
     return { redirect: denyAuthorization(settings, validated.request) }
   }
-  if (!parsed.grant) {
-    throw createError({ statusCode: 422, statusMessage: 'Choose which connector to sign in to.' })
-  }
-  return { redirect: await approveAuthorization(actor, settings, validated.request, parsed.grant) }
+  return { redirect: await approveAuthorization(actor, settings, validated.request, parsed.selections) }
 })

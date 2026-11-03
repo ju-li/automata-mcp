@@ -1,8 +1,9 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
-import type { AppInstance, AppMcpToken, Db } from './app-db'
+import type { AppInstance, AppUser, Db } from './app-db'
 import type { Actor } from './org'
-import type { InstanceKind } from './mcp-scope'
+import type { InstanceKind, McpScope } from './mcp-scope'
+import type { ScopeInput } from './scope-schema'
 
 /**
  * OAuth 2.1 for the MCP endpoint: this app as both the authorization server
@@ -429,117 +430,180 @@ export function buildRedirect(uri: string, params: Record<string, string | undef
 
 // ── consent ────────────────────────────────────────────────────────────────
 
-export interface ClaimableGrant {
-  id: string
-  label: string
-  created?: string
-  expiresAt?: string
-  /** A client already holds it; approving moves it to this one. */
-  claimedBy?: string
-  connection: { id: string, label: string, kind: InstanceKind }
-  scope: ReturnType<typeof scopeToInput>
-}
-
 /**
- * The OAuth grants the signed-in user may claim: issued to them, alive, on a
- * connection of their organization they still reach. A predicate in the query
- * for the first three; `authorizesInstance` for the last, the same rule both
- * surfaces share.
- */
-export async function listClaimableGrants(actor: Actor): Promise<ClaimableGrant[]> {
-  const sql = await appDb()
-  const rows = await sql<(AppMcpToken & { client_name?: string, assigned: boolean })[]>`
-    SELECT t.*, c.name AS client_name,
-           EXISTS (
-             SELECT 1 FROM app.instance_assignments a
-             WHERE a.user_id = t.assigned_to AND a.instance = t.instance
-           ) AS assigned
-    FROM app.mcp_tokens t
-    JOIN app.instances i ON i.id = t.instance
-    LEFT JOIN app.oauth_clients c ON c.id = t.oauth_client
-    WHERE t.assigned_to = ${actor.user.id}
-      AND t.auth_method = 'oauth'
-      AND NOT t.revoked
-      AND (t.expires_at IS NULL OR t.expires_at > now())
-      AND i.org = ${actor.org.id}
-    ORDER BY t.claimed_at IS NOT NULL, t.created DESC
-  `
-  if (rows.length === 0) return []
-
-  const instances = await sql<AppInstance[]>`
-    SELECT * FROM app.instances WHERE id = ANY(${[...new Set(rows.map(r => r.instance))]})
-  `
-  const byId = new Map(instances.map(i => [i.id, i]))
-
-  const grants: ClaimableGrant[] = []
-  for (const row of rows) {
-    const instance = byId.get(row.instance)
-    if (!instance || !isSupportedInstance(instance)) continue
-    if (!authorizesInstance({ role: actor.role, orgId: actor.org.id }, instance.org, row.assigned)) continue
-    const publicInstance = toPublicInstance(instance)
-    grants.push({
-      id: row.id,
-      label: row.label || 'Untitled connector',
-      created: row.created,
-      expiresAt: row.expires_at,
-      claimedBy: row.claimed_at ? (row.client_name || 'another application') : undefined,
-      connection: { id: instance.id, label: publicInstance.label, kind: publicInstance.kind },
-      scope: scopeToInput(scopeFromRecord(row)),
-    })
-  }
-  return grants
-}
-
-/**
- * Approve: bind one of the actor's grants to this client and issue a code.
+ * One connection as the consent page offers it.
  *
- * The claim takes the grant row `FOR UPDATE` and re-checks every condition
- * `listClaimableGrants` showed — the page is not trusted to have been fresh.
- * Claiming **clears** whatever secret the grant had, so the client that held it
- * before (re-claiming is how someone moves a connector, or recovers one whose
- * tokens the client lost) stops working at once rather than at its next refresh.
- * That is the OAuth form of "issue a new secret", which a member may already do
- * for their own token.
+ * `ceiling` is the most this user may grant it: everything for an admin (they
+ * could mint any token anyway), the connection's `connection_oauth_policy` for a
+ * member — and no policy, or one with members switched off, means the
+ * connection is shown but cannot be picked (`allowed: false`). `defaultScope` is
+ * what is granted when the user does not customize: the token dialog's default
+ * for the kind (`defaultScopeFor`), clamped to the ceiling.
+ */
+export interface ConsentOption {
+  connection: { id: string, label: string, kind: InstanceKind, handle: string }
+  allowed: boolean
+  ceiling: ScopeInput
+  ceilingIsOpen: boolean
+  defaultScope: ScopeInput
+  /** A member's sends carry the ceiling's disclaimer, whatever they pick. */
+  disclaimer?: string
+}
+
+interface PolicyRow {
+  instance: string
+  members_allowed: boolean
+  all_chats: boolean
+  chat_jids: unknown
+  all_tables: boolean
+  table_names: unknown
+  all_tools: boolean
+  tool_names: unknown
+  send_disclaimer?: string
+}
+
+interface ResolvedOption {
+  option: ConsentOption
+  instance: AppInstance
+  ceiling?: McpScope
+  defaultScope?: McpScope
+}
+
+/**
+ * The connections the actor reaches, each with what they may grant it.
+ * Reach is `authorizesInstance`'s rule — an admin every connection of the
+ * organization, a member the ones assigned to them — read as a predicate.
+ */
+async function resolveConsentOptions(actor: Actor): Promise<ResolvedOption[]> {
+  const sql = await appDb()
+  const isAdmin = actor.role === 'admin'
+  const instances = (await listOrgInstances(actor.org.id)).filter(isSupportedInstance)
+  const assigned = isAdmin ? undefined : new Set(await listAssignedInstanceIds(actor.user.id))
+  const reachable = instances.filter(i => authorizesInstance(
+    { role: actor.role, orgId: actor.org.id }, i.org, assigned?.has(i.id) ?? false,
+  ))
+  const policies = reachable.length && !isAdmin
+    ? await sql<PolicyRow[]>`SELECT * FROM app.connection_oauth_policy WHERE instance = ANY(${reachable.map(i => i.id)})`
+    : []
+  const policyFor = new Map(policies.map(p => [p.instance, p]))
+
+  return reachable.map((instance) => {
+    const kind = instanceKind(instance)
+    const policy = policyFor.get(instance.id)
+    const ceiling = isAdmin ? OPEN_SCOPE : policy?.members_allowed ? scopeFromRecord(policy) : undefined
+    const defaultScope = ceiling ? clampedDefault(kind, ceiling) : undefined
+    const publicInstance = toPublicInstance(instance)
+    return {
+      instance,
+      ceiling,
+      defaultScope,
+      option: {
+        connection: { id: instance.id, label: publicInstance.label, kind, handle: instance.handle },
+        allowed: Boolean(ceiling),
+        ceiling: scopeToInput(ceiling ?? OPEN_SCOPE),
+        ceilingIsOpen: isAdmin,
+        defaultScope: scopeToInput(defaultScope ?? OPEN_SCOPE),
+        disclaimer: isAdmin ? undefined : policy?.send_disclaimer || undefined,
+      },
+    }
+  })
+}
+
+/** A kind's default scope inside a ceiling; the ceiling itself when the two share no tool. */
+function clampedDefault(kind: InstanceKind, ceiling: McpScope): McpScope {
+  const clamped = intersectScope(defaultScopeFor(kind), ceiling)
+  return !clamped.allTools && clamped.toolNames.length === 0 ? ceiling : clamped
+}
+
+export async function listConsentOptions(actor: Actor): Promise<ConsentOption[]> {
+  return (await resolveConsentOptions(actor)).map(r => r.option)
+}
+
+/** What the consent page sends back per connection picked. */
+export interface ConsentSelection {
+  connection: string
+  /** Absent = the option's `defaultScope`. Must sit within the ceiling. */
+  scope?: ScopeInput
+  /** An admin's choice; ignored for a member, whose sends carry the ceiling's. */
+  send_disclaimer?: string | null
+}
+
+/** What a code carries until it is exchanged. Plain JSON in `oauth_codes.selections`. */
+interface StoredSelection {
+  instance: string
+  scope: ScopeInput
+  sendDisclaimer: string | null
+}
+
+/**
+ * Validate what the user picked against what they may grant *now* — the page is
+ * not trusted to have been fresh, nor to have kept within the ceiling.
+ */
+async function validateSelections(actor: Actor, selections: ConsentSelection[]): Promise<{ stored: StoredSelection[], instances: AppInstance[] }> {
+  if (selections.length === 0) {
+    throw createError({ statusCode: 422, statusMessage: 'Choose at least one connection.' })
+  }
+  const options = new Map((await resolveConsentOptions(actor)).map(r => [r.instance.id, r]))
+  const stored: StoredSelection[] = []
+  const instances: AppInstance[] = []
+  const seen = new Set<string>()
+  for (const selection of selections) {
+    if (seen.has(selection.connection)) continue
+    seen.add(selection.connection)
+    const resolved = options.get(selection.connection)
+    if (!resolved) {
+      throw createError({ statusCode: 404, statusMessage: 'One of those connections is no longer available to you. Reload the page.' })
+    }
+    const { option, ceiling, defaultScope } = resolved
+    if (!ceiling || !defaultScope) {
+      throw createError({ statusCode: 403, statusMessage: `“${option.connection.label}” is not enabled for sign-in. Ask an admin to allow it.` })
+    }
+    const scope = selection.scope ? scopeFromInput(selection.scope) : defaultScope
+    if (!scopeWithin(ceiling, scope)) {
+      throw createError({ statusCode: 422, statusMessage: `That asks for more of “${option.connection.label}” than an admin allows. Narrow it, or ask an admin.` })
+    }
+    stored.push({
+      instance: resolved.instance.id,
+      scope: scopeToInput(scope),
+      sendDisclaimer: actor.role === 'admin' ? (selection.send_disclaimer ?? null) : (option.disclaimer ?? null),
+    })
+    instances.push(resolved.instance)
+  }
+  return { stored, instances }
+}
+
+/**
+ * Approve: check what was picked, check it fits the plan, and issue a code that
+ * carries it. Nothing is minted yet — the connections become token rows only
+ * when the code is exchanged, so a consent the client never completes leaves
+ * nothing behind.
  */
 export async function approveAuthorization(
   actor: Actor,
   settings: OAuthSettings,
   request: AuthorizationRequest,
-  grantId: string,
+  selections: ConsentSelection[],
 ): Promise<string> {
-  const code = secret(CODE_PREFIX)
+  const { stored } = await validateSelections(actor, selections)
   const sql = await appDb()
 
-  await sql.begin(async (tx) => {
-    const [row] = await tx<(AppMcpToken & { assigned: boolean, instance_org?: string })[]>`
-      SELECT t.*, i.org AS instance_org,
-             EXISTS (
-               SELECT 1 FROM app.instance_assignments a
-               WHERE a.user_id = t.assigned_to AND a.instance = t.instance
-             ) AS assigned
-      FROM app.mcp_tokens t JOIN app.instances i ON i.id = t.instance
-      WHERE t.id = ${grantId}
-        AND t.assigned_to = ${actor.user.id}
-        AND t.auth_method = 'oauth'
-        AND NOT t.revoked
-        AND (t.expires_at IS NULL OR t.expires_at > now())
-      FOR UPDATE OF t
-    `
-    if (!row || !authorizesInstance({ role: actor.role, orgId: actor.org.id }, row.instance_org, row.assigned)) {
-      throw createError({ statusCode: 404, statusMessage: 'That connector is no longer available to you. Reload the page.' })
-    }
+  // Said here rather than as an unexplained failure in the client: the
+  // exchange checks again, under the organization row lock.
+  const [freedRow] = await sql<{ freed: number }[]>`
+    SELECT count(*)::int AS freed FROM app.mcp_tokens t
+    JOIN app.oauth_sessions s ON s.id = t.oauth_session
+    WHERE s.user_id = ${actor.user.id} AND s.client = ${request.client.id} AND NOT t.revoked
+  `
+  await assertRoomForTokens(sql, actor.org.id, stored.length, freedRow?.freed ?? 0)
 
-    await clearGrantSecrets(tx, row.id)
-    await tx`
-      UPDATE app.mcp_tokens
-      SET oauth_client = ${request.client.id}, claimed_at = now(), updated = now()
-      WHERE id = ${row.id}
-    `
+  const code = secret(CODE_PREFIX)
+  await sql.begin(async (tx) => {
     await tx`
       INSERT INTO app.oauth_codes ${tx({
         code_hash: sha256(code),
-        token: row.id,
         client: request.client.id,
+        user_id: actor.user.id,
+        selections: tx.json(stored as never),
         redirect_uri: request.redirectUri,
         code_challenge: request.codeChallenge,
         resource: request.resource,
@@ -572,48 +636,67 @@ interface TokenResponse {
   refresh_token: string
 }
 
-/**
- * Seconds until a new access token expires: an hour, or less when the grant
- * itself ends sooner. A grant's `expires_at` is the admin's decision and an
- * access token must not outlive it.
- */
-function accessLifetime(grant: Pick<AppMcpToken, 'expires_at'>): number {
-  const grantLeft = grant.expires_at
-    ? Math.floor((new Date(grant.expires_at).getTime() - Date.now()) / 1000)
-    : Number.POSITIVE_INFINITY
-  return Math.max(1, Math.min(ACCESS_TOKEN_TTL_S, grantLeft))
+/** A session nobody has refreshed for this long is over; the user signs in again. */
+const SESSION_IDLE_MS = 30 * 24 * 60 * 60 * 1000
+
+interface SessionRow {
+  id: string
+  user_id: string
+  client: string
+  refresh_hash?: string
+  prev_refresh_hash?: string
+  refreshed_at?: string
+  created?: string
 }
 
-async function issuePair(
-  tx: Db,
-  grant: AppMcpToken,
-  previousRefreshHash: string | null,
-): Promise<TokenResponse> {
+async function issuePair(tx: Db, sessionId: string, previousRefreshHash: string | null): Promise<TokenResponse> {
   const access = secret(ACCESS_TOKEN_PREFIX)
   const refresh = secret(REFRESH_TOKEN_PREFIX)
-  const expiresIn = accessLifetime(grant)
   await tx`
-    UPDATE app.mcp_tokens SET
+    UPDATE app.oauth_sessions SET
       token_hash = ${sha256(access)},
-      access_expires_at = ${new Date(Date.now() + expiresIn * 1000)},
+      access_expires_at = ${new Date(Date.now() + ACCESS_TOKEN_TTL_S * 1000)},
       refresh_hash = ${sha256(refresh)},
       prev_refresh_hash = ${previousRefreshHash},
-      refreshed_at = ${previousRefreshHash ? new Date() : null},
-      updated = now()
-    WHERE id = ${grant.id}
+      refreshed_at = now()
+    WHERE id = ${sessionId}
   `
-  return { access_token: access, token_type: 'Bearer', expires_in: expiresIn, refresh_token: refresh }
-}
-
-function grantIsAlive(grant: AppMcpToken): boolean {
-  if (grant.revoked || grant.auth_method !== 'oauth') return false
-  return !grant.expires_at || new Date(grant.expires_at).getTime() > Date.now()
+  return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TOKEN_TTL_S, refresh_token: refresh }
 }
 
 /**
- * `grant_type=authorization_code`. The code is spent by `DELETE … RETURNING`
- * as the first statement, so two exchanges of one code cannot both succeed, and
- * a refused exchange still commits that delete (see below).
+ * End sign-ins: delete the sessions, which cascades their connection rows, and
+ * record each connection's end for the hosted outbox the way a revoke would.
+ */
+export async function endOAuthSessions(db: Db, sessionIds: string[]): Promise<void> {
+  if (sessionIds.length === 0) return
+  const children = await db<{ id: string, assigned_to: string, instance: string, org: string }[]>`
+    SELECT t.id, t.assigned_to, t.instance, i.org
+    FROM app.mcp_tokens t JOIN app.instances i ON i.id = t.instance
+    WHERE t.oauth_session = ANY(${sessionIds}) AND NOT t.revoked
+  `
+  await db`DELETE FROM app.oauth_sessions WHERE id = ANY(${sessionIds})`
+  for (const child of children) {
+    await recordHostedEvent(db, { type: 'token.revoked', org: child.org, userId: child.assigned_to, payload: { id: child.id, connection: child.instance } })
+  }
+}
+
+/**
+ * `grant_type=authorization_code`.
+ *
+ * The code is spent by `DELETE … RETURNING` as the first statement, so two
+ * exchanges of one code cannot both succeed, and a refused exchange still
+ * commits that delete: refusals *return* rather than throw, because a throw
+ * inside `begin` would roll the delete back and leave the code open to another
+ * try.
+ *
+ * On success, in one transaction: an earlier sign-in by the same user from the
+ * same client ends (signing in again *moves* the connector), the session is
+ * created, and each picked connection becomes a child token row through
+ * `createToken` with `assertCanAdd` before each — the plan limit under the
+ * organization row lock, exactly as minting from the dashboard. A limit hit
+ * there rolls back to a savepoint, so the session and children vanish but the
+ * code stays spent.
  */
 export async function exchangeAuthorizationCode(params: Record<string, unknown>): Promise<TokenResponse> {
   const code = str(params.code)
@@ -629,14 +712,10 @@ export async function exchangeAuthorizationCode(params: Record<string, unknown>)
   const invalid = new OAuthError(400, 'invalid_grant', 'The authorization code is invalid, expired or already used.')
 
   const sql = await appDb()
-  // Refusals *return* rather than throw, so the transaction commits and the
-  // DELETE stands: a code is spent by any attempt to exchange it, right or
-  // wrong. A throw inside `begin` would roll the delete back and leave the code
-  // open to another try.
   const outcome = await sql.begin(async (tx): Promise<TokenResponse | OAuthError> => {
-    const [spent] = await tx<{ token: string, client: string, redirect_uri: string, code_challenge: string, resource?: string, expires_at: string }[]>`
+    const [spent] = await tx<{ client: string, user_id: string, selections: StoredSelection[], redirect_uri: string, code_challenge: string, resource?: string, expires_at: string }[]>`
       DELETE FROM app.oauth_codes WHERE code_hash = ${sha256(code)}
-      RETURNING token, client, redirect_uri, code_challenge, resource, expires_at
+      RETURNING client, user_id, selections, redirect_uri, code_challenge, resource, expires_at
     `
     if (!spent) return invalid
     if (new Date(spent.expires_at).getTime() <= Date.now()) return invalid
@@ -648,10 +727,63 @@ export async function exchangeAuthorizationCode(params: Record<string, unknown>)
       return new OAuthError(400, 'invalid_target', 'The resource does not match the one authorized.')
     }
 
-    const [grant] = await tx<AppMcpToken[]>`SELECT * FROM app.mcp_tokens WHERE id = ${spent.token} FOR UPDATE`
-    if (!grant || !grantIsAlive(grant) || grant.oauth_client !== clientId) return invalid
+    // The minute since approval is long enough for a membership or a ceiling to
+    // change: re-check what the user may grant now.
+    const [user] = await tx<AppUser[]>`SELECT id, email, name FROM app.users WHERE id = ${spent.user_id}`
+    const actor = user && await loadActor(user)
+    if (!actor) return invalid
+    let checked: Awaited<ReturnType<typeof validateSelections>>
+    try {
+      checked = await validateSelections(actor, spent.selections.map(s => ({
+        connection: s.instance,
+        scope: s.scope,
+        send_disclaimer: s.sendDisclaimer,
+      })))
+    }
+    catch {
+      return new OAuthError(400, 'invalid_grant', 'What was approved is no longer allowed. Sign in again.')
+    }
+    const [client] = await tx<{ name: string }[]>`SELECT name FROM app.oauth_clients WHERE id = ${clientId}`
 
-    return await issuePair(tx, grant, null)
+    try {
+      return await tx.savepoint(async (sp) => {
+        const previous = await sp<{ id: string }[]>`
+          SELECT id FROM app.oauth_sessions WHERE user_id = ${actor.user.id} AND client = ${clientId} FOR UPDATE
+        `
+        await endOAuthSessions(sp, previous.map(p => p.id))
+
+        const [session] = await sp<{ id: string }[]>`
+          INSERT INTO app.oauth_sessions ${sp({ user_id: actor.user.id, client: clientId })} RETURNING id
+        `
+        for (const [i, selection] of checked.stored.entries()) {
+          const instance = checked.instances[i]!
+          await assertCanAdd(sp, actor.org.id, 'token')
+          const { record } = await createToken({
+            instanceId: instance.id,
+            assignedTo: actor.user.id,
+            createdBy: actor.user.id,
+            label: client?.name || 'OAuth sign-in',
+            preset: 'never',
+            scope: scopeFromInput(selection.scope),
+            sendDisclaimer: selection.sendDisclaimer,
+            oauthSession: session!.id,
+          }, sp)
+          await recordHostedEvent(sp, {
+            type: 'token.created',
+            org: actor.org.id,
+            userId: actor.user.id,
+            payload: { id: record.id, connection: instance.id, kind: instance.kind, auth: 'oauth' },
+          })
+        }
+        return await issuePair(sp, session!.id, null)
+      })
+    }
+    catch (error) {
+      if ((error as { statusCode?: number })?.statusCode === 402) {
+        return new OAuthError(400, 'invalid_grant', (error as Error).message || 'Your organization has no room for more connector tokens.')
+      }
+      throw error
+    }
   })
   if (outcome instanceof OAuthError) throw outcome
   return outcome
@@ -660,12 +792,12 @@ export async function exchangeAuthorizationCode(params: Record<string, unknown>)
 /**
  * `grant_type=refresh_token`, rotated on every use.
  *
- * The presented token is looked up as the current one *or* the one it replaced.
- * The current one issues a new pair. The replaced one is reuse — someone else
- * has a copy — and signs the grant out (`clearGrantSecrets`), so both copies die
- * and only the holder signing in again revives it; the grant row itself, which
- * is an admin's decision, survives. Inside a short grace window it is instead
- * read as the client racing itself, and refused without signing anyone out.
+ * The presented token is looked up as the session's current one *or* the one
+ * it replaced. The current one issues a new pair. The replaced one is reuse —
+ * someone else has a copy — and ends the session: both copies die, and the user
+ * signs in again. Inside a short grace window it is instead read as the client
+ * racing itself, and refused without ending anything. Refusals *return* so the
+ * ending commits.
  */
 export async function refreshAccessToken(params: Record<string, unknown>): Promise<TokenResponse> {
   const presented = str(params.refresh_token)
@@ -677,37 +809,51 @@ export async function refreshAccessToken(params: Record<string, unknown>): Promi
   const invalid = new OAuthError(400, 'invalid_grant', 'The refresh token is invalid, expired or revoked.')
 
   const sql = await appDb()
-  // The reuse branch *returns* rather than throws: a throw inside `begin` rolls
-  // the transaction back, which would undo the very sign-out it exists to make.
   const outcome = await sql.begin(async (tx): Promise<TokenResponse | 'refused'> => {
-    const [grant] = await tx<AppMcpToken[]>`
-      SELECT * FROM app.mcp_tokens
-      WHERE auth_method = 'oauth' AND (refresh_hash = ${hash} OR prev_refresh_hash = ${hash})
+    const [session] = await tx<SessionRow[]>`
+      SELECT id, user_id, client, refresh_hash, prev_refresh_hash, refreshed_at, created
+      FROM app.oauth_sessions
+      WHERE refresh_hash = ${hash} OR prev_refresh_hash = ${hash}
       FOR UPDATE
     `
-    if (!grant) return 'refused'
-    if (grant.oauth_client !== clientId) return 'refused'
+    if (!session) return 'refused'
+    if (session.client !== clientId) return 'refused'
 
-    if (grant.refresh_hash !== hash) {
-      const age = grant.refreshed_at ? Date.now() - new Date(grant.refreshed_at).getTime() : Number.POSITIVE_INFINITY
+    if (session.refresh_hash !== hash) {
+      const age = session.refreshed_at ? Date.now() - new Date(session.refreshed_at).getTime() : Number.POSITIVE_INFINITY
       if (age > REFRESH_REUSE_GRACE_MS) {
-        console.warn(`[oauth] a replaced refresh token for grant ${grant.id} was presented again; the grant is signed out until its holder signs in again`)
-        await clearGrantSecrets(tx, grant.id)
+        console.warn(`[oauth] a replaced refresh token for session ${session.id} was presented again; the session is ended`)
+        await endOAuthSessions(tx, [session.id])
       }
       return 'refused'
     }
 
-    if (!grantIsAlive(grant)) return 'refused'
-    return await issuePair(tx, grant, hash)
+    const lastActive = new Date(session.refreshed_at ?? session.created ?? 0).getTime()
+    if (Date.now() - lastActive > SESSION_IDLE_MS) {
+      await endOAuthSessions(tx, [session.id])
+      return 'refused'
+    }
+
+    // A session whose every connection has been revoked reaches nothing; end it
+    // so the client goes back to the consent page rather than holding a token
+    // that answers 401 forever.
+    const [liveRow] = await tx<{ live: number }[]>`
+      SELECT count(*)::int AS live FROM app.mcp_tokens WHERE oauth_session = ${session.id} AND NOT revoked
+    `
+    if (!liveRow?.live) {
+      await endOAuthSessions(tx, [session.id])
+      return 'refused'
+    }
+
+    return await issuePair(tx, session.id, hash)
   })
   if (outcome === 'refused') throw invalid
   return outcome
 }
 
 /**
- * RFC 7009. Either token of a pair signs the grant out — "disconnect" in a
- * client means that client stops, not that the admin's grant is destroyed. An
- * unknown token is answered the same 200, as the RFC requires.
+ * RFC 7009. Either token of a pair ends the session — "disconnect" in a client.
+ * An unknown token is answered the same 200, as the RFC requires.
  */
 export async function revokeOAuthToken(params: Record<string, unknown>): Promise<Record<string, never>> {
   const presented = str(params.token)
@@ -716,31 +862,12 @@ export async function revokeOAuthToken(params: Record<string, unknown>): Promise
 
   const sql = await appDb()
   await sql.begin(async (tx) => {
-    const [grant] = await tx<{ id: string }[]>`
-      SELECT id FROM app.mcp_tokens
-      WHERE auth_method = 'oauth' AND (token_hash = ${hash} OR refresh_hash = ${hash})
-      FOR UPDATE
+    const sessions = await tx<{ id: string }[]>`
+      SELECT id FROM app.oauth_sessions WHERE token_hash = ${hash} OR refresh_hash = ${hash} FOR UPDATE
     `
-    if (grant) await clearGrantSecrets(tx, grant.id)
+    await endOAuthSessions(tx, sessions.map(s => s.id))
   })
   return {}
-}
-
-/**
- * Sign a grant out: no access token, no refresh token, no outstanding code, no
- * client. It reads "Awaiting sign-in" again and its holder can claim it from any
- * client. Scope, holder and lifetime are untouched — this is rotation, not
- * revocation.
- */
-export async function clearGrantSecrets(db: Db, tokenId: string): Promise<void> {
-  await db`
-    UPDATE app.mcp_tokens SET
-      token_hash = NULL, access_expires_at = NULL,
-      refresh_hash = NULL, prev_refresh_hash = NULL, refreshed_at = NULL,
-      oauth_client = NULL, claimed_at = NULL, updated = now()
-    WHERE id = ${tokenId} AND auth_method = 'oauth'
-  `
-  await db`DELETE FROM app.oauth_codes WHERE token = ${tokenId}`
 }
 
 // ── helpers for the routes ─────────────────────────────────────────────────

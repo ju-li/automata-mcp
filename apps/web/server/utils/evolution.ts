@@ -169,8 +169,9 @@ export function evolutionClientForInstance(instance: AppInstance): EvolutionClie
  * can reach a browser session; that separation is the point.
  */
 export function useEvolutionClient(): EvolutionClient {
-  const event = useEvent()
-  const auth = event.context.mcpAuth as McpAuth | undefined
+  // The current tool call's connection — a static token's, or the one an
+  // OAuth session's generated tool is acting for (see `currentMcpAuth`).
+  const auth: McpAuth | undefined = currentMcpAuth()
 
   if (!auth) {
     // Unreachable in practice — server/mcp/index.ts returns 401 before any tool

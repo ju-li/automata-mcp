@@ -1,5 +1,6 @@
 import { assertNever } from '#shared/connection'
-import type { McpAuth } from '../utils/mcp-auth'
+import type { McpAuth, McpCredential } from '../utils/mcp-auth'
+import type { InstanceKind } from '../utils/mcp-scope'
 import { IMAP_INSTRUCTIONS, POSTGRES_INSTRUCTIONS, TELEGRAM_INSTRUCTIONS, WHATSAPP_INSTRUCTIONS } from '../utils/mcp-instructions'
 
 /**
@@ -27,26 +28,55 @@ import { IMAP_INSTRUCTIONS, POSTGRES_INSTRUCTIONS, TELEGRAM_INSTRUCTIONS, WHATSA
  */
 export default defineNitroPlugin((nitro) => {
   nitro.hooks.hook('mcp:config:resolved', ({ config, event }) => {
+    const session = event.context.mcpSession as Extract<McpCredential, { type: 'session' }> | undefined
+    if (session) {
+      config.instructions = sessionInstructions(session.connections)
+      return
+    }
+
     const auth = event.context.mcpAuth as McpAuth | undefined
     // No auth means the request never got past the middleware, so there is no
     // connection to describe. Leave the configured fallback in place.
     if (!auth) return
-
-    switch (auth.kind) {
-      case 'postgres':
-        config.instructions = POSTGRES_INSTRUCTIONS
-        break
-      case 'whatsapp':
-        config.instructions = WHATSAPP_INSTRUCTIONS
-        break
-      case 'telegram':
-        config.instructions = TELEGRAM_INSTRUCTIONS
-        break
-      case 'imap':
-        config.instructions = IMAP_INSTRUCTIONS
-        break
-      default:
-        assertNever(auth, 'MCP auth kind')
-    }
+    config.instructions = instructionsFor(auth.kind)
   })
 })
+
+function instructionsFor(kind: InstanceKind): string {
+  switch (kind) {
+    case 'postgres':
+      return POSTGRES_INSTRUCTIONS
+    case 'whatsapp':
+      return WHATSAPP_INSTRUCTIONS
+    case 'telegram':
+      return TELEGRAM_INSTRUCTIONS
+    case 'imap':
+      return IMAP_INSTRUCTIONS
+    default:
+      return assertNever(kind, 'MCP auth kind')
+  }
+}
+
+/**
+ * An OAuth sign-in covers several connections: name each with its handle, say
+ * how tool names are formed, then each kind's own text once. The per-kind texts
+ * speak of `read-messages`, `run-query` and so on; the opening paragraph is what
+ * maps those to the prefixed names this server actually lists. Each kind's text
+ * also says "bound to exactly one account" — true per tool here, and the
+ * opening says so, so the two do not read as a contradiction.
+ */
+function sessionInstructions(connections: McpAuth[]): string {
+  const lines = connections.map((auth) => {
+    const { label, kind, handle } = describeConnection(auth)
+    return `- \`${handle}\`: ${label} (${kind})`
+  })
+  const kinds = [...new Set(connections.map(c => c.kind))]
+  return [
+    `This server covers ${connections.length === 1 ? 'one connection' : `${connections.length} connections`}, chosen by the user when they signed in:`,
+    ...lines,
+    '',
+    `Every tool name starts with its connection's handle and \`${SESSION_TOOL_SEPARATOR}\` — \`${connections[0]!.instance.handle}${SESSION_TOOL_SEPARATOR}…\` acts on that connection and no other. The guidance below names tools without that prefix and describes each kind once; "this server is bound to one account" holds for each tool, not for the server as a whole. When the user's request could mean more than one connection, ask which.`,
+    '',
+    ...kinds.map(kind => instructionsFor(kind)),
+  ].join('\n')
+}

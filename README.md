@@ -63,9 +63,10 @@ click on Railway or with Docker.
 - **Your history, not just what arrives next.** WhatsApp history is imported when
   a number is paired; Telegram chats are synced and backfilled.
 - **Scoped connector tokens.** Each token reaches exactly one connection, and can
-  be narrowed to specific chats, folders, tables and tools. Claude can sign in
-  with OAuth instead of carrying a token. Tokens are shown once, stored only
-  as a hash, and can expire, be rotated or be revoked.
+  be narrowed to specific chats, folders, tables and tools. Or Claude signs in
+  with OAuth and gets several connections at once, each within what an admin
+  allows. Tokens are shown once, stored only as a hash, and can expire, be
+  rotated or be revoked.
 - **Read-only databases by default.** Queries run in read-only transactions, one
   statement at a time, checked against the token's table allowlist by inspecting
   the query plan. Writes need the write tool granted explicitly, and roll back if
@@ -140,11 +141,12 @@ from it. See [Self-hosting](docs/self-hosting.md).
 ### Connect Claude
 
 1. Create a connection and pair it, link it, or paste a connection string.
-2. On its dashboard, create a **connector** and choose what it may reach.
-3. In Claude, open **Settings → Connectors → Add custom connector** and paste
-   `https://<your-app>/mcp`, then sign in when Claude asks
-   ([OAuth](docs/oauth.md)). Or create a token instead and paste its connector
-   URL. For Claude Code: `claude mcp add --transport http <name> <url>`.
+2. In Claude, open **Settings → Connectors → Add custom connector** and paste
+   `https://<your-app>/mcp`. Sign in when Claude asks and tick the connections it
+   should reach — one connector can cover several ([OAuth](docs/oauth.md)).
+3. Or, for clients that can't sign in, create a **connector token** on the
+   connection's dashboard and paste its URL. For Claude Code:
+   `claude mcp add --transport http <name> <url>`.
 
 ## Documentation
 

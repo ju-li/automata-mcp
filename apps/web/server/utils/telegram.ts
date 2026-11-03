@@ -199,8 +199,7 @@ export function createTelegramAdminBridge(creds: TelegramAdminCredentials) {
  * connection.
  */
 export function useTelegramBridge(): TelegramBridge {
-  const event = useEvent()
-  const auth = event.context.mcpAuth as McpAuth | undefined
+  const auth: McpAuth | undefined = currentMcpAuth()
   if (!auth || auth.kind !== 'telegram') {
     throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
   }

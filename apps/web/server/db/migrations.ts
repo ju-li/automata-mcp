@@ -528,4 +528,131 @@ export const APP_MIGRATIONS: AppMigration[] = [
       CREATE INDEX oauth_codes_expires_idx ON app.oauth_codes (expires_at);
     `,
   },
+  {
+    name: '0011_oauth_sessions',
+    sql: /* sql */ `
+      -- One OAuth sign-in now covers several connections. The secret moves off
+      -- the per-connection row onto a session; each connection the user picked
+      -- at consent is a child token row (auth_method = 'oauth') bound to that
+      -- session, with its own scope, and never a secret of its own. See
+      -- server/utils/oauth.ts.
+      --
+      -- 0010's per-connection grants never shipped; they are removed rather
+      -- than carried into a shape they do not fit.
+      DELETE FROM app.oauth_codes;
+      DELETE FROM app.mcp_tokens WHERE auth_method = 'oauth';
+
+      CREATE TABLE app.oauth_sessions (
+        id                text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        -- CASCADE: a deleted account's sign-ins must stop working.
+        user_id           text NOT NULL REFERENCES app.users (id) ON DELETE CASCADE,
+        client            text NOT NULL REFERENCES app.oauth_clients (id) ON DELETE CASCADE,
+        token_hash        text CHECK (token_hash IS NULL OR length(token_hash) = 64),
+        access_expires_at timestamptz,
+        refresh_hash      text CHECK (refresh_hash IS NULL OR length(refresh_hash) = 64),
+        prev_refresh_hash text CHECK (prev_refresh_hash IS NULL OR length(prev_refresh_hash) = 64),
+        refreshed_at      timestamptz,
+        created           timestamptz NOT NULL DEFAULT now(),
+        last_used_at      timestamptz
+      );
+      CREATE UNIQUE INDEX oauth_sessions_token_hash_key ON app.oauth_sessions (token_hash);
+      CREATE UNIQUE INDEX oauth_sessions_refresh_hash_key ON app.oauth_sessions (refresh_hash);
+      CREATE INDEX oauth_sessions_prev_refresh_hash_idx ON app.oauth_sessions (prev_refresh_hash);
+      CREATE INDEX oauth_sessions_user_idx ON app.oauth_sessions (user_id, client);
+
+      ALTER TABLE app.mcp_tokens
+        DROP CONSTRAINT mcp_tokens_static_has_no_refresh,
+        DROP COLUMN oauth_client,
+        DROP COLUMN claimed_at,
+        DROP COLUMN access_expires_at,
+        DROP COLUMN refresh_hash,
+        DROP COLUMN prev_refresh_hash,
+        DROP COLUMN refreshed_at,
+        -- CASCADE: signing a session out removes the connections it covered;
+        -- nothing an admin created hangs off it any more.
+        ADD COLUMN oauth_session text REFERENCES app.oauth_sessions (id) ON DELETE CASCADE,
+        ADD CONSTRAINT mcp_tokens_oauth_child
+          CHECK ((auth_method = 'oauth') = (oauth_session IS NOT NULL)),
+        ADD CONSTRAINT mcp_tokens_oauth_has_no_secret
+          CHECK (auth_method = 'static' OR token_hash IS NULL);
+      CREATE INDEX mcp_tokens_oauth_session_idx ON app.mcp_tokens (oauth_session);
+
+      -- A code now carries what the user picked; the child rows are created
+      -- only when it is exchanged, so an abandoned consent mints nothing.
+      ALTER TABLE app.oauth_codes
+        DROP COLUMN token,
+        ADD COLUMN user_id text NOT NULL REFERENCES app.users (id) ON DELETE CASCADE,
+        ADD COLUMN selections jsonb NOT NULL;
+
+      -- The most a member may grant a connection through OAuth. No row, or
+      -- members_allowed false, means members cannot sign it in at all (fail
+      -- closed). Admins have no ceiling.
+      CREATE TABLE app.connection_oauth_policy (
+        instance        text PRIMARY KEY REFERENCES app.instances (id) ON DELETE CASCADE,
+        members_allowed boolean NOT NULL DEFAULT false,
+        all_chats       boolean NOT NULL DEFAULT true,
+        chat_jids       jsonb NOT NULL DEFAULT '[]'::jsonb,
+        all_tables      boolean NOT NULL DEFAULT true,
+        table_names     jsonb NOT NULL DEFAULT '[]'::jsonb,
+        all_tools       boolean NOT NULL DEFAULT true,
+        tool_names      jsonb NOT NULL DEFAULT '[]'::jsonb,
+        send_disclaimer text CHECK (send_disclaimer IS NULL OR length(send_disclaimer) BETWEEN 1 AND 200),
+        updated_by      text REFERENCES app.users (id) ON DELETE SET NULL,
+        updated         timestamptz NOT NULL DEFAULT now()
+      );
+
+      -- A connection's handle: the prefix of its tool names in an OAuth
+      -- sign-in (orders_db__run-query). Unique per organization, stable across
+      -- label changes, edited only on purpose — renaming it renames tools in
+      -- every client.
+      ALTER TABLE app.instances
+        ADD COLUMN handle text CHECK (handle ~ '^[a-z][a-z0-9_]{0,19}$');
+
+      -- The first free handle for a label in an organization. Used by the
+      -- backfill below and by the insert trigger, so every insert path gets
+      -- one without each of them having to remember.
+      CREATE FUNCTION app.next_instance_handle(p_org text, p_label text, p_kind text)
+      RETURNS text LANGUAGE plpgsql AS $fn$
+      DECLARE
+        base text;
+        candidate text;
+        n int := 1;
+      BEGIN
+        base := trim(both '_' from regexp_replace(lower(coalesce(nullif(p_label, ''), p_kind)), '[^a-z0-9]+', '_', 'g'));
+        IF base = '' THEN base := p_kind; END IF;
+        IF base !~ '^[a-z]' THEN base := 'c_' || base; END IF;
+        base := trim(trailing '_' from left(base, 16));
+        candidate := base;
+        WHILE EXISTS (SELECT 1 FROM app.instances WHERE org = p_org AND handle = candidate) LOOP
+          n := n + 1;
+          candidate := base || '_' || n;
+        END LOOP;
+        RETURN candidate;
+      END
+      $fn$;
+
+      DO $do$
+      DECLARE r record;
+      BEGIN
+        FOR r IN SELECT id, org, label, kind FROM app.instances ORDER BY created, id LOOP
+          UPDATE app.instances SET handle = app.next_instance_handle(r.org, r.label, r.kind) WHERE id = r.id;
+        END LOOP;
+      END
+      $do$;
+
+      ALTER TABLE app.instances ALTER COLUMN handle SET NOT NULL;
+      CREATE UNIQUE INDEX instances_org_handle_key ON app.instances (org, handle);
+
+      CREATE FUNCTION app.instances_default_handle() RETURNS trigger LANGUAGE plpgsql AS $fn$
+      BEGIN
+        IF NEW.handle IS NULL THEN
+          NEW.handle := app.next_instance_handle(NEW.org, NEW.label, NEW.kind);
+        END IF;
+        RETURN NEW;
+      END
+      $fn$;
+      CREATE TRIGGER instances_default_handle BEFORE INSERT ON app.instances
+        FOR EACH ROW EXECUTE FUNCTION app.instances_default_handle();
+    `,
+  },
 ]

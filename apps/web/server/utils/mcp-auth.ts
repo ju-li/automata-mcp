@@ -1,4 +1,5 @@
 import { assertNever } from '#shared/connection'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
 import type { AppInstance, AppMcpToken, AppUser, OrgLimits, OrgRole } from './app-db'
@@ -40,6 +41,8 @@ interface McpAuthBase {
    * applies from the next request. Undefined = off.
    */
   sendDisclaimer?: string
+  /** Set when this connection is one of several an OAuth sign-in covers. */
+  oauthSessionId?: string
 }
 
 /**
@@ -69,7 +72,7 @@ export type McpAuth =
 interface McpTokenFacts extends Pick<AppMcpToken,
   'id' | 'assigned_to' | 'instance' | 'token_hash' | 'expires_at' | 'revoked'
   | 'all_chats' | 'chat_jids' | 'all_tables' | 'table_names' | 'all_tools' | 'tool_names'
-  | 'send_disclaimer' | 'auth_method' | 'access_expires_at'> {
+  | 'send_disclaimer' | 'auth_method' | 'oauth_session'> {
   user_email?: string
   user_name?: string
   member_role?: OrgRole
@@ -77,6 +80,15 @@ interface McpTokenFacts extends Pick<AppMcpToken,
   max_connections?: number
   max_tokens?: number
   assigned: boolean
+  /** The connection's OAuth ceiling for members; absent = none set (closed). */
+  policy_members_allowed?: boolean
+  policy_all_chats?: boolean
+  policy_chat_jids?: unknown
+  policy_all_tables?: boolean
+  policy_table_names?: unknown
+  policy_all_tools?: boolean
+  policy_tool_names?: unknown
+  policy_send_disclaimer?: string
 }
 
 /** Mint a new token. The plaintext is returned once and never stored. */
@@ -99,12 +111,12 @@ export function hashMcpToken(token: string): string {
  * `/mcp/<token>` path segment is a fallback for MCP clients that cannot attach
  * custom headers.
  */
-function extractToken(event: H3Event): string | undefined {
+function extractToken(event: H3Event): { token: string, from: 'header' | 'path' } | undefined {
   const header = getRequestHeader(event, 'authorization')
   if (header) {
     const match = /^Bearer\s+(.+)$/i.exec(header.trim())
-    if (match) return match[1]!.trim()
-    if (header.trim().startsWith(TOKEN_PREFIX)) return header.trim()
+    if (match) return { token: match[1]!.trim(), from: 'header' }
+    if (header.trim().startsWith(TOKEN_PREFIX)) return { token: header.trim(), from: 'header' }
     // An Authorization header that is present but malformed is a hard failure —
     // do not silently fall through to the path segment.
     return undefined
@@ -112,21 +124,98 @@ function extractToken(event: H3Event): string | undefined {
 
   // Registered by modules/mcp-token-route.ts. Undefined on the plain /mcp route.
   const param = getRouterParam(event, 'token')
-  return param ? decodeURIComponent(param) : undefined
+  return param ? { token: decodeURIComponent(param), from: 'path' } : undefined
 }
 
 /**
- * Resolve a request to a user and the one instance its token is bound to, or
- * `undefined`. Callers must treat `undefined` as 401 — never as anonymous
- * access.
+ * What an MCP request authenticated as.
+ *
+ * `token`: a static connector token — one connection, exactly as before OAuth.
+ * `session`: an OAuth sign-in covering one or more connections, each its own
+ * `McpAuth` resolved through the same checks a static token gets. Tools are
+ * generated per connection for a session (`mcp-session-tools.ts`), so no tool
+ * ever sees more than one connection.
  */
-export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefined> {
-  const token = extractToken(event)
-  // A static token or an OAuth access token. A refresh token carries its own
-  // prefix and its hash lives in another column, so presenting one here matches
-  // nothing.
-  if (!token || !(token.startsWith(TOKEN_PREFIX) || token.startsWith(ACCESS_TOKEN_PREFIX))) return undefined
+export type McpCredential =
+  | { type: 'token', auth: McpAuth }
+  | { type: 'session', sessionId: string, user: AppUser, clientName: string, connections: McpAuth[] }
 
+/**
+ * The connection a tool call is acting for, for the duration of that call.
+ *
+ * A static token sets `event.context.mcpAuth` once; an OAuth session has several
+ * connections on one request, so each generated tool runs its handler inside
+ * `mcpAuthContext.run(connection, …)`. Per call rather than written onto the
+ * shared event, because a JSON-RPC batch can run several calls at once.
+ */
+export const mcpAuthContext = new AsyncLocalStorage<McpAuth>()
+
+/**
+ * The connection the current tool call acts for: the per-call context when an
+ * OAuth session's generated tool is running, else the static token's. Every
+ * MCP-side reader goes through this — never the browser session.
+ */
+export function currentMcpAuth(event?: H3Event): McpAuth | undefined {
+  const scoped = mcpAuthContext.getStore()
+  if (scoped) return scoped
+  const source = event ?? useEvent()
+  return source.context.mcpAuth as McpAuth | undefined
+}
+
+/**
+ * The columns every token check needs, joined LEFT so a missing piece reads as
+ * a missing piece (and is logged as one) rather than as no such token. The
+ * policy columns matter only for an OAuth child held by a member.
+ */
+function tokenFactsSelect(sql: Awaited<ReturnType<typeof appDb>>) {
+  return sql`
+    SELECT t.id, t.assigned_to, t.instance, t.token_hash, t.expires_at, t.revoked,
+           t.all_chats, t.chat_jids, t.all_tables, t.table_names, t.all_tools, t.tool_names,
+           t.send_disclaimer, t.auth_method, t.oauth_session,
+           u.email AS user_email, u.name AS user_name,
+           m.role AS member_role, m.org AS member_org,
+           o.max_connections, o.max_tokens,
+           EXISTS (
+             SELECT 1 FROM app.instance_assignments a
+             WHERE a.user_id = t.assigned_to AND a.instance = t.instance
+           ) AS assigned,
+           p.members_allowed AS policy_members_allowed,
+           p.all_chats AS policy_all_chats, p.chat_jids AS policy_chat_jids,
+           p.all_tables AS policy_all_tables, p.table_names AS policy_table_names,
+           p.all_tools AS policy_all_tools, p.tool_names AS policy_tool_names,
+           p.send_disclaimer AS policy_send_disclaimer
+    FROM app.mcp_tokens t
+    LEFT JOIN app.users u ON u.id = t.assigned_to
+    LEFT JOIN app.memberships m ON m.user_id = t.assigned_to
+    LEFT JOIN app.organizations o ON o.id = m.org
+    LEFT JOIN app.connection_oauth_policy p ON p.instance = t.instance
+  `
+}
+
+/**
+ * Resolve a request to what it authenticated as, or `undefined`. Callers must
+ * treat `undefined` as 401 — never as anonymous access.
+ */
+export async function resolveMcpCredential(event: H3Event): Promise<McpCredential | undefined> {
+  const presented = extractToken(event)
+  if (!presented) return undefined
+
+  if (presented.token.startsWith(ACCESS_TOKEN_PREFIX)) {
+    // OAuth access tokens travel in the header only (the resource metadata
+    // says `bearer_methods_supported: header`), never in a URL that ends up in
+    // logs and browser history.
+    if (presented.from !== 'header') return undefined
+    return await resolveOAuthSession(presented.token)
+  }
+  if (!presented.token.startsWith(TOKEN_PREFIX)) return undefined
+  const auth = await resolveMcpAuth(presented.token)
+  return auth ? { type: 'token', auth } : undefined
+}
+
+/**
+ * Resolve a static token to its one connection, or `undefined`.
+ */
+async function resolveMcpAuth(token: string): Promise<McpAuth | undefined> {
   // ── who this token still reaches ─────────────────────────────────────────
   //
   // A token names a member and a connection. It authenticates only while that
@@ -153,23 +242,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   let instance: AppInstance | undefined
   try {
     const sql = await appDb()
-    ;[record] = await sql<McpTokenFacts[]>`
-      SELECT t.id, t.assigned_to, t.instance, t.token_hash, t.expires_at, t.revoked,
-             t.all_chats, t.chat_jids, t.all_tables, t.table_names, t.all_tools, t.tool_names,
-             t.send_disclaimer, t.auth_method, t.access_expires_at,
-             u.email AS user_email, u.name AS user_name,
-             m.role AS member_role, m.org AS member_org,
-             o.max_connections, o.max_tokens,
-             EXISTS (
-               SELECT 1 FROM app.instance_assignments a
-               WHERE a.user_id = t.assigned_to AND a.instance = t.instance
-             ) AS assigned
-      FROM app.mcp_tokens t
-      LEFT JOIN app.users u ON u.id = t.assigned_to
-      LEFT JOIN app.memberships m ON m.user_id = t.assigned_to
-      LEFT JOIN app.organizations o ON o.id = m.org
-      WHERE t.token_hash = ${hash}
-    `
+    ;[record] = await sql<McpTokenFacts[]>`${tokenFactsSelect(sql)} WHERE t.token_hash = ${hash}`
     if (record) instance = await getRow<AppInstance>('instances', record.instance)
   } catch (error) {
     // Answering 401 here would tell a client its valid token had been revoked
@@ -182,23 +255,128 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
 
   // Defence in depth: the lookup above already proves equality, but compare the
   // stored hash explicitly so a future change to the query cannot weaken this.
-  const presented = Buffer.from(hash)
+  const presentedHash = Buffer.from(hash)
   const stored = Buffer.from(record.token_hash ?? '')
-  if (presented.length !== stored.length || !timingSafeEqual(presented, stored)) {
+  if (presentedHash.length !== stored.length || !timingSafeEqual(presentedHash, stored)) {
+    return undefined
+  }
+  if (record.auth_method !== 'static') return undefined
+
+  const auth = authorizeTokenFacts(record, instance)
+  if (auth) touchTokens([record.id])
+  return auth
+}
+
+/**
+ * Resolve an OAuth access token to its session and the connections it still
+ * reaches.
+ *
+ * Each connection goes through `authorizeTokenFacts` — the very checks a static
+ * token gets — and then, for a member, through the connection's current
+ * ceiling. One that fails is **dropped and logged**, never failing the request:
+ * unassigning one connection must not take the user's other connections down
+ * with it. With none left the answer is 401, which sends the client back to
+ * sign in, where the consent page says what is still available.
+ */
+async function resolveOAuthSession(token: string): Promise<McpCredential | undefined> {
+  const hash = hashMcpToken(token)
+  let session: { id: string, user_id: string, access_expires_at?: string, client_name?: string, email?: string, name?: string } | undefined
+  let rows: McpTokenFacts[] = []
+  let instances: AppInstance[] = []
+  try {
+    const sql = await appDb()
+    ;[session] = await sql`
+      SELECT s.id, s.user_id, s.access_expires_at, c.name AS client_name, u.email, u.name
+      FROM app.oauth_sessions s
+      JOIN app.oauth_clients c ON c.id = s.client
+      JOIN app.users u ON u.id = s.user_id
+      WHERE s.token_hash = ${hash}
+    `
+    if (session) {
+      rows = await sql<McpTokenFacts[]>`
+        ${tokenFactsSelect(sql)}
+        WHERE t.oauth_session = ${session.id} AND NOT t.revoked
+        ORDER BY t.created, t.id
+      `
+      if (rows.length) {
+        instances = await sql<AppInstance[]>`SELECT * FROM app.instances WHERE id = ANY(${rows.map(r => r.instance)})`
+      }
+    }
+  } catch (error) {
+    console.error('[mcp-auth] could not resolve an OAuth session against the app database:', error)
+    throw appDbUnavailable(error)
+  }
+
+  if (!session) return undefined
+  // An access token lives an hour; past that the client refreshes, which the
+  // 401 prompts. A missing expiry is refused, never read as "forever".
+  if (!session.access_expires_at || new Date(session.access_expires_at).getTime() <= Date.now()) {
     return undefined
   }
 
+  const byId = new Map(instances.map(i => [i.id, i]))
+  const connections: McpAuth[] = []
+  for (const record of rows) {
+    if (record.assigned_to !== session.user_id) continue
+    const auth = authorizeTokenFacts(record, byId.get(record.instance))
+    if (!auth) continue
+
+    // A member's connection answers within the connection's *current* ceiling,
+    // so an admin narrowing or switching it off takes effect now.
+    if (record.member_role !== 'admin') {
+      if (!record.policy_members_allowed) {
+        console.error(`[mcp-auth] connection ${record.instance} no longer allows members to sign in; OAuth connection ${record.id} dropped from session ${session.id}`)
+        continue
+      }
+      const ceiling = scopeFromRecord({
+        all_chats: record.policy_all_chats,
+        chat_jids: record.policy_chat_jids,
+        all_tables: record.policy_all_tables,
+        table_names: record.policy_table_names,
+        all_tools: record.policy_all_tools,
+        tool_names: record.policy_tool_names,
+      })
+      auth.scope = intersectScope(auth.scope, ceiling)
+      auth.sendDisclaimer = record.policy_send_disclaimer || undefined
+    }
+    auth.oauthSessionId = session.id
+    connections.push(auth)
+  }
+
+  if (connections.length === 0) {
+    console.error(`[mcp-auth] OAuth session ${session.id} reaches no connection any more; refused`)
+    return undefined
+  }
+
+  touchTokens(connections.map(c => c.tokenId), session.id)
+  return {
+    type: 'session',
+    sessionId: session.id,
+    user: { id: session.user_id, email: session.email ?? '', name: session.name },
+    clientName: session.client_name || 'an app',
+    connections,
+  }
+}
+
+/** Best-effort; a write failure must not fail an otherwise valid request. */
+function touchTokens(tokenIds: string[], sessionId?: string): void {
+  void appDb()
+    .then(async (sql) => {
+      await sql`UPDATE app.mcp_tokens SET last_used_at = now() WHERE id = ANY(${tokenIds})`
+      if (sessionId) await sql`UPDATE app.oauth_sessions SET last_used_at = now() WHERE id = ${sessionId}`
+    })
+    .catch(() => {})
+}
+
+/**
+ * Everything after the lookup: is this token row, for this connection, still a
+ * working credential? Shared by static tokens and OAuth children, so the two
+ * cannot drift on who may reach what.
+ */
+function authorizeTokenFacts(record: McpTokenFacts, instance: AppInstance | undefined): McpAuth | undefined {
   if (record.revoked) return undefined
   if (record.expires_at && new Date(record.expires_at).getTime() <= Date.now()) {
     return undefined
-  }
-  // An OAuth access token lives an hour; past that the client refreshes, which
-  // the 401 below prompts. A missing expiry on an OAuth row is refused, never
-  // read as "forever".
-  if (record.auth_method === 'oauth') {
-    if (!record.access_expires_at || new Date(record.access_expires_at).getTime() <= Date.now()) {
-      return undefined
-    }
   }
 
   // The token points at a row that is gone. A dead credential, not an outage.
@@ -289,11 +467,6 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
       return assertNever(kind, 'connection kind')
   }
 
-  // Best-effort; a write failure must not fail an otherwise valid request.
-  void appDb()
-    .then(sql => sql`UPDATE app.mcp_tokens SET last_used_at = now() WHERE id = ${record.id}`)
-    .catch(() => {})
-
   return auth
 }
 
@@ -305,8 +478,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
  * auth middleware was somehow bypassed.
  */
 export function useMcpAuth(): McpAuth {
-  const event = useEvent()
-  const auth = event.context.mcpAuth as McpAuth | undefined
+  const auth = currentMcpAuth()
   if (!auth) {
     throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
   }

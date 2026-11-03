@@ -18,7 +18,7 @@ here are about running and developing this repository.
 - [Database connections](postgres.md) — what the table allowlist does and does not close, least-privilege roles
 - [Email (IMAP) connections](imap.md) — what syncs and what stays on the mail server, app passwords, attachments
 - [Connection alerts](alerts.md) — disconnect emails and the five-minute sweep
-- [Sign-in from Claude (OAuth)](oauth.md) — connectors that sign in instead of carrying a token, what an admin creates and a member claims, the endpoints
+- [Sign-in from Claude (OAuth)](oauth.md) — one sign-in covering several connections, prefixed tool names, what members may grant, the endpoints
 - [Two-factor authentication](two-factor.md) — authenticator apps and passkeys, the `NUXT_PUBLIC_APP_URL` dependency, resetting a lost factor
 
 **Working on it**

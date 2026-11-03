@@ -32,6 +32,18 @@ type ToolDefinition<I extends ZodRawShape | undefined, O extends ZodRawShape>
  */
 const TOOL_KINDS = new Map<string, readonly InstanceKind[]>()
 
+/**
+ * Each tool's deployment prerequisite (`available`), by name, so the tools an
+ * OAuth session generates per connection (`mcp-session-tools.ts`) honour the
+ * same condition the static `enabled` gate does.
+ */
+const TOOL_AVAILABLE = new Map<string, () => boolean>()
+
+/** Whether a tool's deployment prerequisite holds. Tools without one are always available. */
+export function toolAvailable(name: string): boolean {
+  return TOOL_AVAILABLE.get(name)?.() ?? true
+}
+
 /** The kinds a tool serves, or `undefined` for a tool this build does not know. */
 export function kindsForTool(name: string): readonly InstanceKind[] | undefined {
   return TOOL_KINDS.get(name)
@@ -91,6 +103,7 @@ export function defineKindTool<
   const kinds: readonly InstanceKind[] = Array.isArray(kind) ? kind : [kind as InstanceKind]
 
   TOOL_KINDS.set(rest.name, kinds)
+  if (available) TOOL_AVAILABLE.set(rest.name, available)
 
   return defineMcpTool<InputSchema, OutputSchema>({
     ...rest,
@@ -127,7 +140,7 @@ function countedHandler<H>(name: string, handler: H): H {
     }
     finally {
       try {
-        const auth = useEvent().context.mcpAuth as McpAuth | undefined
+        const auth: McpAuth | undefined = currentMcpAuth()
         if (auth) countToolCall(auth.instance.org, auth.tokenId, name, ok)
       }
       catch {

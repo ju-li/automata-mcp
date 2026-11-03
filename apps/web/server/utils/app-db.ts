@@ -164,7 +164,7 @@ export function isUniqueViolation(error: unknown): boolean {
 // Table names are a closed union and go through `sql(identifier)`; values are
 // always bind parameters. Nothing here builds SQL text from a request.
 
-type AppTable = 'users' | 'organizations' | 'memberships' | 'instances' | 'instance_assignments' | 'invitations' | 'mcp_tokens' | 'oauth_clients'
+type AppTable = 'users' | 'organizations' | 'memberships' | 'instances' | 'instance_assignments' | 'invitations' | 'mcp_tokens'
 
 type Writable = Record<string, unknown>
 
@@ -340,6 +340,12 @@ export interface AppInstance {
   imap_user?: string
   imap_password?: string
   label?: string
+  /**
+   * Short, unique per organization: the prefix of this connection's tool names
+   * in an OAuth sign-in (`orders_db__run-query`). Set by a database trigger on
+   * insert (`app.next_instance_handle`), changed only by an admin on purpose.
+   */
+  handle: string
   created?: string
   /**
    * Outage state, written only by server/utils/alerts.ts. `down_since` empty
@@ -361,10 +367,7 @@ export interface AppMcpToken {
   /** Who minted it. Provenance only; it confers nothing. */
   created_by?: string
   instance: string
-  /**
-   * The current secret's hash. Always set on a static token; on an OAuth grant,
-   * absent while no client holds it ("awaiting sign-in").
-   */
+  /** The secret's hash. Static tokens only — an OAuth child's secret is its session's. */
   token_hash?: string
   label?: string
   last_used_at?: string
@@ -380,12 +383,11 @@ export interface AppMcpToken {
   tool_names: unknown
   /** Appended to every message the send tools send with this token. Absent = off. */
   send_disclaimer?: string
-  /** How the secret reaches the client. See server/utils/oauth.ts. */
+  /**
+   * `static`: the secret is this row's own. `oauth`: a child of an OAuth
+   * sign-in covering one connection; it has no secret — `oauth_session` does.
+   * See server/utils/oauth.ts.
+   */
   auth_method: 'static' | 'oauth'
-  oauth_client?: string
-  claimed_at?: string
-  access_expires_at?: string
-  refresh_hash?: string
-  prev_refresh_hash?: string
-  refreshed_at?: string
+  oauth_session?: string
 }
