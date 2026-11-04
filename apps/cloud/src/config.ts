@@ -6,10 +6,14 @@ import { z } from 'zod'
  * healthy and fail every request, so it refuses to start instead. The error
  * names each variable and never echoes a value.
  *
- * **Stripe is all or nothing.** With none of the four Stripe variables set the
- * service still starts — it still owns plan definitions and entitlements — and
- * every billing route answers 503 `billing_not_configured`. One set without the
- * others refuses to start: a typo must fail loudly, not pass for "billing off".
+ * **`STRIPE_SECRET_KEY` switches Stripe on.** Without it the service still
+ * starts — it still owns plan definitions and entitlements — and every billing
+ * route answers 503 `billing_not_configured`; any other `STRIPE_*` values are
+ * ignored and named in `ignoredStripeVars`, which boot logs. That is what lets a
+ * Railway PR environment run: sealed variables (the two secrets) are never
+ * copied into one, while the price ids are. With the key set, the other three
+ * are required and a missing one refuses to start — a deployment that set
+ * billing up must fail loudly on a typo, not pass for "billing off".
  *
  * **Brevo is all or nothing too**, for the same reason and one more: a key
  * without the marketing list would quietly drop consent people gave.
@@ -62,6 +66,8 @@ export interface CloudConfig {
   appUrl: string
   /** Absent when the service runs without Stripe. */
   stripe?: StripeSettings
+  /** `STRIPE_*` values set without `STRIPE_SECRET_KEY`, so not used. Logged at boot. */
+  ignoredStripeVars: string[]
   /** Absent when the service runs without the CRM sync. */
   brevo?: BrevoSettings
   /** zip-prepop's `POST /zip`. */
@@ -83,11 +89,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
 
   const e = parsed.data
   const set = STRIPE_VARS.filter(name => e[name] !== undefined)
+  const stripeOn = e.STRIPE_SECRET_KEY !== undefined
   const brevoSet = BREVO_VARS.filter(name => e[name] !== undefined)
   const incomplete = [
-    ...(set.length > 0 && set.length < STRIPE_VARS.length
+    ...(stripeOn
       ? STRIPE_VARS.filter(name => e[name] === undefined)
-          .map(name => `  ${name}: set it too — the four STRIPE_* variables go together (leave all empty to run without billing)`)
+          .map(name => `  ${name}: set it too — STRIPE_SECRET_KEY turns billing on, and billing needs all four STRIPE_* variables (unset STRIPE_SECRET_KEY to run without billing)`)
       : []),
     ...(brevoSet.length > 0 && brevoSet.length < BREVO_VARS.length
       ? BREVO_VARS.filter(name => e[name] === undefined)
@@ -105,7 +112,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
     adminKey: e.CLOUD_ADMIN_KEY,
     databaseUrl: e.CLOUD_DATABASE_URL,
     appUrl: e.APP_URL.replace(/\/+$/, ''),
-    stripe: set.length === STRIPE_VARS.length
+    stripe: stripeOn
       ? {
           secretKey: e.STRIPE_SECRET_KEY!,
           webhookSecret: e.STRIPE_WEBHOOK_SECRET!,
@@ -113,6 +120,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
           priceSeat: e.STRIPE_PRICE_SEAT!,
         }
       : undefined,
+    ignoredStripeVars: stripeOn ? [] : [...set],
     brevo: brevoSet.length === BREVO_VARS.length
       ? {
           apiKey: e.BREVO_API_KEY!,

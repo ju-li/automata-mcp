@@ -255,7 +255,9 @@ STRIPE_PRICE_BASE=price_…
 STRIPE_PRICE_SEAT=price_…
 ```
 
-The four `STRIPE_*` variables go together. With none set the service still runs and still writes limits, but starting Pro answers 503. With some but not all set, it refuses to start.
+`STRIPE_SECRET_KEY` turns billing on. Without it the service still runs and still writes limits, but starting Pro answers 503, and any other `STRIPE_*` variables are ignored (the startup log names them). With it set, the other three are required and the service refuses to start without them.
+
+This is what lets a Railway PR environment start. Railway never copies sealed variables into a PR environment, so the two secrets go missing while the price ids arrive. The preview then runs without billing. To test Checkout in previews, give the PR environment's base environment unsealed **test-mode** values. Never use live keys there.
 
 `GET /health` answers `{ ok, app, billing, crm }`. `app` is `waiting` until the web app has run its migrations; the cloud service waits for them rather than failing.
 
