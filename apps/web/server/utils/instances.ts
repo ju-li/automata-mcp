@@ -1,6 +1,7 @@
 import { assertNever } from '#shared/connection'
 import { randomBytes } from 'node:crypto'
 import type { AppInstance } from './app-db'
+import type { EvolutionInstanceRecord } from './evolution-db'
 import type { ImapSecurity, ImapTarget } from './imap-client'
 import type { Actor } from './org'
 import type { ConnectionState } from '#shared/connection'
@@ -565,14 +566,15 @@ export async function getImapHealth(instance: AppInstance): Promise<ConnectionHe
 }
 
 /**
- * Connection state and counts, in one call.
+ * Connection state, profile and counts — what the dashboard, the listing and
+ * `get-connection-status` show. The alert paths, which need no counts, use
+ * `getInstanceHealth` instead.
  *
- * `fetchInstances` with an instance's own token returns only that instance —
- * Evolution enforces the scoping, we do not have to filter. An unpaired or
- * unknown instance reports `close` and zeroes rather than throwing, because the
- * dashboard should render for an account that has never been paired.
+ * An unpaired or unknown instance reports `close` and zeroes rather than
+ * throwing, because the dashboard should render for an account that has never
+ * been paired.
  *
- * **The state does not come from `fetchInstances`.** Its `connectionStatus` is
+ * **The state does not come from Evolution's row.** Its `connectionStatus` is
  * Evolution's database column, and 2.3.7 writes that column only when a socket
  * opens and when one closes for a reason it will not retry (logged out,
  * forbidden, 402, 406). Every other close — a lost network, a server-side
@@ -581,7 +583,7 @@ export async function getImapHealth(instance: AppInstance): Promise<ConnectionHe
  * socket, and a badge read from it says Connected for an account that has
  * received nothing for days. That was a reported bug. `GET
  * /instance/connectionState` reads the in-memory state, so it is asked
- * alongside; the row still supplies the profile and the counts.
+ * alongside; the row still supplies the profile.
  *
  * If that second read fails the state is `unknown`, never the column's value —
  * falling back to the column is the bug.
@@ -590,17 +592,76 @@ export async function getImapHealth(instance: AppInstance): Promise<ConnectionHe
  * dropped session from an account with no session at all. A fresh instance and
  * a logout both leave the column `close`, and a QR on screen leaves it
  * `connecting`; only a retried close leaves it `open` with nothing live behind it.
+ *
+ * **Where the row and the counts come from — and why not `fetchInstances`.**
+ * That route answers with Prisma's `_count`, which counts every account's rows
+ * and joins the result to this one: a full scan of `"Message"` per call, 42% of
+ * production's block reads before this changed. So, when this connection has a
+ * message database (`canReadMessages`):
+ *
+ *   - the row is a primary-key lookup on `"Instance"` (`readInstanceRecord`),
+ *     uncached, so `sessionLost` is as fresh as the poll asking;
+ *   - the counts are per account (`countInstanceRows`) and cached for
+ *     `COUNTS_TTL_MS` — still ~100 ms on a large account, too much for a 15 s
+ *     poll. `freshCounts` bypasses that (down to a 2 s floor) for the one screen
+ *     that watches counts move: the history import after pairing.
+ *
+ * Without a message database — a bring-your-own server with no database URL —
+ * or when that SQL fails, `fetchInstances` is still asked, but cached per
+ * connection (`cachedApiRow`). That is the only path on which the row can be
+ * stale; see there.
  */
-export async function getInstanceStatus(instance: AppInstance): Promise<InstanceStatus> {
-  const evolution = evolutionClientForInstance(instance)
+export async function getInstanceStatus(
+  instance: AppInstance,
+  options: { freshCounts?: boolean } = {},
+): Promise<InstanceStatus> {
+  const status = await readStatus(instance, { counts: true, freshCounts: options.freshCounts })
+  return { ...status, stats: status.stats ?? { messages: 0, chats: 0, contacts: 0 } }
+}
 
-  const [rows, live] = await Promise.all([
-    evolution<EvolutionInstanceRow[]>('/instance/fetchInstances').catch(() => undefined),
+export type InstanceHealth = Omit<InstanceStatus, 'stats'>
+
+/**
+ * `getInstanceStatus` without the counts: state, `sessionLost`, `ownerJid`,
+ * profile. For the alert sweep and webhook evaluation, which run once per
+ * connection every few minutes and read none of the counts — so they never
+ * cause one to be computed.
+ */
+export async function getInstanceHealth(instance: AppInstance): Promise<InstanceHealth> {
+  const { stats: _stats, ...health } = await readStatus(instance, { counts: false })
+  return health
+}
+
+/** Drop what this module has cached about one connection. */
+export function forgetInstanceStatus(instanceId: string): void {
+  apiRowCache.delete(instanceId)
+  countsCache.delete(instanceId)
+}
+
+type InstanceStats = InstanceStatus['stats']
+
+async function readStatus(
+  instance: AppInstance,
+  options: { counts: boolean, freshCounts?: boolean },
+): Promise<InstanceHealth & { stats?: InstanceStats }> {
+  const evolution = evolutionClientForInstance(instance)
+  const viaSql = canReadMessages(instance)
+
+  const [live, record, sqlStats] = await Promise.all([
     liveConnectionState(evolution, instance).catch(() => undefined),
+    viaSql ? sqlInstanceRecord(instance) : undefined,
+    viaSql && options.counts ? cachedSqlCounts(instance, Boolean(options.freshCounts)) : undefined,
   ])
 
-  const row = Array.isArray(rows) ? rows.find(r => r?.name === instance.name) ?? rows[0] : undefined
-  if (!row) return emptyStatus()
+  let row: EvolutionInstanceRecord | undefined = record
+  let stats = sqlStats
+  if (!row || (options.counts && !stats)) {
+    const api = await cachedApiRow(instance, evolution, live, Boolean(options.freshCounts))
+    row ??= api
+    if (options.counts) stats ??= api && statsFromApiRow(api)
+  }
+
+  if (!row) return options.counts ? emptyStatus() : { state: 'close' }
 
   return {
     state: live ?? 'unknown',
@@ -610,12 +671,171 @@ export async function getInstanceStatus(instance: AppInstance): Promise<Instance
     number: row.number ?? row.ownerJid?.split('@')[0],
     ownerJid: row.ownerJid ?? undefined,
     disconnectedAt: row.disconnectionAt ?? undefined,
-    stats: {
-      messages: row._count?.Message ?? 0,
-      chats: row._count?.Chat ?? 0,
-      contacts: row._count?.Contact ?? 0,
-    },
+    ...(options.counts && { stats: stats ?? { messages: 0, chats: 0, contacts: 0 } }),
   }
+}
+
+// ── status caches ──────────────────────────────────────────────────────────
+// Per process, keyed on the connection id. Several replicas each keep their own,
+// which only multiplies a bounded cost; nothing here is a correctness boundary.
+
+const COUNTS_TTL_MS = 5 * 60_000
+/** How fresh "fresh" is: two import-screen polls in a row share one count. */
+const FRESH_FLOOR_MS = 2_000
+const API_ROW_TTL_MS = 5 * 60_000
+/** See `cachedApiRow`: a cached column that disagrees with the live state is re-read sooner. */
+const API_ROW_DISAGREE_TTL_MS = 60_000
+
+const countsCache = new Map<string, { at: number, stats: InstanceStats }>()
+const countsInFlight = new Map<string, Promise<InstanceStats>>()
+const apiRowCache = new Map<string, { at: number, row: EvolutionInstanceRow }>()
+const apiRowInFlight = new Map<string, Promise<EvolutionInstanceRow | undefined>>()
+
+/** The SQL row, or `undefined` for "use the fallback" — never throws. */
+async function sqlInstanceRecord(instance: AppInstance): Promise<EvolutionInstanceRecord | undefined> {
+  if (sqlDenied('instance row', instance)) return undefined
+  try {
+    // No row under this id is not proof the instance is gone — `instance_id`
+    // could be stale — so `undefined` sends the caller to the fallback, which
+    // asks Evolution by name, as before.
+    return await readInstanceRecord(instance)
+  }
+  catch (error) {
+    noteSqlFallback('instance row', instance, error)
+    return undefined
+  }
+}
+
+/**
+ * Per-account counts, cached for `COUNTS_TTL_MS`; `undefined` means "use the
+ * fallback". Concurrent callers share one query, as `contactDirectory()` does.
+ *
+ * A failed recount serves the previous value if there is one — counts that are
+ * a few minutes old are still right enough for a dashboard, and falling back to
+ * `fetchInstances` is the expensive thing this exists to avoid. Failures are not
+ * cached, so the next read retries.
+ */
+async function cachedSqlCounts(instance: AppInstance, fresh: boolean): Promise<InstanceStats | undefined> {
+  const cached = countsCache.get(instance.id)
+  const maxAge = fresh ? FRESH_FLOOR_MS : COUNTS_TTL_MS
+  if (cached && Date.now() - cached.at < maxAge) return cached.stats
+  if (sqlDenied('counts', instance)) return undefined
+
+  let counting = countsInFlight.get(instance.id)
+  if (!counting) {
+    counting = countInstanceRows(instance)
+      .then((stats) => {
+        countsCache.set(instance.id, { at: Date.now(), stats })
+        return stats
+      })
+      .finally(() => countsInFlight.delete(instance.id))
+    countsInFlight.set(instance.id, counting)
+  }
+
+  try {
+    return await counting
+  }
+  catch (error) {
+    noteSqlFallback('counts', instance, error)
+    return cached?.stats
+  }
+}
+
+/**
+ * `fetchInstances`, cached per connection — the fallback for a connection with
+ * no message database, and for one whose SQL read failed.
+ *
+ * Still the expensive route, but at most once per window per connection rather
+ * than once per poll, and for a bring-your-own server the cost lands on that
+ * server.
+ *
+ * **The one place the row can be stale**, and it matters for `sessionLost`,
+ * which compares the cached column against the live state. Bounded three ways:
+ * our own logout, reconnect and delete drop the entry (`forgetInstanceStatus`);
+ * a cached column that disagrees with the live state — a pairing that just
+ * finished, a logout from the phone — is re-read after `API_ROW_DISAGREE_TTL_MS`
+ * rather than the full window; and `fresh` (the import screen) re-reads it down
+ * to the 2 s floor. A dropped session is a lasting disagreement, so it costs one
+ * re-read a minute while it lasts.
+ *
+ * Failures are not cached and answer `undefined`, which the caller reports as
+ * it always has.
+ */
+async function cachedApiRow(
+  instance: AppInstance,
+  evolution: EvolutionClient,
+  live: ConnectionState | undefined,
+  fresh: boolean,
+): Promise<EvolutionInstanceRow | undefined> {
+  const cached = apiRowCache.get(instance.id)
+  const disagrees = cached !== undefined && live !== undefined
+    && normalizeState(cached.row.connectionStatus) !== live
+  const maxAge = fresh ? FRESH_FLOOR_MS : disagrees ? API_ROW_DISAGREE_TTL_MS : API_ROW_TTL_MS
+  if (cached && Date.now() - cached.at < maxAge) return cached.row
+
+  const inFlight = apiRowInFlight.get(instance.id)
+  if (inFlight) return inFlight
+
+  const fetching = evolution<EvolutionInstanceRow[]>('/instance/fetchInstances')
+    .then((rows) => {
+      const row = Array.isArray(rows) ? rows.find(r => r?.name === instance.name) ?? rows[0] : undefined
+      if (row) apiRowCache.set(instance.id, { at: Date.now(), row })
+      return row
+    })
+    .catch(() => undefined)
+    .finally(() => apiRowInFlight.delete(instance.id))
+
+  apiRowInFlight.set(instance.id, fetching)
+  return fetching
+}
+
+function statsFromApiRow(row: EvolutionInstanceRow): InstanceStats {
+  return {
+    messages: row._count?.Message ?? 0,
+    chats: row._count?.Chat ?? 0,
+    contacts: row._count?.Contact ?? 0,
+  }
+}
+
+/**
+ * Say why a status read fell back to `fetchInstances` — once per cause per five
+ * minutes, since the sweep and the polls would otherwise repeat it constantly.
+ * The fallback keeps the status right, so without this a missing grant would
+ * only show up as the database load this change exists to remove.
+ *
+ * A missing grant (42501) also stops that read being tried for the same five
+ * minutes on that connection: it will not fix itself between two polls, and
+ * each attempt is an error line in Postgres's own log.
+ */
+const SQL_FALLBACK_QUIET_MS = 5 * 60_000
+const sqlFallbackLoggedAt = new Map<string, number>()
+// Not cleared by `forgetInstanceStatus`: a missing grant is about the database
+// role, not about anything a logout or reconnect changes.
+const sqlDeniedAt = new Map<string, number>()
+
+function sqlDenied(what: string, instance: AppInstance): boolean {
+  const at = sqlDeniedAt.get(`${what}:${instance.id}`)
+  return at !== undefined && Date.now() - at < SQL_FALLBACK_QUIET_MS
+}
+
+function noteSqlFallback(what: string, instance: AppInstance, error: unknown): void {
+  const code = (error as { code?: unknown } | undefined)?.code
+  if (code === '42501') sqlDeniedAt.set(`${what}:${instance.id}`, Date.now())
+
+  const key = `${what}:${String(code ?? 'other')}`
+  const last = sqlFallbackLoggedAt.get(key)
+  if (last !== undefined && Date.now() - last < SQL_FALLBACK_QUIET_MS) return
+  sqlFallbackLoggedAt.set(key, Date.now())
+
+  if (code === '42501') {
+    console.warn(
+      `[instances] status ${what}: the Evolution database role lacks a grant, so status reads `
+      + 'fall back to Evolution\'s fetchInstances (a full "Message" scan, cached per connection). '
+      + 'Add the status grants in docs/whatsapp.md "Reading and searching messages".',
+    )
+    return
+  }
+  console.error(`[instances] status ${what} could not be read from the Evolution database; using fetchInstances:`, error)
 }
 
 /**
@@ -662,6 +882,7 @@ export async function reconnectInstance(instance: AppInstance): Promise<Connecti
 
   const before = await liveConnectionState(evolution, instance)
   if (before === 'open') return before
+  forgetInstanceStatus(instance.id)
 
   const response = before === 'close'
     ? await evolution<EvolutionActionResponse>(`/instance/connect/${name}`)
@@ -722,6 +943,8 @@ export async function getInstanceQr(instance: AppInstance): Promise<{ state: Con
  */
 export async function logoutInstance(instance: AppInstance): Promise<void> {
   const evolution = evolutionClientForInstance(instance)
+  // Whatever happens below, the cached row (fallback path) predates it.
+  forgetInstanceStatus(instance.id)
   try {
     await evolution(`/instance/logout/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
   } catch (error) {
@@ -802,6 +1025,7 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
     // A connection on its own server may hold a pool onto that server's message
     // database. Keyed on the row, so it outlives the row unless dropped here.
     await closeKeyedPool(`evo:${instance.id}`)
+    forgetInstanceStatus(instance.id)
 
     // Uses the same server the instance was created on, with that server's own
     // global key when it brought one.
@@ -840,14 +1064,9 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
 
 // ── internals ──────────────────────────────────────────────────────────────
 
-interface EvolutionInstanceRow {
+/** One row of `fetchInstances` — the record `readInstanceRecord` reads, plus Prisma's counts. */
+interface EvolutionInstanceRow extends EvolutionInstanceRecord {
   name?: string
-  connectionStatus?: string
-  ownerJid?: string
-  profileName?: string
-  profilePicUrl?: string
-  number?: string
-  disconnectionAt?: string
   _count?: { Message?: number, Chat?: number, Contact?: number }
 }
 
@@ -925,7 +1144,7 @@ export type ConnectionStateReport =
 
 export async function connectionState(
   instance: AppInstance,
-  options: { tolerant?: boolean } = {},
+  options: { tolerant?: boolean, freshCounts?: boolean } = {},
 ): Promise<ConnectionStateReport> {
   const kind = instanceKind(instance)
   switch (kind) {
@@ -934,8 +1153,8 @@ export async function connectionState(
       return { state: health.state, detail: health.detail, error: health.error, warning: health.warning }
     }
     case 'whatsapp':
-      if (!options.tolerant) return await getInstanceStatus(instance)
-      return await getInstanceStatus(instance).catch(() => unknownStatus())
+      if (!options.tolerant) return await getInstanceStatus(instance, { freshCounts: options.freshCounts })
+      return await getInstanceStatus(instance, { freshCounts: options.freshCounts }).catch(() => unknownStatus())
     case 'telegram':
       // Never throws: a bridge that cannot be asked answers `unknown`, for the
       // reason given above.

@@ -29,7 +29,7 @@ import type { ConnectionState, InstanceKind } from '#shared/connection'
 /**
  * One connection's health, in the terms alerting needs, whatever its kind.
  *
- * Built from a live read — `getInstanceStatus()` for WhatsApp, the bridge's
+ * Built from a live read — `getInstanceHealth()` for WhatsApp, the bridge's
  * `/state` for Telegram — and never from a stored column.
  */
 type ConnectionHealth = {
@@ -79,7 +79,9 @@ type ConnectionHealth = {
 async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 'telegram'): Promise<ConnectionHealth> {
   switch (kind) {
     case 'whatsapp': {
-      const status = await getInstanceStatus(instance)
+      // Health only: this runs per connection every five minutes and reads none
+      // of the counts, so it must not cause one to be computed.
+      const status = await getInstanceHealth(instance)
       return {
         kind,
         state: status.state,

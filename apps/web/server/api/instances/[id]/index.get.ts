@@ -9,12 +9,18 @@
  * Not tolerant, unlike the listing: asked for one connection by id, a
  * half-provisioned row should say so rather than report a state it does not
  * have.
+ *
+ * `?fresh=counts` asks for message, chat and contact counts no older than a
+ * couple of seconds instead of the few minutes they are otherwise cached for
+ * (`getInstanceStatus`). Only the history-import screen after pairing sends it,
+ * since it decides the import is over when the counts stop moving.
  */
 export default defineEventHandler(async (event) => {
   const { instance } = await requireReadableInstance(event, getRouterParam(event, 'id'))
+  const freshCounts = getQuery(event).fresh === 'counts'
 
   return {
     instance: toPublicInstance(instance),
-    ...await connectionState(instance),
+    ...await connectionState(instance, { freshCounts }),
   }
 })

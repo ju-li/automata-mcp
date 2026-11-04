@@ -56,15 +56,34 @@ every user's messages in every instance. A dedicated role does not protect them
 from a compromised web service — that process already holds `NUXT_DATABASE_URL`,
 the database's owner — but it does contain a bug in the app's own message queries
 to reading `"Message"`, where under the owner such a bug would reach every stored
-credential in the `app` schema. If you want that, the one grant below serves both
-reading and searching:
+credential in the `app` schema. If you want that, the grants below serve reading,
+searching and connection status:
 
 ```sql
 CREATE ROLE wamcp_search LOGIN PASSWORD 'change-me';
 GRANT CONNECT ON DATABASE evolution TO wamcp_search;
 GRANT USAGE ON SCHEMA public TO wamcp_search;
 GRANT SELECT ON "Message" TO wamcp_search;
+-- Connection status: the account's own row and per-account counts.
+GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt")
+  ON "Instance" TO wamcp_search;
+GRANT SELECT ("instanceId") ON "Chat", "Contact" TO wamcp_search;
 ```
+
+The `"Instance"` grant is column by column on purpose: the same row holds
+`token`, every instance's API key, and this role has no reason to read it.
+
+**Why status reads this database at all.** Evolution's `fetchInstances` answers
+with message, chat and contact counts that Prisma computes over *every* account's
+rows and joins to the one asked about — a full scan of `"Message"` on every call.
+With this URL set, the dashboard, the connection list, the alert sweep and
+`get-connection-status` read the account's `"Instance"` row by primary key, and
+count only that account's rows, caching the counts for five minutes (the history
+import screen after pairing asks for them fresh). A role created before these
+grants existed still works: status falls back to `fetchInstances`, cached per
+connection for five minutes, and the web log says which grant is missing. Without
+this URL at all — a bring-your-own server with no database URL — that cached
+fallback is the only path.
 
 ```bash
 NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:change-me@localhost:5432/evolution
@@ -118,6 +137,9 @@ Worth knowing before you go looking for a bug:
   GRANT CONNECT ON DATABASE evolution TO evo_reader;
   GRANT USAGE ON SCHEMA public TO evo_reader;
   GRANT SELECT ON "Message" TO evo_reader;
+  GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt")
+    ON "Instance" TO evo_reader;
+  GRANT SELECT ("instanceId") ON "Chat", "Contact" TO evo_reader;
   ```
 
   It is checked before it is stored — including that `"Message"` is actually
