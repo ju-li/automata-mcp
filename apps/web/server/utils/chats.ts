@@ -270,13 +270,12 @@ async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<Li
 
   const evolution = evolutionClientForInstance(instance)
 
-  // Only pay for the group listing when it can change an answer.
+  // Only start a group refresh when it can change an answer. Never awaited —
+  // see `groupsFor`.
   const needsGroups = drafts.some(draft => draft.jid.endsWith('@g.us') && !draft.chatName)
 
-  const [contacts, groups] = await Promise.all([
-    contactDirectory(instance, evolution),
-    needsGroups ? fetchGroups(instance, evolution) : Promise.resolve(emptyGroups),
-  ])
+  const groups = needsGroups ? groupsFor(instance, evolution) : emptyGroups
+  const contacts = await contactDirectory(instance, evolution)
 
   return drafts.map((draft) => {
     const localPart = draft.jid.split('@')[0]!
@@ -763,10 +762,8 @@ async function accountNames(
     const evolution = evolutionClientForInstance(instance)
     const needsGroups = chatJids.some(jid => jid.endsWith('@g.us'))
 
-    const [contacts, groups] = await Promise.all([
-      contactDirectory(instance, evolution),
-      needsGroups ? fetchGroups(instance, evolution) : Promise.resolve(emptyGroups),
-    ])
+    const groups = needsGroups ? groupsFor(instance, evolution) : emptyGroups
+    const contacts = await contactDirectory(instance, evolution)
 
     return {
       directory: contactsToDirectory(contacts),
@@ -986,37 +983,51 @@ async function fetchContacts(instance: AppInstance, evolution: EvolutionClient):
 }
 
 /**
- * Group subjects, keyed by group JID.
+ * Group subjects and sizes, keyed by group JID — whatever the cache holds now.
  *
- * **This one is expensive.** Evolution answers it from Baileys rather than its
- * database, and fetches a profile picture — an uncached round trip to WhatsApp —
- * for every group, sequentially. An account in thirty groups pays thirty round
- * trips. Hence the caller only asks when a group would otherwise show a raw id,
- * and hence the two guards here:
+ * **This lookup is expensive, so no request waits for it.** Evolution answers
+ * `fetchAllGroups` from Baileys rather than its database: one cheap
+ * `groupFetchAllParticipating()`, then a profile picture — an uncached round trip
+ * to WhatsApp — for every group, sequentially. `getParticipants=false` does not
+ * skip the pictures and no endpoint returns subjects without them. An account in
+ * fifty groups did not finish inside the old 8-second timeout at all, so every
+ * caller paid the full 8 s and got nothing back.
  *
- *   timeout  a picker that renders ids is better than a modal that hangs. The
- *            account may simply be disconnected, in which case this never returns.
- *   cache    `staleWhileFailing` — serve stale on a failed refresh, cache the
- *            failure for a shorter window, never throw. That file explains why
- *            each of those matters; `fetchParticipants` in `mentions.ts` is the
- *            other lookup with the same shape and shares the mechanism.
+ * So `staleWhileRevalidate`: this returns synchronously, and a missing or
+ * expired entry starts one background refresh per account. A cold first call —
+ * the first listing after a deploy — names groups from contacts, which already
+ * covers most of them, and reports no `participantCount`; later calls get the
+ * full data. With no caller waiting, the refresh gets a timeout it can
+ * realistically finish in.
+ *
+ * A failure is an expected offline state (no live socket while disconnected),
+ * not a fault: the last good answer keeps being served and the next attempt
+ * waits out `GROUP_RETRY_MS`, so a disconnected account costs Evolution one
+ * group scan per window per replica, not one per read. It is logged, briefly,
+ * since a lookup that never succeeds is otherwise invisible — the names just
+ * stay contact names.
  */
-const GROUP_TIMEOUT_MS = 8_000
+const GROUP_TIMEOUT_MS = 60_000
+const GROUP_TTL_MS = 5 * 60_000
+const GROUP_RETRY_MS = 5 * 60_000
 const emptyGroups: Map<string, GroupInfo> = new Map()
 
-const groupCache = staleWhileFailing<Map<string, GroupInfo>>({
-  ttlMs: 5 * 60_000,
-  retryTtlMs: 60_000,
+const groupCache = staleWhileRevalidate<Map<string, GroupInfo>>({
+  ttlMs: GROUP_TTL_MS,
+  retryTtlMs: GROUP_RETRY_MS,
   empty: emptyGroups,
 })
 
-async function fetchGroups(instance: AppInstance, evolution: EvolutionClient): Promise<Map<string, GroupInfo>> {
+function groupsFor(instance: AppInstance, evolution: EvolutionClient): Map<string, GroupInfo> {
   return groupCache(instance.id, async () => {
     // `getParticipants` is required — Evolution answers 400 without it.
     const rows = await evolution<EvolutionGroupRow[]>(
       `/group/fetchAllGroups/${encodeURIComponent(instance.name)}?getParticipants=false`,
       { timeout: GROUP_TIMEOUT_MS },
-    ).catch(() => undefined)
+    ).catch((error: unknown) => {
+      console.warn(`[chats] group lookup failed for connection ${instance.id}; retrying in ${GROUP_RETRY_MS / 60_000} min:`, error instanceof Error ? error.message : error)
+      return undefined
+    })
 
     // `undefined` and not an empty map: an account really can be in no groups,
     // and that answer should be cached for the full window rather than retried.
