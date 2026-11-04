@@ -37,7 +37,17 @@ interface QrResponse {
 
 const id = computed(() => props.id)
 
-const { data, refresh } = await useFetch<StatusResponse>(() => `/api/instances/${id.value}`)
+/**
+ * Set while the history import runs. The server caches counts for a few minutes,
+ * and the import screen decides it is done when they stop moving — so cached
+ * counts would end it early. `applyMode` sets it; the reactive query makes the
+ * status fetch ask for counts recomputed on (nearly) every poll.
+ */
+const freshCounts = ref(false)
+
+const { data, refresh } = await useFetch<StatusResponse>(() => `/api/instances/${id.value}`, {
+  query: computed(() => (freshCounts.value ? { fresh: 'counts' } : {})),
+})
 
 /**
  * The QR poll reports state far more often than the status fetch does, so it is
@@ -245,6 +255,8 @@ const {
  * Evolution makes on its own is noticed without anyone pressing anything.
  */
 function applyMode(next: Mode) {
+  freshCounts.value = next === 'importing'
+
   if (next === 'pairing') {
     pauseStatusPoll()
     pauseImportPoll()

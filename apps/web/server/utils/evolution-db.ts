@@ -22,7 +22,9 @@ import { mentionedJidsOf } from './mentions'
  * `credentialsForInstance()` deliberately refuses. Three rules keep it contained,
  * and none of them is optional:
  *
- *   1. The role is read-only. Only SELECT on "Message" is granted (docs/whatsapp.md).
+ *   1. The role is read-only. SELECT on "Message" is what reading and searching
+ *      need; status reads add a column-level grant on "Instance" and "instanceId"
+ *      on "Chat"/"Contact", and fall back without them (docs/whatsapp.md).
  *      Nothing here writes, and nothing here runs DDL — the schema belongs to
  *      Evolution's Prisma migrations.
  *   2. Every query carries `"instanceId" = <this account>`. `searchMessages`
@@ -196,6 +198,105 @@ export async function resolveEvolutionInstanceId(instance: AppInstance): Promise
   }
 
   return id
+}
+
+/**
+ * The fields of Evolution's `"Instance"` row a status read needs — the same ones
+ * `fetchInstances` used to supply, minus the counts.
+ *
+ * Named columns, never `*`: the same row carries `token`, the instance's API key,
+ * and the optional least-privilege grant in docs/whatsapp.md is column-level for
+ * exactly that reason.
+ */
+export interface EvolutionInstanceRecord {
+  connectionStatus?: string
+  ownerJid?: string
+  profileName?: string
+  profilePicUrl?: string
+  number?: string
+  /** ISO 8601, UTC. */
+  disconnectionAt?: string
+}
+
+/**
+ * This account's `"Instance"` row, by primary key — or `undefined` when there is
+ * no such row.
+ *
+ * **Why status reads come here instead of `fetchInstances`.** 2.3.7 answers that
+ * route with Prisma's `_count: { Message, Contact, Chat }`, which compiles to a
+ * `GROUP BY "instanceId"` over *every account's* rows, joined to the one instance
+ * afterwards. Each call was a full scan of `"Message"` — 42% of the production
+ * database's block reads, growing with every account and every poll. This is an
+ * index lookup.
+ *
+ * `id = <this account>` is this table's form of the `"instanceId"` rule above:
+ * `resolveEvolutionInstanceId()` throws rather than hand back an empty id.
+ *
+ * `disconnectionAt` is a `timestamp` without time zone that Prisma writes and
+ * reads as UTC; postgres.js would parse it in the process's local zone, so it is
+ * converted to `timestamptz` in the query rather than trusting the host's TZ.
+ *
+ * Errors are rethrown as the driver raised them — not as a `createError` — so the
+ * caller can tell a missing grant (42501) from an outage and fall back.
+ */
+export async function readInstanceRecord(instance: AppInstance): Promise<EvolutionInstanceRecord | undefined> {
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const [row] = await sql<Array<{
+    connectionStatus: string | null
+    ownerJid: string | null
+    profileName: string | null
+    profilePicUrl: string | null
+    number: string | null
+    disconnectionAt: Date | null
+  }>>`
+    SELECT "connectionStatus"::text AS "connectionStatus",
+           "ownerJid",
+           "profileName",
+           "profilePicUrl",
+           "number",
+           ("disconnectionAt" AT TIME ZONE 'UTC') AS "disconnectionAt"
+    FROM "Instance"
+    WHERE id = ${instanceId}
+  `
+  if (!row) return undefined
+
+  return {
+    connectionStatus: row.connectionStatus ?? undefined,
+    ownerJid: row.ownerJid ?? undefined,
+    profileName: row.profileName ?? undefined,
+    profilePicUrl: row.profilePicUrl ?? undefined,
+    number: row.number ?? undefined,
+    disconnectionAt: row.disconnectionAt?.toISOString(),
+  }
+}
+
+/**
+ * How many `"Message"`, `"Chat"` and `"Contact"` rows this account holds.
+ *
+ * Raw row counts, duplicates included — the same numbers Prisma's `_count` gave,
+ * so the dashboard's figures do not change meaning with this. Each subquery
+ * carries `"instanceId" = <this account>`, and all three tables have
+ * `@@index([instanceId])`, so this reads one account's rows and nobody else's.
+ * Still ~100 ms on an 840k-message account, which is why the caller caches it.
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`.
+ */
+export async function countInstanceRows(instance: AppInstance): Promise<{ messages: number, chats: number, contacts: number }> {
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const [row] = await sql<Array<{ messages: number, chats: number, contacts: number }>>`
+    SELECT (SELECT count(*) FROM "Message" WHERE "instanceId" = ${instanceId})::int AS messages,
+           (SELECT count(*) FROM "Chat"    WHERE "instanceId" = ${instanceId})::int AS chats,
+           (SELECT count(*) FROM "Contact" WHERE "instanceId" = ${instanceId})::int AS contacts
+  `
+  return {
+    messages: Number(row?.messages ?? 0),
+    chats: Number(row?.chats ?? 0),
+    contacts: Number(row?.contacts ?? 0),
+  }
 }
 
 export interface MessageSearchOptions {
