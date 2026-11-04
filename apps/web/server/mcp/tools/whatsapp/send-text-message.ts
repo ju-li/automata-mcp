@@ -27,7 +27,7 @@ export default defineKindTool({
     openWorldHint: true,
   },
   inputSchema: {
-    number: z.string().min(1).describe('Recipient in international format without "+", e.g. 5511999999999'),
+    number: z.string().min(1).describe('Recipient phone number in international format: country code included, digits only — no "+", spaces or dashes, e.g. 5511999999999'),
     text: z.string().min(1).describe('Message body'),
   },
   handler: async ({ number, text }) => {
@@ -39,10 +39,18 @@ export default defineKindTool({
     await assertNumberAllowed(instance, scope, number)
 
     const evolution = useEvolutionClient()
-    const result = await evolution<Record<string, unknown>>(`/message/sendText/${encodeURIComponent(instance.name)}`, {
-      method: 'POST',
-      body: { number, text: withSendDisclaimer(text, sendDisclaimer) },
-    })
+    let result: Record<string, unknown>
+    try {
+      result = await evolution<Record<string, unknown>>(`/message/sendText/${encodeURIComponent(instance.name)}`, {
+        method: 'POST',
+        body: { number, text: withSendDisclaimer(text, sendDisclaimer) },
+      })
+    }
+    catch (error) {
+      // Evolution's reason lives in the response body, which the raw FetchError
+      // drops — see relayEvolutionSendError.
+      relayEvolutionSendError(error, number, instance.id)
+    }
     return sendDisclaimer ? { ...result, disclaimerAppended: sendDisclaimer } : result
   },
 })
