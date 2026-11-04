@@ -30,13 +30,6 @@ export interface ChatSummary {
    * carries no last message — fall back to `updatedAt` for display.
    */
   lastMessageAt?: string
-  /**
-   * Received messages after the last point you read or replied in this chat —
-   * computed by `listChatActivity` in `evolution-db.ts`, never Evolution's own
-   * `Chat.unreadMessages`, which reads 0 most of the time. Absent when this
-   * connection's messages cannot be read (no message database), rather than 0.
-   */
-  unreadCount?: number
   lastMessagePreview?: string
 }
 
@@ -151,13 +144,12 @@ interface ChatListing {
  * `findChats` into a 60-second memo, which is why a message already visible on
  * the dashboard could be missing from `list-chats` for up to a minute. Now it is
  * one aggregate over `"Message"` (`listChatActivity`), which is the same scan
- * `findChats` ran and also carries an unread count Evolution cannot give us. Only
- * *names* still come from caches — `contactDirectory()` and the group listing —
+ * `findChats` ran. Only *names* still come from caches — `contactDirectory()` and the group listing —
  * since a name changes on a human timescale and a message does not.
  *
  * A connection with no message database (its own Evolution server, no
  * `evolution_db_url`) cannot run that query, so it keeps the old `findChats`
- * walk, uncached, and reports no `unreadCount` rather than Evolution's.
+ * walk, uncached.
  *
  * A failure is reported, not thrown: an empty first page is already the honest
  * answer for a freshly paired account and must not break the scope picker. The
@@ -181,7 +173,6 @@ async function chatListing(instance: AppInstance, window: { limit: number, offse
   const chats = await nameChats(instance, rows.map(row => ({
     jid: row.jid,
     lastMessageAt: isoFromEpochSeconds(row.lastTimestamp),
-    unreadCount: row.unreadCount,
     lastRowId: row.lastRowId ?? undefined,
   })))
 
@@ -193,9 +184,8 @@ async function chatListing(instance: AppInstance, window: { limit: number, offse
  * `findChats` to the end, name it, and slice the window out.
  *
  * The order is `updatedAt DESC`, which live traffic reshuffles between requests,
- * so pages are deduped by JID rather than trusted to be disjoint. `unreadCount`
- * is left off: Evolution's `Chat.unreadMessages` reads 0 most of the time (see
- * `listChatActivity`), and a missing field is better than a wrong one.
+ * so pages are deduped by JID rather than trusted to be disjoint. Evolution's
+ * `unreadCount` is dropped, as on the SQL path — see `listChatActivity`.
  */
 async function walkFindChats(instance: AppInstance, window: { limit: number, offset: number }): Promise<ChatListing> {
   const evolution = evolutionClientForInstance(instance)
@@ -264,7 +254,6 @@ interface ChatDraft {
   profilePicUrl?: string
   updatedAt?: string
   lastMessageAt?: string
-  unreadCount?: number
   lastMessagePreview?: string
   lastRowId?: string
 }
@@ -308,7 +297,6 @@ async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<Li
       profilePicUrl: draft.profilePicUrl ?? contact?.profilePicUrl ?? group?.pictureUrl,
       updatedAt: draft.updatedAt,
       lastMessageAt: draft.lastMessageAt,
-      ...(draft.unreadCount !== undefined && { unreadCount: draft.unreadCount }),
       lastMessagePreview: draft.lastMessagePreview,
       lastRowId: draft.lastRowId,
     }

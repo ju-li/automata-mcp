@@ -29,10 +29,10 @@ export default defineKindTool({
     + 'answers with one page, most recently active first: when `hasMore` is true '
     + 'there are older conversations it did not include, so do not report the '
     + 'list as complete or conclude that a chat does not exist — search-messages '
-    + 'finds a conversation by what was said in it. `unreadCount` counts messages '
-    + 'received after the user last read or replied in that chat; it is absent '
-    + 'when this connector cannot compute it, which is not the same as zero. '
-    + 'Timestamps are UTC.',
+    + 'finds a conversation by what was said in it. It carries no read or unread '
+    + 'status: whether the user has read a message is not available to this '
+    + 'connector, so say so rather than telling the user they have, or have no, '
+    + 'unread messages. Timestamps are UTC.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
