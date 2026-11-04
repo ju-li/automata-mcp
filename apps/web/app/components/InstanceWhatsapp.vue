@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Loader2Icon } from '@lucide/vue'
 import { useIntervalFn } from '@vueuse/core'
 import { toast } from 'vue-sonner'
 
@@ -57,11 +58,25 @@ const connected = computed(() => state.value === 'open')
 const pairingRequested = ref(false)
 
 /**
+ * A scan completed while this page was open. WhatsApp hands its history over in
+ * the minute or so after a device links, so until the counts settle the page
+ * says it is importing rather than showing a dashboard of zeros. Only the QR
+ * poll sets it, and only managers run that poll. A reload during the import
+ * simply lands on the dashboard, whose counts keep climbing on the status poll.
+ */
+const justPaired = ref(false)
+const importDone = ref(false)
+/** When the scan was seen — the import's clock, read by the stats watcher. */
+const importStartedAt = ref(0)
+
+/**
  * What this page is showing. A lost session is its own mode rather than a
  * flavour of pairing: its phone is still linked, so the instruction is
  * different, and it must not be polled the way pairing is — see `applyMode`.
+ * `importing` is a connected account straight after its pairing, while the
+ * history WhatsApp sends with a new device link is still arriving.
  */
-type Mode = 'pairing' | 'lost' | 'connected'
+type Mode = 'pairing' | 'importing' | 'lost' | 'connected'
 
 /**
  * **A member never enters pairing mode**, and that is a safety property rather
@@ -76,7 +91,7 @@ type Mode = 'pairing' | 'lost' | 'connected'
  * usable and that somebody else has to fix.
  */
 const mode = computed<Mode>(() => {
-  if (connected.value) return 'connected'
+  if (connected.value) return justPaired.value && !importDone.value ? 'importing' : 'connected'
   if (!props.canManage) return 'lost'
   if (data.value?.sessionLost && !pairingRequested.value) return 'lost'
   return 'pairing'
@@ -114,9 +129,16 @@ const { pause: pauseQrPoll, resume: resumeQrPoll } = useIntervalFn(async () => {
     const result = await $fetch<QrResponse>(`/api/instances/${id.value}/qr`)
     if (result.state === 'open') {
       qr.value = null
+      if (!justPaired.value) importStartedAt.value = Date.now()
+      justPaired.value = true
       // Refreshed rather than recorded, so the page does not flip to connected on
       // this poll's word and back again while the status fetch catches up.
       await refresh()
+      // But the state this poll recorded earlier must go now: `polledState` wins
+      // over the status fetch, so a stale `connecting` left here would hold the
+      // page on an empty QR frame for good — every later tick lands back in this
+      // branch and nothing else clears it. The status fetch decides from here.
+      polledState.value = null
       return
     }
     polledState.value = result.state
@@ -135,6 +157,64 @@ const { pause: pauseStatusPoll, resume: resumeStatusPoll } = useIntervalFn(
   15000,
   { immediate: false },
 )
+
+// ── importing history after pairing ────────────────────────────────────────
+/**
+ * Evolution says nothing when a history sync is finished, so the page decides
+ * from the counts: done once they have stopped moving for a while. History can
+ * start a few seconds after the link opens, so an account still at zero is
+ * given longer before it is called empty, and the wait is capped regardless —
+ * the dashboard's own status poll keeps the counts current after that.
+ */
+const IMPORT_POLL_MS = 3000
+const IMPORT_STABLE_POLLS = 5
+const IMPORT_EMPTY_MS = 60 * 1000
+const IMPORT_MAX_MS = 3 * 60 * 1000
+
+const lastImportTotal = ref<number | null>(null)
+const unchangedPolls = ref(0)
+
+const { pause: pauseImportPoll, resume: resumeImportPoll } = useIntervalFn(
+  () => refresh(),
+  IMPORT_POLL_MS,
+  { immediate: false },
+)
+
+function resetImport() {
+  justPaired.value = false
+  importDone.value = false
+  lastImportTotal.value = null
+  unchangedPolls.value = 0
+}
+
+function finishImport(announce: boolean) {
+  importDone.value = true
+  if (announce) toast.success('WhatsApp connected — history imported.')
+}
+
+watch(() => data.value?.stats, (stats) => {
+  if (mode.value !== 'importing' || !stats) return
+
+  const total = stats.messages + stats.chats + stats.contacts
+  unchangedPolls.value = total === lastImportTotal.value ? unchangedPolls.value + 1 : 0
+  lastImportTotal.value = total
+
+  const elapsed = Date.now() - importStartedAt.value
+  if (
+    (total > 0 && unchangedPolls.value >= IMPORT_STABLE_POLLS)
+    || (total === 0 && elapsed >= IMPORT_EMPTY_MS)
+    || elapsed >= IMPORT_MAX_MS
+  ) {
+    finishImport(true)
+  }
+})
+
+const format = new Intl.NumberFormat()
+const importProgress = computed(() => {
+  const stats = data.value?.stats
+  if (!stats || stats.messages + stats.chats === 0) return ''
+  return `${format.format(stats.messages)} messages · ${format.format(stats.chats)} chats so far`
+})
 
 // ── reconnecting ───────────────────────────────────────────────────────────
 // Three ways out: the session comes back (`applyMode` sees `connected`), the
@@ -167,17 +247,26 @@ const {
 function applyMode(next: Mode) {
   if (next === 'pairing') {
     pauseStatusPoll()
+    pauseImportPoll()
     resumeQrPoll()
+  }
+  else if (next === 'importing') {
+    polledState.value = null
+    pauseQrPoll()
+    pauseStatusPoll()
+    resumeImportPoll()
   }
   else {
     polledState.value = null
     pauseQrPoll()
+    pauseImportPoll()
     resumeStatusPoll()
   }
 
   if (next !== 'lost') resetReconnect()
 
-  if (next === 'connected') pairingRequested.value = false
+  if (next === 'connected' || next === 'importing') pairingRequested.value = false
+  if (next === 'connected') justPaired.value = false
 }
 
 watch(mode, (next, previous) => {
@@ -213,6 +302,7 @@ function backToPairing(path: string, success: string, failure: string) {
       await $fetch(`/api/instances/${id.value}/${path}`, { method: 'POST' })
       qr.value = null
       polledState.value = null
+      resetImport()
       pairingRequested.value = true
       restartPairing()
       await refresh()
@@ -261,8 +351,40 @@ const importHistory = () => backToPairing(
       </p>
     </InstanceHeader>
 
+    <!-- ── scanned: linking, then importing history ────────────────────── -->
+    <!--
+      Covers the gap between the scan and the dashboard. Without it the QR frame
+      empties to a skeleton the moment the code is used and the page reads as
+      stuck, and the dashboard that follows would show counts of zero while the
+      history is still arriving.
+    -->
+    <Card v-if="mode === 'importing' || (mode === 'pairing' && justPaired)">
+      <CardContent class="flex flex-col items-center gap-3 py-12 text-center">
+        <Loader2Icon class="size-8 animate-spin text-muted-foreground" />
+        <p class="font-medium">
+          {{ mode === 'importing' ? 'Importing your WhatsApp history' : 'Linking your phone…' }}
+        </p>
+        <p class="max-w-md text-sm text-muted-foreground">
+          WhatsApp is sending your past conversations to this device. Keep your
+          phone online — this usually takes under a minute.
+        </p>
+        <p v-if="importProgress" class="text-sm tabular-nums">
+          {{ importProgress }}
+        </p>
+        <Button
+          v-if="mode === 'importing'"
+          variant="ghost"
+          size="sm"
+          class="mt-2"
+          @click="finishImport(false)"
+        >
+          Show dashboard now
+        </Button>
+      </CardContent>
+    </Card>
+
     <!-- ── pairing ─────────────────────────────────────────────────────── -->
-    <Card v-if="mode === 'pairing'">
+    <Card v-else-if="mode === 'pairing'">
       <CardHeader>
         <CardTitle>Scan to connect</CardTitle>
         <CardDescription>
@@ -288,7 +410,7 @@ const importHistory = () => backToPairing(
     </Card>
 
     <!-- ── connected, or was ───────────────────────────────────────────── -->
-    <template v-else>
+    <template v-else-if="mode === 'connected' || mode === 'lost'">
       <!--
         A dropped session keeps its profile and counts below: the phone is still
         linked, and everything stored up to the drop is still readable.
