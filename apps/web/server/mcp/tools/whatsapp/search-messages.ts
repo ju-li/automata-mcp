@@ -113,21 +113,20 @@ export default defineKindTool({
 /**
  * Label the chats a search landed in.
  *
- * Reuses `listChats` rather than deriving names in SQL: naming is not obvious
- * here (see the `EvolutionChatRow` note in `chats.ts` — 2.3.7 aliases two
- * different columns as `pushName`, so names come from the contact table and the
- * group listing instead), and one source of naming rules is worth the round trip.
+ * From the contact and group caches, not from `listChats`: the listing is now a
+ * live aggregate over the whole account, and a search needs a name for a handful
+ * of chats, not the account's activity. Same precedence as the listing, since
+ * both go through the same naming in `chats.ts`.
  *
  * Best effort. The group listing behind it can time out on a disconnected
  * account, and a result labelled with bare JIDs beats no result at all.
  */
 async function chatNames(instance: AppInstance, hits: MessageSearchHit[]): Promise<Map<string, string>> {
-  const wanted = new Set(hits.map(hit => hit.jid))
-  if (!wanted.size) return new Map()
+  const wanted = [...new Set(hits.map(hit => hit.jid))]
+  if (!wanted.length) return new Map()
 
   try {
-    const { chats } = await listChats(instance)
-    return new Map(chats.filter(chat => wanted.has(chat.jid)).map(chat => [chat.jid, chat.name]))
+    return await chatLabels(instance, wanted)
   }
   catch (error) {
     console.error('[search] could not label chats:', error)

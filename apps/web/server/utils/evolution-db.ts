@@ -150,7 +150,7 @@ async function evolutionDbFor(instance: AppInstance): Promise<Sql> {
   return keyedPool(
     resolved.guard ? `evo:${instance.id}` : 'evo:default',
     resolved.url,
-    { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS, readOnly: true },
+    { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS, readOnly: true, jit: false },
   )
 }
 
@@ -505,6 +505,195 @@ export async function listMessagesPage(
     hasMore: rows.length > options.limit,
     total: Number.isFinite(total) ? total : undefined,
   }
+}
+
+/**
+ * One conversation's activity, as the chat listing needs it.
+ *
+ * Rows only, like everything here: naming the chat and previewing its last
+ * message belong to `chats.ts`.
+ */
+export interface ChatActivityRow {
+  jid: string
+  /** Unix seconds of the newest message that is not a control record. */
+  lastTimestamp: number | null
+  /** `"Message".id` of that message, for `lastMessagePayloads`. */
+  lastRowId: string | null
+  /** See `listChatActivity` for what counts. */
+  unreadCount: number
+}
+
+export interface ChatActivityOptions {
+  limit: number
+  offset: number
+}
+
+/**
+ * The account's conversations, most recent activity first, with an unread count
+ * we compute rather than one we read.
+ *
+ * **This replaced `POST /chat/findChats`** and the 60-second cache that sat in
+ * front of it. That endpoint is itself a raw `DISTINCT ON (remoteJid)` over this
+ * table, so reading the table directly costs the same scan and drops the stale
+ * window — a message that has already reached the dashboard is no longer missing
+ * from `list-chats` for up to a minute.
+ *
+ * **Why the unread count is ours.** Evolution's `Chat.unreadMessages` cannot be
+ * trusted: 2.3.7's `messages.update` handler writes `unreadMessages: 0` to the
+ * chat on *any* status update in it — a delivery receipt for your own message
+ * included — and only recounts for messages arriving as `DELIVERY_ACK`. So it
+ * reads 0 most of the time, which an agent asked "anything unread?" reports as
+ * "no". It is also a column of `"Chat"`, outside the one table the documented
+ * reader role is granted.
+ *
+ * **What counts as unread**, and why not simply `status = 'DELIVERY_ACK'`:
+ * history import stores every incoming message WhatsApp sent without a status as
+ * `DELIVERY_ACK` — Evolution's default for anything received — so a plain count
+ * calls years of imported conversation unread. Instead each chat gets a *read
+ * watermark*: the newest message you sent there, or the newest received one
+ * WhatsApp marked `READ`/`PLAYED` (reading a chat on the phone marks everything
+ * up to that point — `updateMessagesReadedByTimestamp` in Evolution — and
+ * replying implies you saw it). Unread = received messages after the watermark
+ * still at `DELIVERY_ACK`/`EDITED`, counted by message id so a duplicated row is
+ * one message, with reactions and control records left out since neither is a
+ * message anyone has to read. A chat never read or replied to since pairing
+ * counts everything it holds — WhatsApp would show it unread too.
+ *
+ * **Cost — the shape is load-bearing, measured on an 840k-message account.**
+ * One scan of the account's rows (`@@index([instanceId])` is the only index).
+ * Postgres has no statistics on `key->>'remoteJid'`, so it guesses one chat per
+ * row (743k estimated against 675 real) and groups by *sorting*. Fed raw rows,
+ * that sort carries each row's whole `key` and `message` jsonb — 586 bytes —
+ * and spilled ~540 MB to disk: 91 s. The `MATERIALIZED` CTE reduces every row
+ * to a few scalars and three flags *before* the grouping, and is a fence so the
+ * planner cannot inline it and drag the jsonb back into the sort: ~3 s warm,
+ * ~6 s cold, 2.3 s warm with JIT off (the pool sets `jit: false`). Do not fold
+ * `msg` into `per_chat`.
+ *
+ * Two smaller choices for the same reason. The last row comes from a plain
+ * `max()` over a sortable text key (zero-padded timestamp, message id, row id),
+ * not `array_agg(... ORDER BY ...)`, which needs its own sort per group. And the
+ * watermark comparison happens after aggregation, over each chat's candidate
+ * timestamps, rather than through a window function or a second pass joined on
+ * the watermark — both measured several times slower. The last message's payload
+ * is *not* read here; `lastMessagePayloads` fetches it by primary key for the
+ * rows actually returned.
+ *
+ * `status@broadcast` is left out: it is Status updates, not a conversation, and
+ * nothing can be sent to it.
+ */
+export async function listChatActivity(
+  instance: AppInstance,
+  options: ChatActivityOptions,
+): Promise<{ rows: ChatActivityRow[], total: number }> {
+  // Database first, for the same reason as `listMessagesPage`.
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  let rows: Array<ChatActivityRow & { total: string | number }>
+  try {
+    rows = await sql`
+      WITH msg AS MATERIALIZED (
+        SELECT m.key->>'remoteJid' AS jid,
+               m."messageTimestamp" AS ts,
+               COALESCE(m.key->>'id', '') AS mid,
+               m.id AS row_id,
+               ((m.key->>'fromMe')::boolean OR m.status IN ('READ', 'PLAYED')) AS marks_read,
+               ${notControl(sql)} AS is_activity,
+               ${unreadCandidate(sql)} AS may_be_unread
+        FROM "Message" m
+        WHERE m."instanceId" = ${instanceId}
+          AND m.key->>'remoteJid' IS NOT NULL
+          AND m.key->>'remoteJid' <> 'status@broadcast'
+      ), per_chat AS (
+        SELECT jid,
+               max(ts) FILTER (WHERE marks_read) AS watermark,
+               max(ts) FILTER (WHERE is_activity) AS last_ts,
+               split_part(max(lpad(ts::text, 10, '0') || '|' || mid || '|' || row_id)
+                            FILTER (WHERE is_activity), '|', 3) AS last_row_id,
+               array_agg(ts) FILTER (WHERE may_be_unread) AS cand_ts,
+               array_agg(mid) FILTER (WHERE may_be_unread) AS cand_id
+        FROM msg
+        GROUP BY jid
+      )
+      SELECT jid,
+             last_ts AS "lastTimestamp",
+             NULLIF(last_row_id, '') AS "lastRowId",
+             (SELECT count(DISTINCT c.id)
+                FROM unnest(cand_ts, cand_id) AS c(ts, id)
+               WHERE c.ts > COALESCE(watermark, 0))::int AS "unreadCount",
+             COUNT(*) OVER () AS total
+      FROM per_chat
+      ORDER BY last_ts DESC NULLS LAST, jid
+      LIMIT ${options.limit} OFFSET ${options.offset}
+    `
+  }
+  catch (error) {
+    console.error('[chats] Evolution database query failed:', error)
+    throw createError({
+      statusCode: 503,
+      statusMessage: 'Listing conversations is temporarily unavailable',
+      cause: error,
+    })
+  }
+
+  // Rides on the returned rows, like `listMessagesPage`'s count: a page past the
+  // end has no row to carry it, and the caller treats that as "nothing here".
+  const total = Number(rows[0]?.total)
+
+  return {
+    rows: rows.map(({ total: _total, ...row }) => ({
+      ...row,
+      lastTimestamp: row.lastTimestamp === null ? null : Number(row.lastTimestamp),
+      unreadCount: Number(row.unreadCount) || 0,
+    })),
+    total: Number.isFinite(total) ? total : 0,
+  }
+}
+
+/**
+ * The payloads of the given rows, keyed by `"Message".id` — the last message of
+ * each chat on one page of the listing.
+ *
+ * Separate from `listChatActivity` so a listing that names and sorts thousands
+ * of chats in memory pays for payloads only on the page it returns. Still bound
+ * by `instanceId`, so an id from anywhere else reads nothing.
+ */
+export async function lastMessagePayloads(instance: AppInstance, rowIds: string[]): Promise<Map<string, unknown>> {
+  if (!rowIds.length) return new Map()
+
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const rows = await sql<Array<{ id: string, message: unknown }>>`
+    SELECT id, message FROM "Message"
+    WHERE "instanceId" = ${instanceId} AND id = ANY(${rowIds}::text[])
+  `
+
+  return new Map(rows.map(row => [row.id, row.message]))
+}
+
+/**
+ * Not a WhatsApp control record. An edit is kept: in history-synced data it is
+ * the only copy of the new text, so it is real activity in the chat.
+ */
+function notControl(sql: Sql) {
+  return sql`(m.message->'protocolMessage' IS NULL OR m.message->'protocolMessage'->'editedMessage' IS NOT NULL)`
+}
+
+/**
+ * A received message that may still be unread. `EDITED` because Evolution
+ * overwrites an edited message's status with it, read or not — the watermark
+ * decides which side of the line it is on. Edits themselves are excluded with
+ * every other `protocolMessage`: they change a message, they are not a new one.
+ */
+function unreadCandidate(sql: Sql) {
+  return sql`(
+    (m.key->>'fromMe')::boolean = false
+    AND m.status IN ('DELIVERY_ACK', 'EDITED')
+    AND m.message->'reactionMessage' IS NULL
+    AND m.message->'protocolMessage' IS NULL
+  )`
 }
 
 /**
