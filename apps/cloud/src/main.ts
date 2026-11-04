@@ -58,10 +58,16 @@ await new Promise<void>((resolve, reject) => {
 })
 console.info(`[cloud] listening on :${config.port}`)
 if (!billing.configured) {
-  console.warn('[cloud] STRIPE_* are not set — running without billing. Plan limits are still written; starting Pro answers 503.')
+  console.warn('[cloud] STRIPE_SECRET_KEY is not set — running without billing. Plan limits are still written; starting Pro answers 503.')
+  if (config.ignoredStripeVars.length > 0) {
+    console.warn(`[cloud] ignoring ${config.ignoredStripeVars.join(', ')}: they do nothing without STRIPE_SECRET_KEY.`)
+  }
 }
 if (!crm.configured) {
-  console.info('[cloud] BREVO_* are not set — running without the CRM sync.')
+  console.info('[cloud] BREVO_API_KEY is not set — running without the CRM sync.')
+  if (config.ignoredBrevoVars.length > 0) {
+    console.warn(`[cloud] ignoring ${config.ignoredBrevoVars.join(', ')}: they do nothing without BREVO_API_KEY.`)
+  }
 }
 
 const timers: NodeJS.Timeout[] = []
