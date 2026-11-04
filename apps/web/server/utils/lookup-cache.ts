@@ -13,7 +13,7 @@
  *   staleWhileFailing     the caller awaits the lookup. `fetchParticipants` in
  *                         `mentions.ts`: one group, one call, bounded by a short
  *                         timeout, and the answer it gives is the one it needs.
- *   staleWhileRevalidate  the caller never awaits it. `groupsFor` in `chats.ts`:
+ *   staleWhileRevalidate  the caller never awaits the lookup. `groupsFor` in `chats.ts`:
  *                         Evolution's `fetchAllGroups` fetches a profile picture
  *                         per group, sequentially, and on an account in fifty
  *                         groups never finishes inside any timeout a request
@@ -70,11 +70,12 @@ export function staleWhileFailing<T>(options: StaleCacheOptions<T>) {
 }
 
 /**
- * Returns a synchronous `peek(key, load)`: the cached value (or `empty`) right
- * now, with a background `load` started when the entry is missing or expired.
+ * Returns `peek(key, load)`: the cached value (or `empty`) right now, with a
+ * background `load` started when the entry is missing or expired. `peek` never
+ * waits on `load`; it is async only for `seed`, below.
  *
  * At most one `load` is in flight per key. Concurrent readers of a cold entry
- * all get `empty` and share the one refresh, which is the point: the first
+ * all get the same answer (`empty`, or the seed) and share the one refresh, which is the point: the first
  * `list-chats` after a deploy must not start one group scan per caller.
  *
  * A failure — `undefined` or a rejection — keeps the previous value and holds
@@ -82,12 +83,43 @@ export function staleWhileFailing<T>(options: StaleCacheOptions<T>) {
  * disconnected account from costing Evolution a full scan on every read.
  *
  * No timers: refreshes are started only by reads, so an account nobody looks at
- * costs nothing, and `load`'s own timeout is what bounds each one. Per process,
- * so every replica refreshes for itself.
+ * costs nothing, and `load`'s own timeout is what bounds each one. The entries
+ * are per process; anything shared between replicas or across restarts is the
+ * job of `seed` and of `load` itself.
+ *
+ * `seed`, when given, is awaited once for a key with no entry at all — a cold
+ * process. It must be cheap (`groupsFor` reads one indexed table in the app
+ * database, never Evolution), since the request waits on it. What it returns is
+ * served at once but stored already expired, so the same call still starts the
+ * real refresh; and because a failed refresh keeps the previous value, a seeded
+ * value is what an account that cannot be refreshed keeps showing. Concurrent
+ * cold readers share one seed. A seed that fails or finds nothing stores
+ * nothing, and the read falls through to `empty` as it would without one.
  */
-export function staleWhileRevalidate<T>(options: StaleCacheOptions<T>) {
+export function staleWhileRevalidate<T>(options: StaleCacheOptions<T> & {
+  seed?: (key: string) => Promise<T | undefined>
+}) {
   const entries = new Map<string, { expiresAt: number, value: T }>()
   const inFlight = new Set<string>()
+  const seeding = new Map<string, Promise<void>>()
+
+  function seedOnce(key: string, seed: (key: string) => Promise<T | undefined>): Promise<void> {
+    let pending = seeding.get(key)
+    if (!pending) {
+      pending = Promise.resolve()
+        .then(() => seed(key))
+        .then(
+          (seeded) => {
+            // A refresh may have settled while the seed was being read; it wins.
+            if (seeded !== undefined && !entries.has(key)) entries.set(key, { expiresAt: 0, value: seeded })
+          },
+          () => {},
+        )
+        .finally(() => seeding.delete(key))
+      seeding.set(key, pending)
+    }
+    return pending
+  }
 
   function settle(key: string, loaded: T | undefined) {
     if (loaded === undefined) {
@@ -98,7 +130,9 @@ export function staleWhileRevalidate<T>(options: StaleCacheOptions<T>) {
     entries.set(key, { expiresAt: Date.now() + options.ttlMs, value: loaded })
   }
 
-  return function peek(key: string, load: () => Promise<T | undefined>): T {
+  return async function peek(key: string, load: () => Promise<T | undefined>): Promise<T> {
+    if (options.seed && !entries.has(key)) await seedOnce(key, options.seed)
+
     const cached = entries.get(key)
     const fresh = cached !== undefined && Date.now() < cached.expiresAt
 

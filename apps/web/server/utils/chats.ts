@@ -4,6 +4,7 @@ import type { MentionDirectory } from './mentions'
 import { applyMentions, authorName, contactsToDirectory, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
 import type { ChatActivityRow } from './evolution-db'
 import { canReadMessages, lastMessagePayloads, listChatActivity, listMessagesPage, senderOf } from './evolution-db'
+import { readStoredGroups, replaceStoredGroups } from './whatsapp-groups'
 
 /**
  * Reading conversations out of Evolution.
@@ -270,11 +271,11 @@ async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<Li
 
   const evolution = evolutionClientForInstance(instance)
 
-  // Only start a group refresh when it can change an answer. Never awaited —
-  // see `groupsFor`.
+  // Only touch the group cache when it can change an answer. The refresh is
+  // never awaited — see `groupsFor`; a cold cache waits only on the app DB.
   const needsGroups = drafts.some(draft => draft.jid.endsWith('@g.us') && !draft.chatName)
 
-  const groups = needsGroups ? groupsFor(instance, evolution) : emptyGroups
+  const groups = needsGroups ? await groupsFor(instance, evolution) : emptyGroups
   const contacts = await contactDirectory(instance, evolution)
 
   return drafts.map((draft) => {
@@ -762,7 +763,7 @@ async function accountNames(
     const evolution = evolutionClientForInstance(instance)
     const needsGroups = chatJids.some(jid => jid.endsWith('@g.us'))
 
-    const groups = needsGroups ? groupsFor(instance, evolution) : emptyGroups
+    const groups = needsGroups ? await groupsFor(instance, evolution) : emptyGroups
     const contacts = await contactDirectory(instance, evolution)
 
     return {
@@ -993,33 +994,51 @@ async function fetchContacts(instance: AppInstance, evolution: EvolutionClient):
  * fifty groups did not finish inside the old 8-second timeout at all, so every
  * caller paid the full 8 s and got nothing back.
  *
- * So `staleWhileRevalidate`: this returns synchronously, and a missing or
- * expired entry starts one background refresh per account. A cold first call —
- * the first listing after a deploy — names groups from contacts, which already
- * covers most of them, and reports no `participantCount`; later calls get the
- * full data. With no caller waiting, the refresh gets a timeout it can
- * realistically finish in.
+ * So `staleWhileRevalidate`: a missing or expired entry starts one background
+ * refresh per account, and the request reads what is there. With no caller
+ * waiting, the refresh gets a timeout it can realistically finish in.
+ *
+ * **What is there on a cold process comes from `app.whatsapp_groups`** — the
+ * last successful refresh, stored by `whatsapp-groups.ts`, which also states the
+ * staleness rule. The request awaits that one indexed app-database read (the
+ * cache's `seed`), never Evolution, so the first listing after a deploy or on
+ * another replica still has subjects and `participantCount`. Evolution 2.3.7
+ * keeps subjects only in memory, so there is nothing upstream to read instead.
+ * The refresh itself also checks the table first: rows written within
+ * `GROUP_SHARED_FRESH_MS` mean another replica just scanned, and its answer is
+ * taken rather than scanning again (without picture URLs, which are not stored;
+ * the listing falls back to the contact's). Half the TTL, not all of it: this
+ * process's own write is just under one TTL old when its next refresh starts,
+ * and must not count as someone else's fresh scan.
  *
  * A failure is an expected offline state (no live socket while disconnected),
- * not a fault: the last good answer keeps being served and the next attempt
- * waits out `GROUP_RETRY_MS`, so a disconnected account costs Evolution one
- * group scan per window per replica, not one per read. It is logged, briefly,
- * since a lookup that never succeeds is otherwise invisible — the names just
- * stay contact names.
+ * not a fault: the last good answer — seeded or fetched — keeps being served and
+ * the next attempt waits out `GROUP_RETRY_MS`, so a disconnected account shows
+ * the subjects it had when it was last connected and costs Evolution one group
+ * scan per window per replica, not one per read. It is logged, briefly, since a
+ * lookup that never succeeds is otherwise invisible — the names just stay what
+ * they were.
  */
 const GROUP_TIMEOUT_MS = 60_000
 const GROUP_TTL_MS = 5 * 60_000
 const GROUP_RETRY_MS = 5 * 60_000
+const GROUP_SHARED_FRESH_MS = GROUP_TTL_MS / 2
+/** Stored groups older than this are not used to seed a cold cache. */
+const GROUP_SEED_MAX_AGE_MS = 30 * 24 * 60 * 60_000
 const emptyGroups: Map<string, GroupInfo> = new Map()
 
 const groupCache = staleWhileRevalidate<Map<string, GroupInfo>>({
   ttlMs: GROUP_TTL_MS,
   retryTtlMs: GROUP_RETRY_MS,
   empty: emptyGroups,
+  seed: instanceId => readStoredGroups(instanceId, GROUP_SEED_MAX_AGE_MS),
 })
 
-function groupsFor(instance: AppInstance, evolution: EvolutionClient): Map<string, GroupInfo> {
+function groupsFor(instance: AppInstance, evolution: EvolutionClient): Promise<Map<string, GroupInfo>> {
   return groupCache(instance.id, async () => {
+    const recent = await readStoredGroups(instance.id, GROUP_SHARED_FRESH_MS)
+    if (recent) return recent
+
     // `getParticipants` is required — Evolution answers 400 without it.
     const rows = await evolution<EvolutionGroupRow[]>(
       `/group/fetchAllGroups/${encodeURIComponent(instance.name)}?getParticipants=false`,
@@ -1042,6 +1061,9 @@ function groupsFor(instance: AppInstance, evolution: EvolutionClient): Map<strin
         pictureUrl: row.pictureUrl ?? undefined,
       })
     }
+
+    // Already off the request path; the cache does not wait on the write.
+    void replaceStoredGroups(instance.id, byJid)
 
     return byJid
   })

@@ -467,4 +467,30 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN marketing_consent boolean NOT NULL DEFAULT false;
     `,
   },
+  {
+    name: '0010_whatsapp_groups',
+    sql: /* sql */ `
+      -- The last successful answer from Evolution's fetchAllGroups for a
+      -- WhatsApp connection, so a cold process (deploy, restart, another
+      -- replica) and a disconnected account can still name groups. Evolution
+      -- 2.3.7 keeps subjects only in memory, so nothing upstream can stand in.
+      --
+      -- Only what naming needs: subject and size. No picture URLs and no
+      -- participants. Never copied into app.hosted_events, whose payloads must
+      -- not carry chat ids or names.
+      --
+      -- Rows are the account's whole group list as of fetched_at: a successful
+      -- refresh replaces them exactly, so a group the account left disappears.
+      -- They cascade with the connection, which is removed only through
+      -- deleteInstance() (instances.org is RESTRICT).
+      CREATE TABLE app.whatsapp_groups (
+        instance_id text NOT NULL REFERENCES app.instances (id) ON DELETE CASCADE,
+        jid         text NOT NULL,
+        subject     text,
+        size        integer CHECK (size IS NULL OR size >= 0),
+        fetched_at  timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (instance_id, jid)
+      );
+    `,
+  },
 ]
