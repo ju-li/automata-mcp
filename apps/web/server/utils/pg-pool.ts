@@ -115,7 +115,7 @@ function sslFor(target: PgTarget): postgres.Options<Record<string, never>>['ssl'
  * hand-written copy of these options meant a change to the pin, to `onnotice`
  * or to `prepare` could silently apply to one and not the other.
  */
-function driverOptions(target: PgTarget, options: { guard: boolean, max: number, statementTimeoutMs: number, readOnly?: boolean }) {
+function driverOptions(target: PgTarget, options: { guard: boolean, max: number, statementTimeoutMs: number, readOnly?: boolean, jit?: boolean }) {
   const ssl = sslFor(target)
 
   return {
@@ -149,6 +149,7 @@ function driverOptions(target: PgTarget, options: { guard: boolean, max: number,
       application_name: 'claude-mcp-connector',
       statement_timeout: options.statementTimeoutMs,
       ...(options.readOnly && { default_transaction_read_only: true }),
+      ...(options.jit === false && { jit: 'off' }),
     },
   }
 }
@@ -185,6 +186,16 @@ export interface KeyedPoolOptions {
    * connection kind: `run-statement` must write.
    */
   readOnly?: boolean
+  /**
+   * `false` opens every session with `jit = off`.
+   *
+   * For a pool whose queries are one-shot scans that finish in seconds: JIT
+   * compiles dozens of functions per query and does not earn that back. The chat
+   * listing measured 3.0 s with it and 2.3 s without on an 840k-message account.
+   * Sent as a startup parameter like `statement_timeout` above, so a pooler that
+   * refuses one refuses both.
+   */
+  jit?: boolean
 }
 
 /**
@@ -211,6 +222,7 @@ export async function keyedPool(key: string, dsn: string, options: KeyedPoolOpti
           max: options.max ?? PER_POOL_MAX,
           statementTimeoutMs: options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
           readOnly: options.readOnly,
+          jit: options.jit,
         }),
         idle_timeout: 30,
         max_lifetime: 60 * 30,

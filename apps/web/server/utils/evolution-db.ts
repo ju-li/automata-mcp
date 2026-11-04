@@ -150,7 +150,7 @@ async function evolutionDbFor(instance: AppInstance): Promise<Sql> {
   return keyedPool(
     resolved.guard ? `evo:${instance.id}` : 'evo:default',
     resolved.url,
-    { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS, readOnly: true },
+    { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS, readOnly: true, jit: false },
   )
 }
 
@@ -505,6 +505,154 @@ export async function listMessagesPage(
     hasMore: rows.length > options.limit,
     total: Number.isFinite(total) ? total : undefined,
   }
+}
+
+/**
+ * One conversation's activity, as the chat listing needs it.
+ *
+ * Rows only, like everything here: naming the chat and previewing its last
+ * message belong to `chats.ts`.
+ */
+export interface ChatActivityRow {
+  jid: string
+  /** Unix seconds of the newest message that is not a control record. */
+  lastTimestamp: number | null
+  /** `"Message".id` of that message, for `lastMessagePayloads`. */
+  lastRowId: string | null
+}
+
+export interface ChatActivityOptions {
+  limit: number
+  offset: number
+}
+
+/**
+ * The account's conversations, most recent activity first.
+ *
+ * **This replaced `POST /chat/findChats`** and the 60-second cache that sat in
+ * front of it. That endpoint is itself a raw `DISTINCT ON (remoteJid)` over this
+ * table, so reading the table directly costs the same scan and drops the stale
+ * window — a message that has already reached the dashboard is no longer missing
+ * from `list-chats` for up to a minute.
+ *
+ * **No unread count, on purpose.** Evolution's `Chat.unreadMessages` reads 0
+ * almost always — 2.3.7's `messages.update` handler writes 0 on *any* status
+ * update in the chat. Deriving it here was tried and measured wrong: the signal
+ * that a chat was read on the phone is the app-state `chats.update` carrying
+ * `unreadCount: 0`, and 2.3.7's handler for it writes only `remoteJid` and
+ * forwards only `remoteJid` in its webhook, so that fact is never stored. Message
+ * `READ` statuses arrive too sporadically to stand in for it (a test account with
+ * zero unread badges on the phone computed 651 unread). A field that is always
+ * wrong is worse than none: an agent asked "anything unread?" should say it
+ * cannot tell. Re-check if Evolution starts persisting `chats.update`.
+ *
+ * **Cost — the shape is load-bearing, measured on an 840k-message account.**
+ * One scan of the account's rows (`@@index([instanceId])` is the only index).
+ * Postgres has no statistics on `key->>'remoteJid'`, so it guesses one chat per
+ * row (743k estimated against 675 real) and groups by *sorting*. Fed raw rows,
+ * that sort carries each row's whole `key` and `message` jsonb — 586 bytes —
+ * and spilled ~540 MB to disk: 91 s. The `MATERIALIZED` CTE reduces every row
+ * to a few scalars and a flag *before* the grouping, and is a fence so the
+ * planner cannot inline it and drag the jsonb back into the sort: ~3 s warm,
+ * ~6 s cold, 2.3 s warm with JIT off (the pool sets `jit: false`). Do not fold
+ * `msg` into `per_chat`.
+ *
+ * The last row comes from a plain `max()` over a sortable text key (zero-padded
+ * timestamp, message id, row id), not `array_agg(... ORDER BY ...)`, which needs
+ * its own sort per group. The last message's payload is *not* read here; `lastMessagePayloads` fetches it by primary key for the
+ * rows actually returned.
+ *
+ * `status@broadcast` is left out: it is Status updates, not a conversation, and
+ * nothing can be sent to it.
+ */
+export async function listChatActivity(
+  instance: AppInstance,
+  options: ChatActivityOptions,
+): Promise<{ rows: ChatActivityRow[], total: number }> {
+  // Database first, for the same reason as `listMessagesPage`.
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  let rows: Array<ChatActivityRow & { total: string | number }>
+  try {
+    rows = await sql`
+      WITH msg AS MATERIALIZED (
+        SELECT m.key->>'remoteJid' AS jid,
+               m."messageTimestamp" AS ts,
+               COALESCE(m.key->>'id', '') AS mid,
+               m.id AS row_id,
+               ${notControl(sql)} AS is_activity
+        FROM "Message" m
+        WHERE m."instanceId" = ${instanceId}
+          AND m.key->>'remoteJid' IS NOT NULL
+          AND m.key->>'remoteJid' <> 'status@broadcast'
+      ), per_chat AS (
+        SELECT jid,
+               max(ts) FILTER (WHERE is_activity) AS last_ts,
+               split_part(max(lpad(ts::text, 10, '0') || '|' || mid || '|' || row_id)
+                            FILTER (WHERE is_activity), '|', 3) AS last_row_id
+        FROM msg
+        GROUP BY jid
+      )
+      SELECT jid,
+             last_ts AS "lastTimestamp",
+             NULLIF(last_row_id, '') AS "lastRowId",
+             COUNT(*) OVER () AS total
+      FROM per_chat
+      ORDER BY last_ts DESC NULLS LAST, jid
+      LIMIT ${options.limit} OFFSET ${options.offset}
+    `
+  }
+  catch (error) {
+    console.error('[chats] Evolution database query failed:', error)
+    throw createError({
+      statusCode: 503,
+      statusMessage: 'Listing conversations is temporarily unavailable',
+      cause: error,
+    })
+  }
+
+  // Rides on the returned rows, like `listMessagesPage`'s count: a page past the
+  // end has no row to carry it, and the caller treats that as "nothing here".
+  const total = Number(rows[0]?.total)
+
+  return {
+    rows: rows.map(({ total: _total, ...row }) => ({
+      ...row,
+      lastTimestamp: row.lastTimestamp === null ? null : Number(row.lastTimestamp),
+    })),
+    total: Number.isFinite(total) ? total : 0,
+  }
+}
+
+/**
+ * The payloads of the given rows, keyed by `"Message".id` — the last message of
+ * each chat on one page of the listing.
+ *
+ * Separate from `listChatActivity` so a listing that names and sorts thousands
+ * of chats in memory pays for payloads only on the page it returns. Still bound
+ * by `instanceId`, so an id from anywhere else reads nothing.
+ */
+export async function lastMessagePayloads(instance: AppInstance, rowIds: string[]): Promise<Map<string, unknown>> {
+  if (!rowIds.length) return new Map()
+
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const rows = await sql<Array<{ id: string, message: unknown }>>`
+    SELECT id, message FROM "Message"
+    WHERE "instanceId" = ${instanceId} AND id = ANY(${rowIds}::text[])
+  `
+
+  return new Map(rows.map(row => [row.id, row.message]))
+}
+
+/**
+ * Not a WhatsApp control record. An edit is kept: in history-synced data it is
+ * the only copy of the new text, so it is real activity in the chat.
+ */
+function notControl(sql: Sql) {
+  return sql`(m.message->'protocolMessage' IS NULL OR m.message->'protocolMessage'->'editedMessage' IS NOT NULL)`
 }
 
 /**

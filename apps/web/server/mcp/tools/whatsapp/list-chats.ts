@@ -9,10 +9,13 @@
  * `read-messages` and `list-tables` both carry an envelope to close. A model
  * told nothing concludes these are all the conversations there are.
  *
- * No page-size or offset argument, though, and that is not an omission: naming
- * the rows costs Evolution's entire contact table per call (see `listChats`), so
- * walking a small `skip` is far more expensive than one large page. The page
- * size stays this server's decision.
+ * No page-size or offset argument, though, and that is not an omission: every
+ * page is one aggregate over the account's whole message table (see
+ * `listChatActivity`), so walking a small `skip` costs that scan per page. One
+ * large page is cheaper. The page size stays this server's decision.
+ *
+ * Read live, not cached: a message that has reached the dashboard is in this
+ * listing on the next call.
  */
 export default defineKindTool({
   name: 'list-chats',
@@ -26,7 +29,10 @@ export default defineKindTool({
     + 'answers with one page, most recently active first: when `hasMore` is true '
     + 'there are older conversations it did not include, so do not report the '
     + 'list as complete or conclude that a chat does not exist — search-messages '
-    + 'finds a conversation by what was said in it.',
+    + 'finds a conversation by what was said in it. It carries no read or unread '
+    + 'status: whether the user has read a message is not available to this '
+    + 'connector, so say so rather than telling the user they have, or have no, '
+    + 'unread messages. Timestamps are UTC.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
