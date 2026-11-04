@@ -34,8 +34,11 @@ from a request's `Host` header, so it has to be right.
 - Users tick connections from the ones they reach. For an admin that is every
   connection in the organization; for a member, the ones assigned to them.
 - "All current connections" ticks them all as a **snapshot**. A connection
-  added later is not included until the user signs in again from the same app,
-  which replaces the earlier sign-in.
+  added later is not included automatically. To add it, use **Add this
+  connection to** on its Sign in from Claude card, which adds it to an existing
+  sign-in without the app re-authorizing (it sees the new tools when it next
+  lists them). Signing in again from the same app also works, and replaces the
+  earlier sign-in.
 
 **What each connection may do.** Each ticked connection starts at the same
 default a new token gets: everything for WhatsApp and Telegram, read-only for a
@@ -65,6 +68,40 @@ effect immediately for sign-ins members already made.
   organization, and can be changed on the card. Renaming it renames the tools in
   every signed-in app, which resets any per-tool permissions set there.
 - Static tokens keep un-prefixed tool names.
+
+## Connected apps
+
+**Profile → Connected apps** lists each app signed in to your account, the
+connections it covers with their access, and when it was last used. **Sign out**
+there ends that sign-in on every connection. Apps that registered with a
+metadata document show their verified domain.
+
+## How apps register
+
+- **Client ID Metadata Documents (preferred)**, the method the MCP spec
+  recommends since 2026-07-28. Claude uses it when the server advertises
+  `client_id_metadata_document_supported`.
+  - The app's `client_id` is an `https` URL. This server fetches the JSON
+    document there, checks it, and caches it for an hour; a failed refresh
+    keeps a copy younger than a day.
+  - The consent page then shows the app's **domain as verified**, rather than
+    only the name the app chose.
+  - The fetch is guarded like any user-supplied host: private addresses are
+    refused unless `NUXT_ALLOW_PRIVATE_TARGETS` is set, and this deployment's
+    own services always are.
+  - The socket dials the address the guard approved. No redirects are
+    followed, there is a 5-second timeout and a 10 KB limit, and only JSON is
+    accepted.
+  - The document must name its own URL as `client_id`, carry no secret, use
+    `token_endpoint_auth_method: none`, and list the redirect URI being used.
+  - `NUXT_OAUTH_REDIRECT_HOSTS` applies to its redirects too.
+- **Dynamic Client Registration (deprecated, still accepted)** at
+  `/api/oauth/register`, for apps that have not moved yet.
+
+**Scopes.** There is one scope, `mcp`. It is advertised in both metadata
+documents, named in the 401 challenge, and returned with every token. What a
+sign-in can reach is decided per connection on the consent page, which is finer
+than a scope can express.
 
 ## Lifetime and revocation
 
@@ -96,13 +133,13 @@ Access tokens last an hour, and refresh tokens rotate on every use.
 | --- | --- |
 | `/.well-known/oauth-protected-resource`, `…/mcp` | RFC 9728 resource metadata. The MCP 401's `resource_metadata` points at the `/mcp` form. |
 | `/.well-known/oauth-authorization-server` | RFC 8414 metadata. |
-| `/api/oauth/register` | RFC 7591 dynamic client registration. Public clients only (`token_endpoint_auth_method: none`), throttled per address. |
+| `/api/oauth/register` | RFC 7591 dynamic client registration — deprecated in MCP in favour of metadata documents, kept for older apps. Public clients only (`token_endpoint_auth_method: none`), throttled per address. Echoes `application_type`. |
 | `/oauth/authorize` | The consent page. Refuses to render in a frame. |
 | `/api/oauth/token` | `authorization_code` with PKCE `S256` (required), and `refresh_token`. |
 | `/api/oauth/revoke` | RFC 7009. |
 
-**Registration is open by design**, because that is what lets Claude add the
-connector with no setup.
+**Registration is open by design**, both kinds, because that is what lets Claude
+add the connector with no setup.
 
 - A registered client can do nothing until a signed-in person approves it.
 - The consent page shows the client's name as the client's own claim.

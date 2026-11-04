@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ShieldCheckIcon, TriangleAlertIcon } from '@lucide/vue'
+import { BadgeCheckIcon, ShieldCheckIcon, TriangleAlertIcon } from '@lucide/vue'
 
 /**
  * The OAuth consent page: an MCP client (Claude, Claude Code, the Inspector)
@@ -27,7 +27,7 @@ interface Option {
 
 interface Context {
   errorRedirect?: string
-  client: { name: string, redirectHost: string }
+  client: { name: string, redirectHost: string, verifiedHost?: string }
   user: { email: string }
   org: { name: string }
   isAdmin: boolean
@@ -209,7 +209,16 @@ useHead({ title: 'Connect an app' })
       </CardHeader>
 
       <CardContent class="space-y-5 text-sm">
-        <div class="flex items-start gap-2 rounded-md border bg-muted/40 p-3">
+        <div v-if="data.client.verifiedHost" class="flex items-start gap-2 rounded-md border bg-muted/40 p-3">
+          <BadgeCheckIcon class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+          <p>
+            This app is published by <strong class="font-semibold break-all">{{ data.client.verifiedHost }}</strong>,
+            checked against its own website. Approving sends you back to
+            <strong class="font-semibold break-all">{{ data.client.redirectHost }}</strong>
+            with access to the connections you pick.
+          </p>
+        </div>
+        <div v-else class="flex items-start gap-2 rounded-md border bg-muted/40 p-3">
           <TriangleAlertIcon class="mt-0.5 size-4 shrink-0 text-muted-foreground" />
           <p>
             The name above is chosen by the app itself. Approving sends you back to
@@ -279,7 +288,8 @@ useHead({ title: 'Connect an app' })
           </div>
 
           <p class="text-xs text-muted-foreground">
-            Connections you add later need a new sign-in.
+            Connections created later are not included; add one from its page
+            (“Add this connection to”) or sign in again.
             <template v-if="!data.isAdmin">
               The most each one can do is set by an admin; you can narrow it here.
             </template>

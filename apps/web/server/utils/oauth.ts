@@ -39,6 +39,14 @@ const REFRESH_TOKEN_PREFIX = 'wamcpr_'
 const CODE_PREFIX = 'wamcpc_'
 const CLIENT_PREFIX = 'mcpc_'
 
+/**
+ * The one OAuth scope. What a sign-in may reach is decided per connection on
+ * the consent page, which is finer than scopes can say; the scope exists
+ * because the MCP spec asks servers to advertise one (`scopes_supported`, and
+ * `scope` in the 401 challenge) and some clients fall back to it.
+ */
+export const OAUTH_SCOPE = 'mcp'
+
 /** One hour. Short, because a refresh is cheap and a leaked access token is not. */
 export const ACCESS_TOKEN_TTL_S = 60 * 60
 const CODE_TTL_MS = 60 * 1000
@@ -115,6 +123,7 @@ export function protectedResourceMetadata(settings: OAuthSettings) {
     resource: settings.resource,
     authorization_servers: [settings.issuer],
     bearer_methods_supported: ['header'],
+    scopes_supported: [OAUTH_SCOPE],
     resource_name: 'Automata MCP',
   }
 }
@@ -125,7 +134,11 @@ export function authorizationServerMetadata(settings: OAuthSettings) {
     issuer: settings.issuer,
     authorization_endpoint: `${settings.issuer}/oauth/authorize`,
     token_endpoint: `${settings.issuer}/api/oauth/token`,
+    // Dynamic Client Registration: deprecated by the MCP spec (2026-07-28) in
+    // favour of Client ID Metadata Documents, kept for clients that have not
+    // moved. Clients prefer CIMD when the flag below is set.
     registration_endpoint: `${settings.issuer}/api/oauth/register`,
+    client_id_metadata_document_supported: true,
     revocation_endpoint: `${settings.issuer}/api/oauth/revoke`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
@@ -133,6 +146,7 @@ export function authorizationServerMetadata(settings: OAuthSettings) {
     token_endpoint_auth_methods_supported: ['none'],
     revocation_endpoint_auth_methods_supported: ['none'],
     authorization_response_iss_parameter_supported: true,
+    scopes_supported: [OAUTH_SCOPE],
   }
 }
 
@@ -234,6 +248,8 @@ export interface OAuthClient {
   id: string
   name: string
   redirect_uris: string[]
+  /** `cimd`: `id` is the URL of its metadata document — a domain it controls. */
+  registration: 'dcr' | 'cimd'
   created?: string
 }
 
@@ -315,11 +331,15 @@ export async function registerClient(event: H3Event, settings: OAuthSettings, bo
   // Control characters out: the name is shown on the consent page.
   const name = rawName.replace(/\p{Cc}/gu, '').slice(0, 100) || 'Unnamed client'
 
+  // SEP-837: a native app says so, which is what makes its loopback redirect
+  // expected rather than odd. Both kinds get the same redirect rules here.
+  const applicationType = input.application_type === 'native' ? 'native' : 'web'
+
   const id = CLIENT_PREFIX + randomBytes(16).toString('base64url')
   const sql = await appDb()
   const [client] = await sql<OAuthClient[]>`
-    INSERT INTO app.oauth_clients ${sql({ id, name, redirect_uris: uris })}
-    RETURNING id, name, redirect_uris, created
+    INSERT INTO app.oauth_clients ${sql({ id, name, redirect_uris: uris, registration: 'dcr' })}
+    RETURNING id, name, redirect_uris, registration, created
   `
 
   setResponseStatus(event, 201)
@@ -333,13 +353,20 @@ export async function registerClient(event: H3Event, settings: OAuthSettings, bo
     grant_types: ['authorization_code', 'refresh_token'],
     response_types: ['code'],
     token_endpoint_auth_method: 'none',
+    application_type: applicationType,
   }
 }
 
-async function getClient(db: Db, id: string | undefined): Promise<OAuthClient | undefined> {
+/**
+ * The client an authorization request names: a metadata document (an `https`
+ * URL — fetched and cached, `oauth-client-metadata.ts`) or a DCR registration.
+ */
+async function getClient(db: Db, id: string | undefined, settings: OAuthSettings): Promise<OAuthClient | undefined> {
   if (!id) return undefined
+  if (isMetadataClientId(id)) return await resolveMetadataClient(id, settings)
   const [client] = await db<OAuthClient[]>`
-    SELECT id, name, redirect_uris, created FROM app.oauth_clients WHERE id = ${id}
+    SELECT id, name, redirect_uris, registration, created FROM app.oauth_clients
+    WHERE id = ${id} AND registration = 'dcr'
   `
   return client
 }
@@ -378,7 +405,7 @@ export async function validateAuthorizationRequest(
   params: AuthorizationParams,
 ): Promise<{ request: AuthorizationRequest } | { errorRedirect: string }> {
   const sql = await appDb()
-  const client = await getClient(sql, str(params.client_id))
+  const client = await getClient(sql, str(params.client_id), settings)
   if (!client) {
     throw createError({ statusCode: 400, statusMessage: 'This sign-in link names an application this deployment does not know. Start again from the app you were connecting.' })
   }
@@ -634,6 +661,7 @@ interface TokenResponse {
   token_type: 'Bearer'
   expires_in: number
   refresh_token: string
+  scope: string
 }
 
 /** A session nobody has refreshed for this long is over; the user signs in again. */
@@ -661,7 +689,7 @@ async function issuePair(tx: Db, sessionId: string, previousRefreshHash: string 
       refreshed_at = now()
     WHERE id = ${sessionId}
   `
-  return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TOKEN_TTL_S, refresh_token: refresh }
+  return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TOKEN_TTL_S, refresh_token: refresh, scope: OAUTH_SCOPE }
 }
 
 /**
@@ -868,6 +896,145 @@ export async function revokeOAuthToken(params: Record<string, unknown>): Promise
     await endOAuthSessions(tx, sessions.map(s => s.id))
   })
   return {}
+}
+
+// ── a user's own sign-ins ──────────────────────────────────────────────────
+
+export interface OwnSession {
+  id: string
+  client: { name: string, verifiedHost?: string }
+  created?: string
+  lastUsedAt?: string
+  connections: {
+    tokenId: string
+    id: string
+    label: string
+    kind: InstanceKind
+    handle: string
+    scope: ScopeInput
+  }[]
+}
+
+/**
+ * The signed-in user's OAuth sign-ins and the connections each covers — the
+ * "connected apps" list on the profile page. Own rows only, as a predicate in
+ * the query; revoked connections are left out, a sign-in with none left is
+ * still listed (it ends at its next refresh) so it can be signed out now.
+ */
+export async function listOwnSessions(userId: string): Promise<OwnSession[]> {
+  const sql = await appDb()
+  const sessions = await sql<{ id: string, created?: string, last_used_at?: string, client_id: string, client_name: string, registration: 'dcr' | 'cimd' }[]>`
+    SELECT s.id, s.created, s.last_used_at, c.id AS client_id, c.name AS client_name, c.registration
+    FROM app.oauth_sessions s JOIN app.oauth_clients c ON c.id = s.client
+    WHERE s.user_id = ${userId}
+    ORDER BY s.created DESC
+  `
+  if (sessions.length === 0) return []
+  const children = await sql<(AppInstance & { token_id: string, oauth_session: string, t_all_chats: boolean, t_chat_jids: unknown, t_all_tables: boolean, t_table_names: unknown, t_all_tools: boolean, t_tool_names: unknown })[]>`
+    SELECT i.*, t.id AS token_id, t.oauth_session,
+           t.all_chats AS t_all_chats, t.chat_jids AS t_chat_jids,
+           t.all_tables AS t_all_tables, t.table_names AS t_table_names,
+           t.all_tools AS t_all_tools, t.tool_names AS t_tool_names
+    FROM app.mcp_tokens t JOIN app.instances i ON i.id = t.instance
+    WHERE t.oauth_session = ANY(${sessions.map(s => s.id)}) AND NOT t.revoked
+    ORDER BY t.created
+  `
+  return sessions.map(session => ({
+    id: session.id,
+    client: {
+      name: session.client_name,
+      verifiedHost: session.registration === 'cimd' ? new URL(session.client_id).host : undefined,
+    },
+    created: session.created,
+    lastUsedAt: session.last_used_at,
+    connections: children
+      .filter(c => c.oauth_session === session.id && isSupportedInstance(c))
+      .map((c) => {
+        const instance = toPublicInstance(c)
+        return {
+          tokenId: c.token_id,
+          id: c.id,
+          label: instance.label,
+          kind: instance.kind,
+          handle: c.handle,
+          scope: scopeToInput(scopeFromRecord({
+            all_chats: c.t_all_chats, chat_jids: c.t_chat_jids,
+            all_tables: c.t_all_tables, table_names: c.t_table_names,
+            all_tools: c.t_all_tools, tool_names: c.t_tool_names,
+          })),
+        }
+      }),
+  }))
+}
+
+/** Sign one of the user's own sign-ins out. 404 for anyone else's — it does not exist for them. */
+export async function endOwnSession(userId: string, sessionId: string): Promise<void> {
+  const sql = await appDb()
+  const ended = await sql.begin(async (tx) => {
+    const [own] = await tx<{ id: string }[]>`
+      SELECT id FROM app.oauth_sessions WHERE id = ${sessionId} AND user_id = ${userId} FOR UPDATE
+    `
+    if (!own) return false
+    await endOAuthSessions(tx, [own.id])
+    return true
+  })
+  if (!ended) throw createError({ statusCode: 404, statusMessage: 'Not found' })
+}
+
+/**
+ * Add a connection to one of the user's existing sign-ins — the incremental
+ * consent the MCP spec describes, done from this app rather than by sending the
+ * client through authorization again.
+ *
+ * The same checks as the consent page (`validateSelections`: reach, the
+ * member's ceiling, narrowing only), the same mint (`assertCanAdd` under the
+ * organization row lock, then `createToken` into the session), the same hosted
+ * event. The client sees the new tools the next time it lists them.
+ */
+export async function addConnectionToSession(actor: Actor, sessionId: string, selection: ConsentSelection): Promise<{ tokenId: string }> {
+  const sql = await appDb()
+  const [own] = await sql<{ id: string }[]>`
+    SELECT id FROM app.oauth_sessions WHERE id = ${sessionId} AND user_id = ${actor.user.id}
+  `
+  if (!own) throw createError({ statusCode: 404, statusMessage: 'Not found' })
+
+  const { stored, instances } = await validateSelections(actor, [selection])
+  const chosen = stored[0]!
+  const instance = instances[0]!
+
+  return await sql.begin(async (tx) => {
+    // Locked so two clicks cannot both add the connection; then the org row,
+    // inside assertCanAdd.
+    await tx`SELECT id FROM app.oauth_sessions WHERE id = ${sessionId} FOR UPDATE`
+    const [existing] = await tx`
+      SELECT 1 FROM app.mcp_tokens
+      WHERE oauth_session = ${sessionId} AND instance = ${instance.id} AND NOT revoked
+    `
+    if (existing) {
+      throw createError({ statusCode: 409, statusMessage: 'That sign-in already includes this connection.' })
+    }
+    await assertCanAdd(tx, actor.org.id, 'token')
+    const [client] = await tx<{ name: string }[]>`
+      SELECT c.name FROM app.oauth_sessions s JOIN app.oauth_clients c ON c.id = s.client WHERE s.id = ${sessionId}
+    `
+    const { record } = await createToken({
+      instanceId: instance.id,
+      assignedTo: actor.user.id,
+      createdBy: actor.user.id,
+      label: client?.name || 'OAuth sign-in',
+      preset: 'never',
+      scope: scopeFromInput(chosen.scope),
+      sendDisclaimer: chosen.sendDisclaimer,
+      oauthSession: sessionId,
+    }, tx)
+    await recordHostedEvent(tx, {
+      type: 'token.created',
+      org: actor.org.id,
+      userId: actor.user.id,
+      payload: { id: record.id, connection: instance.id, kind: instance.kind, auth: 'oauth' },
+    })
+    return { tokenId: record.id }
+  })
 }
 
 // ── helpers for the routes ─────────────────────────────────────────────────

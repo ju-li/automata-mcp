@@ -655,4 +655,20 @@ export const APP_MIGRATIONS: AppMigration[] = [
         FOR EACH ROW EXECUTE FUNCTION app.instances_default_handle();
     `,
   },
+  {
+    name: '0012_oauth_client_metadata',
+    sql: /* sql */ `
+      -- How a client came to be known. 'dcr': it registered itself (RFC 7591,
+      -- deprecated in MCP since 2026-07-28) and its id is ours (mcpc_…). 'cimd':
+      -- its id is the https URL of a Client ID Metadata Document, fetched by us
+      -- and cached here — the row is a cache of that document, refreshed when
+      -- older than fetched_at allows. See server/utils/oauth-client-metadata.ts.
+      ALTER TABLE app.oauth_clients
+        ADD COLUMN registration text NOT NULL DEFAULT 'dcr'
+          CHECK (registration IN ('dcr', 'cimd')),
+        ADD COLUMN fetched_at timestamptz,
+        ADD CONSTRAINT oauth_clients_cimd_fetched
+          CHECK (registration = 'dcr' OR fetched_at IS NOT NULL);
+    `,
+  },
 ]

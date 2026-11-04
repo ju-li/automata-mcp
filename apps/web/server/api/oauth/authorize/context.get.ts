@@ -25,6 +25,10 @@ export default defineEventHandler(async (event) => {
     client: {
       name: request.client.name,
       redirectHost: new URL(request.redirectUri).host,
+      // A metadata-document client is identified by a URL on its own domain,
+      // which we fetched over TLS — the one part of its identity we can vouch
+      // for. A DCR client's name is only its own claim.
+      verifiedHost: request.client.registration === 'cimd' ? new URL(request.client.id).host : undefined,
     },
     user: { email: actor.user.email },
     org: { name: actor.org.name },

@@ -73,6 +73,42 @@ async function rename() {
 }
 
 const howTo = ref(false)
+
+/**
+ * The viewer's own sign-ins that do not include this connection yet, so it
+ * can be added to one without the app going through authorization again.
+ * Fetched lazily: most dashboard visits never need it.
+ */
+interface OwnSession {
+  id: string
+  client: { name: string }
+  connections: { id: string }[]
+}
+const { data: sessions, refresh: refreshSessions } = useFetch<{ sessions: OwnSession[] }>('/api/oauth/sessions', {
+  lazy: true,
+  server: false,
+  default: () => ({ sessions: [] }),
+})
+const addable = computed(() =>
+  (sessions.value?.sessions ?? []).filter(s => !s.connections.some(c => c.id === props.instanceId)),
+)
+const { run: runAdd } = useApiAction()
+const adding = ref<string | null>(null)
+
+async function addTo(session: OwnSession) {
+  adding.value = session.id
+  await runAdd(async () => {
+    await $fetch(`/api/oauth/sessions/${session.id}/connections`, {
+      method: 'POST',
+      body: { connection: props.instanceId },
+    })
+    await refreshSessions()
+  }, {
+    success: `Added. ${session.client.name} sees its tools the next time it reloads them.`,
+    failure: 'Could not add it',
+  })
+  adding.value = null
+}
 </script>
 
 <template>
@@ -104,6 +140,21 @@ const howTo = ref(false)
         </div>
         <Button variant="outline" size="sm" @click="howTo = true">
           How to
+        </Button>
+      </div>
+
+      <!-- A member can add it only where the ceiling allows them to sign it in at all. -->
+      <div v-if="addable.length && (canManage || data.membersAllowed)" class="flex flex-wrap items-center gap-2 border-t pt-3">
+        <span class="text-muted-foreground">Already signed in from an app? Add this connection to:</span>
+        <Button
+          v-for="session in addable"
+          :key="session.id"
+          variant="outline"
+          size="sm"
+          :disabled="adding === session.id"
+          @click="addTo(session)"
+        >
+          {{ session.client.name }} ({{ session.connections.length }} connection{{ session.connections.length === 1 ? '' : 's' }})
         </Button>
       </div>
 

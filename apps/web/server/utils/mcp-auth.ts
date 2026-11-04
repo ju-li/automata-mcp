@@ -497,7 +497,7 @@ export function mcpUnauthorized(event?: H3Event, reason = 'invalid_token'): Resp
   // needs a new token, not a sign-in against a different address.
   const metadata = event && !getRouterParam(event, 'token') ? resourceMetadataUrl() : undefined
   const challenge = `Bearer realm="claude-whatsapp-mcp", error="${reason}"`
-    + (metadata ? `, resource_metadata="${metadata}"` : '')
+    + (metadata ? `, resource_metadata="${metadata}", scope="${OAUTH_SCOPE}"` : '')
   return new Response(
     JSON.stringify({
       jsonrpc: '2.0',

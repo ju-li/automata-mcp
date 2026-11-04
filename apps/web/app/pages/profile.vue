@@ -306,6 +306,8 @@ async function submitPassword() {
     </Card>
 
     <!-- No card header: the component carries its own heading and status line. -->
+    <ConnectedApps />
+
     <Card>
       <CardContent>
         <TwoFactorSettings />
