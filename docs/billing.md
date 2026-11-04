@@ -148,7 +148,7 @@ That is the whole list. Nothing about connections, tokens or usage is sent. The 
    BREVO_MARKETING_LIST=…    # numeric list id, different from the product list
    ```
 
-   The three go together. With none set, there is no sync. With only some set, or with a non-numeric or repeated list id, the service refuses to start.
+   `BREVO_API_KEY` turns the sync on. Without it there is no sync, and any list ids set are ignored (the startup log names them), so a Railway PR environment that lost the sealed key still starts. With the key set, both list ids are required and must differ. A missing, non-numeric or repeated list id stops the service from starting.
 4. Redeploy. `GET /health` reports `crm`:
    - `unconfigured`: no Brevo variables are set.
    - `waiting`: the start-up checks have not passed yet. The log says why: the web app's migration `0009_marketing_consent` is missing, a list doesn't exist, the key is wrong, or an attribute exists with the wrong type. The service tries again every five minutes; billing is unaffected.

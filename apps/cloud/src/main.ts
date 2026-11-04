@@ -64,7 +64,10 @@ if (!billing.configured) {
   }
 }
 if (!crm.configured) {
-  console.info('[cloud] BREVO_* are not set — running without the CRM sync.')
+  console.info('[cloud] BREVO_API_KEY is not set — running without the CRM sync.')
+  if (config.ignoredBrevoVars.length > 0) {
+    console.warn(`[cloud] ignoring ${config.ignoredBrevoVars.join(', ')}: they do nothing without BREVO_API_KEY.`)
+  }
 }
 
 const timers: NodeJS.Timeout[] = []

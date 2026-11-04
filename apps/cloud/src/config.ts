@@ -15,8 +15,11 @@ import { z } from 'zod'
  * are required and a missing one refuses to start — a deployment that set
  * billing up must fail loudly on a typo, not pass for "billing off".
  *
- * **Brevo is all or nothing too**, for the same reason and one more: a key
- * without the marketing list would quietly drop consent people gave.
+ * **`BREVO_API_KEY` switches the CRM sync on**, the same way and for the same
+ * reason: without it the sync is off and the list ids are ignored (named in
+ * `ignoredBrevoVars`). With the key set, both lists are required and must
+ * differ — a key without the marketing list would quietly drop consent people
+ * gave.
  */
 const schema = z.object({
   CLOUD_ADMIN_KEY: z.string().min(24, 'use at least 24 characters (openssl rand -hex 24)'),
@@ -68,6 +71,8 @@ export interface CloudConfig {
   stripe?: StripeSettings
   /** `STRIPE_*` values set without `STRIPE_SECRET_KEY`, so not used. Logged at boot. */
   ignoredStripeVars: string[]
+  /** `BREVO_*` list ids set without `BREVO_API_KEY`, so not used. Logged at boot. */
+  ignoredBrevoVars: string[]
   /** Absent when the service runs without the CRM sync. */
   brevo?: BrevoSettings
   /** zip-prepop's `POST /zip`. */
@@ -91,17 +96,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
   const set = STRIPE_VARS.filter(name => e[name] !== undefined)
   const stripeOn = e.STRIPE_SECRET_KEY !== undefined
   const brevoSet = BREVO_VARS.filter(name => e[name] !== undefined)
+  const brevoOn = e.BREVO_API_KEY !== undefined
   const incomplete = [
     ...(stripeOn
       ? STRIPE_VARS.filter(name => e[name] === undefined)
           .map(name => `  ${name}: set it too — STRIPE_SECRET_KEY turns billing on, and billing needs all four STRIPE_* variables (unset STRIPE_SECRET_KEY to run without billing)`)
       : []),
-    ...(brevoSet.length > 0 && brevoSet.length < BREVO_VARS.length
+    ...(brevoOn
       ? BREVO_VARS.filter(name => e[name] === undefined)
-          .map(name => `  ${name}: set it too — the three BREVO_* variables go together (leave all empty to run without the CRM sync)`)
+          .map(name => `  ${name}: set it too — BREVO_API_KEY turns the CRM sync on, and the sync needs both list ids (unset BREVO_API_KEY to run without it)`)
       : []),
   ]
-  if (brevoSet.length === BREVO_VARS.length && e.BREVO_PRODUCT_LIST === e.BREVO_MARKETING_LIST) {
+  if (brevoOn && brevoSet.length === BREVO_VARS.length && e.BREVO_PRODUCT_LIST === e.BREVO_MARKETING_LIST) {
     incomplete.push('  BREVO_MARKETING_LIST: must differ from BREVO_PRODUCT_LIST — everyone goes on the product list, only those who consented on the marketing one')
   }
   if (incomplete.length > 0) {
@@ -121,7 +127,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
         }
       : undefined,
     ignoredStripeVars: stripeOn ? [] : [...set],
-    brevo: brevoSet.length === BREVO_VARS.length
+    brevo: brevoOn
       ? {
           apiKey: e.BREVO_API_KEY!,
           apiUrl: (e.BREVO_API_URL ?? 'https://api.brevo.com/v3').replace(/\/+$/, ''),
@@ -129,6 +135,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
           marketingList: Number(e.BREVO_MARKETING_LIST),
         }
       : undefined,
+    ignoredBrevoVars: brevoOn ? [] : [...brevoSet],
     ipLookupUrl: e.IP_LOOKUP_URL ?? 'https://api.revbull-services.com/ip-to-zip/zip',
     port: e.CLOUD_PORT ?? e.PORT ?? 8096,
   }
