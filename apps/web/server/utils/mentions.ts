@@ -182,10 +182,12 @@ export function applyMentions(
 /**
  * Group membership, keyed by local part.
  *
- * Cached through `staleWhileFailing`, which `fetchGroups` in `chats.ts` also
- * uses and which explains the three behaviours it buys: Evolution answers this
- * from Baileys rather than its database, so it is a live round trip that never
- * returns while the account is disconnected.
+ * Cached through `staleWhileFailing`, which explains the three behaviours it
+ * buys: Evolution answers this from Baileys rather than its database, so it is a
+ * live round trip that never returns while the account is disconnected. Awaited,
+ * unlike the group listing in `chats.ts` (`staleWhileRevalidate`), because it is
+ * one group's members rather than every group's picture, and a read needs the
+ * answer to name its authors.
  *
  * A participant is indexed under every identity it carries — `id`, `lid`,
  * `phoneNumber`, `jid` — because which one appears in `mentionedJid` depends on
