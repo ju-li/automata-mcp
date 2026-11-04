@@ -451,4 +451,20 @@ export const APP_MIGRATIONS: AppMigration[] = [
           CHECK (send_disclaimer IS NULL OR length(send_disclaimer) BETWEEN 1 AND 200);
     `,
   },
+  {
+    name: '0009_marketing_consent',
+    sql: /* sql */ `
+      -- When the user ticked the marketing box on the hosted signup page. NULL is
+      -- not given — every self-hosted user, every account from before the box,
+      -- and everyone who left it unticked. Records consent given at signup, not
+      -- current subscription state: an unsubscribe lives in the CRM (Brevo, fed
+      -- by the cloud service), and nothing here reverses one.
+      ALTER TABLE app.users
+        ADD COLUMN marketing_consent_at timestamptz;
+
+      -- The box's answer, carried through verification like plan.
+      ALTER TABLE app.email_verifications
+        ADD COLUMN marketing_consent boolean NOT NULL DEFAULT false;
+    `,
+  },
 ]

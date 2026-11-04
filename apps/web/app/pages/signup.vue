@@ -7,6 +7,22 @@ const route = useRoute()
 const email = ref('')
 const password = ref('')
 const signupCode = ref('')
+// Starts unticked, and is ticked once mounted only for a visitor outside the
+// regions where a pre-ticked box is not consent (see marketingOptIn.ts). The
+// lookup can take a moment, so a box the visitor already touched is left as
+// they set it. The invitation signup form always starts unticked.
+const marketingConsent = ref(false)
+let marketingConsentTouched = false
+function touchMarketingConsent() {
+  marketingConsentTouched = true
+}
+onMounted(async () => {
+  // `billing` is true exactly on the hosted offering, and is already resolved
+  // here; the checkbox itself is hidden everywhere else.
+  if (await marketingMayStartTicked({ lookup: billing.value }) && !marketingConsentTouched) {
+    marketingConsent.value = true
+  }
+})
 const error = ref('')
 const busy = ref(false)
 
@@ -57,6 +73,7 @@ async function submit() {
         password: password.value,
         signupCode: selfSignup.value === 'code' ? signupCode.value : undefined,
         plan: billing.value ? plan.value : undefined,
+        marketingConsent: marketingConsent.value,
       },
     })
     // With verification on, the account does not exist yet: the mailed code
@@ -193,6 +210,8 @@ async function submit() {
           organization? Use the invitation link instead.
         </p>
       </div>
+
+      <MarketingConsent v-model="marketingConsent" @update:model-value="touchMarketingConsent" />
 
       <p v-if="error" class="text-sm text-destructive">
         {{ error }}

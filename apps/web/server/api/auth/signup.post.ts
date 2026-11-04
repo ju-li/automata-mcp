@@ -14,6 +14,12 @@ const body = z.object({
    * joins an organization that already has a plan, and without billing.
    */
   plan: z.enum(['free', 'pro']).optional(),
+  /**
+   * The marketing opt-in box, shown on the hosted signup page only. Ignored
+   * without hosted mode, so a self-hosted deployment never records consent
+   * whatever a client sends.
+   */
+  marketingConsent: z.boolean().optional(),
 })
 
 /**
@@ -42,7 +48,8 @@ const body = z.object({
  * whether the address already had an account — that mail says so instead.
  */
 export default defineEventHandler(async (event) => {
-  const { email, password, name, invite: code, signupCode, plan } = await parseBody(event, body)
+  const { email, password, name, invite: code, signupCode, plan, marketingConsent: consentBox } = await parseBody(event, body)
+  const marketingConsent = hostedMode() && consentBox === true
 
   const invited = code ? await resolveInvite(code) : undefined
   const { firstAccountOnly } = invited ? { firstAccountOnly: false } : checkSelfSignup(event, signupCode)
@@ -84,6 +91,7 @@ export default defineEventHandler(async (event) => {
       inviteId: invited?.invite?.id,
       firstAccountOnly,
       plan: chosenPlan,
+      marketingConsent,
     })
     return { verificationRequired: true, email: pending.email }
   }
@@ -96,11 +104,12 @@ export default defineEventHandler(async (event) => {
       email,
       passwordHash,
       name: name?.trim() || email.split('@')[0] || '',
+      marketingConsent,
     })
     await recordHostedEvent(tx, {
       type: 'user.signed_up',
       userId: created.id,
-      payload: { email: created.email, name: created.name, plan: chosenPlan ?? null, invited: Boolean(invited?.invite) },
+      payload: { email: created.email, name: created.name, plan: chosenPlan ?? null, invited: Boolean(invited?.invite), marketingConsent },
     })
 
     if (invited?.invite) {
