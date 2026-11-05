@@ -645,6 +645,7 @@ export async function getInstanceHealth(instance: AppInstance): Promise<Instance
 export function forgetInstanceStatus(instanceId: string): void {
   apiRowCache.delete(instanceId)
   countsCache.delete(instanceId)
+  historySettingCache.delete(instanceId)
 }
 
 type InstanceStats = InstanceStatus['stats']
@@ -1000,6 +1001,7 @@ export async function enableFullHistorySync(instance: AppInstance): Promise<void
     method: 'POST',
     body: settingsBody(current, { syncFullHistory: true }),
   })
+  historySettingCache.delete(instance.id)
 
   // The new setting only reaches Baileys when the socket is next constructed, and
   // that only counts as a fresh device link — the thing that triggers a history
@@ -1128,6 +1130,7 @@ async function applyHistoryLimitBeforePairing(instance: AppInstance): Promise<vo
         method: 'POST',
         body: settingsBody(current, { syncFullHistory: false }),
       })
+      historySettingCache.delete(instance.id)
       console.info(`[instances] ${instance.id} (${instance.name}): full-history sync turned off before pairing — the organization imports recent history only`)
     }
   }
@@ -1139,6 +1142,67 @@ async function applyHistoryLimitBeforePairing(instance: AppInstance): Promise<vo
   }
   historyLimitChecked.set(instance.id, now)
 }
+
+/**
+ * Whether this account's history was imported only in part: its Evolution
+ * settings carry `syncFullHistory: false`, so its pairing asked WhatsApp for
+ * the recent slice only. `undefined` when the settings could not be read —
+ * callers then say nothing either way rather than guess.
+ *
+ * Read off the connection rather than the plan on purpose. The setting is what
+ * the pairing actually used: an organization that upgraded but has not
+ * re-imported still holds only recent history, and one that lapsed keeps the
+ * full history it imported. Both stay true here because nothing changes the
+ * setting except a pairing-bound step — `enableFullHistorySync` (which logs
+ * out) and `applyHistoryLimitBeforePairing`. One looseness, in the safe
+ * direction: a connection that imported in full and was then re-paired under
+ * the limit holds the old history too, and still reads as partial.
+ *
+ * Also true for an account paired before `syncFullHistory` was turned on, which
+ * is accurate: it has only what arrived since.
+ *
+ * Cached five minutes per connection, successes only, cleared wherever the
+ * setting is written and by `forgetInstanceStatus`.
+ */
+export async function recentHistoryOnly(instance: AppInstance): Promise<boolean | undefined> {
+  const now = Date.now()
+  const cached = historySettingCache.get(instance.id)
+  if (cached && now - cached.at < HISTORY_SETTING_TTL_MS) return cached.recentOnly
+
+  let settings: EvolutionSettings | null
+  try {
+    settings = await evolutionClientForInstance(instance)<EvolutionSettings | null>(
+      `/settings/find/${encodeURIComponent(instance.name)}`,
+    )
+  }
+  catch (error) {
+    console.warn(`[instances] could not read history settings for ${instance.id} (${instance.name}):`, error)
+    return undefined
+  }
+
+  // No settings row is Evolution's default, which is off.
+  const recentOnly = settings?.syncFullHistory !== true
+  for (const [id, entry] of historySettingCache) {
+    if (now - entry.at >= HISTORY_SETTING_TTL_MS) historySettingCache.delete(id)
+  }
+  historySettingCache.set(instance.id, { at: now, recentOnly })
+  return recentOnly
+}
+
+const historySettingCache = new Map<string, { at: number, recentOnly: boolean }>()
+const HISTORY_SETTING_TTL_MS = 5 * 60_000
+
+/**
+ * Said to a model alongside `recentHistoryOnly: true`. Shared by the read and
+ * search tools so the two cannot describe the gap differently.
+ */
+export const RECENT_HISTORY_NOTE
+  = 'This account\'s history was imported only in part: when it was linked, WhatsApp handed over '
+    + 'its recent history, not the full one, so older messages may never have been imported and '
+    + 'cannot be read or searched here. The oldest message stored is not necessarily the start of '
+    + 'a conversation, and finding nothing older is not proof nothing older exists — say so rather '
+    + 'than presenting what is here as the whole history. An admin of the account can import the '
+    + 'full history from its page in the web app, where their plan allows it.'
 
 // ── internals ──────────────────────────────────────────────────────────────
 

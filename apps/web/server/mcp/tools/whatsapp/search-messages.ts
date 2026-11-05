@@ -24,7 +24,9 @@ export default defineKindTool({
     'Find WhatsApp messages containing given words, newest first, across every '
     + 'chat unless a `jid` narrows it to one. Matching is case-insensitive and '
     + 'every word must appear in the same message. Covers the history imported '
-    + 'when the account was paired as well as everything since. Reaction messages '
+    + 'when the account was paired as well as everything since; when the response '
+    + 'carries `recentHistoryOnly: true` that import was partial, so older '
+    + 'messages may exist that were never imported and cannot be found. Reaction messages '
     + 'are not searched unless `includeReactions` is set, which also makes a bare '
     + 'emoji findable. A match you sent is marked `fromMe` and carries no '
     + '`author`; on one you received, `author` is the sender\'s name where the '
@@ -70,6 +72,7 @@ export default defineKindTool({
 
     if (jid) assertChatAllowed(scope, jid)
 
+    const historyCheck = recentHistoryOnly(instance)
     const { hits, truncated } = await searchMessages(instance, {
       terms,
       jid,
@@ -83,9 +86,10 @@ export default defineKindTool({
       limit,
     })
 
-    const [names, directory] = await Promise.all([
+    const [names, directory, partialHistory] = await Promise.all([
       chatNames(instance, hits),
       resolveNames(instance, hits),
+      historyCheck,
     ])
 
     return {
@@ -106,6 +110,9 @@ export default defineKindTool({
       truncated,
       // Same principle: a whole message class this search never looked at.
       ...(!includeReactions && { reactionsExcluded: true }),
+      // And one more: messages from before the account was linked that were
+      // never imported. Every response, since a search can miss them anywhere.
+      ...(partialHistory && { recentHistoryOnly: true, note: RECENT_HISTORY_NOTE }),
     }
   },
 })

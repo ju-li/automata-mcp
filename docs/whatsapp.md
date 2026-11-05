@@ -223,6 +223,18 @@ in `server/utils/instances.ts`:
 It never applies to a bring-your-own Evolution server, and it deletes nothing
 already imported. Self-hosted deployments never set it.
 
+Older messages are not fetched later either: reads and searches only query
+Evolution's database, and nothing can ask WhatsApp for history after pairing.
+So the MCP tools say when the history is partial. `read-messages`,
+`search-messages` and `get-connection-status` carry `recentHistoryOnly: true`
+when the connection's Evolution settings have `syncFullHistory` off — the
+setting its pairing actually used, not the current plan, so an organization that
+upgraded but has not re-imported still reads as partial. `read-messages` adds a
+`note` once it reaches the oldest stored message, and `search-messages` adds one
+on every response. Self-hosted accounts paired before full-history sync existed
+report it too, accurately. Read through `recentHistoryOnly()` in
+`server/utils/instances.ts`, cached five minutes per connection.
+
 ## Bring your own Evolution server
 
 A WhatsApp connection can be created against a user's own Evolution server: the

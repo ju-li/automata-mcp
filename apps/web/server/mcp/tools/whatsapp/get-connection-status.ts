@@ -19,7 +19,9 @@ export default defineKindTool({
     'Report whether the connected WhatsApp account is currently online, along with '
     + 'the profile it is signed in as and how many messages, chats and contacts have '
     + 'been recorded. Call this before sending anything: only an account in the '
-    + '`open` state can send or receive.',
+    + '`open` state can send or receive. `recentHistoryOnly: true` means the '
+    + 'history imported when the account was linked is partial — recent messages '
+    + 'only — so older conversations may be missing from reads and searches.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -30,6 +32,11 @@ export default defineKindTool({
   inputSchema: {},
   handler: async () => {
     const { instance } = useMcpAuth()
-    return await getInstanceStatus(instance)
+    const [status, partialHistory] = await Promise.all([
+      getInstanceStatus(instance),
+      recentHistoryOnly(instance),
+    ])
+    // Omitted when false or unknown, as on the read tools.
+    return { ...status, ...(partialHistory && { recentHistoryOnly: true }) }
   },
 })

@@ -32,7 +32,7 @@ interface StatusResponse {
    * The plan imports only the recent history WhatsApp sends any linked device,
    * and refuses a full-history import. Decided by the server.
    */
-  recentHistoryOnly?: boolean
+  historyLimitedByPlan?: boolean
 }
 
 interface QrResponse {
@@ -465,7 +465,7 @@ const importHistory = () => backToPairing(
       <!-- The last sentence points at a section a member does not have, and
            re-importing costs a QR scan on a real phone — so they are told what
            the counts mean, not how to change them. -->
-      <p v-if="data?.recentHistoryOnly" class="text-xs text-muted-foreground">
+      <p v-if="data?.historyLimitedByPlan" class="text-xs text-muted-foreground">
         Your plan imports recent history only: when a device is linked, WhatsApp
         hands over the recent part of your conversations, and everything since is
         kept. Older messages are not imported.
@@ -532,7 +532,7 @@ const importHistory = () => backToPairing(
                on a plan limited to recent history, and the note above says
                why and where to upgrade. -->
           <ConfirmAction
-            v-if="!data?.recentHistoryOnly"
+            v-if="!data?.historyLimitedByPlan"
             label="Import full history"
             title="Import this account's full history?"
             confirm-label="Disconnect and import"
