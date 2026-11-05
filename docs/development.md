@@ -53,7 +53,7 @@ apps/web/                    Nuxt 4 + TypeScript. Own Dockerfile, built from the
                              Evolution and Telegram database, cloud and email
                              verification startup checks, hosted usage rollups
   server/tasks/              scheduled: alert sweep, webhook re-registration,
-                             IMAP sync
+                             IMAP sync, unpaired WhatsApp reaper, tool-call pruning
   server/db/migrations.ts    the app schema, applied at boot
   server/utils/              app database, auth, organizations, invitations, instances,
                              tokens, Evolution and Telegram clients and message
@@ -61,7 +61,8 @@ apps/web/                    Nuxt 4 + TypeScript. Own Dockerfile, built from the
                              guard, keyed handle cache, row serialisation, SQL
                              engine seam, Postgres pool / plan guard / runner / catalog,
                              IMAP client / sync / reads, two-factor (TOTP, WebAuthn),
-                             email verification, cloud client, entitlements
+                             email verification, cloud client, entitlements,
+                             MCP client and tool-call (Telemetry) recording
 apps/telegram-bridge/        Node + teleproto. Links Telegram accounts, syncs chats to Postgres.
                              Own Dockerfile, built from the repo root.
   src/                       HTTP API, sessions, locks, webhook
@@ -134,6 +135,7 @@ There is no `predev` hook — bring the services up yourself.
 | `pnpm bridge:typecheck` | `tsc` for the bridge — `pnpm typecheck` does not cover it |
 | `pnpm cloud:dev` | the hosted-only cloud service on the host, <http://localhost:8096> |
 | `pnpm cloud:typecheck` | `tsc` for the cloud service — not covered by `pnpm typecheck` either |
+| `pnpm cloud:crm-backfill` | one-off: a Brevo contact for every existing user (product list; marketing list only where consent was given at signup); needs the `BREVO_*` variables — see [billing.md](billing.md) |
 | `pnpm release:version X.Y.Z` | write the release version into `package.json` and every directory listing |
 | `pnpm listings:check` | refuse listings whose version or tool names disagree with the code |
 | `pnpm listings:tools <server-card-url>` | regenerate `lhm.plugin.json`'s tool list from a running server's `/.well-known/mcp/server-card.json` |
@@ -298,7 +300,10 @@ share a tool whose arguments differ: that is why Telegram has
 
 Keep the basename globally unique: collisions are detected across groups, and two
 tools with one name make the MCP server throw. One shared file for several kinds
-satisfies that rather than straining it. Give every tool an explicit
+satisfies that rather than straining it. `defineKindTool` adds an optional
+`reason` argument to every tool — the model's one sentence on why it is calling,
+recorded for Telemetry and taken off the arguments before your handler runs — so
+a tool that declares its own `reason` throws at load. Give every tool an explicit
 `name`, a `title` and accurate `readOnlyHint` / `destructiveHint`; see
 `whatsapp/get-connection-status.ts` (read) and `sql/run-statement.ts`
 (write) for the pattern. `enabled` cannot see arguments, so anything that

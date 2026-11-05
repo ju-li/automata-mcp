@@ -279,6 +279,8 @@ has.
 | `instance_assignments` | "may use, not manage" grants to members |
 | `invitations` | SHA-256 of the invitation code, address, role, expiry |
 | `mcp_tokens` | SHA-256 of the connector token, holder, scope, expiry, `last_used_at` |
+| `mcp_token_clients`, `mcp_tool_calls` | which MCP clients used each token, and the Telemetry tool-call history (kept 30 days) |
+| `whatsapp_groups`, `whatsapp_group_scans` | last-known WhatsApp group names and sizes, and when each account's groups were last fetched (at most every six hours) — see [WhatsApp](whatsapp.md) |
 | `totp_credentials`, `webauthn_credentials`, `recovery_codes`, `mfa_challenges` | second sign-in factors — see [Two-factor authentication](two-factor.md) |
 | `email_verifications` | signups and address changes waiting to be confirmed — see [Email verification](#email-verification) |
 | `mail_sync_state`, `mail_folders`, `mail_messages` | synced IMAP headers, never bodies — see [Email (IMAP) connections](imap.md) |
@@ -297,7 +299,11 @@ An `instances` row carries, by kind:
   `imap_password`.
 
 Two more columns, `down_since` and `alerted_at`, carry outage state — see
-[Connection alerts](alerts.md).
+[Connection alerts](alerts.md). On WhatsApp rows, `row_churn_since` and
+`row_churn_seen_at` track a reconnect loop, and `paired_at` records the first
+time the account was seen linked. A WhatsApp row still without `paired_at` an
+hour after it was created is deleted — see
+[WhatsApp](whatsapp.md#connections-never-paired-are-removed-after-an-hour).
 
 `api_key`, `admin_key`, `dsn`, `evolution_db_url`, `telegram_db_url` and
 `imap_password` never leave the server — `toPublicInstance()` is the only projection the UI receives —

@@ -8,6 +8,8 @@
 3. **WhatsApp:** continue to the QR code and scan it — WhatsApp → Settings →
    Linked devices → Link a device. To use an Evolution server other than this
    app's, tick **Use my own Evolution API server** first (see [Bring your own Evolution server](whatsapp.md#bring-your-own-evolution-server)).
+   A WhatsApp connection not paired within an hour is deleted with its tokens;
+   the pairing screen counts down (see [Connections never paired are removed after an hour](whatsapp.md#connections-never-paired-are-removed-after-an-hour)).
    **Telegram:** on the connection's page press **Show QR code** and scan it —
    Telegram → Settings → Devices → Link Desktop Device. An account with two-step
    verification is then asked for its password, which goes to Telegram and is
@@ -71,11 +73,11 @@ comes back.
 
 | Tool | Kind | | What it does |
 |---|---|---|---|
-| `get-connection-status` | WhatsApp | read | Whether the account is paired and connected (`open`) |
-| `list-chats` | WhatsApp | read | Conversations in scope, most recently active first, with the `jid` other tools take; says `hasMore` when it returned one page of several |
+| `get-connection-status` | WhatsApp | read | Whether the account is paired and connected (`open`); `flapping` when it reads `open` but keeps reconnecting — shown as **Unstable** on the dashboard, fixed by restarting the Evolution service, not by Reconnect |
+| `list-chats` | WhatsApp | read | Conversations in scope, most recently active first, with the `jid` other tools take; says `hasMore` when it returned one page of several. No read/unread status — WhatsApp's read state isn't available to it |
 | `read-messages` | WhatsApp | read | One chat, newest first, 1–200 per page (default 50), optional `since` / `until`; reports `hasMore`, `nextPage`, `covered` and `totalMatching` |
 | `search-messages` | WhatsApp | read | Messages containing every word of `query`, across chats in scope or one `jid`; optional date range and `fromMe`; up to 100 matches (default 20) |
-| `send-text-message` | WhatsApp | **write** | Send text to a number in international format |
+| `send-text-message` | WhatsApp | **write** | Send text to a number in international format; a refusal (e.g. a number not on WhatsApp) comes back with WhatsApp's reason |
 | `get-telegram-status` | Telegram | read | Whether the account is linked and online, who it is signed in as, and how far sync has got |
 | `list-telegram-chats` | Telegram | read | Synced chats in scope — private, groups, supergroups, channels — most recently active first, with the `chatId` other tools take; 1–200 per page (default 100) |
 | `read-telegram-messages` | Telegram | read | One chat, newest first, with the same paging envelope as `read-messages`; optional forum `topicId`; says when older history was never synced |
