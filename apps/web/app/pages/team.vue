@@ -235,11 +235,8 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
       <CardHeader>
         <CardTitle>Telemetry</CardTitle>
         <CardDescription>
-          When telemetry is on, every connector tool call is stored for 30 days:
-          which tool, whether it worked, and the one-line reason Claude gave for
-          making it. Reasons are written by the model and can mention what
-          someone asked about. Each person sees the history of their own tokens
-          and admins see everyone's, from a token's “Last used” date.
+          Records each connector tool call and the reason Claude gave for it.
+          <a href="https://www.getautomata.app/docs/telemetry" target="_blank" rel="noopener noreferrer" class="underline underline-offset-4 hover:text-foreground">Learn more</a>
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -261,10 +258,6 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
             </p>
             <p v-else-if="!isAdmin" class="text-xs text-muted-foreground">
               Only an admin can change this.
-            </p>
-            <p v-else class="text-xs text-muted-foreground">
-              Turning it off stops collection; what was already stored is
-              deleted when its 30 days are up.
             </p>
           </div>
         </div>
