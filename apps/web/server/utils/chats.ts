@@ -17,7 +17,10 @@ export interface ChatSummary {
   jid: string
   name: string
   isGroup: boolean
-  /** Bare phone number of a 1:1 chat. Groups do not have one. */
+  /**
+   * Bare phone number of a 1:1 chat addressed by phone number. Groups and LID
+   * chats (`…@lid`) do not have one — a LID's digits are not a phone number.
+   */
   number?: string
   /** Members in a group, and only when the group lookup actually ran. */
   participantCount?: number
@@ -292,7 +295,11 @@ async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<Li
       jid: draft.jid,
       name,
       isGroup,
-      number: isGroup ? undefined : localPart,
+      // Only a phone-number JID carries a number, as in `listContacts`. A LID
+      // chat's local part is a privacy alias, and handing it out here as a
+      // number is what leads a model to send to it as one — reaching whoever
+      // owns that number, if anyone.
+      number: draft.jid.endsWith('@s.whatsapp.net') ? localPart : undefined,
       participantCount: group?.size,
       profilePicUrl: draft.profilePicUrl ?? contact?.profilePicUrl ?? group?.pictureUrl,
       updatedAt: draft.updatedAt,

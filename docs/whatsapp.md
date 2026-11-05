@@ -167,6 +167,52 @@ On Railway, Evolution's Postgres is its own service — use its private URL, and
 note the port there is whatever that service actually listens on (see "Pin the
 ports").
 
+## Chats addressed by LID (`…@lid`)
+
+WhatsApp addresses a person in one of two ways. The familiar one is a
+phone-number JID, `5511999999999@s.whatsapp.net`. The other is a **LID**, such as
+`79972425314508@lid`: a per-person alias WhatsApp uses so that group members and
+people who never exchanged numbers don't learn each other's phone numbers. **A
+LID's digits are not a phone number.** They carry no country code, and dialling
+them reaches whoever owns that number, if anyone.
+
+Which form a chat gets is WhatsApp's decision, not this app's. Group members are
+usually LIDs, and many 1:1 chats are too, especially in
+history imported at pairing. So `list-chats`, the dashboard and the token scope
+picker routinely show chats whose identifier ends in `@lid`.
+
+What the connector does with them:
+
+- **Reading and searching** work the same for both forms.
+- **Replying** works: `send-text-message` takes the chat's full JID
+  (`…@lid`) and the message lands in the existing conversation, stored under the
+  LID. The tool description and the server instructions tell the model to pass
+  the JID as returned, and never to strip the suffix and send to the digits.
+- **Names** for senders and @-mentions are resolved from the account's contacts
+  and from group membership, which knows both forms of each member. A LID it
+  cannot resolve stays a raw id rather than being guessed.
+- **Phone numbers** are shown only for chats addressed by phone number. A LID
+  chat has no `number` in `list-chats` and none in the dashboard, even when the
+  phone itself shows one.
+
+What it can't do yet:
+
+- **Tell you the phone number behind a LID.** WhatsApp reveals the link on some
+  live messages (Evolution keeps it as `remoteJidAlt`), never on imported history,
+  and Evolution has no API for Baileys' own mapping. The connector does not
+  surface the partial data it has, so the model is told the number may be
+  unknown.
+- **Merge one person's two chats.** Someone reached both by LID and by phone
+  number can appear as two conversations, each holding part of the history.
+- **Link the two forms in token scope.** A token scoped to a person's
+  phone-number chat does not reach their LID chat, and the reverse. The picker
+  lists them as separate chats; tick both if the person has both.
+
+On a bring-your-own Evolution server with `DATABASE_SAVE_IS_ON_WHATSAPP=true`,
+Evolution may resolve a LID to the phone-number JID it has linked it to. For a
+token scoped to the LID chat, sending to that LID is then refused. Turning the
+setting off, or adding the phone-number chat to the token's scope, avoids it.
+
 ## Stuck reconnecting (`conflict: replaced`)
 
 The signature, in Evolution's log: `stream errored out` dozens of times a minute

@@ -56,7 +56,7 @@ export default defineKindTool({
     openWorldHint: true,
   },
   inputSchema: {
-    jid: z.string().min(1).describe('Chat identifier from list-chats, e.g. 5511999999999@s.whatsapp.net'),
+    jid: z.string().min(1).describe('Chat identifier from list-chats, exactly as returned, e.g. 5511999999999@s.whatsapp.net or 79972425314508@lid'),
     limit: z.number().int().min(1).max(200).default(50).describe('How many messages to return in this page'),
     page: z.number().int().min(1).default(1).describe('1-based page of `limit` messages, counting back from the newest. Walk this up while `hasMore` is true.'),
     since: z.string().optional().describe('Only messages at or after this date, e.g. 2024-03-01 or 2024-03-01T12:00:00Z'),
