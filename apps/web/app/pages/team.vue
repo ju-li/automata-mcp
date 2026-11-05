@@ -235,7 +235,6 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
       <CardHeader>
         <CardTitle>Telemetry</CardTitle>
         <CardDescription>
-          Records each connector tool call and the reason Claude gave for it.
           <a href="https://www.getautomata.app/docs/telemetry" target="_blank" rel="noopener noreferrer" class="underline underline-offset-4 hover:text-foreground">Learn more</a>
         </CardDescription>
       </CardHeader>
