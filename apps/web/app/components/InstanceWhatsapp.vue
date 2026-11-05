@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Loader2Icon } from '@lucide/vue'
+import { Loader2Icon, TriangleAlertIcon } from '@lucide/vue'
 import { useIntervalFn, useNow } from '@vueuse/core'
 import { toast } from 'vue-sonner'
 
@@ -437,16 +437,23 @@ const importHistory = () => backToPairing(
           Or enter code <code class="font-mono font-medium">{{ qr.pairingCode }}</code> on your phone.
         </p>
 
-        <p v-if="removalMinutes !== undefined" class="max-w-sm text-center text-xs text-muted-foreground">
-          <template v-if="removalMinutes > 0">
-            A connection that isn't paired within an hour of being created is removed automatically.
-            {{ removalMinutes === 1 ? '1 minute' : `${removalMinutes} minutes` }} left.
-          </template>
-          <template v-else>
+        <p v-if="removalMinutes !== undefined && removalMinutes > 0" class="max-w-sm text-center text-xs text-muted-foreground">
+          A connection that isn't paired within an hour of being created is removed automatically.
+          {{ removalMinutes === 1 ? '1 minute' : `${removalMinutes} minutes` }} left.
+        </p>
+        <!-- Past the deadline: deletion is imminent and cannot be undone, so it
+             reads as a warning rather than as helper text. -->
+        <div
+          v-else-if="removalMinutes === 0"
+          role="alert"
+          class="flex max-w-sm items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+        >
+          <TriangleAlertIcon class="mt-0.5 size-4 shrink-0" />
+          <p>
             This connection wasn't paired within an hour and is about to be removed automatically.
             You can create a new one.
-          </template>
-        </p>
+          </p>
+        </div>
 
         <div v-if="pairingTimedOut" class="text-center">
           <p class="text-sm text-muted-foreground">
