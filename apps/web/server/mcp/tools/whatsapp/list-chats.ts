@@ -23,7 +23,9 @@ export default defineKindTool({
   title: 'List WhatsApp chats',
   description:
     'List recent WhatsApp conversations, most recently active first, with the '
-    + '`jid` needed by read-messages. Includes conversations imported from the '
+    + '`jid` needed by read-messages and send-text-message. `number` is present only '
+    + 'for chats addressed by phone number: a jid ending in `@lid` is a WhatsApp '
+    + 'privacy alias whose digits are not a phone number. Includes conversations imported from the '
     + 'phone when the account was paired, not only ones active since. If this '
     + 'connector is scoped to specific chats, only those are listed. This '
     + 'answers with one page, most recently active first: when `hasMore` is true '

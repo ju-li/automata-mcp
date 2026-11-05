@@ -225,7 +225,8 @@ export function filterChatsToScope<T extends { jid: string }>(scope: McpScope, c
 }
 
 /**
- * Turn a phone number into the JID Evolution would use for it.
+ * Turn a phone number (or a JID, passed through by Evolution) into the JID
+ * Evolution would use for it.
  *
  * **Never normalise JIDs locally.** Evolution's `createJid` carries
  * country-specific rules — Brazil's ninth digit, Mexico and Argentina prefixes —
@@ -259,11 +260,21 @@ export async function resolveNumberToJid(
 }
 
 /**
- * Scope check for a send, which addresses a chat by phone number rather than JID.
+ * Scope check for a send, which addresses a chat by phone number or by JID.
  *
  * Resolves through Evolution and compares exact JIDs. **Fails closed** — if the
  * lookup throws (instance offline, Evolution unreachable) the send is refused,
  * because an unverifiable recipient is exactly the case scope exists to stop.
+ *
+ * A JID goes through the same lookup rather than being compared as typed, so
+ * there is one path and Evolution's `createJid()` stays the only normaliser.
+ * For a LID (`…@lid`), 2.3.7's `whatsappNumber()` answers with the LID itself
+ * (Baileys is not asked) — *unless* the server keeps its optional on-WhatsApp
+ * cache (`DATABASE_SAVE_IS_ON_WHATSAPP`, off in our compose files) and that
+ * cache has linked the LID to a phone number, in which case it answers the
+ * phone-number JID. A token scoped to the LID chat is then refused a send to
+ * it — closed, and confusing — while one scoped to the phone-number chat may
+ * send to the LID, which that cache says is the same person (#119).
  */
 export async function assertNumberAllowed(
   instance: AppInstance,
