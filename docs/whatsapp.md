@@ -79,11 +79,11 @@ rows and joins to the one asked about — a full scan of `"Message"` on every ca
 With this URL set, the dashboard, the connection list, the alert sweep and
 `get-connection-status` read the account's `"Instance"` row by primary key, and
 count only that account's rows, caching the counts for five minutes (the history
-import screen after pairing asks for them fresh). A role created before these
-grants existed still works: status falls back to `fetchInstances`, cached per
-connection for five minutes, and the web log says which grant is missing. Without
-this URL at all — a bring-your-own server with no database URL — that cached
-fallback is the only path.
+import screen after pairing asks for them fresh; the alert sweep reads no counts
+at all). A role created before these grants existed still works: status falls
+back to `fetchInstances`, cached per connection for five minutes, and the web
+log says a grant is missing. Without this URL at all — a bring-your-own server
+with no database URL — that cached fallback is the only path.
 
 `"updatedAt"` is what tells a reconnect loop from a healthy connection (see
 "Stuck reconnecting" below). It has no fallback: without the grant everything
@@ -121,6 +121,18 @@ Worth knowing before you go looking for a bug:
   count is every conversation the phone listed at pairing; `list-chats` lists
   conversations Evolution holds messages for, which is routinely fewer. The gap
   is not more pages — `hasMore` is the only signal that there are.
+- **There are no unread counts.** Neither `list-chats` nor the dashboard says
+  which chats are unread, and the tool tells the model so. Evolution 2.3.7 does
+  not keep the one signal that says a chat was read on the phone, and an unread
+  count derived from message statuses was tried and found wrong (651 "unread" on
+  an account with no unread badges).
+- **Group names can lag by up to six hours.** Fetching an account's groups from
+  WhatsApp costs about two WhatsApp queries per group and drew `rate-overlimit`
+  answers when it ran every few minutes, so it runs at most once every six hours
+  per account (an hour after a failed attempt), in the background, and the
+  result is kept in `app.whatsapp_groups`. A group joined or renamed since the
+  last scan shows its old name, or the contact name or bare id, until the next
+  one. Chats and their last messages are read live; only group names lag.
 - The scope editor lists the tools of the connection's own kind, and lists both
   read tools whether or not the database URL is set. It deliberately does not
   hide a tool with an unmet prerequisite: both read tools need that URL, so
@@ -202,11 +214,18 @@ what it deletes:
   does not clear it, so a connection that was paired and later signed out is
   never removed. Rows that existed before this was added were backfilled from
   alert history and, where Evolution shares the app's database, from Evolution's
-  `ownerJid` and stored messages.
+  `ownerJid` and stored messages. One case neither the backfill nor the live
+  check below can see: a connection signed out *before* upgrading, on a server
+  whose database the app has no URL for, that never raised an alert. It looks
+  exactly like one nobody paired, and the first run after the upgrade removes
+  it. To keep one, add its database URL (**Enable reading**) or pair it again
+  first.
 - **Re-checked live just before deleting.** If Evolution now reports the account
   `open` or linked, or its database holds messages for it, the connection is
   marked paired and kept. If the check can't reach Evolution or its database,
-  the connection is kept and checked again on the next run.
+  the connection is kept and checked again on the next run. A dedicated role
+  without the `"Chat"`/`"Contact"` grants above counts as can't-reach, so no
+  connection read through such a role is removed until the grants are added.
 - **Deleted the same way as the Delete button**: the instance is first removed
   from Evolution, then the row. If this deployment has no admin key for the
   connection's server, the connection is kept, because deleting the row would
@@ -252,6 +271,12 @@ recv 412 chats, 1180 contacts, 39204 msgs (is latest: false, progress: 34%), typ
 
 `type: 2` is a full sync, `type: 3` is the recent-only one. Anything but `2` means
 `syncFullHistory` never reached the socket.
+
+The connection's page shows it too, to whoever scanned: after the scan it reads
+**Importing your WhatsApp history** with message and chat counts climbing, and
+moves on to the dashboard once they have stopped changing for about fifteen
+seconds (three minutes at most; **Show dashboard now** skips the wait). The
+import carries on in Evolution either way, and the dashboard counts catch up.
 
 Caveats worth knowing before you rely on it:
 

@@ -402,6 +402,13 @@ Where the build differs from, or adds to, the design above:
   minutes, so a Brevo outage at boot does not need a restart. `/health` reports
   `crm: 'unconfigured' | 'waiting' | 'ready'`.
 - **The two list ids must differ**, or the service refuses to start.
+- **`BREVO_API_KEY` is the switch, not all-or-none.** List ids set without the
+  key are ignored and named in the boot log instead of refusing to start, since
+  a Railway PR environment drops the sealed key but keeps the ids. With the key
+  set, a missing or non-numeric list id still refuses to start.
+- **The backfill honours consent recorded at signup.** A new contact goes on the
+  marketing list when `marketing_consent_at` is set. No account from before the
+  checkbox has it, so for those the result is the product list only, as above.
 - **Consent is re-checked at verify time.** A verification row written in
   hosted mode is honoured only if the deployment is still hosted when the code
   is entered.

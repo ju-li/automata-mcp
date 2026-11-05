@@ -65,6 +65,10 @@ click on Railway or with Docker.
 - **Scoped connector tokens.** Each token reaches exactly one connection, and can
   be narrowed to specific chats, folders, tables and tools. Tokens are
   shown once, stored only as a hash, and can expire, be rotated or be revoked.
+- **Know how connectors are used.** Each token lists the MCP clients that
+  connected with it, and with telemetry on every tool call is kept for 30 days
+  with the one-line reason Claude gave for it. See
+  [Telemetry](docs/using-automata.md#telemetry).
 - **Read-only databases by default.** Queries run in read-only transactions, one
   statement at a time, checked against the token's table allowlist by inspecting
   the query plan. Writes need the write tool granted explicitly, and roll back if
@@ -87,8 +91,9 @@ click on Railway or with Docker.
 
 [Sign up at mcp.getautomata.app](https://mcp.getautomata.app/signup) and skip
 to [Connect Claude](#connect-claude). Free covers one connection, one connector
-token and one user; Pro is $19/month after a 7-day trial, with unlimited
-connections and tokens and five users included ($10/user after).
+token and one user, with telemetry always on; Pro is $19/month after a 7-day
+trial, with unlimited connections and tokens and five users included
+($10/user after).
 
 ### Railway (one click)
 
