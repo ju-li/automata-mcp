@@ -34,8 +34,8 @@ async function setRecording(on: boolean) {
     await $fetch('/api/org', { method: 'PATCH', body: { recordToolCalls: on } })
     await refresh()
   }, {
-    success: on ? 'Tool calls are now recorded.' : 'Tool calls are no longer recorded.',
-    failure: 'Could not change tool-call recording',
+    success: on ? 'Telemetry is on.' : 'Telemetry is off.',
+    failure: 'Could not change telemetry',
   })
 }
 
@@ -233,10 +233,10 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
          they are is theirs to know. -->
     <Card v-if="data?.toolCalls">
       <CardHeader>
-        <CardTitle>Tool-call history</CardTitle>
+        <CardTitle>Telemetry</CardTitle>
         <CardDescription>
-          When this is on, every connector tool call is kept for 30 days: which
-          tool, whether it worked, and the one-line reason Claude gave for
+          When telemetry is on, every connector tool call is stored for 30 days:
+          which tool, whether it worked, and the one-line reason Claude gave for
           making it. Reasons are written by the model and can mention what
           someone asked about. Each person sees the history of their own tokens
           and admins see everyone's, from a token's “Last used” date.
@@ -252,7 +252,7 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
             @update:model-value="setRecording($event === true)"
           />
           <div class="space-y-1">
-            <Label for="record-tool-calls" class="font-normal">Record tool calls</Label>
+            <Label for="record-tool-calls" class="font-normal">Collect telemetry</Label>
             <p v-if="data.toolCalls.required" class="text-xs text-muted-foreground">
               Always on with your plan.
               <NuxtLink v-if="isAdmin" to="/billing" class="underline underline-offset-4">
@@ -263,7 +263,7 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
               Only an admin can change this.
             </p>
             <p v-else class="text-xs text-muted-foreground">
-              Turning it off stops recording; what was already recorded is
+              Turning it off stops collection; what was already stored is
               deleted when its 30 days are up.
             </p>
           </div>

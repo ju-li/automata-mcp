@@ -25,7 +25,7 @@ Self-hosted deployments never run the cloud service.
 | Connector tokens | 1 | unlimited |
 | Users | 1 | 5 included, $10/user/month after |
 | Requests | unlimited | unlimited |
-| Tool-call history | always on, 30 days | off by default, admins choose |
+| Telemetry | always on, stored 30 days | optional, off by default |
 
 The numbers are set in three places:
 
@@ -80,7 +80,7 @@ retry settings in Stripe decide how long that lasts.
 The plan and its limits are kept apart:
 - **Plan:** Stripe status, decided by the billing code.
 - **Limits:** three plain numbers on each organization, `max_connections`, `max_tokens` and `max_members`. NULL means unlimited.
-- **Required tool-call recording:** one flag on each organization, `tool_calls_required`. While it is true, every MCP tool call and the reason Claude gave for it are recorded and the organization can't turn that off. It's true on Free and false on Pro. See "Tool-call history" in [using-automata.md](using-automata.md).
+- **Required telemetry:** one flag on each organization, `tool_calls_required`. While it is true, every MCP tool call and the reason Claude gave for it are recorded and the organization can't turn that off. It's true on Free and false on Pro. See "Telemetry" in [using-automata.md](using-automata.md).
 
 The cloud service writes those values whenever a subscription changes, and for every organization each time it starts. The web app's checks only ever read them, so they keep working, from the database, even while the cloud service is down.
 

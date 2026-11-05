@@ -158,7 +158,7 @@ export async function setToolCallRecording(orgId: string, on: boolean): Promise<
   if (!row) {
     throw createError({
       statusCode: 402,
-      statusMessage: 'Your plan records tool calls and cannot turn that off. Upgrade to choose.',
+      statusMessage: 'Your plan includes telemetry, which cannot be turned off. Upgrade to choose.',
       data: { code: 'plan_limit', resource: 'tool_calls' },
     })
   }

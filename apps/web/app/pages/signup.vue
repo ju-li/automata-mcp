@@ -57,7 +57,7 @@ const plans: { id: PlanChoice, name: string, price: string, note: string, featur
       'Unlimited connector tokens',
       '5 users included, $10/user/month after',
       'Unlimited requests',
-      'Tool-call history optional, off by default',
+      'Telemetry optional, off by default',
     ],
   },
 ]

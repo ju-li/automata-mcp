@@ -77,8 +77,8 @@ function formatDateTime(value: string) {
 
       <div class="min-h-0 flex-1 overflow-y-auto">
         <p v-if="recording && !recording.recording" class="mb-4 text-sm text-muted-foreground">
-          Tool calls are not being recorded for this organization. An admin can
-          turn recording on under Team.
+          Telemetry is off for this organization, so new calls are not stored.
+          An admin can turn it on under Team.
         </p>
 
         <p v-if="failed && !calls.length" class="text-sm text-destructive">
