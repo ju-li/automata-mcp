@@ -1,6 +1,7 @@
 import type { AppMcpToken, Db } from './app-db'
 import type { McpScope } from './mcp-scope'
 import type { ScopeInput } from './scope-schema'
+import type { PublicTokenClient } from './mcp-clients'
 
 /**
  * MCP token CRUD.
@@ -32,6 +33,12 @@ export interface PublicToken {
   scope: ScopeInput
   /** Appended to every message this token sends. Absent = off. */
   send_disclaimer?: string
+  /**
+   * The MCP clients that started sessions with it, newest first — self-reported,
+   * a hint only (see mcp-clients.ts). Filled by `listTokens`; absent means not
+   * read, which is different from an empty list.
+   */
+  clients?: PublicTokenClient[]
 }
 
 export function toPublicToken(token: AppMcpToken, emails?: Map<string, string>): PublicToken {
@@ -54,9 +61,9 @@ export function toPublicToken(token: AppMcpToken, emails?: Map<string, string>):
  * The tokens on one connection.
  *
  * `assignedTo` narrows to one member's own, which is what a member gets: a token
- * label names where a colleague runs Claude, and `last_used_at` and the scope of
- * an admin's own token are not theirs to read. Admins pass nothing and see all
- * of them.
+ * label names where a colleague runs Claude, and `last_used_at`, the clients
+ * and the scope of an admin's own token are not theirs to read. Admins pass
+ * nothing and see all of them.
  */
 export async function listTokens(
   instanceId: string,
@@ -70,7 +77,21 @@ export async function listTokens(
       ${options.assignedTo ? sql`AND assigned_to = ${options.assignedTo}` : sql``}
     ORDER BY created DESC
   `
-  return rows.map(row => toPublicToken(row, options.emails))
+  // By the ids this predicate already returned, so a member's list carries only
+  // their own tokens' clients. A failed read leaves `clients` absent rather than
+  // failing the list: this list is where a leaked token gets revoked, and a
+  // hint must not stand between someone and that button.
+  let clients: Map<string, PublicTokenClient[]> | undefined
+  try {
+    clients = await listTokenClients(rows.map(row => row.id))
+  }
+  catch (error) {
+    console.error(`[tokens] could not read the clients of connection ${instanceId}'s tokens:`, (error as Error)?.message ?? error)
+  }
+  return rows.map(row => ({
+    ...toPublicToken(row, options.emails),
+    clients: clients ? clients.get(row.id) ?? [] : undefined,
+  }))
 }
 
 /** Expiry presets offered by the UI. `never` leaves `expires_at` NULL. */
