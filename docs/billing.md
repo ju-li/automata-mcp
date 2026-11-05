@@ -12,7 +12,7 @@ The hosted offering is two services:
 - **The cloud service** (`apps/cloud`) sells plans. It owns Stripe (Checkout,
   the Customer Portal, the webhook, seat billing) and writes each
   organization's limits. It also keeps a Brevo CRM contact for every user
-  (see [CRM (Brevo)](#crm-brevo)). PostHog telemetry joins it later.
+  (see [CRM (Brevo)](#crm-brevo)). PostHog product analytics joins it later.
 
 Self-hosted deployments never run the cloud service.
 
@@ -94,7 +94,7 @@ UPDATE app.organizations SET max_connections = NULL, max_tokens = NULL, max_memb
 
 ## Account events
 
-On the hosted deployment the web app also records account and organization changes in `app.hosted_events`. The cloud service reads them. Billing acts on membership changes (to bill seats) and on deleted organizations (to cancel what they were paying for). The CRM sync acts on signups, email and membership changes, and plan changes. Telemetry (PostHog) will read the same rows later. The changes recorded:
+On the hosted deployment the web app also records account and organization changes in `app.hosted_events`. The cloud service reads them. Billing acts on membership changes (to bill seats) and on deleted organizations (to cancel what they were paying for). The CRM sync acts on signups, email and membership changes, and plan changes. Product analytics (PostHog) will read the same rows later; tool-call telemetry and its reasons are never among them. The changes recorded:
 - signups and email changes;
 - organizations created and deleted;
 - members joining, leaving and changing role;
@@ -112,7 +112,7 @@ The cloud service keeps one Brevo contact per user. A signup appears in Brevo wi
 
 ### Marketing consent
 
-The hosted signup page, and the signup form behind an invitation link, show a checkbox: "Send me product news and tips by email. You can unsubscribe at any time." On the signup page it starts ticked only for a visitor outside the EU, EEA, UK, Switzerland, Canada and Brazil, where a pre-ticked box does not count as consent. Two signals decide, and either one placing the visitor inside leaves the box unticked: the browser's time zone (a zone it cannot place, including `UTC`, which privacy-hardened browsers report, counts as inside), then the visitor's country. For that the browser asks the web app, which passes the visitor's IP address to the cloud service, which looks it up with `IP_LOOKUP_URL` (default: RevBull's zip-prepop service at `https://api.revbull-services.com/ip-to-zip/zip`) and caches the answer for an hour. The browser never contacts the lookup service, and addresses are never logged. The lookup is skipped when the time zone already decides, and if it fails or times out the time zone decides alone. The invitation form always starts unticked. The zone list is in `apps/web/app/composables/marketingOptIn.ts`. Submitting with the box ticked records the time in `app.users.marketing_consent_at`. That column records consent **given at signup**, not whether the person is still subscribed: Brevo owns that, and nothing here re-adds someone who unsubscribed. The checkbox's wording on any date is in the git history of `apps/web/app/components/MarketingConsent.vue`.
+The hosted signup page, and the signup form behind an invitation link, show a checkbox: "Send me product news and tips by email. You can unsubscribe at any time." On the signup page it starts ticked only for a visitor outside the EU, EEA, UK, Switzerland, Canada and Brazil, where a pre-ticked box does not count as consent. Two signals decide, and either one placing the visitor inside leaves the box unticked: the browser's time zone (a zone it cannot place, including `UTC`, which privacy-hardened browsers report, counts as inside), then the visitor's country. For that the browser asks the web app, which passes the visitor's IP address to the cloud service, which looks it up with `IP_LOOKUP_URL` (default: RevBull's zip-prepop service at `https://api.revbull-services.com/ip-to-zip/zip`) and caches the answer for an hour. The browser never contacts the lookup service, and addresses are never logged. The lookup is skipped when the time zone already decides, and if it fails or times out the time zone decides alone. The invitation form always starts unticked. The zone list is in `apps/web/app/composables/marketingOptIn.ts`, the country list in `apps/cloud/src/consent-region.ts`. Submitting with the box ticked records the time in `app.users.marketing_consent_at`. That column records consent **given at signup**, not whether the person is still subscribed: Brevo owns that, and nothing here re-adds someone who unsubscribed. The checkbox's wording on any date is in the git history of `apps/web/app/components/MarketingConsent.vue`.
 
 A self-hosted deployment shows no checkbox and ignores the field if a client sends it.
 
@@ -152,8 +152,8 @@ That is the whole list. Nothing about connections, tokens or usage is sent. The 
 
    `BREVO_API_KEY` turns the sync on. Without it there is no sync, and any list ids set are ignored (the startup log names them), so a Railway PR environment that lost the sealed key still starts. With the key set, both list ids are required and must differ. A missing, non-numeric or repeated list id stops the service from starting.
 4. Redeploy. `GET /health` reports `crm`:
-   - `unconfigured`: no Brevo variables are set.
-   - `waiting`: the start-up checks have not passed yet. The log says why: the web app's migration `0009_marketing_consent` is missing, a list doesn't exist, the key is wrong, or an attribute exists with the wrong type. The service tries again every five minutes; billing is unaffected.
+   - `unconfigured`: `BREVO_API_KEY` is not set.
+   - `waiting`: the start-up checks have not passed yet. The log says why: the web app's migration `0009_marketing_consent` is missing, a list doesn't exist, the key is wrong, or an attribute exists with the wrong type. The service checks again every 15 seconds while the migration is missing, and every five minutes otherwise; billing is unaffected.
    - `ready`: the sync is running.
 
    The first time the sync runs, it starts from the **oldest** retained event, so every signup since the event log existed becomes a contact.
@@ -169,7 +169,7 @@ pnpm cloud:crm-backfill       # locally, with the variables in the root .env
 ```
 
 - It is safe to rerun, and safe to run while the service is running. An account that already has a contact is updated, and updates never touch lists.
-- New contacts go on the product list only, because none of these accounts were asked for consent.
+- New contacts go on the product list, and on the marketing list only when the account ticked the box at signup. Accounts from before the checkbox were never asked, so none of them reach it.
 - It sends no `SIGNUP_PLAN` or `INVITED`, because none were recorded for these accounts.
 
 ### When Brevo says no
