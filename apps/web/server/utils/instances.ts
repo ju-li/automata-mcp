@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import type { AppInstance } from './app-db'
 import type { EvolutionInstanceRecord } from './evolution-db'
 import type { ImapSecurity, ImapTarget } from './imap-client'
+import type { HostedEvent } from './hosted-events'
 import type { Actor } from './org'
 import type { ConnectionState } from '#shared/connection'
 
@@ -75,6 +76,11 @@ export interface PublicInstance {
    * a second implementation of that rule in the UI would drift.
    */
   canReadMessages?: boolean
+  /**
+   * WhatsApp only, and only while it has never been paired: when
+   * `reapUnpairedConnections` will delete it. Absent once paired, for good.
+   */
+  unpairedRemovalAt?: string
 }
 
 export function toPublicInstance(instance: AppInstance): PublicInstance {
@@ -98,6 +104,7 @@ export function toPublicInstance(instance: AppInstance): PublicInstance {
         // Not recomputed here: `canReadMessages` in evolution-db.ts is the rule,
         // and the comment there calls itself the only place it lives.
         canReadMessages: canReadMessages(instance),
+        unpairedRemovalAt: unpairedRemovalAt(instance),
       }
     case 'telegram':
       return {
@@ -645,6 +652,148 @@ export async function getInstanceHealth(instance: AppInstance): Promise<Instance
   return health
 }
 
+// ── pairing, recorded ──────────────────────────────────────────────────────
+/**
+ * How long a WhatsApp connection may exist without ever being paired before
+ * `reapUnpairedConnections` deletes it. It is not inert while it waits:
+ * Evolution keeps it `connecting` and generates a fresh QR every few minutes
+ * (each printed to Evolution's log), holds a socket for it, and auto-connects
+ * it again at every Evolution boot; it also counts against `max_connections`.
+ */
+export const UNPAIRED_TTL_MS = 60 * 60_000
+
+/** When a never-paired WhatsApp connection is due for removal; `undefined` once paired. */
+export function unpairedRemovalAt(instance: AppInstance): string | undefined {
+  if (instanceKind(instance) !== 'whatsapp' || instance.paired_at || !instance.created) return undefined
+  const created = Date.parse(instance.created)
+  return Number.isNaN(created) ? undefined : new Date(created + UNPAIRED_TTL_MS).toISOString()
+}
+
+/**
+ * Record, once, that this WhatsApp account has been linked — `paired_at`.
+ *
+ * **Ours, because Evolution's own record cannot say it.** A connection nobody
+ * has scanned yet and one that was logged out both leave Evolution's column
+ * `close` with no `ownerJid`; only a fact written here while the account was
+ * linked tells them apart, and the reaper deletes on exactly that difference.
+ *
+ * Called from every live read that can see a link — `readStatus` (dashboard,
+ * MCP status, alert sweep, webhook) and the pairing page's QR poll. Fire and
+ * forget: the conditional UPDATE makes repeats harmless, and a failed write is
+ * retried by the next read, long before the hour runs out. The in-memory set
+ * only saves the write on a process that already made it.
+ */
+export function notePaired(instance: AppInstance): void {
+  if (instance.paired_at || pairedNoted.has(instance.id)) return
+  pairedNoted.add(instance.id)
+  appDb()
+    .then(sql => sql`UPDATE app.instances SET paired_at = now() WHERE id = ${instance.id} AND paired_at IS NULL`)
+    .catch((error) => {
+      pairedNoted.delete(instance.id)
+      console.error(`[instances] could not record that connection ${instance.id} is paired:`, error)
+    })
+}
+
+const pairedNoted = new Set<string>()
+
+/** Like `notePaired`, but awaited — for the reaper, which acts on the answer. */
+async function storePaired(instance: AppInstance): Promise<void> {
+  const sql = await appDb()
+  await sql`UPDATE app.instances SET paired_at = now() WHERE id = ${instance.id} AND paired_at IS NULL`
+  pairedNoted.add(instance.id)
+}
+
+/**
+ * Has this WhatsApp connection ever been paired — asked live, right before the
+ * reaper deletes it. Records `paired_at` when the answer is yes.
+ *
+ *   paired    Evolution's live state is `open`, its row carries an `ownerJid`,
+ *             or its database holds messages for the account. The last one is
+ *             what protects a connection paired before `paired_at` existed and
+ *             logged out since: no `ownerJid`, but its history is still there.
+ *   unpaired  Evolution answered, and none of the above. Includes Evolution
+ *             no longer knowing the instance at all (404).
+ *   unknown   Something could not be asked. Never deleted on.
+ *
+ * Every read here is uncached. The status caches exist to spare dashboards;
+ * this runs once per candidate per ten minutes and decides a deletion.
+ */
+export async function pairingEvidence(instance: AppInstance): Promise<'paired' | 'unpaired' | 'unknown'> {
+  if (instance.paired_at) return 'paired'
+
+  let evolution: EvolutionClient
+  try {
+    evolution = evolutionClientForInstance(instance)
+  }
+  catch {
+    // No instance token: provisioning stores one before the row exists, so this
+    // is a row that was edited by hand. Not ours to guess about.
+    return 'unknown'
+  }
+
+  let missing = false
+  try {
+    if (await liveConnectionState(evolution, instance) === 'open') {
+      await storePaired(instance)
+      return 'paired'
+    }
+  }
+  catch (error) {
+    if (httpStatusOf(error) !== 404) return 'unknown'
+    missing = true
+  }
+
+  // The row's ownerJid: from SQL where there is a message database, else from
+  // Evolution's API. A 404 from either agrees with the live read that the
+  // instance is gone; anything else is a read that failed.
+  let ownerJid: string | undefined
+  let rowRead = false
+  if (canReadMessages(instance) && (instance.instance_id || !missing)) {
+    try {
+      const record = await readInstanceRecord(instance)
+      if (record) {
+        ownerJid = record.ownerJid
+        rowRead = true
+      }
+    }
+    catch {
+      // Falls through to the API.
+    }
+  }
+  if (!rowRead && !missing) {
+    try {
+      const rows = await evolution<EvolutionInstanceRow[]>('/instance/fetchInstances')
+      const row = Array.isArray(rows) ? rows.find(r => r?.name === instance.name) : undefined
+      if (!row) return 'unknown'
+      ownerJid = row.ownerJid ?? undefined
+    }
+    catch (error) {
+      if (httpStatusOf(error) !== 404) return 'unknown'
+    }
+  }
+  if (ownerJid) {
+    await storePaired(instance)
+    return 'paired'
+  }
+
+  // Stored history outlives a logout. Without a message database there is
+  // nothing to count, and `paired_at` plus the reads above have to do.
+  if (canReadMessages(instance) && (instance.instance_id || !missing)) {
+    try {
+      const { messages } = await countInstanceRows(instance)
+      if (messages > 0) {
+        await storePaired(instance)
+        return 'paired'
+      }
+    }
+    catch {
+      return 'unknown'
+    }
+  }
+
+  return 'unpaired'
+}
+
 // ── reconnect loops ────────────────────────────────────────────────────────
 /**
  * How recently Evolution must have written an `open` row for the read to count
@@ -754,6 +903,8 @@ async function readStatus(
   if (!row) {
     return options.counts ? { ...emptyStatus(), rowChurn: storedChurn } : { state: 'close', rowChurn: storedChurn }
   }
+
+  if (live === 'open' || row.ownerJid) notePaired(instance)
 
   const { churn, flapping } = rowChurn(storedChurn, {
     columnOpen: row.connectionStatus === 'open',
@@ -1062,7 +1213,10 @@ export async function getInstanceQr(instance: AppInstance): Promise<{ state: Con
   )
 
   if (response?.instance?.state) {
-    return { state: normalizeState(response.instance.state) }
+    const state = normalizeState(response.instance.state)
+    // The pairing page's poll is the first thing to see a scan land.
+    if (state === 'open') notePaired(instance)
+    return { state }
   }
 
   if (response?.base64 || response?.code || response?.pairingCode) {
@@ -1149,8 +1303,14 @@ export async function enableFullHistorySync(instance: AppInstance): Promise<void
  *
  * A Postgres connection owns nothing outside this app: there is no remote
  * resource to release, only a local pool to close.
+ *
+ * `event` is the hosted outbox row for the delete, written in the same
+ * transaction as the row delete.
  */
-export async function deleteInstance(instance: AppInstance): Promise<void> {
+export async function deleteInstance(
+  instance: AppInstance,
+  options: { event?: HostedEvent } = {},
+): Promise<void> {
   // Release whatever this kind holds, then delete the row — once, for every
   // kind. The ordering is the rule stated above and it is the same either way:
   // if releasing throws, the row survives and still points at the thing.
@@ -1205,8 +1365,13 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
     assertNever(kind, 'connection kind')
   }
 
+  // The outbox event commits with the row delete, so it exists exactly when the
+  // connection is gone.
   const sql = await appDb()
-  await sql`DELETE FROM app.instances WHERE id = ${instance.id}`
+  await sql.begin(async (tx) => {
+    await tx`DELETE FROM app.instances WHERE id = ${instance.id}`
+    if (options.event) await recordHostedEvent(tx, options.event)
+  })
 }
 
 // ── internals ──────────────────────────────────────────────────────────────

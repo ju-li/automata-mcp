@@ -87,7 +87,7 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              db-rows, sql-engine, pg-pool, pg-guard,
                              pg-run, pg-catalog, chats, alerts, mailer,
                              mcp-kind-tool, mcp-clients, tool-calls, telegram, telegram-db,
-                             telegram-instances, imap-client, imap-sync, imap-db,
+                             telegram-instances, imap-client, imap-sync, imap-db, unpaired-reaper,
                              mail-format, whatsapp-groups, mfa, totp, webauthn, entitlements,
                              hosted-events, cloud, …
   shared/connection.ts       InstanceKind, assertNever — imported as #shared
@@ -438,6 +438,17 @@ Telegram webhook (`api/webhook/telegram.post.ts`) resolves row by `instance_id` 
 Sweep in-process, so **multiple replicas mail multiple times**. `nitro.scheduledTasks` needs `nitro.experimental.tasks`; both in `nuxt.config.ts`.
 
 `sendAppEmail()` never throws, answers whether mail went out; with `NUXT_SMTP_HOST` unset answers false, warns once. Callers decide what "not sent" means — alert stays queued, invitation link stays on screen.
+
+## Unpaired WhatsApp connections are reaped
+
+`server/utils/unpaired-reaper.ts`, task `instances:reap-unpaired` every 10 min: WhatsApp connection with `paired_at IS NULL` one hour (`UNPAIRED_TTL_MS`) after `created` deleted, tokens cascade (#105). Not inert while waiting: Evolution keeps it `connecting`, logs ASCII QR every ~3.5 min, auto-connects at boot, counts against `max_connections`. Pairing screen shows countdown from `unpairedRemovalAt` (server-computed on `PublicInstance`); `/instances/[id]` 404 says why.
+
+Rules easy to undo:
+
+- **`paired_at` = our fact, never Evolution's.** Fresh and logged-out both `close` with no `ownerJid`; deleting a once-paired connection loses tokens + history access. `notePaired()` (instances.ts) writes it once, never cleared, from every read that can see a link: `readStatus` (dashboard, MCP, sweep, webhook) on live `open` or `ownerJid`, QR poll on `open`. Migration `0015` backfilled from alert/churn/group-scan columns and, guarded (exists + privilege + `EXCEPTION`), from Evolution's `"Instance"."ownerJid"` / `"Message"` in same DB — failure must skip, never fail boot.
+- **Live re-check before every delete** (`pairingEvidence`): `open`, `ownerJid`, or any `"Message"` row → record `paired_at`, keep. Any read failing → `unknown`, keep. Only Evolution answering without a link (incl. 404 = instance gone) deletes. Messages check = what protects pre-`paired_at` connection logged out since.
+- **Only via `deleteInstance()`**; no admin key for its server → kept, logged (deleting row would orphan the QR churn). Bring-your-own servers included. Telegram excluded (unlinked session holds nothing).
+- **Leased per row** (`reap_lease_until`, conditional UPDATE) — replica-safe. Outbox `connection.deleted` with `reason: 'unpaired_expired'` in the row delete's transaction (`deleteInstance`'s `event` option; user delete passes `reason: 'user'`).
 
 ## Organizations and roles
 

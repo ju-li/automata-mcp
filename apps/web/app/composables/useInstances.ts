@@ -22,6 +22,11 @@ export interface PublicInstanceRow {
   ownServer?: boolean
   /** WhatsApp only: whether the read tools can answer for this connection. */
   canReadMessages?: boolean
+  /**
+   * WhatsApp only, while never paired: when the connection is deleted
+   * automatically if nobody pairs it. Absent once paired.
+   */
+  unpairedRemovalAt?: string
 }
 
 /**

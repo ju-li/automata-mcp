@@ -57,6 +57,9 @@ export default defineNuxtConfig({
       '*/2 * * * *': ['imap:sync'],
       // Recorded tool calls past their 30 days. Idempotent, so replicas are fine.
       '23 4 * * *': ['mcp:prune-tool-calls'],
+      // WhatsApp connections never paired within an hour. Leased per row, so
+      // replicas are fine. See server/utils/unpaired-reaper.ts.
+      '*/10 * * * *': ['instances:reap-unpaired'],
     },
   },
 
