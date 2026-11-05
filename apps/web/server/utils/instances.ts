@@ -26,6 +26,12 @@ export type InstanceStatus = {
    * rather than by scanning a QR code.
    */
   sessionLost?: boolean
+  /**
+   * Evolution has been reopening this account's socket over and over for at
+   * least `CHURN_CONFIRM_MS`, while its column reads `open`. Reconnect cannot
+   * end it; restarting the Evolution service does. See `rowChurn`.
+   */
+  flapping?: boolean
   profileName?: string
   profilePicUrl?: string
   number?: string
@@ -615,21 +621,103 @@ export async function getInstanceStatus(
   instance: AppInstance,
   options: { freshCounts?: boolean } = {},
 ): Promise<InstanceStatus> {
-  const status = await readStatus(instance, { counts: true, freshCounts: options.freshCounts })
+  const { rowChurn: _churn, ...status } = await readStatus(instance, { counts: true, freshCounts: options.freshCounts })
   return { ...status, stats: status.stats ?? { messages: 0, chats: 0, contacts: 0 } }
 }
 
-export type InstanceHealth = Omit<InstanceStatus, 'stats'>
+export type InstanceHealth = Omit<InstanceStatus, 'stats'> & {
+  /**
+   * The churn observation after this read, for `evaluateConnectionHealth` to
+   * store — the only writer of `row_churn_since` / `row_churn_seen_at`. Not on
+   * `InstanceStatus`: the dashboard and MCP get the verdict, `flapping`.
+   */
+  rowChurn: RowChurn
+}
 
 /**
- * `getInstanceStatus` without the counts: state, `sessionLost`, `ownerJid`,
- * profile. For the alert sweep and webhook evaluation, which run once per
- * connection every few minutes and read none of the counts — so they never
- * cause one to be computed.
+ * `getInstanceStatus` without the counts: state, `sessionLost`, `flapping`,
+ * `ownerJid`, profile. For the alert sweep and webhook evaluation, which run
+ * once per connection every few minutes and read none of the counts — so they
+ * never cause one to be computed.
  */
 export async function getInstanceHealth(instance: AppInstance): Promise<InstanceHealth> {
   const { stats: _stats, ...health } = await readStatus(instance, { counts: false })
   return health
+}
+
+// ── reconnect loops ────────────────────────────────────────────────────────
+/**
+ * How recently Evolution must have written an `open` row for the read to count
+ * as "a socket just opened". A loop writes it about once a second; one ordinary
+ * reconnect writes it once, and stops counting this long afterwards.
+ */
+const ROW_RECENT_MS = 2 * 60_000
+/**
+ * How long recent writes must keep being seen before the connection is called
+ * `flapping`. Two sweeps five minutes apart can each land just after an
+ * ordinary reconnect; three in a row that all do is a socket that will not
+ * settle. Also the gap in observation after which an episode starts over.
+ */
+const CHURN_CONFIRM_MS = 10 * 60_000
+
+/** First and latest evaluation that saw a recent `open` write. Both absent: none seen. */
+export interface RowChurn {
+  since?: string
+  seenAt?: string
+}
+
+/**
+ * Fold one status read into the stored churn observation, and say whether it
+ * now amounts to a reconnect loop.
+ *
+ * **Why this exists.** Evolution 2.3.7 retries every close except `loggedOut`,
+ * `forbidden`, 402 and 406 — at once, with no backoff and no attempt count —
+ * and `createClient` replaces `this.client` without ending the previous socket,
+ * whose handlers still reconnect when it closes. Two sockets on one set of
+ * credentials then replace each other (`conflict: replaced`, 440) dozens of
+ * times a minute, indefinitely. The column reads `open` throughout and every
+ * live read lands on whichever socket just opened, so `state` and `sessionLost`
+ * both say healthy. Production ran like that for hours and nobody was told
+ * (ju-li/automata-mcp#103). Only restarting the Evolution service ends it.
+ *
+ * **The signal is Evolution's own row, never the webhook.** Each open writes
+ * the `"Instance"` row, so `updatedAt` on an `open` row trails the newest open
+ * — see `EvolutionInstanceRecord.rowWrittenAt`. A count of `connection.update`
+ * deliveries would say the same thing, but deliveries are unsigned and anyone
+ * can post one; a stranger must not be able to mail a user that their account
+ * is unstable. The webhook still matters: it makes evaluations happen, which is
+ * what refreshes the observation between sweeps.
+ *
+ * The rule, on time rather than on sample count so the webhook's extra
+ * evaluations cannot shorten it: a recent write starts an episode, every later
+ * one extends it, any read that sees no recent write ends it. `flapping` once
+ * an episode has been extended for `CHURN_CONFIRM_MS` and was last extended
+ * within that long. A read that cannot see the write time at all — no message
+ * database, a missing grant, the SQL failing — leaves the observation as it
+ * was, and the last clause lets a stale one lapse on its own.
+ */
+export function rowChurn(
+  stored: RowChurn,
+  read: { columnOpen: boolean, rowWrittenAt?: string },
+  now = Date.now(),
+): { churn: RowChurn, flapping: boolean } {
+  const churn = nextChurn(stored, read, now)
+  const since = churn.since ? Date.parse(churn.since) : Number.NaN
+  const seenAt = churn.seenAt ? Date.parse(churn.seenAt) : Number.NaN
+  const flapping = seenAt - since >= CHURN_CONFIRM_MS && now - seenAt < CHURN_CONFIRM_MS
+  return { churn, flapping }
+}
+
+function nextChurn(stored: RowChurn, read: { columnOpen: boolean, rowWrittenAt?: string }, now: number): RowChurn {
+  const writtenAt = read.rowWrittenAt ? Date.parse(read.rowWrittenAt) : Number.NaN
+  if (Number.isNaN(writtenAt)) return stored
+
+  if (!read.columnOpen || now - writtenAt >= ROW_RECENT_MS) return {}
+
+  const lastSeen = stored.seenAt ? Date.parse(stored.seenAt) : Number.NaN
+  const continuing = stored.since !== undefined && now - lastSeen < CHURN_CONFIRM_MS
+  const at = new Date(now).toISOString()
+  return { since: continuing ? stored.since : at, seenAt: at }
 }
 
 /** Drop what this module has cached about one connection. */
@@ -646,10 +734,12 @@ async function readStatus(
 ): Promise<InstanceHealth & { stats?: InstanceStats }> {
   const evolution = evolutionClientForInstance(instance)
   const viaSql = canReadMessages(instance)
+  const storedChurn: RowChurn = { since: instance.row_churn_since, seenAt: instance.row_churn_seen_at }
 
-  const [live, record, sqlStats] = await Promise.all([
+  const [live, record, rowWrittenAt, sqlStats] = await Promise.all([
     liveConnectionState(evolution, instance).catch(() => undefined),
     viaSql ? sqlInstanceRecord(instance) : undefined,
+    viaSql ? sqlRowWrittenAt(instance) : undefined,
     viaSql && options.counts ? cachedSqlCounts(instance, Boolean(options.freshCounts)) : undefined,
   ])
 
@@ -661,11 +751,20 @@ async function readStatus(
     if (options.counts) stats ??= api && statsFromApiRow(api)
   }
 
-  if (!row) return options.counts ? emptyStatus() : { state: 'close' }
+  if (!row) {
+    return options.counts ? { ...emptyStatus(), rowChurn: storedChurn } : { state: 'close', rowChurn: storedChurn }
+  }
+
+  const { churn, flapping } = rowChurn(storedChurn, {
+    columnOpen: row.connectionStatus === 'open',
+    rowWrittenAt,
+  })
 
   return {
     state: live ?? 'unknown',
     sessionLost: row.connectionStatus === 'open' && live !== undefined && live !== 'open',
+    flapping,
+    rowChurn: churn,
     profileName: row.profileName ?? undefined,
     profilePicUrl: row.profilePicUrl ?? undefined,
     number: row.number ?? row.ownerJid?.split('@')[0],
@@ -702,6 +801,24 @@ async function sqlInstanceRecord(instance: AppInstance): Promise<EvolutionInstan
   }
   catch (error) {
     noteSqlFallback('instance row', instance, error)
+    return undefined
+  }
+}
+
+/**
+ * When Evolution last wrote the row, or `undefined` for "cannot tell" — never
+ * throws. Uncached, like the row: a loop is told from one reconnect by how
+ * recent this is. A missing grant on `"updatedAt"` is logged by
+ * `noteSqlFallback` like the other status grants, and costs only flapping
+ * detection — there is no fallback for it.
+ */
+async function sqlRowWrittenAt(instance: AppInstance): Promise<string | undefined> {
+  if (sqlDenied('row write time', instance)) return undefined
+  try {
+    return await readInstanceRowWrittenAt(instance)
+  }
+  catch (error) {
+    noteSqlFallback('row write time', instance, error)
     return undefined
   }
 }
@@ -827,6 +944,20 @@ function noteSqlFallback(what: string, instance: AppInstance, error: unknown): v
   if (last !== undefined && Date.now() - last < SQL_FALLBACK_QUIET_MS) return
   sqlFallbackLoggedAt.set(key, Date.now())
 
+  if (what === 'row write time') {
+    // No fallback behind this one, so the usual wording would be untrue.
+    if (code === '42501') {
+      console.warn(
+        '[instances] the Evolution database role cannot read "Instance"."updatedAt", so a '
+        + 'WhatsApp reconnect loop is not detected. Add it to the status grants in '
+        + 'docs/whatsapp.md "Reading and searching messages".',
+      )
+      return
+    }
+    console.error('[instances] could not read when Evolution last wrote an instance row; reconnect-loop detection skipped:', error)
+    return
+  }
+
   if (code === '42501') {
     console.warn(
       `[instances] status ${what}: the Evolution database role lacks a grant, so status reads `
@@ -854,26 +985,36 @@ async function liveConnectionState(evolution: EvolutionClient, instance: AppInst
  * Bring a dropped session back from its stored credentials, without a QR scan
  * if they still hold.
  *
- * Which Evolution call does that depends on the live state, and the wrong one is
- * a silent no-op:
+ * Only one live state has a call that does that safely:
  *
  *   close       `GET /instance/connect`. In `close` Evolution builds a new socket
  *               from the stored credentials.
- *   connecting  `POST /instance/restart`. `connect` in this state only returns
- *               the cached QR object, so a socket that hung while connecting is
- *               never replaced by it. Restart ends the socket, and Evolution's
- *               close handler reconnects.
- *   unknown     restart as well; Evolution answers that the instance does not
- *               exist, which is the error worth surfacing.
- *   open        nothing. This is also the one state in which neither call could
- *               help if the socket were in fact dead: Baileys' `end()` returns
- *               early on a socket it already closed, and both routes answer
- *               `open` with the state.
+ *   connecting  nothing — 409. `connect` in this state only returns the cached
+ *               QR object, and the other candidate, `restart`, is never sent
+ *               (below). A socket that hung while connecting is recovered by
+ *               restarting the Evolution service, which is what the refusal says.
+ *   unknown     nothing — 409. Evolution has no live socket it will tell us
+ *               about; the same restart is the remedy.
+ *   open        nothing. This is also the one state in which no call could help
+ *               if the socket were in fact dead: Baileys' `end()` returns early
+ *               on a socket it already closed.
  *
- * Either call can still leave the account needing a QR — rejected credentials
+ * **Never `POST /instance/restart`.** On Baileys, 2.3.7's controller takes a
+ * fallback branch (`instance.controller.ts` `restartInstance`) that calls
+ * `client.end()` — a close with no status code, which Evolution's own close
+ * handler answers by reconnecting — and then calls `connectToWhatsapp` itself.
+ * When the close has been processed by then, that is a second `createClient`
+ * beside the handler's, and `createClient` does not end the socket it replaces:
+ * two sockets on one set of credentials, replacing each other as fast as they
+ * can log in. It is a race, unconfirmed as the cause of
+ * ju-li/automata-mcp#103, but the loop it can start costs a real number its
+ * standing with WhatsApp, and in the order where it does not double up it does
+ * nothing a service restart would not.
+ *
+ * `connect` can still leave the account needing a QR — rejected credentials
  * make Evolution emit one — which the caller sees as a state it can pair from.
  *
- * Both routes catch their own failures and answer **200** with
+ * The route catches its own failures and answers **200** with
  * `{ error: true, message }`, so a resolved request is not a success.
  */
 export async function reconnectInstance(instance: AppInstance): Promise<ConnectionState> {
@@ -882,11 +1023,17 @@ export async function reconnectInstance(instance: AppInstance): Promise<Connecti
 
   const before = await liveConnectionState(evolution, instance)
   if (before === 'open') return before
+  if (before !== 'close') {
+    throw createError({
+      statusCode: 409,
+      statusMessage: before === 'connecting'
+        ? 'Evolution is still connecting this account. If it stays that way, restart the Evolution service — that reconnects it without a new QR scan.'
+        : 'Evolution has no live connection for this account. Restarting the Evolution service reconnects it without a new QR scan.',
+    })
+  }
   forgetInstanceStatus(instance.id)
 
-  const response = before === 'close'
-    ? await evolution<EvolutionActionResponse>(`/instance/connect/${name}`)
-    : await evolution<EvolutionActionResponse>(`/instance/restart/${name}`, { method: 'POST' })
+  const response = await evolution<EvolutionActionResponse>(`/instance/connect/${name}`)
 
   if (response?.error) {
     // Handled, so Nitro would log nothing; the message is Evolution's own.

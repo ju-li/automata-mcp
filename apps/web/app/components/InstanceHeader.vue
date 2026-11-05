@@ -17,7 +17,9 @@ const props = withDefaults(defineProps<{
   kind: InstanceKind
   /** A messaging session that dropped; see `ConnectionBadge`. */
   lost?: boolean
-}>(), { canManage: false, lost: false })
+  /** A WhatsApp reconnect loop; see `ConnectionBadge`. */
+  flapping?: boolean
+}>(), { canManage: false, lost: false, flapping: false })
 
 defineEmits<{ renamed: [] }>()
 </script>
@@ -39,7 +41,7 @@ defineEmits<{ renamed: [] }>()
         />
         <slot />
       </div>
-      <ConnectionBadge :state="props.state" :kind="props.kind" :lost="props.lost" />
+      <ConnectionBadge :state="props.state" :kind="props.kind" :lost="props.lost" :flapping="props.flapping" />
     </div>
   </div>
 </template>

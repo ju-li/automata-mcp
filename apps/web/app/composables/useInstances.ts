@@ -39,6 +39,8 @@ export interface InstanceListRow {
   state: ConnectionState
   /** WhatsApp only: was connected, and Evolution's live socket no longer is. */
   sessionLost?: boolean
+  /** WhatsApp only: Evolution keeps reopening the socket. See `rowChurn` on the server. */
+  flapping?: boolean
   target?: string
   detail?: string
   profileName?: string

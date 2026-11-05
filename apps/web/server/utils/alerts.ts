@@ -1,4 +1,5 @@
 import type { AppInstance } from './app-db'
+import type { RowChurn } from './instances'
 import { assertNever } from '#shared/connection'
 import type { ConnectionState, InstanceKind } from '#shared/connection'
 
@@ -38,6 +39,11 @@ type ConnectionHealth = {
   /** Linked, and the transport dropped. Reconnect is enough. */
   sessionLost: boolean
   /**
+   * WhatsApp only: Evolution keeps reopening the socket — see `rowChurn` in
+   * instances.ts. Reconnect cannot help; restarting the Evolution service does.
+   */
+  flapping: boolean
+  /**
    * The connection has been linked at some point, so a bad state is an outage
    * rather than a connection nobody has finished setting up.
    */
@@ -57,7 +63,9 @@ type ConnectionHealth = {
 
 /**
  * Read one connection's live health. Throws only where the underlying read
- * does; both reads report an unreachable backend as `unknown` instead.
+ * does; both reads report an unreachable backend as `unknown` instead. For
+ * WhatsApp it also stores the reconnect-loop observation the read produced
+ * (`storeRowChurn`), since that verdict is built across reads.
  *
  * **What "paired" means differs by kind, and both answers are deliberate.**
  *
@@ -82,10 +90,12 @@ async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 't
       // Health only: this runs per connection every five minutes and reads none
       // of the counts, so it must not cause one to be computed.
       const status = await getInstanceHealth(instance)
+      await storeRowChurn(instance, status.rowChurn, Boolean(status.flapping))
       return {
         kind,
         state: status.state,
         sessionLost: Boolean(status.sessionLost),
+        flapping: Boolean(status.flapping),
         paired: Boolean(status.ownerJid),
         knownUnlinked: false,
         revoked: false,
@@ -101,6 +111,7 @@ async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 't
         kind,
         state: status.state,
         sessionLost: Boolean(status.sessionLost),
+        flapping: false,
         paired: linked || unreachable,
         knownUnlinked: !linked && !unreachable,
         revoked: Boolean(status.revoked),
@@ -110,6 +121,39 @@ async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 't
     }
     default:
       return assertNever(kind)
+  }
+}
+
+/**
+ * Persist the churn observation a WhatsApp health read produced — this file is
+ * the only writer of `row_churn_since` / `row_churn_seen_at`, as it is of
+ * `down_since` and `alerted_at`. Written only when it changed, and with plain
+ * SQL rather than `updateRow`, so bookkeeping every sweep does not move the
+ * connection's `updated` stamp.
+ *
+ * Logs once per episode, when it first amounts to a loop. The fix is the
+ * operator's — restarting the Evolution service — and the operator reads logs,
+ * not the mail that goes to the organization.
+ */
+async function storeRowChurn(instance: AppInstance, churn: RowChurn, flapping: boolean): Promise<void> {
+  const since = instance.row_churn_since
+  const seenAt = instance.row_churn_seen_at
+  if (churn.since === since && churn.seenAt === seenAt) return
+
+  const sql = await appDb()
+  await sql`
+    UPDATE app.instances
+    SET row_churn_since = ${churn.since ?? null}, row_churn_seen_at = ${churn.seenAt ?? null}
+    WHERE id = ${instance.id}
+  `
+
+  const wasFlapping = rowChurn({ since, seenAt }, { columnOpen: false }).flapping
+  if (flapping && !wasFlapping) {
+    console.error(
+      `[alerts] WhatsApp connection ${instance.id} (${instance.name}) has been reconnecting continuously `
+      + `since ${churn.since}: Evolution keeps reopening its socket while the stored status reads open. `
+      + 'Reconnect cannot end this; restart the Evolution service (no QR scan needed). See docs/whatsapp.md.',
+    )
   }
 }
 
@@ -194,7 +238,9 @@ async function evaluate(instance: AppInstance): Promise<void> {
     return
   }
 
-  const healthy = health.state === 'open' && !health.sessionLost
+  // A loop reads `open` on most live reads — whichever socket just logged in —
+  // so without the last clause it is healthy by construction.
+  const healthy = health.state === 'open' && !health.sessionLost && !health.flapping
 
   if (healthy) {
     if (!instance.down_since && !instance.alerted_at) return
@@ -327,6 +373,24 @@ function outageMail(instance: AppInstance, health: ConnectionHealth, canManage: 
   const label = connectionLabel(instance, health.kind)
   const url = connectionUrl(instance)
 
+  // Not "disconnected": most reads find it connected, and some messages get
+  // through. Saying it is down would be contradicted by the dashboard badge
+  // the reader opens next.
+  if (health.flapping) {
+    return {
+      subject: `${label} keeps reconnecting`,
+      text: [
+        `${label} is stuck reconnecting over and over, so anything connected to it — `
+        + 'including MCP tools — may miss messages or fail to send.',
+        '',
+        whatsappLoopCause(instance, canManage),
+        ...(url ? ['', url] : []),
+        '',
+        'You will get one more email when it is working again.',
+      ].join('\n'),
+    }
+  }
+
   const cause = health.kind === 'telegram' ? telegramOutageCause(health, canManage) : whatsappOutageCause(health, canManage)
 
   return {
@@ -341,6 +405,22 @@ function outageMail(instance: AppInstance, health: ConnectionHealth, canManage: 
       'You will get one more email when it is working again.',
     ].join('\n'),
   }
+}
+
+/**
+ * Who can end a reconnect loop is whoever runs the Evolution service — never a
+ * button in this app, since Reconnect does nothing to an `open` socket. On the
+ * deployment's own server that is its operator, who on a self-hosted install is
+ * likely the admin reading this and on the hosted one is not; the wording holds
+ * for both. On a server the organization supplied, it is them.
+ */
+function whatsappLoopCause(instance: AppInstance, canManage: boolean): string {
+  const service = onDeploymentServer(instance)
+    ? 'whoever runs this deployment has to restart its Evolution service'
+    : 'the Evolution server this connection uses has to be restarted'
+  return canManage
+    ? `Evolution keeps opening a new connection for this account and WhatsApp keeps replacing it. Reconnect cannot end this — ${service}. No QR scan is needed, and the phone stays linked. Repeated logins can get a number flagged by WhatsApp, so this is worth doing soon.`
+    : `Evolution keeps opening a new connection for this account and WhatsApp keeps replacing it. Nothing needs scanning; ${service}, and an admin of your organization has been told as well.`
 }
 
 function whatsappOutageCause(health: ConnectionHealth, canManage: boolean): string {

@@ -216,6 +216,44 @@ export interface EvolutionInstanceRecord {
   number?: string
   /** ISO 8601, UTC. */
   disconnectionAt?: string
+  /**
+   * When Evolution last wrote this row (its Prisma `@updatedAt`), ISO 8601, UTC.
+   * Read by `readInstanceRowWrittenAt`, not by `readInstanceRecord`; see there.
+   * 2.3.7 writes it on four occasions only: a socket opening, a QR moving the
+   * column to `connecting`, a close it will not retry, and logout cleanup. The
+   * last three leave the column something other than `open`, so an `open` row
+   * written recently means a socket opened recently — the one signal of a
+   * reconnect loop the live state cannot give (see `rowChurn` in instances.ts).
+   *
+   * Only this SQL read supplies it. `fetchInstances` would, but that path is
+   * cached for minutes, which is too coarse to tell a loop from one reconnect.
+   */
+  rowWrittenAt?: string
+}
+
+/**
+ * When Evolution last wrote this account's `"Instance"` row — see
+ * `EvolutionInstanceRecord.rowWrittenAt` — or `undefined` when there is no row
+ * or the column is NULL.
+ *
+ * A separate statement from `readInstanceRecord`, not a seventh column there:
+ * the least-privilege grant in docs/whatsapp.md is column by column, and a role
+ * granted before this column was read would fail that whole query with 42501
+ * and push every status read onto `fetchInstances`. Here a missing grant costs
+ * only this signal. Same primary-key lookup, same `id = <this account>` rule.
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`.
+ */
+export async function readInstanceRowWrittenAt(instance: AppInstance): Promise<string | undefined> {
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const [row] = await sql<Array<{ updatedAt: Date | null }>>`
+    SELECT ("updatedAt" AT TIME ZONE 'UTC') AS "updatedAt"
+    FROM "Instance"
+    WHERE id = ${instanceId}
+  `
+  return row?.updatedAt?.toISOString()
 }
 
 /**

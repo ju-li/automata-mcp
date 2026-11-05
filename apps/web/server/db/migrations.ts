@@ -588,4 +588,22 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN tool_calls_required boolean NOT NULL DEFAULT false;
     `,
   },
+  {
+    name: '0014_instance_row_churn',
+    sql: /* sql */ `
+      -- A WhatsApp socket that keeps reopening: Evolution 2.3.7 retries a
+      -- 440 (conflict: replaced) close at once, and two sockets on one set of
+      -- credentials replace each other indefinitely while the column reads
+      -- 'open'. Every open writes Evolution's "Instance" row, so an 'open' row
+      -- written within the last two minutes, observed continuously for ten,
+      -- is that loop. These hold the observation, written only by
+      -- server/utils/alerts.ts: row_churn_since is the first evaluation that
+      -- saw a recent write, row_churn_seen_at the latest. Both empty means no
+      -- churn seen. Stored rather than in memory so replicas and restarts
+      -- agree on how long it has lasted.
+      ALTER TABLE app.instances
+        ADD COLUMN row_churn_since   timestamptz,
+        ADD COLUMN row_churn_seen_at timestamptz;
+    `,
+  },
 ]

@@ -25,12 +25,13 @@ export interface StateDisplay {
  * that dropped is `close` or `connecting` like one that was never paired, and the
  * words for those — "scan a QR code" — are the wrong instruction for a phone that
  * is still linked. The server tells the two apart (`sessionLost`); this only
- * chooses what to say.
+ * chooses what to say. `flapping` likewise: a reconnect loop reads `open`, and
+ * only the server can tell it from a healthy connection.
  */
 export function describeState(
   state: ConnectionState,
   kind: InstanceKind,
-  options: { lost?: boolean } = {},
+  options: { lost?: boolean, flapping?: boolean } = {},
 ): StateDisplay {
   switch (kind) {
     case 'postgres':
@@ -46,11 +47,24 @@ export function describeState(
       }
 
     case 'whatsapp':
+      // Checked first: a loop reads `open` on most polls, and "Connected" over
+      // it is the answer ju-li/automata-mcp#103 was about.
+      if (options.flapping) {
+        return {
+          label: 'Unstable',
+          variant: 'destructive',
+          hint: 'Evolution keeps reconnecting this account. Messages may be missed until the Evolution service is restarted.',
+        }
+      }
       if (options.lost && state !== 'open') {
         return {
           label: 'Connection lost',
           variant: 'destructive',
-          hint: 'WhatsApp dropped this account\'s connection. Evolution normally reconnects within seconds — if it stays like this, reconnect.',
+          // Reconnect is offered only from `close` (`reconnectInstance`), so
+          // the other states name what does help instead.
+          hint: state === 'close'
+            ? 'WhatsApp dropped this account\'s connection. Evolution normally reconnects within seconds — if it stays like this, reconnect.'
+            : 'WhatsApp dropped this account\'s connection. Evolution normally reconnects within seconds — if it stays like this, restart the Evolution service.',
         }
       }
       switch (state) {

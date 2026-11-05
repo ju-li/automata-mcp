@@ -53,6 +53,16 @@ What it will and will not send:
 - The mail says which fix applies: a dropped session asks for **Reconnect**, an
   unlinked account asks for a QR scan. Sending someone to scan a code they did
   not need to costs a real phone.
+- A WhatsApp **reconnect loop** counts as an outage too, even though nearly every
+  live read finds it `open`. Two sockets on one set of credentials keep
+  replacing each other (`conflict: replaced`), and neither the webhook nor the
+  live state shows it. The sweep reads when Evolution last wrote the account's
+  `"Instance"` row, which happens on every socket open. Ten minutes of fresh
+  writes on an `open` row marks the connection unstable, and the 10-minute grace
+  above runs from there, so the mail goes out 20–25 minutes into the loop. It
+  says restarting the Evolution service is the fix, since Reconnect cannot help,
+  and the web log gets a line saying the same. See [whatsapp.md](whatsapp.md)
+  "Stuck reconnecting".
 
 **Telegram** follows the same rules, with four failures told apart:
 
