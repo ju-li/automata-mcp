@@ -382,6 +382,18 @@ export interface AppMcpToken {
  * One MCP client that started a session with a token, as it described itself
  * in `initialize`. Client-chosen text throughout. See server/utils/mcp-clients.ts.
  */
+/** One recorded MCP tool call. See tool-calls.ts. */
+export interface AppMcpToolCall {
+  id: string
+  token_id: string
+  instance: string
+  tool: string
+  ok: boolean
+  reason?: string
+  user_agent?: string
+  at: string
+}
+
 export interface AppMcpTokenClient {
   token_id: string
   client_name: string

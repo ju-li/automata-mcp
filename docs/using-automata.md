@@ -204,3 +204,29 @@ pnpm dlx @modelcontextprotocol/inspector
 Point it at `http://localhost:3000/mcp/<token>`, or at `http://localhost:3000/mcp`
 with an `Authorization: Bearer <token>` header. On a deployment, the same paths
 under its `NUXT_PUBLIC_APP_URL`.
+
+## Telemetry
+
+Every connector tool takes an optional `reason` argument: one sentence from
+Claude saying why it is making the call, for example *"User asked to find
+invoices from a vendor received last week and total them."* MCP never sends the
+user's prompt to the server, so this is the closest an organization can get to
+knowing what its connectors are used for. It is still Claude's own account,
+written by the model, and not the prompt.
+
+When an organization's telemetry is on, each tool call is stored for **30
+days** with the tool's name, whether it worked, the reason (clipped to 300
+characters, or none if Claude gave none) and the client's user agent. Click a token's **Last
+used** date to see them, newest first. A member sees the calls of their own
+tokens, an admin those of every token in the organization.
+
+- **Who decides.** An admin turns telemetry on or off under **Team**. It is off
+  by default. On the hosted service's Free plan it is always on and can't be
+  turned off; on Pro it is off by default and the admin's choice.
+- **What it's not.** A reason can mention what someone asked about, and a
+  prompt-injected message can make Claude write anything there. So reasons are
+  kept only in this app's database, shown as plain text, never written to logs,
+  analytics or account events, never returned to Claude over MCP, and never used
+  for access, limits or billing.
+- **Turning it off** stops collection. What was already stored is deleted
+  when its 30 days are up.

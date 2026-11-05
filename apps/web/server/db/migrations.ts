@@ -548,4 +548,44 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ON app.mcp_token_clients (token_id, last_seen DESC);
     `,
   },
+  {
+    name: '0013_mcp_tool_calls',
+    sql: /* sql */ `
+      -- One row per MCP tool call, while the organization records them: which
+      -- tool, whether it succeeded, the request's User-Agent, and the optional
+      -- reason the model gave for the call. See server/utils/tool-calls.ts.
+      --
+      -- reason is model-written free text and can quote what the user asked
+      -- about, so it is treated like a tool argument: kept here only, for 30
+      -- days (the mcp:prune-tool-calls task), never copied into hosted_events.
+      -- Self-reported throughout — nothing may authorize, bill or rate-limit on
+      -- it. Lengths match the clipping in tool-calls.ts. Rows cascade with the
+      -- token and the connection; neither cascade deletes anything upstream.
+      CREATE TABLE app.mcp_tool_calls (
+        id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        token_id   text NOT NULL REFERENCES app.mcp_tokens (id) ON DELETE CASCADE,
+        instance   text NOT NULL REFERENCES app.instances (id) ON DELETE CASCADE,
+        tool       text NOT NULL CHECK (length(tool) <= 100),
+        ok         boolean NOT NULL,
+        reason     text CHECK (length(reason) <= 300),
+        user_agent text CHECK (length(user_agent) <= 200),
+        at         timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX mcp_tool_calls_token_idx ON app.mcp_tool_calls (token_id, at DESC, id DESC);
+      CREATE INDEX mcp_tool_calls_instance_idx ON app.mcp_tool_calls (instance);
+      CREATE INDEX mcp_tool_calls_at_idx ON app.mcp_tool_calls (at);
+
+      -- Whether calls are recorded. record_tool_calls is the organization's own
+      -- choice, off by default. tool_calls_required is written only by the
+      -- cloud service (on for Free on the hosted deployment) and, while true,
+      -- overrides the choice and refuses changes to it. Self-hosted
+      -- organizations never have it set. Like max_*, it outlives hosted mode:
+      -- unsetting NUXT_CLOUD_URL leaves it as it was.
+      ALTER TABLE app.organizations
+        ADD COLUMN record_tool_calls   boolean NOT NULL DEFAULT false,
+        ADD COLUMN tool_calls_required boolean NOT NULL DEFAULT false;
+      ALTER TABLE app.entitlement_defaults
+        ADD COLUMN tool_calls_required boolean NOT NULL DEFAULT false;
+    `,
+  },
 ]

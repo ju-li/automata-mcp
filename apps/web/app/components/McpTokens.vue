@@ -157,6 +157,8 @@ const assigneeOptions = computed(() =>
 
 const howTo = ref<TokenRow | null>(null)
 const clientsOf = ref<TokenRow | null>(null)
+/** Whose tool-call history is open. See ToolCallsDialog. */
+const callsOf = ref<TokenRow | null>(null)
 
 /** The line under a token's name: its clients by name, newest session first. */
 function clientSummary(token: TokenRow) {
@@ -407,7 +409,21 @@ function statusOf(token: TokenRow) {
                 {{ formatDate(token.created) }}
               </TableCell>
               <TableCell class="text-muted-foreground">
-                {{ token.last_used_at ? formatDate(token.last_used_at) : 'Never' }}
+                <!-- Opens the token's recorded tool calls. On the date rather
+                     than a row button: the actions column is already as wide
+                     as an ordinary screen allows. -->
+                <button
+                  v-if="token.last_used_at"
+                  type="button"
+                  class="underline-offset-2 hover:underline"
+                  title="Show recorded tool calls"
+                  @click="callsOf = token"
+                >
+                  {{ formatDate(token.last_used_at) }}
+                </button>
+                <template v-else>
+                  Never
+                </template>
               </TableCell>
               <TableCell class="text-muted-foreground">
                 {{ token.expires_at ? formatDate(token.expires_at) : 'Never' }}
@@ -629,6 +645,13 @@ function statusOf(token: TokenRow) {
       :scope="howTo?.scope"
       @update:open="value => { if (!value) howTo = null }"
       @create="createFromHowTo"
+    />
+
+    <ToolCallsDialog
+      :open="Boolean(callsOf)"
+      :token-id="callsOf?.id"
+      :label="callsOf?.label"
+      @update:open="value => { if (!value) callsOf = null }"
     />
 
     <TokenClientsDialog

@@ -55,6 +55,8 @@ export default defineNuxtConfig({
       '0 * * * *': ['alerts:register-webhooks'],
       // Mailbox headers. Safe on several replicas: each mailbox is leased.
       '*/2 * * * *': ['imap:sync'],
+      // Recorded tool calls past their 30 days. Idempotent, so replicas are fine.
+      '23 4 * * *': ['mcp:prune-tool-calls'],
     },
   },
 

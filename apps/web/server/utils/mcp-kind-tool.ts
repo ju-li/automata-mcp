@@ -1,4 +1,6 @@
+import { z } from 'zod'
 import type { ZodRawShape } from 'zod'
+import { MAX_REASON_INPUT, recordToolCall } from './tool-calls'
 import type { InstanceKind } from './mcp-scope'
 import type { McpAuth } from './mcp-auth'
 
@@ -41,6 +43,27 @@ export function kindsForTool(name: string): readonly InstanceKind[] | undefined 
 export function toolServesKind(name: string, kind: InstanceKind): boolean {
   return TOOL_KINDS.get(name)?.includes(kind) ?? false
 }
+
+/**
+ * The optional `reason` argument every tool takes: the model's one-sentence
+ * account of why it is calling the tool. MCP never sends the user's prompt, so
+ * this is the closest a connection owner can get to "what was this for".
+ *
+ * **Injected here, once, rather than declared per tool**, so the description
+ * cannot drift and no tool can forget it. It is removed from the arguments
+ * before the tool's own handler runs (`countedHandler`), so no tool sees it or
+ * can come to depend on it.
+ *
+ * **Optional, and clipped rather than refused.** A client that omits it, or a
+ * model that writes too much, must never turn a real call into a validation
+ * error; `MAX_REASON_INPUT` only caps request size, and storage clips to
+ * `MAX_REASON`. See tool-calls.ts for what happens to it, and why it is never
+ * logged, exported or returned.
+ */
+const REASON_FIELD = z.string().max(MAX_REASON_INPUT).optional().describe(
+  'One sentence: why you are calling this tool, i.e. what the user asked for. '
+  + 'Do not include names, contact details, message text or other personal data.',
+)
 
 /**
  * Define an MCP tool that belongs to one or more kinds of connection.
@@ -92,8 +115,17 @@ export function defineKindTool<
 
   TOOL_KINDS.set(rest.name, kinds)
 
+  // A tool argument of the same name would be shadowed by the injected one and
+  // then stripped before its handler ran — fail at load instead.
+  if (rest.inputSchema && 'reason' in rest.inputSchema) {
+    throw new Error(`[mcp] tool ${rest.name} declares a 'reason' argument; that name is reserved (see REASON_FIELD)`)
+  }
+
   return defineMcpTool<InputSchema, OutputSchema>({
     ...rest,
+    // Cast: the injected field is invisible to the tool's own handler type on
+    // purpose — the handler never receives it.
+    inputSchema: { ...rest.inputSchema, reason: REASON_FIELD } as unknown as InputSchema,
     handler: countedHandler(rest.name, rest.handler),
     // Inferred from the directory too; stated so a move cannot silently change
     // which connections the tool belongs to. For a single-kind tool the group
@@ -111,14 +143,28 @@ export function defineKindTool<
 }
 
 /**
- * The tool's handler, counted for the hosted offering's usage rollup — tool
- * name and outcome only, never arguments or results (see hosted-events.ts).
- * Counting is synchronous and never throws, so it cannot change what the tool
- * answers; on a self-hosted deployment it returns at its first check.
+ * The tool's handler, with `reason` taken off its arguments, counted for the
+ * hosted offering's usage rollup — tool name and outcome only, never arguments
+ * or results (see hosted-events.ts) — and recorded with its reason when the
+ * organization records tool calls (tool-calls.ts). Counting and recording are
+ * synchronous and never throw, so neither can change what the tool answers; on
+ * a self-hosted deployment that records nothing both return at their first
+ * check.
+ *
+ * Every tool has an input schema now (the injected `reason` guarantees one),
+ * so the SDK always calls `handler(args, extra)` and the arguments are `args[0]`.
  */
 function countedHandler<H>(name: string, handler: H): H {
   if (typeof handler !== 'function') return handler
   const wrapped = async function (this: unknown, ...args: unknown[]) {
+    let reason: unknown
+    const [input] = args
+    if (input && typeof input === 'object' && !Array.isArray(input) && 'reason' in input) {
+      const { reason: given, ...rest } = input as Record<string, unknown>
+      reason = given
+      args = [rest, ...args.slice(1)]
+    }
+
     let ok = false
     try {
       const result = await (handler as (...a: unknown[]) => unknown).apply(this, args)
@@ -127,8 +173,17 @@ function countedHandler<H>(name: string, handler: H): H {
     }
     finally {
       try {
-        const auth = useEvent().context.mcpAuth as McpAuth | undefined
-        if (auth) countToolCall(auth.instance.org, auth.tokenId, name, ok)
+        const event = useEvent()
+        const auth = event.context.mcpAuth as McpAuth | undefined
+        if (auth) {
+          countToolCall(auth.instance.org, auth.tokenId, name, ok)
+          recordToolCall(auth, {
+            tool: name,
+            ok,
+            reason: typeof reason === 'string' ? reason : undefined,
+            userAgent: getRequestHeader(event, 'user-agent'),
+          })
+        }
       }
       catch {
         // No request context: nothing to attribute the call to.
