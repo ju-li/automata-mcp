@@ -4,7 +4,7 @@ import type { MentionDirectory } from './mentions'
 import { applyMentions, authorName, contactsToDirectory, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
 import type { ChatActivityRow } from './evolution-db'
 import { canReadMessages, lastMessagePayloads, listChatActivity, listMessagesPage, senderOf } from './evolution-db'
-import { readStoredGroups, replaceStoredGroups } from './whatsapp-groups'
+import { GROUP_SCAN_FAILURE_BACKOFF_MS, GROUP_SCAN_TIMEOUT_MS, claimGroupScan, readStoredGroups, recordGroupScanFailure, replaceStoredGroups } from './whatsapp-groups'
 
 /**
  * Reading conversations out of Evolution.
@@ -986,71 +986,63 @@ async function fetchContacts(instance: AppInstance, evolution: EvolutionClient):
 /**
  * Group subjects and sizes, keyed by group JID — whatever the cache holds now.
  *
- * **This lookup is expensive, so no request waits for it.** Evolution answers
- * `fetchAllGroups` from Baileys rather than its database: one cheap
- * `groupFetchAllParticipating()`, then a profile picture — an uncached round trip
- * to WhatsApp — for every group, sequentially. `getParticipants=false` does not
- * skip the pictures and no endpoint returns subjects without them. An account in
- * fifty groups did not finish inside the old 8-second timeout at all, so every
- * caller paid the full 8 s and got nothing back.
+ * **Fetching them from WhatsApp is expensive, so no request waits for it and it
+ * is rare.** Evolution answers `fetchAllGroups` from Baileys rather than its
+ * database, and one call costs about two WhatsApp queries per group — a
+ * `groupMetadata` each, set off by the `groups.update` the fetch emits, and a
+ * profile picture each, sequentially. `getParticipants=false` skips neither and
+ * no endpoint returns subjects without them. Run every few minutes, WhatsApp
+ * answered with `rate-overlimit`; on a fifty-group account it also outlasted
+ * any timeout a request could afford. So the scan runs at most once per
+ * `GROUP_SCAN_INTERVAL_MS` per account, by whichever replica claims it, and
+ * everything else reads `app.whatsapp_groups` — `whatsapp-groups.ts` states the
+ * schedule and the staleness rule.
  *
- * So `staleWhileRevalidate`: a missing or expired entry starts one background
- * refresh per account, and the request reads what is there. With no caller
- * waiting, the refresh gets a timeout it can realistically finish in.
+ * The in-memory cache (`staleWhileRevalidate`) only saves the table read. A
+ * cold process awaits one indexed app-database read as its `seed`, never
+ * Evolution, so the first listing after a deploy, on another replica, or for a
+ * disconnected account still has subjects and `participantCount`. After
+ * `GROUP_TTL_MS` an entry is re-read in the background, which picks up a scan
+ * another replica ran; the read that finds a scan due runs it, in the
+ * background too.
  *
- * **What is there on a cold process comes from `app.whatsapp_groups`** — the
- * last successful refresh, stored by `whatsapp-groups.ts`, which also states the
- * staleness rule. The request awaits that one indexed app-database read (the
- * cache's `seed`), never Evolution, so the first listing after a deploy or on
- * another replica still has subjects and `participantCount`. Evolution 2.3.7
- * keeps subjects only in memory, so there is nothing upstream to read instead.
- * The refresh itself also checks the table first: rows written within
- * `GROUP_SHARED_FRESH_MS` mean another replica just scanned, and its answer is
- * taken rather than scanning again (without picture URLs, which are not stored;
- * the listing falls back to the contact's). Half the TTL, not all of it: this
- * process's own write is just under one TTL old when its next refresh starts,
- * and must not count as someone else's fresh scan.
- *
- * A failure is an expected offline state (no live socket while disconnected),
- * not a fault: the last good answer — seeded or fetched — keeps being served and
- * the next attempt waits out `GROUP_RETRY_MS`, so a disconnected account shows
- * the subjects it had when it was last connected and costs Evolution one group
- * scan per window per replica, not one per read. It is logged, briefly, since a
- * lookup that never succeeds is otherwise invisible — the names just stay what
- * they were.
+ * A failed scan is usually an expected offline state (no live socket while
+ * disconnected), not a fault: the stored subjects keep being served and every
+ * replica waits out `GROUP_SCAN_FAILURE_BACKOFF_MS`. It is logged, briefly,
+ * since a scan that never succeeds is otherwise invisible — the names just
+ * stay what they were. With nothing stored, groups are named from contacts and
+ * then their bare id, with no `participantCount`.
  */
-const GROUP_TIMEOUT_MS = 60_000
 const GROUP_TTL_MS = 5 * 60_000
-const GROUP_RETRY_MS = 5 * 60_000
-const GROUP_SHARED_FRESH_MS = GROUP_TTL_MS / 2
-/** Stored groups older than this are not used to seed a cold cache. */
-const GROUP_SEED_MAX_AGE_MS = 30 * 24 * 60 * 60_000
 const emptyGroups: Map<string, GroupInfo> = new Map()
 
 const groupCache = staleWhileRevalidate<Map<string, GroupInfo>>({
   ttlMs: GROUP_TTL_MS,
-  retryTtlMs: GROUP_RETRY_MS,
+  // `undefined` here means "nothing stored and no scan to run" — another cheap
+  // table read later, not a WhatsApp retry. Those are governed by the table.
+  retryTtlMs: GROUP_TTL_MS,
   empty: emptyGroups,
-  seed: instanceId => readStoredGroups(instanceId, GROUP_SEED_MAX_AGE_MS),
+  seed: instanceId => readStoredGroups(instanceId),
 })
 
 function groupsFor(instance: AppInstance, evolution: EvolutionClient): Promise<Map<string, GroupInfo>> {
   return groupCache(instance.id, async () => {
-    const recent = await readStoredGroups(instance.id, GROUP_SHARED_FRESH_MS)
-    if (recent) return recent
+    if (!await claimGroupScan(instance.id)) return readStoredGroups(instance.id)
 
     // `getParticipants` is required — Evolution answers 400 without it.
     const rows = await evolution<EvolutionGroupRow[]>(
       `/group/fetchAllGroups/${encodeURIComponent(instance.name)}?getParticipants=false`,
-      { timeout: GROUP_TIMEOUT_MS },
+      { timeout: GROUP_SCAN_TIMEOUT_MS },
     ).catch((error: unknown) => {
-      console.warn(`[chats] group lookup failed for connection ${instance.id}; retrying in ${GROUP_RETRY_MS / 60_000} min:`, error instanceof Error ? error.message : error)
+      console.warn(`[chats] group scan failed for connection ${instance.id}; next attempt in ${GROUP_SCAN_FAILURE_BACKOFF_MS / 60_000} min:`, error instanceof Error ? error.message : error)
       return undefined
     })
 
-    // `undefined` and not an empty map: an account really can be in no groups,
-    // and that answer should be cached for the full window rather than retried.
-    if (!Array.isArray(rows)) return undefined
+    if (!Array.isArray(rows)) {
+      await recordGroupScanFailure(instance.id)
+      // Keep serving what is stored; `undefined` keeps whatever the cache holds.
+      return readStoredGroups(instance.id)
+    }
 
     const byJid = new Map<string, GroupInfo>()
     for (const row of rows) {
@@ -1062,8 +1054,9 @@ function groupsFor(instance: AppInstance, evolution: EvolutionClient): Promise<M
       })
     }
 
-    // Already off the request path; the cache does not wait on the write.
-    void replaceStoredGroups(instance.id, byJid)
+    // Records the scan and releases the lease. An empty map is a real answer —
+    // an account can be in no groups — and is stored as such.
+    await replaceStoredGroups(instance.id, byJid)
 
     return byJid
   })

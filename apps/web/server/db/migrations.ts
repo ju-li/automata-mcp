@@ -493,4 +493,28 @@ export const APP_MIGRATIONS: AppMigration[] = [
       );
     `,
   },
+  {
+    name: '0011_whatsapp_group_scans',
+    sql: /* sql */ `
+      -- When each WhatsApp connection's group list was last fetched from
+      -- WhatsApp, shared by every replica. One fetchAllGroups costs about two
+      -- WhatsApp queries per group (Evolution answers the groups.update it
+      -- triggers with a groupMetadata per group, then fetches every group's
+      -- picture), and WhatsApp answers repeated runs with rate-overlimit. So a
+      -- scan runs only when none succeeded within the scan interval and none
+      -- failed within the back-off, and only by the replica holding the lease;
+      -- everyone else names groups from app.whatsapp_groups.
+      --
+      -- lease_until is claimed by a conditional UPDATE, like mail_sync_state,
+      -- so no database connection is held across the scan. NULL is free —
+      -- not '-infinity', which the app pool's timestamp transform cannot
+      -- turn into an ISO string.
+      CREATE TABLE app.whatsapp_group_scans (
+        instance_id text PRIMARY KEY REFERENCES app.instances (id) ON DELETE CASCADE,
+        scanned_at  timestamptz,
+        failed_at   timestamptz,
+        lease_until timestamptz
+      );
+    `,
+  },
 ]
