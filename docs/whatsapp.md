@@ -185,6 +185,41 @@ After the usual ten-minute grace period, everyone who can reach the connection
 is emailed (see [alerts.md](alerts.md)). That takes the message database URL
 and, with a dedicated role, the `"updatedAt"` grant above.
 
+## Connections never paired are removed after an hour
+
+A WhatsApp connection that nobody pairs within **one hour** of creating it is
+deleted automatically, together with any connector tokens on it. While it waits,
+it isn't idle. Evolution keeps it `connecting`, generates a fresh QR every few
+minutes and prints each one to its log, and reconnects it at every Evolution
+restart. On the hosted offering it also counts toward the organization's
+connection limit. The pairing screen shows how much time is left.
+
+The `instances:reap-unpaired` task runs every ten minutes. These rules decide
+what it deletes:
+
+- **Only connections this app has never seen paired.** The app records the first
+  time it sees an account linked (`app.instances.paired_at`). A logout later
+  does not clear it, so a connection that was paired and later signed out is
+  never removed. Rows that existed before this was added were backfilled from
+  alert history and, where Evolution shares the app's database, from Evolution's
+  `ownerJid` and stored messages.
+- **Re-checked live just before deleting.** If Evolution now reports the account
+  `open` or linked, or its database holds messages for it, the connection is
+  marked paired and kept. If the check can't reach Evolution or its database,
+  the connection is kept and checked again on the next run.
+- **Deleted the same way as the Delete button**: the instance is first removed
+  from Evolution, then the row. If this deployment has no admin key for the
+  connection's server, the connection is kept, because deleting the row would
+  leave the instance generating QRs there with nothing recording it. This applies
+  to bring-your-own servers too, using that server's own key.
+- Each row is leased while it is checked, so several replicas can run the task.
+  Each deletion logs one line with the connection and organization ids. On the
+  hosted offering it also writes a `connection.deleted` event with
+  `reason: 'unpaired_expired'`.
+
+Telegram connections are not affected. An unlinked Telegram session holds no
+socket and polls nothing.
+
 ## Importing existing history
 
 WhatsApp hands over past conversations **once**, in a burst it pushes while a

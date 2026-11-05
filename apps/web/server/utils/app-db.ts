@@ -355,6 +355,15 @@ export interface AppInstance {
    */
   row_churn_since?: string
   row_churn_seen_at?: string
+  /**
+   * WhatsApp only: when this app first saw the account linked. Never cleared —
+   * a logout does not make a paired connection an unfinished one. Written by
+   * `notePaired` in instances.ts; a connection still without it an hour after
+   * `created` is deleted by `reapUnpairedConnections`.
+   */
+  paired_at?: string
+  /** That task's claim on this row, so two replicas never both delete it. */
+  reap_lease_until?: string
 }
 
 export interface AppMcpToken {

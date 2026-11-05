@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { Loader2Icon } from '@lucide/vue'
-import { useIntervalFn } from '@vueuse/core'
+import { Loader2Icon, TriangleAlertIcon } from '@lucide/vue'
+import { useIntervalFn, useNow } from '@vueuse/core'
 import { toast } from 'vue-sonner'
 
 /**
@@ -120,6 +120,20 @@ const display = computed(() => describeState(state.value, 'whatsapp', { lost: mo
  */
 const canReconnect = computed(() => state.value === 'close')
 const evolutionServer = computed(() => (data.value?.instance.ownServer ? 'your Evolution server' : 'the Evolution server'))
+
+/**
+ * A connection nobody has ever paired is deleted an hour after it was created
+ * (server/utils/unpaired-reaper.ts). Said on the pairing screen with the time
+ * left, so it is not a surprise later. The server decides whether it applies —
+ * a re-pair after a logout carries no deadline.
+ */
+const now = useNow({ interval: 30_000 })
+const removalMinutes = computed(() => {
+  const at = data.value?.instance.unpairedRemovalAt
+  if (!at) return undefined
+  const left = Date.parse(at) - now.value.getTime()
+  return Number.isNaN(left) ? undefined : Math.max(0, Math.ceil(left / 60_000))
+})
 
 const qr = ref<QrResponse['qr'] | null>(null)
 const pairingTimedOut = ref(false)
@@ -422,6 +436,24 @@ const importHistory = () => backToPairing(
         <p v-if="qr?.pairingCode" class="text-sm text-muted-foreground">
           Or enter code <code class="font-mono font-medium">{{ qr.pairingCode }}</code> on your phone.
         </p>
+
+        <p v-if="removalMinutes !== undefined && removalMinutes > 0" class="max-w-sm text-center text-xs text-muted-foreground">
+          A connection that isn't paired within an hour of being created is removed automatically.
+          {{ removalMinutes === 1 ? '1 minute' : `${removalMinutes} minutes` }} left.
+        </p>
+        <!-- Past the deadline: deletion is imminent and cannot be undone, so it
+             reads as a warning rather than as helper text. -->
+        <div
+          v-else-if="removalMinutes === 0"
+          role="alert"
+          class="flex max-w-sm items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+        >
+          <TriangleAlertIcon class="mt-0.5 size-4 shrink-0" />
+          <p>
+            This connection wasn't paired within an hour and is about to be removed automatically.
+            You can create a new one.
+          </p>
+        </div>
 
         <div v-if="pairingTimedOut" class="text-center">
           <p class="text-sm text-muted-foreground">

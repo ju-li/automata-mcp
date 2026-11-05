@@ -606,4 +606,67 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN row_churn_seen_at timestamptz;
     `,
   },
+  {
+    name: '0015_instance_paired_at',
+    sql: /* sql */ `
+      -- WhatsApp only: when this app first saw the account linked (a live
+      -- read answering 'open', or Evolution's row carrying an ownerJid).
+      -- Written once and never cleared, so a logout later does not make a
+      -- connection that was paired look like one nobody finished setting up.
+      -- A connection with this still NULL an hour after it was created is
+      -- deleted by the instances:reap-unpaired task, through deleteInstance().
+      --
+      -- reap_lease_until is that task's claim on a row, a conditional UPDATE
+      -- like whatsapp_group_scans, so two replicas never both ask Evolution
+      -- to delete one instance. NULL is free.
+      ALTER TABLE app.instances
+        ADD COLUMN paired_at        timestamptz,
+        ADD COLUMN reap_lease_until timestamptz;
+
+      -- Backfill: existing connections that were ever paired must not be
+      -- reaped. now(), not the real moment, which nobody recorded. The task
+      -- re-checks live before deleting anything, so what this misses is
+      -- caught there; what it must never do is miss in the other direction.
+      --
+      -- Only the alert sweep writes down_since, and only for a paired
+      -- connection; churn is seen only on an 'open' row; a group scan
+      -- succeeds only over a live socket.
+      UPDATE app.instances i
+      SET paired_at = now()
+      WHERE i.kind = 'whatsapp'
+        AND (i.down_since IS NOT NULL
+          OR i.alerted_at IS NOT NULL
+          OR i.row_churn_since IS NOT NULL
+          OR EXISTS (SELECT 1 FROM app.whatsapp_group_scans s
+                     WHERE s.instance_id = i.id AND s.scanned_at IS NOT NULL));
+
+      -- In the default deployment Evolution writes into this same database, so
+      -- its own records say which accounts were linked: an ownerJid, or any
+      -- stored message. Guarded three ways, because none of it is ours: the
+      -- tables may not exist (a separate Evolution database), this role may
+      -- not read them, and Evolution may change them. Any failure skips the
+      -- backfill rather than failing the migration — and with it the boot.
+      DO $$
+      BEGIN
+        IF to_regclass('public."Instance"') IS NOT NULL
+           AND has_table_privilege('public."Instance"', 'SELECT') THEN
+          UPDATE app.instances i
+          SET paired_at = now()
+          WHERE i.kind = 'whatsapp' AND i.paired_at IS NULL AND i.instance_id <> ''
+            AND EXISTS (SELECT 1 FROM public."Instance" e
+                        WHERE e.id = i.instance_id AND e."ownerJid" IS NOT NULL);
+        END IF;
+        IF to_regclass('public."Message"') IS NOT NULL
+           AND has_table_privilege('public."Message"', 'SELECT') THEN
+          UPDATE app.instances i
+          SET paired_at = now()
+          WHERE i.kind = 'whatsapp' AND i.paired_at IS NULL AND i.instance_id <> ''
+            AND EXISTS (SELECT 1 FROM public."Message" m WHERE m."instanceId" = i.instance_id);
+        END IF;
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'paired_at backfill from Evolution''s tables skipped: %', SQLERRM;
+      END
+      $$;
+    `,
+  },
 ]
