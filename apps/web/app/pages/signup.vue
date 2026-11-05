@@ -45,7 +45,7 @@ const plans: { id: PlanChoice, name: string, price: string, note: string, featur
     name: 'Free',
     price: '$0',
     note: 'For trying it out on your own.',
-    features: ['1 connection', '1 connector token', 'Just you', 'Unlimited requests', 'Tool calls and their reasons kept for 30 days'],
+    features: ['1 connection', '1 connector token', 'Just you', 'Unlimited requests', 'Telemetry, stored for 30 days'],
   },
   {
     id: 'pro',
