@@ -28,6 +28,11 @@ interface StatusResponse {
   profilePicUrl?: string
   number?: string
   stats: { messages: number, chats: number, contacts: number }
+  /**
+   * The plan imports only the recent history WhatsApp sends any linked device,
+   * and refuses a full-history import. Decided by the server.
+   */
+  recentHistoryOnly?: boolean
 }
 
 interface QrResponse {
@@ -36,6 +41,9 @@ interface QrResponse {
 }
 
 const id = computed(() => props.id)
+
+/** Only with the hosted offering is there a Billing page to point at. */
+const { billing } = usePlan()
 
 /**
  * Set while the history import runs. The server caches counts for a few minutes,
@@ -457,7 +465,18 @@ const importHistory = () => backToPairing(
       <!-- The last sentence points at a section a member does not have, and
            re-importing costs a QR scan on a real phone — so they are told what
            the counts mean, not how to change them. -->
-      <p class="text-xs text-muted-foreground">
+      <p v-if="data?.recentHistoryOnly" class="text-xs text-muted-foreground">
+        Your plan imports recent history only: when a device is linked, WhatsApp
+        hands over the recent part of your conversations, and everything since is
+        kept. Older messages are not imported.
+        <template v-if="canManage && billing">
+          <NuxtLink to="/billing" class="underline underline-offset-2">
+            Upgrade
+          </NuxtLink>
+          to import an account's full history.
+        </template>
+      </p>
+      <p v-else class="text-xs text-muted-foreground">
         WhatsApp hands over its history only at the moment a device is linked, so
         these counts are the import from pairing plus everything since.
         <template v-if="canManage">
@@ -509,7 +528,11 @@ const importHistory = () => backToPairing(
             with the same phone.
           </ConfirmAction>
 
+          <!-- Hidden rather than left to fail: the server refuses it with 402
+               on a plan limited to recent history, and the note above says
+               why and where to upgrade. -->
           <ConfirmAction
+            v-if="!data?.recentHistoryOnly"
             label="Import full history"
             title="Import this account's full history?"
             confirm-label="Disconnect and import"

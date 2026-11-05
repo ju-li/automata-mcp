@@ -517,4 +517,25 @@ export const APP_MIGRATIONS: AppMigration[] = [
       );
     `,
   },
+  {
+    name: '0012_recent_history_only',
+    sql: /* sql */ `
+      -- Whether this organization's WhatsApp connections on the deployment's
+      -- own Evolution server import only the recent history WhatsApp sends any
+      -- linked device, rather than asking for the full history at pairing
+      -- (Baileys' requireFullSync). A capability, not a plan: the cloud service
+      -- sets it for Free, since a full import is most of the disk an account
+      -- costs. false is no restriction — every self-hosted organization.
+      --
+      -- Read when a connection is created and before every pairing (see
+      -- whatsappHistoryLimited in instances.ts). It deletes nothing: history
+      -- already imported stays, and clearing it does not import anything until
+      -- the account is re-paired with "Import full history".
+      ALTER TABLE app.organizations
+        ADD COLUMN recent_history_only boolean NOT NULL DEFAULT false;
+
+      ALTER TABLE app.entitlement_defaults
+        ADD COLUMN recent_history_only boolean NOT NULL DEFAULT false;
+    `,
+  },
 ]

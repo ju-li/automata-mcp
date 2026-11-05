@@ -19,12 +19,14 @@ export type Db = postgres.Sql | postgres.TransactionSql
 export const CLOUD_SCHEMA = 'cloud'
 
 /**
- * The web app migration this service needs: it adds the entitlement columns,
- * the outbox and `app.entitlement_defaults`. The service waits for it rather
- * than failing, since the two are deployed together and either may start
- * first.
+ * The web app migration this service needs: the latest one that adds a
+ * column `plans.ts` writes (`recent_history_only`); earlier ones added the
+ * other entitlement columns, the outbox and `app.entitlement_defaults`.
+ * Migrations apply in order, so waiting for this one waits for those too. The
+ * service waits rather than failing, since the two are deployed together and
+ * either may start first.
  */
-const REQUIRED_APP_MIGRATION = '0007_entitlement_defaults'
+const REQUIRED_APP_MIGRATION = '0012_recent_history_only'
 
 export function connect(databaseUrl: string): Sql {
   return postgres(databaseUrl, {

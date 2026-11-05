@@ -14,13 +14,24 @@
  * couple of seconds instead of the few minutes they are otherwise cached for
  * (`getInstanceStatus`). Only the history-import screen after pairing sends it,
  * since it decides the import is over when the counts stop moving.
+ *
+ * A WhatsApp connection also carries `recentHistoryOnly`: whether its plan
+ * imports only recent history, so the dashboard can say so and offer Billing
+ * instead of a full-history import the server would refuse. Decided by
+ * `whatsappHistoryLimited`, not by the browser.
  */
 export default defineEventHandler(async (event) => {
   const { instance } = await requireReadableInstance(event, getRouterParam(event, 'id'))
   const freshCounts = getQuery(event).fresh === 'counts'
 
+  const [state, recentHistoryOnly] = await Promise.all([
+    connectionState(instance, { freshCounts }),
+    instanceKind(instance) === 'whatsapp' ? whatsappHistoryLimited(instance) : undefined,
+  ])
+
   return {
     instance: toPublicInstance(instance),
-    ...await connectionState(instance, { freshCounts }),
+    ...state,
+    ...(recentHistoryOnly !== undefined && { recentHistoryOnly }),
   }
 })

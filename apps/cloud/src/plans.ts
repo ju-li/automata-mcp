@@ -3,20 +3,29 @@ import type { Db } from './db.ts'
 /**
  * The plans, and the one place their rules live.
  *
- *   free   1 connection, 1 connector token, 1 user
+ *   free   1 connection, 1 connector token, 1 user; WhatsApp imports recent
+ *          history only at pairing, not the full history (disk)
  *   pro    7-day trial (card upfront), then a flat monthly price with five
  *          users included and a per-seat price beyond; everything unlimited
  *
  * The web app enforces limits but knows no plan: it reads three numbers per
  * organization (`max_connections`, `max_tokens`, `max_members`, NULL =
- * unlimited) and the defaults a new organization is born with. This file is
+ * unlimited), one flag (`recent_history_only`, false = full WhatsApp history)
+ * and the defaults a new organization is born with. This file is
  * what writes both, from the Stripe status `syncOrg` (billing.ts) stores.
  */
 
 export type PlanName = 'free' | 'pro'
 
-/** What Free allows. Pro has no limits; it bills seats instead. */
-export const FREE_LIMITS = { connections: 1, tokens: 1, members: 1 } as const
+/**
+ * What Free allows. Pro has no limits; it bills seats instead.
+ *
+ * `recentHistoryOnly`: a full WhatsApp history import is most of the disk an
+ * account costs us, so Free imports only the recent slice WhatsApp sends any
+ * linked device. Applies to connections on our Evolution server only; history
+ * already imported is never deleted by it, in either direction.
+ */
+export const FREE_LIMITS = { connections: 1, tokens: 1, members: 1, recentHistoryOnly: true } as const
 
 /** Members included in Pro's base price; each one beyond is a billed seat. */
 export const INCLUDED_SEATS = 5
@@ -52,13 +61,14 @@ export function billableSeats(members: number): number {
  */
 export async function writeEntitlementDefaults(db: Db): Promise<void> {
   await db`
-    INSERT INTO app.entitlement_defaults (id, max_connections, max_tokens, max_members, plan_label)
-    VALUES ('new_organization', ${FREE_LIMITS.connections}, ${FREE_LIMITS.tokens}, ${FREE_LIMITS.members}, 'Free')
+    INSERT INTO app.entitlement_defaults (id, max_connections, max_tokens, max_members, recent_history_only, plan_label)
+    VALUES ('new_organization', ${FREE_LIMITS.connections}, ${FREE_LIMITS.tokens}, ${FREE_LIMITS.members}, ${FREE_LIMITS.recentHistoryOnly}, 'Free')
     ON CONFLICT (id) DO UPDATE SET
-      max_connections = EXCLUDED.max_connections,
-      max_tokens      = EXCLUDED.max_tokens,
-      max_members     = EXCLUDED.max_members,
-      plan_label      = EXCLUDED.plan_label,
+      max_connections     = EXCLUDED.max_connections,
+      max_tokens          = EXCLUDED.max_tokens,
+      max_members         = EXCLUDED.max_members,
+      recent_history_only = EXCLUDED.recent_history_only,
+      plan_label          = EXCLUDED.plan_label,
       updated         = now()
   `
 }
@@ -91,10 +101,11 @@ export async function applyPlanEntitlements(db: Db, orgId?: string): Promise<Pla
       WHERE ${orgId ?? null}::text IS NULL OR id = ${orgId ?? null}
     )
     UPDATE app.organizations o SET
-      max_connections = CASE WHEN next.is_pro THEN NULL ELSE ${FREE_LIMITS.connections}::int END,
-      max_tokens      = CASE WHEN next.is_pro THEN NULL ELSE ${FREE_LIMITS.tokens}::int END,
-      max_members     = CASE WHEN next.is_pro THEN NULL ELSE ${FREE_LIMITS.members}::int END,
-      plan_label      = next.label
+      max_connections     = CASE WHEN next.is_pro THEN NULL ELSE ${FREE_LIMITS.connections}::int END,
+      max_tokens          = CASE WHEN next.is_pro THEN NULL ELSE ${FREE_LIMITS.tokens}::int END,
+      max_members         = CASE WHEN next.is_pro THEN NULL ELSE ${FREE_LIMITS.members}::int END,
+      recent_history_only = CASE WHEN next.is_pro THEN false ELSE ${FREE_LIMITS.recentHistoryOnly}::boolean END,
+      plan_label          = next.label
     FROM next
     WHERE o.id = next.id
     RETURNING o.id, next.previous AS "from", next.label AS "to"

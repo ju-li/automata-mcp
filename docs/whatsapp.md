@@ -163,7 +163,7 @@ scanned:
 | | Where | Effect if wrong |
 |---|---|---|
 | `DATABASE_SAVE_DATA_HISTORIC=true` | evolution service env | Evolution receives the burst and drops it |
-| `syncFullHistory: true` | sent at `POST /instance/create`, in `server/utils/instances.ts` | Only recent messages arrive, and groups are skipped |
+| `syncFullHistory: true` | sent at `POST /instance/create`, in `server/utils/instances.ts` | Only the recent slice arrives (`type: 3` below) |
 | A fresh device link | scanning the QR | Reconnecting an existing session sends no history |
 
 New accounts get all three automatically. An account paired before this was
@@ -193,6 +193,35 @@ Caveats worth knowing before you rely on it:
   group chats appear in `list-chats` and in the token scope picker.
 - **Reads get slower as it grows.** Evolution indexes its `Message` table on
   `instanceId` only; `remoteJid` lives inside a JSONB column with no index.
+
+### Recent history only (hosted Free)
+
+On the hosted offering, a Free organization's connections are created with
+`syncFullHistory: false` (`app.organizations.recent_history_only`, written by
+the cloud service; see [Plans and billing](billing.md)). Baileys then sends
+`requireFullSync: false`, and WhatsApp hands over only what it gives any linked
+browser — the `type: 3` sync above. Evolution still stores it, since it
+persists every history sync type under `DATABASE_SAVE_DATA_HISTORIC`. How far
+back that reaches is WhatsApp's choice, not a setting here.
+
+Group chats still sync live and in that slice: with `syncFullHistory` off,
+Evolution's group filter falls back to `groupsIgnore`, which instances are
+created with off.
+
+The limit is enforced in three places, all through `whatsappHistoryLimited()`
+in `server/utils/instances.ts`:
+
+- **Create** sends `syncFullHistory: false`.
+- **Import full history** answers 402 `plan_limit`; the dashboard hides it and
+  points admins at Billing instead.
+- **Pairing**: before the QR poll's `connect`, a connection still carrying
+  `syncFullHistory: true` (created while the organization was on Pro) has it
+  turned off, at most once a minute per connection. Never the other way:
+  upgrading turns nothing on, since full history costs a QR scan and that is the
+  owner's call.
+
+It never applies to a bring-your-own Evolution server, and it deletes nothing
+already imported. Self-hosted deployments never set it.
 
 ## Bring your own Evolution server
 

@@ -25,6 +25,17 @@ Self-hosted deployments never run the cloud service.
 | Connector tokens | 1 | unlimited |
 | Users | 1 | 5 included, $10/user/month after |
 | Requests | unlimited | unlimited |
+| WhatsApp history at pairing | recent only | full |
+
+**WhatsApp history.** A full history import is most of the disk an account
+costs, so a Free organization's WhatsApp connections ask WhatsApp for the
+recent history only: what it hands any linked browser, rather than everything
+the phone holds. Live messages from then on are all kept. It applies only to
+connections on the deployment's own Evolution server, never to a bring-your-own
+one, and it deletes nothing: history already imported stays when an
+organization moves to Free, and moving to Pro imports nothing by itself. An
+admin who upgrades presses **Import full history** on the connection, which
+costs a QR scan. See [WhatsApp history](whatsapp.md#recent-history-only-hosted-free).
 
 The numbers are set in three places:
 
@@ -78,7 +89,7 @@ retry settings in Stripe decide how long that lasts.
 
 The plan and its limits are kept apart:
 - **Plan:** Stripe status, decided by the billing code.
-- **Limits:** three plain numbers on each organization, `max_connections`, `max_tokens` and `max_members`. NULL means unlimited.
+- **Limits:** three plain numbers on each organization, `max_connections`, `max_tokens` and `max_members` (NULL means unlimited), and one flag, `recent_history_only` (false means full WhatsApp history).
 
 The cloud service writes those numbers whenever a subscription changes, and for every organization each time it starts. The web app's checks only ever read them, so they keep working, from the database, even while the cloud service is down.
 
@@ -87,7 +98,7 @@ A new organization gets the limits in `app.entitlement_defaults`, which the clou
 Unsetting `NUXT_CLOUD_URL` stops new limits from being written. It does **not** clear limits already written. A deployment that switches the hosted offering off after using it should clear them:
 
 ```sql
-UPDATE app.organizations SET max_connections = NULL, max_tokens = NULL, max_members = NULL, plan_label = NULL;
+UPDATE app.organizations SET max_connections = NULL, max_tokens = NULL, max_members = NULL, recent_history_only = false, plan_label = NULL;
 ```
 
 ## Account events
@@ -288,7 +299,7 @@ Railway injects `PORT=8080` into every service, and the cloud service follows it
 
 Before the cloud service existed, the web app talked to Stripe itself, configured with `NUXT_BILLING` and `NUXT_STRIPE_*`. To move over:
 
-1. Deploy the cloud service (step 6). It writes `app.entitlement_defaults` and re-derives every organization's limits as soon as the web app's migration `0007_entitlement_defaults` has run.
+1. Deploy the cloud service (step 6). It writes `app.entitlement_defaults` and re-derives every organization's limits as soon as the web app's migration `0012_recent_history_only` has run.
 2. On the web service, set `NUXT_CLOUD_URL` and `NUXT_CLOUD_ADMIN_KEY`, and remove `NUXT_BILLING` and the four `NUXT_STRIPE_*` variables.
 3. In Stripe, change the webhook destination's URL from `https://<web app>/api/webhook/stripe` to `https://<cloud service>/webhooks/stripe`. The signing secret stays the same.
 

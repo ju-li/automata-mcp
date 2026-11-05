@@ -208,6 +208,10 @@ export async function provisionWhatsappInstance(
   const admin = createEvolutionClient(creds)
   const name = generateInstanceName()
 
+  // Read before anything is provisioned, like the checks above. A user's own
+  // server is their disk, so the plan's history limit never applies there.
+  const fullHistory = server ? true : !await orgRecentHistoryOnly(await appDb(), actor.org.id)
+
   const created = await admin<{ instance?: { instanceId?: string }, hash?: string | { apikey?: string } }>(
     '/instance/create',
     {
@@ -223,7 +227,12 @@ export async function provisionWhatsappInstance(
         // that fetches history later. Side effect worth knowing: Evolution's
         // `shouldIgnoreJid` stops filtering `@g.us` when this is on, so group
         // chats sync too, regardless of `groupsIgnore`.
-        syncFullHistory: true,
+        //
+        // Off for an organization limited to recent history: Baileys then sends
+        // `requireFullSync: false`, and WhatsApp hands over only the recent
+        // slice it gives any linked browser — still imported, since Evolution
+        // persists every history sync type under SAVE_DATA.HISTORIC.
+        syncFullHistory: fullHistory,
       },
     },
   )
@@ -910,6 +919,10 @@ export async function reconnectInstance(instance: AppInstance): Promise<Connecti
 export async function getInstanceQr(instance: AppInstance): Promise<{ state: ConnectionState, qr?: InstanceQr }> {
   const evolution = evolutionClientForInstance(instance)
 
+  // Before `connect`: in `close` it builds the socket that pairs, and the
+  // setting reaches Baileys only when a socket is built.
+  await applyHistoryLimitBeforePairing(instance)
+
   const response = await evolution<Record<string, any>>(
     `/instance/connect/${encodeURIComponent(instance.name)}`,
   )
@@ -967,6 +980,9 @@ export async function logoutInstance(instance: AppInstance): Promise<void> {
  * Callers must confirm with the user first. This disconnects the account.
  */
 export async function enableFullHistorySync(instance: AppInstance): Promise<void> {
+  // Before anything changes: refused, the account stays linked.
+  if (await whatsappHistoryLimited(instance)) throw fullHistoryLimitError()
+
   const evolution = evolutionClientForInstance(instance)
   const name = encodeURIComponent(instance.name)
 
@@ -1060,6 +1076,68 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
 
   const sql = await appDb()
   await sql`DELETE FROM app.instances WHERE id = ${instance.id}`
+}
+
+/**
+ * Whether this WhatsApp connection may import only recent history: its
+ * organization is limited to that (`recent_history_only`, which the cloud
+ * service sets for Free) **and** it lives on the deployment's own Evolution
+ * server. A bring-your-own server stores history on the user's disk, which is
+ * what the limit is about, so it never applies there.
+ *
+ * The one place the rule lives — provisioning, the full-history import and
+ * pairing all ask here.
+ */
+export async function whatsappHistoryLimited(instance: AppInstance): Promise<boolean> {
+  if (!onDeploymentServer(instance)) return false
+  return await orgRecentHistoryOnly(await appDb(), instance.org)
+}
+
+/**
+ * When each connection's history setting was last checked before pairing. The
+ * QR poll runs every two seconds; one check a minute is enough, since the
+ * setting matters only at the moment a socket is built.
+ */
+const historyLimitChecked = new Map<string, number>()
+const HISTORY_LIMIT_CHECK_MS = 60_000
+
+/**
+ * Turn `syncFullHistory` off before a limited connection pairs.
+ *
+ * A connection created under a limit already has it off. This covers the one
+ * created with it on — by an organization that was unlimited then (a lapsed
+ * Pro), or before the limit existed — which would otherwise import the full
+ * history at its next pairing. One-directional on purpose: lifting the limit
+ * turns nothing on. Full history then arrives only through "Import full
+ * history", which the owner chooses because it costs a QR scan.
+ *
+ * Errors propagate, so the poll fails rather than pair with the setting unknown.
+ */
+async function applyHistoryLimitBeforePairing(instance: AppInstance): Promise<void> {
+  const now = Date.now()
+  const checked = historyLimitChecked.get(instance.id)
+  if (checked && now - checked < HISTORY_LIMIT_CHECK_MS) return
+
+  if (await whatsappHistoryLimited(instance)) {
+    const evolution = evolutionClientForInstance(instance)
+    const name = encodeURIComponent(instance.name)
+    // Read-modify-write, for the reasons `enableFullHistorySync` gives.
+    const current = await evolution<EvolutionSettings | null>(`/settings/find/${name}`)
+    if (current?.syncFullHistory) {
+      await evolution(`/settings/set/${name}`, {
+        method: 'POST',
+        body: settingsBody(current, { syncFullHistory: false }),
+      })
+      console.info(`[instances] ${instance.id} (${instance.name}): full-history sync turned off before pairing — the organization imports recent history only`)
+    }
+  }
+
+  // Bounded by sweeping old entries rather than by connection count: a
+  // pairing that ended long ago has nothing left to check.
+  for (const [id, at] of historyLimitChecked) {
+    if (now - at >= HISTORY_LIMIT_CHECK_MS) historyLimitChecked.delete(id)
+  }
+  historyLimitChecked.set(instance.id, now)
 }
 
 // ── internals ──────────────────────────────────────────────────────────────
