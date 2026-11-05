@@ -377,3 +377,18 @@ export interface AppMcpToken {
   /** Appended to every message the send tools send with this token. Absent = off. */
   send_disclaimer?: string
 }
+
+/**
+ * One MCP client that started a session with a token, as it described itself
+ * in `initialize`. Client-chosen text throughout. See server/utils/mcp-clients.ts.
+ */
+export interface AppMcpTokenClient {
+  token_id: string
+  client_name: string
+  client_version: string
+  protocol_version?: string
+  user_agent?: string
+  first_seen: string
+  last_seen: string
+  sessions: number
+}

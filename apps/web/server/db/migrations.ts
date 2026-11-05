@@ -517,4 +517,35 @@ export const APP_MIGRATIONS: AppMigration[] = [
       );
     `,
   },
+  {
+    name: '0012_mcp_token_clients',
+    sql: /* sql */ `
+      -- Which MCP clients have started a session with each connector token:
+      -- the clientInfo and protocolVersion of every accepted initialize. One
+      -- row per client per token, since one bearer token can be pasted into
+      -- several clients at once and a single column would show only the last.
+      --
+      -- Every value is what the client chose to send. It is a support and
+      -- leak hint, never identity: nothing may authorize on it. The lengths
+      -- match the clipping in server/utils/mcp-clients.ts, which also keeps
+      -- each token to its newest rows, so a holder sending a fresh name on
+      -- every initialize cannot grow this without bound.
+      --
+      -- last_seen is the last session started, not the last tool call; that
+      -- stays app.mcp_tokens.last_used_at. Rows cascade with the token.
+      CREATE TABLE app.mcp_token_clients (
+        token_id         text NOT NULL REFERENCES app.mcp_tokens (id) ON DELETE CASCADE,
+        client_name      text NOT NULL CHECK (length(client_name) <= 100),
+        client_version   text NOT NULL CHECK (length(client_version) <= 100),
+        protocol_version text CHECK (length(protocol_version) <= 100),
+        user_agent       text CHECK (length(user_agent) <= 200),
+        first_seen       timestamptz NOT NULL DEFAULT now(),
+        last_seen        timestamptz NOT NULL DEFAULT now(),
+        sessions         integer NOT NULL DEFAULT 1 CHECK (sessions > 0),
+        PRIMARY KEY (token_id, client_name, client_version)
+      );
+      CREATE INDEX mcp_token_clients_recent_idx
+        ON app.mcp_token_clients (token_id, last_seen DESC);
+    `,
+  },
 ]

@@ -86,7 +86,7 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              mentions, redact, net-guard, keyed-resource,
                              db-rows, sql-engine, pg-pool, pg-guard,
                              pg-run, pg-catalog, chats, alerts, mailer,
-                             mcp-kind-tool, telegram, telegram-db,
+                             mcp-kind-tool, mcp-clients, telegram, telegram-db,
                              telegram-instances, imap-client, imap-sync, imap-db,
                              mail-format, whatsapp-groups, mfa, totp, webauthn, entitlements,
                              hosted-events, cloud, …
@@ -236,6 +236,8 @@ Deliberate non-goals, not oversights: deletion dropped like any control record, 
 **`nitro.experimental.asyncContext: true` required — don't turn off.** MCP SDK invokes tool handlers with its `RequestHandlerExtra`, not H3 event, so `useEvent()` only way to reach per-request credentials; needs async context.
 
 **`modules/mcp-token-route.ts` deliberately fragile.** Deep-resolves file inside `@nuxtjs/mcp-toolkit` not in package's `exports` map, to register `/mcp/:token` against same handler (Claude and other clients can't attach `Authorization` header to custom connector). Middleware URL rewrite doesn't work — h3 1.15.x re-assigns `event._path` before every layer. If toolkit upgrade moves that file, module throws at build with pointer to documented fallback. Toolkit bump = re-verify this module.
+
+**Which client uses each token: `server/utils/mcp-clients.ts`, `app.mcp_token_clients`.** One row per (token, client name, version), from the `clientInfo` + `protocolVersion` of each `initialize`, plus `User-Agent`. Captured in `server/mcp/index.ts` middleware after the limit check — we run stateless, so later requests' SDK servers never saw the `initialize` (`getClientVersion()` undefined in tools) and `mcp:server:created` fires too early. Middleware `readRawBody` is safe: h3 caches body on `RawBodySymbol`, toolkit's `toWebRequest` replays it via `getRequestWebStream` — verified identical responses with/without, 200 KB bodies intact. **Toolkit or h3 bump = re-check.** Records only what SDK accepts: single object (SDK refuses `initialize` in batch), `clientInfo.name`/`version` strings — else rows for sessions that never started. Substring test before `JSON.parse`, so `tools/call` bodies not parsed twice. Client-chosen text: control chars stripped, clipped by code point (100; UA 200), newest 20 rows per token (trim = second statement, CTE DELETE can't see the INSERT's row). Write best-effort, never awaited, logs token id only. `listTokens` reads clients for ids its own predicate returned (member visibility for free); failed read leaves `clients` absent, never fails the list — it's where revoke lives. `newClient` = name first seen > 1 day after token's first client, within 14 days, version bump never flags. **Hint, never identity** — nothing may authorize on it; per-call attribution impossible stateless. Rotation keeps rows.
 
 **Token redaction:** `server/plugins/redact-mcp.ts` scrubs `event.node.req.originalUrl` (what Nitro's error handler reads — scrubbing `event.path` alone insufficient) and sets `event.context.noLog`. `mcp.logging` off for same reason. Route any added error reporter/logger through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
 
