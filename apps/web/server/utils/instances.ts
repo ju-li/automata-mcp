@@ -717,6 +717,15 @@ async function storePaired(instance: AppInstance): Promise<void> {
  *
  * Every read here is uncached. The status caches exist to spare dashboards;
  * this runs once per candidate per ten minutes and decides a deletion.
+ *
+ * **404 means gone — verified against 2.3.7.** The instance routes run
+ * `[instanceExistsGuard, instanceLoggedGuard, authGuard.apikey]` in that order
+ * (`src/api/routes/index.router.ts`), and `instanceExistsGuard` throws
+ * `NotFoundException` when the name is neither loaded nor in `"Instance"` — so a
+ * deleted instance answers 404 before its (now unknown) token is checked. The
+ * one exception is `CACHE_REDIS_SAVE_INSTANCES=true`, where a stale Redis key
+ * passes that guard and the auth guard answers 401; that reads as `unknown`
+ * here and the row is kept. Every compose file and the AIO image set it false.
  */
 export async function pairingEvidence(instance: AppInstance): Promise<'paired' | 'unpaired' | 'unknown'> {
   if (instance.paired_at) return 'paired'
