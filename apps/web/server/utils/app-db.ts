@@ -348,6 +348,13 @@ export interface AppInstance {
    */
   down_since?: string
   alerted_at?: string
+  /**
+   * WhatsApp only: how long Evolution has been reopening this account's socket
+   * over and over. Written only by server/utils/alerts.ts, read through
+   * `rowChurn()` in instances.ts.
+   */
+  row_churn_since?: string
+  row_churn_seen_at?: string
 }
 
 export interface AppMcpToken {

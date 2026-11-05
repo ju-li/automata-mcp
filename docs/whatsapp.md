@@ -65,7 +65,7 @@ GRANT CONNECT ON DATABASE evolution TO wamcp_search;
 GRANT USAGE ON SCHEMA public TO wamcp_search;
 GRANT SELECT ON "Message" TO wamcp_search;
 -- Connection status: the account's own row and per-account counts.
-GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt")
+GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "updatedAt")
   ON "Instance" TO wamcp_search;
 GRANT SELECT ("instanceId") ON "Chat", "Contact" TO wamcp_search;
 ```
@@ -84,6 +84,11 @@ grants existed still works: status falls back to `fetchInstances`, cached per
 connection for five minutes, and the web log says which grant is missing. Without
 this URL at all — a bring-your-own server with no database URL — that cached
 fallback is the only path.
+
+`"updatedAt"` is what tells a reconnect loop from a healthy connection (see
+"Stuck reconnecting" below). It has no fallback: without the grant everything
+else keeps working, the log says the column is unreadable, and loops go
+undetected.
 
 ```bash
 NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:change-me@localhost:5432/evolution
@@ -137,7 +142,7 @@ Worth knowing before you go looking for a bug:
   GRANT CONNECT ON DATABASE evolution TO evo_reader;
   GRANT USAGE ON SCHEMA public TO evo_reader;
   GRANT SELECT ON "Message" TO evo_reader;
-  GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt")
+  GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "updatedAt")
     ON "Instance" TO evo_reader;
   GRANT SELECT ("instanceId") ON "Chat", "Contact" TO evo_reader;
   ```
@@ -149,6 +154,36 @@ Worth knowing before you go looking for a bug:
 On Railway, Evolution's Postgres is its own service — use its private URL, and
 note the port there is whatever that service actually listens on (see "Pin the
 ports").
+
+## Stuck reconnecting (`conflict: replaced`)
+
+The signature, in Evolution's log: `stream errored out` dozens of times a minute
+for one instance, each with `reasonNode: {"tag":"conflict","attrs":{"type":"replaced"}}`,
+`statusReason: 428` / `440`, and a fresh `CONNECTED TO WHATSAPP` after every one.
+Two sockets are logging in with the same credentials and replacing each other.
+Evolution 2.3.7 retries a 440 close at once with no backoff, and replaces its
+client without ending the old socket, so nothing inside Evolution ends it. The
+stored status reads `open` throughout.
+
+**Fix: restart the Evolution service.** On boot it reconnects every account whose
+status is `open` or `connecting` with one socket each. Every account drops
+briefly; none needs a QR scan. Do it soon: repeated logins on a real number can
+get it flagged by WhatsApp, and the log volume can hit Railway's 500 lines a
+second cap, which hides every other account's logs.
+
+Reconnect in the app does not help, and the app no longer sends Evolution's
+`POST /instance/restart`. On Baileys that route ends the socket and can then
+connect a second time itself, which is one way two sockets appear. The dashboard
+offers Reconnect only for a connection whose socket is `close`.
+
+The app detects the loop from Evolution's own `"Instance"` row, not from
+webhooks (deliveries are unsigned): every socket that opens writes the row. A
+connection whose `open` row keeps being freshly written for ten minutes is
+marked **Unstable** on the dashboard, and `get-connection-status` returns
+`flapping: true`. The web log gets one line naming the instance and the fix.
+After the usual ten-minute grace period, everyone who can reach the connection
+is emailed (see [alerts.md](alerts.md)). That takes the message database URL
+and, with a dedicated role, the `"updatedAt"` grant above.
 
 ## Importing existing history
 

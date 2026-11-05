@@ -24,6 +24,8 @@ interface StatusResponse {
   state: ConnectionState
   /** Was connected, and Evolution's live socket no longer is. */
   sessionLost?: boolean
+  /** Evolution keeps reopening the socket; reads `open` most of the time. */
+  flapping?: boolean
   profileName?: string
   profilePicUrl?: string
   number?: string
@@ -107,7 +109,17 @@ const mode = computed<Mode>(() => {
   return 'pairing'
 })
 
-const display = computed(() => describeState(state.value, 'whatsapp', { lost: mode.value === 'lost' }))
+const flapping = computed(() => data.value?.flapping === true)
+
+const display = computed(() => describeState(state.value, 'whatsapp', { lost: mode.value === 'lost', flapping: flapping.value }))
+
+/**
+ * Reconnect is offered only from `close`: that is the one state with a safe call
+ * behind it, and the server refuses the others (`reconnectInstance`). From
+ * `connecting` or `unknown` the notice says what does help instead.
+ */
+const canReconnect = computed(() => state.value === 'close')
+const evolutionServer = computed(() => (data.value?.instance.ownServer ? 'your Evolution server' : 'the Evolution server'))
 
 const qr = ref<QrResponse['qr'] | null>(null)
 const pairingTimedOut = ref(false)
@@ -349,6 +361,7 @@ const importHistory = () => backToPairing(
       :state="state"
       kind="whatsapp"
       :lost="mode === 'lost'"
+      :flapping="flapping"
       @renamed="refresh()"
     >
       <!--
@@ -427,22 +440,59 @@ const importHistory = () => backToPairing(
         A dropped session keeps its profile and counts below: the phone is still
         linked, and everything stored up to the drop is still readable.
       -->
+      <!--
+        A reconnect loop, which reads `open` on most polls. Reconnect has no
+        socket to act on, so nobody gets a button — only who can end it.
+        Takes the place of the lost-session notice when both are true: a poll
+        that lands between two sockets sees a dropped session, and offering
+        Reconnect then is the wrong fix.
+      -->
+      <NoticeCard v-if="flapping" title="Evolution keeps reconnecting this account" tone="error">
+        <template #description>
+          <p class="mt-1 text-sm text-muted-foreground">
+            Its connection to WhatsApp is being replaced over and over, so messages
+            may be missing here and sends may fail.
+            <template v-if="canManage">
+              Reconnect cannot end this. Restarting {{ evolutionServer }} does, with
+              no new QR scan. Repeated logins can get a number flagged by WhatsApp,
+              so do it soon.
+            </template>
+            <template v-else>
+              Nothing needs scanning. Whoever runs {{ evolutionServer }} has to
+              restart it — an admin of your organization can see to that.
+            </template>
+          </p>
+        </template>
+      </NoticeCard>
+
       <SessionLostNotice
-        v-if="mode === 'lost'"
+        v-else-if="mode === 'lost'"
         service="WhatsApp"
         :can-manage="canManage"
         :reconnecting="reconnecting"
         :stalled="reconnectStalled"
         :busy="reconnectBusy"
+        :can-reconnect="canReconnect"
         @reconnect="reconnect"
       >
         <template #hint>
           The phone is still linked, so reconnecting normally needs no new QR code.
         </template>
         <template #stalled>
-          Evolution did not bring the connection back. Its session for this account
-          may be stuck — restarting {{ data?.instance.ownServer ? 'your Evolution server' : 'the Evolution server' }}
-          usually reconnects it without a new scan.
+          <template v-if="canReconnect">
+            Evolution did not bring the connection back. Its session for this account
+            may be stuck — restarting {{ evolutionServer }} usually reconnects it
+            without a new scan.
+          </template>
+          <template v-else-if="state === 'connecting'">
+            Evolution is still trying to connect this account. If it does not settle
+            within a minute or two, restarting {{ evolutionServer }} reconnects it
+            without a new scan.
+          </template>
+          <template v-else>
+            Evolution has no live connection for this account. Restarting
+            {{ evolutionServer }} reconnects it without a new scan.
+          </template>
         </template>
       </SessionLostNotice>
 
