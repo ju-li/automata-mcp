@@ -182,6 +182,14 @@ export interface DescribedImapError {
 
 export function describeImapError(cause: unknown): DescribedImapError {
   const error = (cause ?? {}) as ImapFlowError
+  // A failed write to the app database (postgres.js's PostgresError, whose
+  // `code` is a SQLSTATE like 21000) is ours, not the mail server's. Passed
+  // through as `error.code` it read as "Could not reach the mail server
+  // (21000)" and sent the user checking a server that was answering fine.
+  const pg = cause as { name?: string, severity_local?: unknown } | undefined
+  if (pg?.name === 'PostgresError' || typeof pg?.severity_local === 'string') {
+    return { code: 'internal', auth: false, message: imapErrorMessage('internal') }
+  }
   const code = error.authenticationFailed
     ? 'auth'
     : error.tlsFailed || /CERT|SSL|TLS/i.test(error.code ?? '')
@@ -211,6 +219,9 @@ export function imapErrorMessage(code: string): string {
       return 'The mail server did not answer in time.'
     case 'dns':
       return 'The mail server\'s host name does not resolve.'
+    case 'internal':
+      return 'The mail server answered, but storing what it sent failed on our side. '
+        + 'The server log has the cause; the sync retries every two minutes.'
     case 'host_refused':
       return 'The mail server\'s address is not one this deployment may connect to.'
     default:
