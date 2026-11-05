@@ -467,4 +467,54 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN marketing_consent boolean NOT NULL DEFAULT false;
     `,
   },
+  {
+    name: '0010_whatsapp_groups',
+    sql: /* sql */ `
+      -- The last successful answer from Evolution's fetchAllGroups for a
+      -- WhatsApp connection, so a cold process (deploy, restart, another
+      -- replica) and a disconnected account can still name groups. Evolution
+      -- 2.3.7 keeps subjects only in memory, so nothing upstream can stand in.
+      --
+      -- Only what naming needs: subject and size. No picture URLs and no
+      -- participants. Never copied into app.hosted_events, whose payloads must
+      -- not carry chat ids or names.
+      --
+      -- Rows are the account's whole group list as of fetched_at: a successful
+      -- refresh replaces them exactly, so a group the account left disappears.
+      -- They cascade with the connection, which is removed only through
+      -- deleteInstance() (instances.org is RESTRICT).
+      CREATE TABLE app.whatsapp_groups (
+        instance_id text NOT NULL REFERENCES app.instances (id) ON DELETE CASCADE,
+        jid         text NOT NULL,
+        subject     text,
+        size        integer CHECK (size IS NULL OR size >= 0),
+        fetched_at  timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (instance_id, jid)
+      );
+    `,
+  },
+  {
+    name: '0011_whatsapp_group_scans',
+    sql: /* sql */ `
+      -- When each WhatsApp connection's group list was last fetched from
+      -- WhatsApp, shared by every replica. One fetchAllGroups costs about two
+      -- WhatsApp queries per group (Evolution answers the groups.update it
+      -- triggers with a groupMetadata per group, then fetches every group's
+      -- picture), and WhatsApp answers repeated runs with rate-overlimit. So a
+      -- scan runs only when none succeeded within the scan interval and none
+      -- failed within the back-off, and only by the replica holding the lease;
+      -- everyone else names groups from app.whatsapp_groups.
+      --
+      -- lease_until is claimed by a conditional UPDATE, like mail_sync_state,
+      -- so no database connection is held across the scan. NULL is free —
+      -- not '-infinity', which the app pool's timestamp transform cannot
+      -- turn into an ISO string.
+      CREATE TABLE app.whatsapp_group_scans (
+        instance_id text PRIMARY KEY REFERENCES app.instances (id) ON DELETE CASCADE,
+        scanned_at  timestamptz,
+        failed_at   timestamptz,
+        lease_until timestamptz
+      );
+    `,
+  },
 ]
