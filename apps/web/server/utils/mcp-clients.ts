@@ -37,7 +37,8 @@ export const MAX_CLIENTS_PER_TOKEN = 20
 const MAX_NAME = 100
 const MAX_VERSION = 100
 const MAX_PROTOCOL = 100
-const MAX_USER_AGENT = 200
+/** Also the clip for `app.mcp_tool_calls.user_agent`, so the two tables agree. */
+export const MAX_USER_AGENT = 200
 
 /**
  * A client counts as new on a token when its name was first seen more than
@@ -76,9 +77,9 @@ export interface PublicTokenClient {
  * fail the write outright, a newline would wreck the table row), whitespace
  * trimmed, at most `max` code points — Postgres's `length()` counts code
  * points, so clipping UTF-16 units could split a pair and still disagree with
- * the CHECK.
+ * the CHECK. Shared with tool-calls.ts, whose columns follow the same rule.
  */
-function clip(value: string, max: number): string {
+export function clipClientText(value: string, max: number): string {
   const clean = value.replace(/[\u0000-\u001F\u007F-\u009F]/g, '').trim()
   const points = Array.from(clean)
   return points.length > max ? points.slice(0, max).join('') : clean
@@ -115,10 +116,10 @@ export function parseClientHello(raw: string | undefined, userAgent?: string): C
   if (typeof name !== 'string' || typeof version !== 'string') return undefined
 
   return {
-    name: clip(name, MAX_NAME),
-    version: clip(version, MAX_VERSION),
-    protocolVersion: typeof protocolVersion === 'string' ? clip(protocolVersion, MAX_PROTOCOL) || undefined : undefined,
-    userAgent: userAgent ? clip(userAgent, MAX_USER_AGENT) || undefined : undefined,
+    name: clipClientText(name, MAX_NAME),
+    version: clipClientText(version, MAX_VERSION),
+    protocolVersion: typeof protocolVersion === 'string' ? clipClientText(protocolVersion, MAX_PROTOCOL) || undefined : undefined,
+    userAgent: userAgent ? clipClientText(userAgent, MAX_USER_AGENT) || undefined : undefined,
   }
 }
 

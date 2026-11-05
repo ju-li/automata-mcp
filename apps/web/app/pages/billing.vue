@@ -216,6 +216,7 @@ const meters = computed(() => {
             <li>Unlimited connections and connector tokens</li>
             <li>{{ data.includedSeats }} users included, $10/user/month after</li>
             <li>Unlimited requests</li>
+            <li>Tool-call history optional, off by default</li>
           </ul>
         </CardContent>
       </Card>

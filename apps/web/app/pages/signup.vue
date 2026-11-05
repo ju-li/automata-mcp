@@ -45,7 +45,7 @@ const plans: { id: PlanChoice, name: string, price: string, note: string, featur
     name: 'Free',
     price: '$0',
     note: 'For trying it out on your own.',
-    features: ['1 connection', '1 connector token', 'Just you', 'Unlimited requests'],
+    features: ['1 connection', '1 connector token', 'Just you', 'Unlimited requests', 'Tool calls and their reasons kept for 30 days'],
   },
   {
     id: 'pro',
@@ -57,6 +57,7 @@ const plans: { id: PlanChoice, name: string, price: string, note: string, featur
       'Unlimited connector tokens',
       '5 users included, $10/user/month after',
       'Unlimited requests',
+      'Tool-call history optional, off by default',
     ],
   },
 ]

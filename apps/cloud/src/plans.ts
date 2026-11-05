@@ -9,8 +9,10 @@ import type { Db } from './db.ts'
  *
  * The web app enforces limits but knows no plan: it reads three numbers per
  * organization (`max_connections`, `max_tokens`, `max_members`, NULL =
- * unlimited) and the defaults a new organization is born with. This file is
- * what writes both, from the Stripe status `syncOrg` (billing.ts) stores.
+ * unlimited), one flag (`tool_calls_required`: Free records every MCP tool
+ * call and its reason, with no way to turn that off) and the defaults a new
+ * organization is born with. This file is what writes all of them, from the
+ * Stripe status `syncOrg` (billing.ts) stores.
  */
 
 export type PlanName = 'free' | 'pro'
@@ -52,14 +54,17 @@ export function billableSeats(members: number): number {
  */
 export async function writeEntitlementDefaults(db: Db): Promise<void> {
   await db`
-    INSERT INTO app.entitlement_defaults (id, max_connections, max_tokens, max_members, plan_label)
-    VALUES ('new_organization', ${FREE_LIMITS.connections}, ${FREE_LIMITS.tokens}, ${FREE_LIMITS.members}, 'Free')
+    INSERT INTO app.entitlement_defaults
+      (id, max_connections, max_tokens, max_members, plan_label, tool_calls_required)
+    VALUES
+      ('new_organization', ${FREE_LIMITS.connections}, ${FREE_LIMITS.tokens}, ${FREE_LIMITS.members}, 'Free', true)
     ON CONFLICT (id) DO UPDATE SET
-      max_connections = EXCLUDED.max_connections,
-      max_tokens      = EXCLUDED.max_tokens,
-      max_members     = EXCLUDED.max_members,
-      plan_label      = EXCLUDED.plan_label,
-      updated         = now()
+      max_connections     = EXCLUDED.max_connections,
+      max_tokens          = EXCLUDED.max_tokens,
+      max_members         = EXCLUDED.max_members,
+      plan_label          = EXCLUDED.plan_label,
+      tool_calls_required = EXCLUDED.tool_calls_required,
+      updated             = now()
   `
 }
 
@@ -71,8 +76,11 @@ export interface PlanChange {
 
 /**
  * Turn each organization's stored Stripe status into entitlements: Free's
- * limits, or none for Pro. One statement, so the rule is written once whether
- * it runs for one organization after a sync or for all of them at boot.
+ * limits and required tool-call recording, or none of either for Pro. Leaving
+ * Free hands recording back to the organization's own switch
+ * (`record_tool_calls`, off unless an admin turned it on). One statement, so
+ * the rule is written once whether it runs for one organization after a sync
+ * or for all of them at boot.
  *
  * Answers the organizations whose plan label changed, for `plan.changed`.
  */
@@ -94,6 +102,7 @@ export async function applyPlanEntitlements(db: Db, orgId?: string): Promise<Pla
       max_connections = CASE WHEN next.is_pro THEN NULL ELSE ${FREE_LIMITS.connections}::int END,
       max_tokens      = CASE WHEN next.is_pro THEN NULL ELSE ${FREE_LIMITS.tokens}::int END,
       max_members     = CASE WHEN next.is_pro THEN NULL ELSE ${FREE_LIMITS.members}::int END,
+      tool_calls_required = NOT next.is_pro,
       plan_label      = next.label
     FROM next
     WHERE o.id = next.id

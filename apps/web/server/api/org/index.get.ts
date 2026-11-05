@@ -6,6 +6,9 @@
  * rather than a dead end. Pending invitations are admin-only: an unaccepted
  * invitation names an email address that has not yet agreed to be associated
  * with this organization.
+ *
+ * `toolCalls` goes to everyone: a member's calls are recorded too, and whether
+ * they are is theirs to know.
  */
 export default defineEventHandler(async (event) => {
   const actor = await requireMembership(event)
@@ -15,5 +18,6 @@ export default defineEventHandler(async (event) => {
     role: actor.role,
     members: await listOrgMembers(actor.org.id),
     invites: actor.role === 'admin' ? await listPendingInvites(actor.org.id) : undefined,
+    toolCalls: await loadToolCallSetting(actor.org.id),
   }
 })

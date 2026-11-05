@@ -25,6 +25,7 @@ Self-hosted deployments never run the cloud service.
 | Connector tokens | 1 | unlimited |
 | Users | 1 | 5 included, $10/user/month after |
 | Requests | unlimited | unlimited |
+| Tool-call history | always on, 30 days | off by default, admins choose |
 
 The numbers are set in three places:
 
@@ -79,15 +80,16 @@ retry settings in Stripe decide how long that lasts.
 The plan and its limits are kept apart:
 - **Plan:** Stripe status, decided by the billing code.
 - **Limits:** three plain numbers on each organization, `max_connections`, `max_tokens` and `max_members`. NULL means unlimited.
+- **Required tool-call recording:** one flag on each organization, `tool_calls_required`. While it is true, every MCP tool call and the reason Claude gave for it are recorded and the organization can't turn that off. It's true on Free and false on Pro. See "Tool-call history" in [using-automata.md](using-automata.md).
 
-The cloud service writes those numbers whenever a subscription changes, and for every organization each time it starts. The web app's checks only ever read them, so they keep working, from the database, even while the cloud service is down.
+The cloud service writes those values whenever a subscription changes, and for every organization each time it starts. The web app's checks only ever read them, so they keep working, from the database, even while the cloud service is down.
 
 A new organization gets the limits in `app.entitlement_defaults`, which the cloud service writes when it starts. Until that row exists, a hosted signup answers 503 rather than creating an organization with no limits. That only happens if the web app is deployed before the cloud service has ever run.
 
 Unsetting `NUXT_CLOUD_URL` stops new limits from being written. It does **not** clear limits already written. A deployment that switches the hosted offering off after using it should clear them:
 
 ```sql
-UPDATE app.organizations SET max_connections = NULL, max_tokens = NULL, max_members = NULL, plan_label = NULL;
+UPDATE app.organizations SET max_connections = NULL, max_tokens = NULL, max_members = NULL, plan_label = NULL, tool_calls_required = false;
 ```
 
 ## Account events
@@ -288,7 +290,7 @@ Railway injects `PORT=8080` into every service, and the cloud service follows it
 
 Before the cloud service existed, the web app talked to Stripe itself, configured with `NUXT_BILLING` and `NUXT_STRIPE_*`. To move over:
 
-1. Deploy the cloud service (step 6). It writes `app.entitlement_defaults` and re-derives every organization's limits as soon as the web app's migration `0007_entitlement_defaults` has run.
+1. Deploy the cloud service (step 6). It writes `app.entitlement_defaults` and re-derives every organization's limits as soon as the web app's migration `0013_mcp_tool_calls` has run.
 2. On the web service, set `NUXT_CLOUD_URL` and `NUXT_CLOUD_ADMIN_KEY`, and remove `NUXT_BILLING` and the four `NUXT_STRIPE_*` variables.
 3. In Stripe, change the webhook destination's URL from `https://<web app>/api/webhook/stripe` to `https://<cloud service>/webhooks/stripe`. The signing secret stays the same.
 
