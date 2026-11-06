@@ -21,6 +21,8 @@ import { z } from 'zod'
  *
  * The description steers hard away from the one dangerous reading: a LID's
  * digits passed as a phone number reach whoever owns that number, if anyone.
+ * `assertNotBareLid` (lid-guard.ts) is the check under it: digits this account
+ * has seen as a LID are refused with the full JID to use instead (#113).
  */
 export default defineKindTool({
   name: 'send-text-message',
@@ -54,6 +56,10 @@ export default defineKindTool({
   },
   handler: async ({ number, text }) => {
     const { instance, scope, sendDisclaimer } = useMcpAuth()
+
+    // First, so a stripped LID is refused as that rather than resolved as a
+    // phone number by the scope check. Refuses only digits known as a LID.
+    await assertNotBareLid(instance, number)
 
     // Resolves the number through Evolution and compares exact JIDs. Fails
     // closed — an unverifiable recipient is refused, not sent to. No-op when
