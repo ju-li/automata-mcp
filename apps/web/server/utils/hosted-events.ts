@@ -22,7 +22,8 @@ import type { Db } from './app-db'
  *   record after the fact through `recordHostedEventQuietly`.
  * - **Never in a payload:** credentials, connection strings, hosts, chat ids,
  *   folder or table names, message content, tool arguments. An email address is
- *   allowed, only on user events — the CRM keys contacts on it.
+ *   allowed, only on user events. (The CRM sync reads the current address from
+ *   `app.users` rather than trusting this copy; telemetry may use it.)
  * - **The type is a closed union** (`HostedEventType`), so a consumer can match
  *   exhaustively and a typo fails to compile.
  */

@@ -181,7 +181,7 @@ export async function resetIfIdentityChanged(instance: Pick<AppInstance, 'id'>, 
 
 async function syncFolders(instance: AppInstance, client: ImapFlow, lease: Lease, deadline: number): Promise<void> {
   const sql = await appDb()
-  const listed = await client.list()
+  const listed = uniqueFolders(await client.list())
 
   const folders = listed.map(folder => ({
     path: folder.path,
@@ -226,6 +226,27 @@ async function syncFolders(instance: AppInstance, client: ImapFlow, lease: Lease
       console.error(`[imap-sync] connection ${instance.id}: a folder failed (${describeImapError(cause).code})`, cause)
     }
   }
+}
+
+/**
+ * One entry per path. Some servers (Lark Mail) list the same folder more than
+ * once, and a batch upsert naming one key twice fails outright with 21000
+ * (`ON CONFLICT DO UPDATE command cannot affect row a second time`) — the
+ * whole sync, not one folder. Where copies disagree, a selectable one wins over
+ * a `\Noselect` one, then one carrying a special-use flag.
+ */
+function uniqueFolders(listed: ListResponse[]): ListResponse[] {
+  const rank = (f: ListResponse) =>
+    (f.flags.has('\\Noselect') || f.flags.has('\\NonExistent') ? 0 : 2) + (f.specialUse ? 1 : 0)
+  const byPath = new Map<string, ListResponse>()
+  for (const folder of listed) {
+    const seen = byPath.get(folder.path)
+    if (!seen || rank(folder) > rank(seen)) byPath.set(folder.path, folder)
+  }
+  if (byPath.size < listed.length) {
+    console.warn(`[imap-sync] the mail server listed ${listed.length - byPath.size} folder(s) more than once; kept one of each`)
+  }
+  return [...byPath.values()]
 }
 
 function isSyncable(folder: ListResponse): boolean {
@@ -423,7 +444,9 @@ async function storeMessages(
 
   for (let i = 0; i < uids.length; i += 100) {
     const batch = uids.slice(i, i + 100)
-    const rows = []
+    // Keyed by UID: a server answering one UID twice would otherwise fail the
+    // batch with 21000, as a duplicated folder does above; the later answer wins.
+    const byUid = new Map<number, ReturnType<typeof toRow>>()
     for await (const message of client.fetch(batch, {
       uid: true,
       envelope: true,
@@ -433,9 +456,11 @@ async function storeMessages(
       size: true,
       headers: ['references'],
     }, { uid: true })) {
-      rows.push(toRow(instance.id, path, uidvalidity, message))
+      const row = toRow(instance.id, path, uidvalidity, message)
+      byUid.set(row.uid, row)
     }
-    if (!rows.length) continue
+    if (!byUid.size) continue
+    const rows = [...byUid.values()]
 
     await sql`
       INSERT INTO app.mail_messages ${sql(rows)}

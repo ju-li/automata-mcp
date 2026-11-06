@@ -56,15 +56,39 @@ every user's messages in every instance. A dedicated role does not protect them
 from a compromised web service — that process already holds `NUXT_DATABASE_URL`,
 the database's owner — but it does contain a bug in the app's own message queries
 to reading `"Message"`, where under the owner such a bug would reach every stored
-credential in the `app` schema. If you want that, the one grant below serves both
-reading and searching:
+credential in the `app` schema. If you want that, the grants below serve reading,
+searching and connection status:
 
 ```sql
 CREATE ROLE wamcp_search LOGIN PASSWORD 'change-me';
 GRANT CONNECT ON DATABASE evolution TO wamcp_search;
 GRANT USAGE ON SCHEMA public TO wamcp_search;
 GRANT SELECT ON "Message" TO wamcp_search;
+-- Connection status: the account's own row and per-account counts.
+GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "updatedAt")
+  ON "Instance" TO wamcp_search;
+GRANT SELECT ("instanceId") ON "Chat", "Contact" TO wamcp_search;
 ```
+
+The `"Instance"` grant is column by column on purpose: the same row holds
+`token`, every instance's API key, and this role has no reason to read it.
+
+**Why status reads this database at all.** Evolution's `fetchInstances` answers
+with message, chat and contact counts that Prisma computes over *every* account's
+rows and joins to the one asked about — a full scan of `"Message"` on every call.
+With this URL set, the dashboard, the connection list, the alert sweep and
+`get-connection-status` read the account's `"Instance"` row by primary key, and
+count only that account's rows, caching the counts for five minutes (the history
+import screen after pairing asks for them fresh; the alert sweep reads no counts
+at all). A role created before these grants existed still works: status falls
+back to `fetchInstances`, cached per connection for five minutes, and the web
+log says a grant is missing. Without this URL at all — a bring-your-own server
+with no database URL — that cached fallback is the only path.
+
+`"updatedAt"` is what tells a reconnect loop from a healthy connection (see
+"Stuck reconnecting" below). It has no fallback: without the grant everything
+else keeps working, the log says the column is unreadable, and loops go
+undetected.
 
 ```bash
 NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:change-me@localhost:5432/evolution
@@ -97,6 +121,18 @@ Worth knowing before you go looking for a bug:
   count is every conversation the phone listed at pairing; `list-chats` lists
   conversations Evolution holds messages for, which is routinely fewer. The gap
   is not more pages — `hasMore` is the only signal that there are.
+- **There are no unread counts.** Neither `list-chats` nor the dashboard says
+  which chats are unread, and the tool tells the model so. Evolution 2.3.7 does
+  not keep the one signal that says a chat was read on the phone, and an unread
+  count derived from message statuses was tried and found wrong (651 "unread" on
+  an account with no unread badges).
+- **Group names can lag by up to six hours.** Fetching an account's groups from
+  WhatsApp costs about two WhatsApp queries per group and drew `rate-overlimit`
+  answers when it ran every few minutes, so it runs at most once every six hours
+  per account (an hour after a failed attempt), in the background, and the
+  result is kept in `app.whatsapp_groups`. A group joined or renamed since the
+  last scan shows its old name, or the contact name or bare id, until the next
+  one. Chats and their last messages are read live; only group names lag.
 - The scope editor lists the tools of the connection's own kind, and lists both
   read tools whether or not the database URL is set. It deliberately does not
   hide a tool with an unmet prerequisite: both read tools need that URL, so
@@ -118,6 +154,9 @@ Worth knowing before you go looking for a bug:
   GRANT CONNECT ON DATABASE evolution TO evo_reader;
   GRANT USAGE ON SCHEMA public TO evo_reader;
   GRANT SELECT ON "Message" TO evo_reader;
+  GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "updatedAt")
+    ON "Instance" TO evo_reader;
+  GRANT SELECT ("instanceId") ON "Chat", "Contact" TO evo_reader;
   ```
 
   It is checked before it is stored — including that `"Message"` is actually
@@ -127,6 +166,154 @@ Worth knowing before you go looking for a bug:
 On Railway, Evolution's Postgres is its own service — use its private URL, and
 note the port there is whatever that service actually listens on (see "Pin the
 ports").
+
+## Chats addressed by LID (`…@lid`)
+
+WhatsApp addresses a person in one of two ways. The familiar one is a
+phone-number JID, `5511999999999@s.whatsapp.net`. The other is a **LID**, such as
+`79972425314508@lid`: a per-person alias WhatsApp uses so that group members and
+people who never exchanged numbers don't learn each other's phone numbers. **A
+LID's digits are not a phone number.** They carry no country code, and dialling
+them reaches whoever owns that number, if anyone.
+
+Which form a chat gets is WhatsApp's decision, not this app's. Group members are
+usually LIDs, and many 1:1 chats are too, especially in
+history imported at pairing. So `list-chats`, the dashboard and the token scope
+picker routinely show chats whose identifier ends in `@lid`.
+
+What the connector does with them:
+
+- **Reading and searching** work the same for both forms.
+- **Replying** works: `send-text-message` takes the chat's full JID
+  (`…@lid`) and the message lands in the existing conversation, stored under the
+  LID. The tool description and the server instructions tell the model to pass
+  the JID as returned, and never to strip the suffix and send to the digits.
+  If it does anyway, a send to digits this account has seen as a LID (as a chat,
+  a group sender or an @-mention) is refused with the full JID to use instead.
+  Digits it has never seen as a LID — a new contact's phone number — still send.
+- **Names** for senders and @-mentions are resolved from the account's contacts
+  and from group membership, which knows both forms of each member. A LID it
+  cannot resolve stays a raw id rather than being guessed.
+- **Phone numbers** are shown as `number` only for chats addressed by phone
+  number. A LID chat has no `number`; instead it carries `phoneNumber` in
+  `list-chats` (and shows it in the dashboard's Chats table, marked "via LID")
+  **when WhatsApp has revealed it**: Evolution keeps the phone-number form as
+  `remoteJidAlt` on some live messages in the LID chat. History import never
+  carries it, so a LID chat with only imported messages shows no number even
+  when the phone itself shows one. A LID seen with more than one number (or a
+  number with more than one LID) is left unlinked rather than guessed. Nothing
+  else is consulted — not contact names, not the alias's own digits, not data
+  from other accounts on the same Evolution server. The chat is still the LID:
+  replies and token scope follow its JID, not the number.
+- **One person, two chats, shown as one.** Someone who moved from phone-number
+  to LID addressing has part of their history under each id. When the two are
+  linked as above, `list-chats` and the dashboard's Chats table show one row,
+  under the LID, with both ids in `jids`. `read-messages` and `search-messages`
+  given either id read both, as one timeline with no duplicates, and search
+  labels every hit with one id per person. A token reads only the halves it is
+  scoped to and is told, as a count, when part of the conversation is outside
+  its scope. A chat with no link says so (`linkUnknown`) where a second part
+  could exist. The dashboard's Chats *card* still shows Evolution's own count,
+  which is not comparable.
+
+What it can't do yet:
+
+- **Tell you the phone number behind every LID.** WhatsApp reveals the link
+  only on some live messages, never on imported history, and Evolution has no
+  API for Baileys' own mapping. So `phoneNumber` is partial, and the model is
+  told its absence means "unknown", not "none". It also needs the message
+  database: a connection without one never shows it.
+- **Link chats it has no link for.** A LID chat with no revealed number stays
+  a separate chat from that person's phone-number chat, if they have one. A
+  read of either says the conversation may continue under another id.
+
+**Token scope stays a list of exact chat ids.** A linked person is one row in
+the token's chat picker, showing their number and "2 chats". Ticking it allows
+both ids, and unticking removes both. A token that holds only one of the two
+(one scoped before they were linked, say) shows the row as partly ticked, with
+a note. It keeps reaching only that half until you tick the row, and the model
+is told part of the conversation is outside its scope. A link never lets a
+token reach an id that wasn't ticked.
+
+On a bring-your-own Evolution server with `DATABASE_SAVE_IS_ON_WHATSAPP=true`,
+Evolution may resolve a LID to the phone-number JID it has linked it to. For a
+token scoped only to the LID chat, sending to that LID is then refused, because
+the message would go to the phone-number id. The refusal says so. Ticking the
+person's row so both ids are included, or turning the setting off, avoids it.
+
+## Stuck reconnecting (`conflict: replaced`)
+
+The signature, in Evolution's log: `stream errored out` dozens of times a minute
+for one instance, each with `reasonNode: {"tag":"conflict","attrs":{"type":"replaced"}}`,
+`statusReason: 428` / `440`, and a fresh `CONNECTED TO WHATSAPP` after every one.
+Two sockets are logging in with the same credentials and replacing each other.
+Evolution 2.3.7 retries a 440 close at once with no backoff, and replaces its
+client without ending the old socket, so nothing inside Evolution ends it. The
+stored status reads `open` throughout.
+
+**Fix: restart the Evolution service.** On boot it reconnects every account whose
+status is `open` or `connecting` with one socket each. Every account drops
+briefly; none needs a QR scan. Do it soon: repeated logins on a real number can
+get it flagged by WhatsApp, and the log volume can hit Railway's 500 lines a
+second cap, which hides every other account's logs.
+
+Reconnect in the app does not help, and the app no longer sends Evolution's
+`POST /instance/restart`. On Baileys that route ends the socket and can then
+connect a second time itself, which is one way two sockets appear. The dashboard
+offers Reconnect only for a connection whose socket is `close`.
+
+The app detects the loop from Evolution's own `"Instance"` row, not from
+webhooks (deliveries are unsigned): every socket that opens writes the row. A
+connection whose `open` row keeps being freshly written for ten minutes is
+marked **Unstable** on the dashboard, and `get-connection-status` returns
+`flapping: true`. The web log gets one line naming the instance and the fix,
+and with `NUXT_OPS_ALERT_EMAIL` set the operator is mailed straight away.
+After the usual ten-minute grace period, everyone who can reach the connection
+is emailed (see [alerts.md](alerts.md), which also covers what the hosted
+offering tells customers instead). That takes the message database URL
+and, with a dedicated role, the `"updatedAt"` grant above.
+
+## Connections never paired are removed after an hour
+
+A WhatsApp connection that nobody pairs within **one hour** of creating it is
+deleted automatically, together with any connector tokens on it. While it waits,
+it isn't idle. Evolution keeps it `connecting`, generates a fresh QR every few
+minutes and prints each one to its log, and reconnects it at every Evolution
+restart. On the hosted offering it also counts toward the organization's
+connection limit. The pairing screen shows how much time is left.
+
+The `instances:reap-unpaired` task runs every ten minutes. These rules decide
+what it deletes:
+
+- **Only connections this app has never seen paired.** The app records the first
+  time it sees an account linked (`app.instances.paired_at`). A logout later
+  does not clear it, so a connection that was paired and later signed out is
+  never removed. Rows that existed before this was added were backfilled from
+  alert history and, where Evolution shares the app's database, from Evolution's
+  `ownerJid` and stored messages. One case neither the backfill nor the live
+  check below can see: a connection signed out *before* upgrading, on a server
+  whose database the app has no URL for, that never raised an alert. It looks
+  exactly like one nobody paired, and the first run after the upgrade removes
+  it. To keep one, add its database URL (**Enable reading**) or pair it again
+  first.
+- **Re-checked live just before deleting.** If Evolution now reports the account
+  `open` or linked, or its database holds messages for it, the connection is
+  marked paired and kept. If the check can't reach Evolution or its database,
+  the connection is kept and checked again on the next run. A dedicated role
+  without the `"Chat"`/`"Contact"` grants above counts as can't-reach, so no
+  connection read through such a role is removed until the grants are added.
+- **Deleted the same way as the Delete button**: the instance is first removed
+  from Evolution, then the row. If this deployment has no admin key for the
+  connection's server, the connection is kept, because deleting the row would
+  leave the instance generating QRs there with nothing recording it. This applies
+  to bring-your-own servers too, using that server's own key.
+- Each row is leased while it is checked, so several replicas can run the task.
+  Each deletion logs one line with the connection and organization ids. On the
+  hosted offering it also writes a `connection.deleted` event with
+  `reason: 'unpaired_expired'`.
+
+Telegram connections are not affected. An unlinked Telegram session holds no
+socket and polls nothing.
 
 ## Importing existing history
 
@@ -160,6 +347,12 @@ recv 412 chats, 1180 contacts, 39204 msgs (is latest: false, progress: 34%), typ
 
 `type: 2` is a full sync, `type: 3` is the recent-only one. Anything but `2` means
 `syncFullHistory` never reached the socket.
+
+The connection's page shows it too, to whoever scanned: after the scan it reads
+**Importing your WhatsApp history** with message and chat counts climbing, and
+moves on to the dashboard once they have stopped changing for about fifteen
+seconds (three minutes at most; **Show dashboard now** skips the wait). The
+import carries on in Evolution either way, and the dashboard counts catch up.
 
 Caveats worth knowing before you rely on it:
 

@@ -1,5 +1,7 @@
 import { z } from 'zod'
 import type { ChatMessage } from '~~/server/utils/chats'
+import type { ChatExpansion } from '~~/server/utils/mcp-scope'
+import type { LidLinks } from '~~/server/utils/whatsapp-identity'
 
 /**
  * Read tool. Unlike list-chats this refuses loudly when the requested chat is out
@@ -14,6 +16,14 @@ import type { ChatMessage } from '~~/server/utils/chats'
  * (`hasMore`), what span it actually covers (`covered`), and how to get the
  * rest (`nextPage`, plus a `note` in words because the flag alone was not
  * enough).
+ *
+ * **One person, possibly two JIDs.** WhatsApp may store a person's messages
+ * under a LID and under their phone number. When `whatsapp-identity.ts` links
+ * the two, either `jid` reads both (`jids` says so), but only the halves this
+ * token is scoped to — `expandChat` adds a partner only when it passes the same
+ * literal scope check, and a cut half is reported as `linkedOutOfScope`, a
+ * count. A 1:1 chat with no link says so (`linkUnknown`) where a second half
+ * could exist, since a page from half a conversation reads as the whole one.
  */
 export default defineKindTool({
   name: 'read-messages',
@@ -40,7 +50,13 @@ export default defineKindTool({
     + 'own record carrying the new text, with `editOf` naming the message it '
     + 'replaces; that earlier record is still in the history with the text it '
     + 'had before, so read the pair as one message that changed rather than as '
-    + 'two. WhatsApp\'s own control records — deletions, disappearing-message '
+    + 'two. One person can be stored under two ids — a `@lid` and their phone '
+    + 'number; when this connector has linked them, reading either id returns '
+    + 'both halves, merged into one timeline, and `jids` lists what was read. '
+    + '`linkedOutOfScope` means part of this person\'s conversation is under an '
+    + 'id this token may not read; `linkUnknown` means another part may exist '
+    + 'that this connector cannot link. Say so rather than presenting the page '
+    + 'as the whole conversation. WhatsApp\'s own control records — deletions, disappearing-message '
     + 'timer changes, key exchanges — carry nothing to read and are left out, '
     + 'counted by `protocolMessagesExcluded` when any were, and still included '
     + 'in `totalMatching`. An edit that WhatsApp encrypted for the chat\'s '
@@ -56,7 +72,7 @@ export default defineKindTool({
     openWorldHint: true,
   },
   inputSchema: {
-    jid: z.string().min(1).describe('Chat identifier from list-chats, e.g. 5511999999999@s.whatsapp.net'),
+    jid: z.string().min(1).describe('Chat identifier from list-chats, exactly as returned, e.g. 5511999999999@s.whatsapp.net or 79972425314508@lid'),
     limit: z.number().int().min(1).max(200).default(50).describe('How many messages to return in this page'),
     page: z.number().int().min(1).default(1).describe('1-based page of `limit` messages, counting back from the newest. Walk this up while `hasMore` is true.'),
     since: z.string().optional().describe('Only messages at or after this date, e.g. 2024-03-01 or 2024-03-01T12:00:00Z'),
@@ -72,7 +88,10 @@ export default defineKindTool({
   handler: async ({ jid, limit, page, since, until, includeReactions }) => {
     const { instance, scope } = useMcpAuth()
 
-    assertChatAllowed(scope, jid)
+    // Asserts `jid` itself first, exactly as before; a linked partner is added
+    // only when the token is scoped to it too.
+    const links = await lidLinks(instance)
+    const chat = expandChat(scope, links, jid)
 
     // Named `range` rather than `window` only to keep the DOM global unshadowed;
     // it goes back to the caller as `window`.
@@ -93,8 +112,10 @@ export default defineKindTool({
     // `range` is echoed back to the caller as `window`, and it should describe
     // the time bounds and nothing else.
     const { messages, hasMore, total, protocolMessagesExcluded } = await listMessages(
-      instance, jid, { limit, page, ...range, includeReactions },
+      instance, chat.jids, { limit, page, ...range, includeReactions },
     )
+
+    const identity = linkStatus(jid, chat, links)
 
     const covered = coveredSpan(messages)
     const bounded = Boolean(range.since || range.until)
@@ -107,10 +128,12 @@ export default defineKindTool({
         ? incompleteNote({ page, limit, count: messages.length, excluded: protocolMessagesExcluded, range })
         : undefined,
       protocolMessagesExcluded > 0 ? droppedNote(protocolMessagesExcluded) : undefined,
+      identity.note,
     ].filter((note): note is string => Boolean(note))
 
     return {
       jid,
+      ...identity.fields,
       page,
       limit,
       count: messages.length,
@@ -142,6 +165,62 @@ export default defineKindTool({
     }
   },
 })
+
+/**
+ * What this page says about the person behind a 1:1 chat having a second JID.
+ *
+ * Four outcomes, each its own field so a caller can test for it, and each with
+ * a sentence because a field alone went unread before (`hasMore`):
+ *   - both halves read            → `jids`
+ *   - a half outside scope        → `linkedOutOfScope`, a count, never the id
+ *   - no link, one could exist    → `linkUnknown`. Always for a LID chat; for a
+ *                                   phone-number chat only when the account has
+ *                                   LID chats it could not link — otherwise
+ *                                   every ordinary chat would carry a warning.
+ *   - links could not be read     → `linkUnavailable`
+ * Groups and anything else carry none.
+ */
+function linkStatus(
+  jid: string,
+  chat: ChatExpansion,
+  links: LidLinks,
+): { fields: Record<string, unknown>, note?: string } {
+  const personal = jid.endsWith('@lid') || jid.endsWith('@s.whatsapp.net')
+  if (!personal) return { fields: {} }
+
+  if (chat.jids.length > 1) {
+    return {
+      fields: { jids: chat.jids },
+      note: 'This person\'s conversation is stored under two ids — their privacy alias (@lid) and their '
+        + 'phone number — and this page reads both, merged into one timeline. Reply with the jid as given.',
+    }
+  }
+  if (chat.outOfScope > 0) {
+    return {
+      fields: { linkedOutOfScope: chat.outOfScope },
+      note: 'Part of this person\'s conversation is stored under another id that this connector token is '
+        + 'not scoped to, so it is not in these messages. Do not treat this as the whole conversation; '
+        + 'the account owner can add the other part to the token\'s allowed chats.',
+    }
+  }
+  if (!links.available) {
+    return {
+      fields: { linkUnavailable: true },
+      note: 'Could not check whether this person has a second conversation under another id '
+        + '(a @lid alias or their phone number), so this may be only part of it.',
+    }
+  }
+  if (jid.endsWith('@lid') || links.unlinkedLids > 0) {
+    return {
+      fields: { linkUnknown: true },
+      note: 'This person may also have a separate, older or newer conversation under '
+        + (jid.endsWith('@lid') ? 'their phone number' : 'a @lid privacy alias')
+        + ' that this connector cannot link to this one, so these messages may not be the whole '
+        + 'conversation.',
+    }
+  }
+  return { fields: {} }
+}
 
 /**
  * Said in words as well as in a flag. The failure this exists to prevent was a

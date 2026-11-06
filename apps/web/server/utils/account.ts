@@ -121,15 +121,21 @@ export async function setPassword(userId: string, password: string): Promise<voi
  * Create an account inside the caller's transaction. Throws 409 when the
  * address is taken. Takes a finished hash so the slow part runs before the
  * transaction opens rather than while it holds a connection.
+ *
+ * `marketingConsent` is the hosted signup page's opt-in box; callers pass it
+ * only in hosted mode, so a self-hosted account never records one.
  */
 export async function createUser(
   tx: Db,
-  input: { email: string, passwordHash: string, name: string },
+  input: { email: string, passwordHash: string, name: string, marketingConsent?: boolean },
 ): Promise<AppUser> {
   try {
     const [row] = await tx<AppUser[]>`
-      INSERT INTO app.users (email, name, password_hash)
-      VALUES (${normaliseEmail(input.email)}, ${input.name}, ${input.passwordHash})
+      INSERT INTO app.users (email, name, password_hash, marketing_consent_at)
+      VALUES (
+        ${normaliseEmail(input.email)}, ${input.name}, ${input.passwordHash},
+        CASE WHEN ${Boolean(input.marketingConsent)} THEN now() END
+      )
       RETURNING id, email, name
     `
     return row!

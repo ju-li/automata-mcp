@@ -30,6 +30,11 @@ export interface OrgResponse {
   members: OrgMemberRow[]
   /** Admin-only: an unaccepted invitation names someone who has not agreed yet. */
   invites?: OrgInviteRow[]
+  /**
+   * Whether MCP tool calls are recorded, and whether this organization may stop
+   * — mirrors `ToolCallSetting` in server/utils/tool-calls.ts.
+   */
+  toolCalls?: { recording: boolean, required: boolean }
 }
 
 /** What to call a role in prose. */

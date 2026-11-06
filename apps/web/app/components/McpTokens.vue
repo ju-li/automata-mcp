@@ -106,6 +106,8 @@ interface TokenRow {
   assignedTo: { id: string, email?: string }
   scope: TokenScope
   send_disclaimer?: string
+  /** Absent when the server could not read them; empty when none were seen. */
+  clients?: TokenClient[]
 }
 
 const { data, refresh, status } = await useFetch<{ tokens: TokenRow[] }>(
@@ -154,6 +156,16 @@ const assigneeOptions = computed(() =>
 )
 
 const howTo = ref<TokenRow | null>(null)
+const clientsOf = ref<TokenRow | null>(null)
+/** Whose tool-call history is open. See ToolCallsDialog. */
+const callsOf = ref<TokenRow | null>(null)
+
+/** The line under a token's name: its clients by name, newest session first. */
+function clientSummary(token: TokenRow) {
+  const distinct = distinctClients(token.clients ?? [])
+  const shown = distinct.slice(0, 2).map(clientLabel).join(' · ')
+  return distinct.length > 2 ? `${shown} +${distinct.length - 2} more` : shown
+}
 
 /**
  * The how-to can only show a masked URL — the plaintext is gone after minting.
@@ -283,11 +295,6 @@ async function rotate(token: TokenRow) {
   await refresh()
 }
 
-function formatDate(value?: string) {
-  if (!value) return '—'
-  return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
-}
-
 function statusOf(token: TokenRow) {
   if (token.revoked) return { label: 'Revoked', variant: 'outline' as const }
   if (token.expired) return { label: 'Expired', variant: 'outline' as const }
@@ -357,6 +364,8 @@ function statusOf(token: TokenRow) {
             <TableRow>
               <TableHead>Name</TableHead>
               <TableHead>Created</TableHead>
+              <!-- The last tool call. A client's last session is in the
+                   clients dialog; they differ, and both are labelled. -->
               <TableHead>Last used</TableHead>
               <TableHead>Expires</TableHead>
               <TableHead>Scope</TableHead>
@@ -375,12 +384,41 @@ function statusOf(token: TokenRow) {
                 <div v-if="canManage" class="text-xs font-normal text-muted-foreground">
                   {{ token.assignedTo.id === user?.id ? 'You' : (token.assignedTo.email || 'Unknown holder') }}
                 </div>
+                <!-- Which MCP clients it was used from, as they named
+                     themselves. A hint, not identity — the dialog says so.
+                     Capped and wrapping, so a long client name cannot widen
+                     the column and push the row actions off the edge. -->
+                <button
+                  v-if="token.clients?.length"
+                  type="button"
+                  class="mt-0.5 block max-w-40 text-left text-xs font-normal whitespace-normal text-muted-foreground [overflow-wrap:anywhere] underline-offset-2 hover:underline"
+                  @click="clientsOf = token"
+                >
+                  {{ clientSummary(token) }}
+                </button>
+                <Badge v-if="token.clients?.some(c => c.newClient)" variant="secondary" class="mt-1">
+                  New client
+                </Badge>
               </TableCell>
               <TableCell class="text-muted-foreground">
                 {{ formatDate(token.created) }}
               </TableCell>
               <TableCell class="text-muted-foreground">
-                {{ token.last_used_at ? formatDate(token.last_used_at) : 'Never' }}
+                <!-- Opens the token's recorded tool calls. On the date rather
+                     than a row button: the actions column is already as wide
+                     as an ordinary screen allows. -->
+                <button
+                  v-if="token.last_used_at"
+                  type="button"
+                  class="underline-offset-2 hover:underline"
+                  title="Show recorded tool calls"
+                  @click="callsOf = token"
+                >
+                  {{ formatDate(token.last_used_at) }}
+                </button>
+                <template v-else>
+                  Never
+                </template>
               </TableCell>
               <TableCell class="text-muted-foreground">
                 {{ token.expires_at ? formatDate(token.expires_at) : 'Never' }}
@@ -602,6 +640,20 @@ function statusOf(token: TokenRow) {
       :scope="howTo?.scope"
       @update:open="value => { if (!value) howTo = null }"
       @create="createFromHowTo"
+    />
+
+    <ToolCallsDialog
+      :open="Boolean(callsOf)"
+      :token-id="callsOf?.id"
+      :label="callsOf?.label"
+      @update:open="value => { if (!value) callsOf = null }"
+    />
+
+    <TokenClientsDialog
+      :open="Boolean(clientsOf)"
+      :label="clientsOf?.label"
+      :clients="clientsOf?.clients ?? []"
+      @update:open="value => { if (!value) clientsOf = null }"
     />
 
     <RevealTokenDialog :token="revealed" :kind="kind" :scope="revealedScope" @close="revealed = null" />

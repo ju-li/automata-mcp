@@ -29,6 +29,12 @@ export default defineMcpHandler({
     // are never cross-read. See server/utils/mcp-auth.ts.
     event.context.mcpAuth = auth
 
+    // Which client this token is used from, recorded on `initialize` only and
+    // never awaited past the body read. Here rather than in a tool or hook: we
+    // run stateless, so nothing later in the request has seen the initialize.
+    // See server/utils/mcp-clients.ts.
+    await captureTokenClient(event, auth.tokenId)
+
     return next()
   },
 })

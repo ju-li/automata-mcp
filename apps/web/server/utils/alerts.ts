@@ -1,4 +1,5 @@
 import type { AppInstance } from './app-db'
+import type { RowChurn } from './instances'
 import { assertNever } from '#shared/connection'
 import type { ConnectionState, InstanceKind } from '#shared/connection'
 
@@ -29,7 +30,7 @@ import type { ConnectionState, InstanceKind } from '#shared/connection'
 /**
  * One connection's health, in the terms alerting needs, whatever its kind.
  *
- * Built from a live read — `getInstanceStatus()` for WhatsApp, the bridge's
+ * Built from a live read — `getInstanceHealth()` for WhatsApp, the bridge's
  * `/state` for Telegram — and never from a stored column.
  */
 type ConnectionHealth = {
@@ -37,6 +38,11 @@ type ConnectionHealth = {
   state: ConnectionState
   /** Linked, and the transport dropped. Reconnect is enough. */
   sessionLost: boolean
+  /**
+   * WhatsApp only: Evolution keeps reopening the socket — see `rowChurn` in
+   * instances.ts. Reconnect cannot help; restarting the Evolution service does.
+   */
+  flapping: boolean
   /**
    * The connection has been linked at some point, so a bad state is an outage
    * rather than a connection nobody has finished setting up.
@@ -57,7 +63,9 @@ type ConnectionHealth = {
 
 /**
  * Read one connection's live health. Throws only where the underlying read
- * does; both reads report an unreachable backend as `unknown` instead.
+ * does; both reads report an unreachable backend as `unknown` instead. For
+ * WhatsApp it also stores the reconnect-loop observation the read produced
+ * (`storeRowChurn`), since that verdict is built across reads.
  *
  * **What "paired" means differs by kind, and both answers are deliberate.**
  *
@@ -79,11 +87,15 @@ type ConnectionHealth = {
 async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 'telegram'): Promise<ConnectionHealth> {
   switch (kind) {
     case 'whatsapp': {
-      const status = await getInstanceStatus(instance)
+      // Health only: this runs per connection every five minutes and reads none
+      // of the counts, so it must not cause one to be computed.
+      const status = await getInstanceHealth(instance)
+      await storeRowChurn(instance, status.rowChurn, Boolean(status.flapping))
       return {
         kind,
         state: status.state,
         sessionLost: Boolean(status.sessionLost),
+        flapping: Boolean(status.flapping),
         paired: Boolean(status.ownerJid),
         knownUnlinked: false,
         revoked: false,
@@ -99,6 +111,7 @@ async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 't
         kind,
         state: status.state,
         sessionLost: Boolean(status.sessionLost),
+        flapping: false,
         paired: linked || unreachable,
         knownUnlinked: !linked && !unreachable,
         revoked: Boolean(status.revoked),
@@ -108,6 +121,40 @@ async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 't
     }
     default:
       return assertNever(kind)
+  }
+}
+
+/**
+ * Persist the churn observation a WhatsApp health read produced — this file is
+ * the only writer of `row_churn_since` / `row_churn_seen_at`, as it is of
+ * `down_since` and `alerted_at`. Written only when it changed, and with plain
+ * SQL rather than `updateRow`, so bookkeeping every sweep does not move the
+ * connection's `updated` stamp.
+ *
+ * Logs once per episode, when it first amounts to a loop. The fix is the
+ * operator's — restarting the Evolution service — and the organization's mail
+ * does not reach them; with `NUXT_OPS_ALERT_EMAIL` set they are also mailed
+ * (`reportLoopToOperator`).
+ */
+async function storeRowChurn(instance: AppInstance, churn: RowChurn, flapping: boolean): Promise<void> {
+  const since = instance.row_churn_since
+  const seenAt = instance.row_churn_seen_at
+  if (churn.since === since && churn.seenAt === seenAt) return
+
+  const sql = await appDb()
+  await sql`
+    UPDATE app.instances
+    SET row_churn_since = ${churn.since ?? null}, row_churn_seen_at = ${churn.seenAt ?? null}
+    WHERE id = ${instance.id}
+  `
+
+  const wasFlapping = isFlapping({ since, seenAt })
+  if (flapping && !wasFlapping) {
+    console.error(
+      `[alerts] WhatsApp connection ${instance.id} (${instance.name}) has been reconnecting continuously `
+      + `since ${churn.since}: Evolution keeps reopening its socket while the stored status reads open. `
+      + 'Reconnect cannot end this; restart the Evolution service (no QR scan needed). See docs/whatsapp.md.',
+    )
   }
 }
 
@@ -181,6 +228,15 @@ async function evaluate(instance: AppInstance): Promise<void> {
 
   const health = await readConnectionHealth(instance, kind)
 
+  // Before the paired check, and with no grace: the operator is the one person
+  // who can end a loop, so they hear about it as soon as it amounts to one.
+  // Its failure is logged and does not stop the organization's own alert.
+  // Kind-agnostic: only WhatsApp health can be `flapping`, and only a WhatsApp
+  // row ever carries `ops_alerted_at`.
+  await reportLoopToOperator(instance, health).catch((error) => {
+    console.error(`[alerts] could not report connection ${instance.id}'s reconnect loop to the operator:`, error)
+  })
+
   if (!health.paired) {
     // Unlinked on purpose — a Telegram logout clears the account — while an
     // outage was open. Nothing is broken any more and nothing is working
@@ -192,7 +248,9 @@ async function evaluate(instance: AppInstance): Promise<void> {
     return
   }
 
-  const healthy = health.state === 'open' && !health.sessionLost
+  // A loop reads `open` on most live reads — whichever socket just logged in —
+  // so without the last clause it is healthy by construction.
+  const healthy = health.state === 'open' && !health.sessionLost && !health.flapping
 
   if (healthy) {
     if (!instance.down_since && !instance.alerted_at) return
@@ -290,6 +348,135 @@ interface AlertMail {
   text: string
 }
 
+// ── the operator ───────────────────────────────────────────────────────────
+
+/** `NUXT_OPS_ALERT_EMAIL`, trimmed. Empty: no operator mail. */
+function opsAlertEmail(): string {
+  return String(useRuntimeConfig().opsAlertEmail ?? '').trim()
+}
+
+/**
+ * Whether the operator of this deployment is mailed about a reconnect loop on
+ * this connection: an operator address is set, mail can go out, and the
+ * connection is on the deployment's own Evolution server. A server the
+ * organization supplied is theirs to restart, and its loops are not ours to
+ * report.
+ */
+function operatorMailedAboutLoops(instance: Pick<AppInstance, 'admin_key' | 'base_url'>): boolean {
+  return Boolean(opsAlertEmail()) && Boolean(useRuntimeConfig().smtpHost) && onDeploymentServer(instance)
+}
+
+/**
+ * Whether what a customer reads about a reconnect loop on this connection may
+ * say "this is on our side, we have been alerted". The one rule behind the
+ * outage mail, the dashboard notice and `operatorAlerted` on the status that
+ * MCP returns — so the three cannot disagree.
+ *
+ * Hosted mode only. On a self-hosted deployment the reader is often the
+ * operator, and the existing wording ("whoever runs this deployment") is right
+ * whether or not an operator address is set. On the hosted offering the promise
+ * is only true if somebody is actually told, hence the operator address is part
+ * of the rule rather than assumed.
+ */
+export function operatorAlertedAboutLoop(instance: Pick<AppInstance, 'admin_key' | 'base_url'>): boolean {
+  return hostedMode() && operatorMailedAboutLoops(instance)
+}
+
+/**
+ * Mail the deployment's operator when a WhatsApp connection on its Evolution
+ * server starts looping, and again when the loop has ended.
+ *
+ * The only operator signal before this was the `storeRowChurn` log line, which
+ * nobody watches; in practice a loop was heard about when a customer replied to
+ * the outage mail. No grace period: the organization's mail waits ten minutes
+ * because most drops recover by themselves, and a loop does not — `flapping`
+ * already takes ten minutes of churn to become true.
+ *
+ * `ops_alerted_at` is the bookkeeping, as `alerted_at` is for the organization:
+ * claimed by a conditional UPDATE *before* sending, so two replicas or the sweep
+ * and a webhook landing together cannot both mail, and put back if the send
+ * failed, so broken SMTP delays the mail rather than losing it. The same claim
+ * guards the "ended" mail. With no operator address any more, a stale claim is
+ * cleared without mail once the loop ends.
+ *
+ * The mail names the connection by ids only — no label, no address, nothing
+ * the organization typed — since its reader needs to find the instance, not
+ * the customer.
+ */
+async function reportLoopToOperator(instance: AppInstance, health: ConnectionHealth): Promise<void> {
+  const to = opsAlertEmail()
+
+  if (health.flapping) {
+    if (instance.ops_alerted_at || !operatorMailedAboutLoops(instance)) return
+
+    const sql = await appDb()
+    const claimed = await sql`
+      UPDATE app.instances SET ops_alerted_at = now()
+      WHERE id = ${instance.id} AND ops_alerted_at IS NULL
+      RETURNING id
+    `
+    if (!claimed.length) return
+
+    const sent = await sendAppEmail({ to, ...operatorLoopMail(instance) })
+    if (!sent) {
+      await sql`UPDATE app.instances SET ops_alerted_at = NULL WHERE id = ${instance.id}`
+    }
+    return
+  }
+
+  if (!instance.ops_alerted_at) return
+
+  const sql = await appDb()
+  // `IS NOT NULL`, not equality with the value read: rows come back as ISO
+  // strings at millisecond precision, and the stored value has microseconds.
+  const released = await sql`
+    UPDATE app.instances SET ops_alerted_at = NULL
+    WHERE id = ${instance.id} AND ops_alerted_at IS NOT NULL
+    RETURNING id
+  `
+  if (!released.length || !to) return
+
+  const sent = await sendAppEmail({ to, ...operatorLoopEndedMail(instance) })
+  if (!sent) {
+    await sql`
+      UPDATE app.instances SET ops_alerted_at = ${instance.ops_alerted_at}
+      WHERE id = ${instance.id} AND ops_alerted_at IS NULL
+    `
+  }
+}
+
+function operatorLoopMail(instance: AppInstance): AlertMail {
+  return {
+    subject: `WhatsApp connection ${instance.id} is stuck reconnecting`,
+    text: [
+      `Evolution keeps reopening the socket for WhatsApp connection ${instance.id} `
+      + `(Evolution instance "${instance.name}", organization ${instance.org || 'unknown'}) `
+      + 'while its stored status reads open: two sockets on one set of credentials are replacing each other.',
+      '',
+      `Seen since: ${instance.row_churn_since ?? 'just now'}`,
+      '',
+      'Fix: restart the Evolution service. No QR scan is needed; every account on it drops briefly and reconnects. '
+      + 'Reconnect in the app cannot end this. Repeated logins can get the number flagged by WhatsApp, so do it soon.',
+      ...(hostedMode()
+        ? ['', 'The people using this connection are told it is on our side and that nothing is needed from them.']
+        : []),
+      '',
+      'See docs/whatsapp.md, "Stuck reconnecting". You will get one more email when the loop has ended.',
+    ].join('\n'),
+  }
+}
+
+function operatorLoopEndedMail(instance: AppInstance): AlertMail {
+  return {
+    subject: `WhatsApp connection ${instance.id} is no longer reconnecting`,
+    text: [
+      `WhatsApp connection ${instance.id} (Evolution instance "${instance.name}") is no longer seen reconnecting over and over. `
+      + 'If Evolution has been unreachable since, this can also mean its row cannot be read; the connection\'s own '
+      + 'outage mail covers that.',
+    ].join('\n'),
+  }
+}
+
 interface AlertRecipient {
   email: string
   /** An admin of the owning organization. Decides which fix the mail names. */
@@ -325,6 +512,24 @@ function outageMail(instance: AppInstance, health: ConnectionHealth, canManage: 
   const label = connectionLabel(instance, health.kind)
   const url = connectionUrl(instance)
 
+  // Not "disconnected": most reads find it connected, and some messages get
+  // through. Saying it is down would be contradicted by the dashboard badge
+  // the reader opens next.
+  if (health.flapping) {
+    return {
+      subject: `${label} keeps reconnecting`,
+      text: [
+        `${label} is stuck reconnecting over and over, so anything connected to it — `
+        + 'including MCP tools — may miss messages or fail to send.',
+        '',
+        whatsappLoopCause(instance, canManage),
+        ...(url ? ['', url] : []),
+        '',
+        'You will get one more email when it is working again.',
+      ].join('\n'),
+    }
+  }
+
   const cause = health.kind === 'telegram' ? telegramOutageCause(health, canManage) : whatsappOutageCause(health, canManage)
 
   return {
@@ -339,6 +544,34 @@ function outageMail(instance: AppInstance, health: ConnectionHealth, canManage: 
       'You will get one more email when it is working again.',
     ].join('\n'),
   }
+}
+
+/**
+ * Who can end a reconnect loop is whoever runs the Evolution service — never a
+ * button in this app, since Reconnect does nothing to an `open` socket. On the
+ * deployment's own server that is its operator, who on a self-hosted install is
+ * likely the admin reading this. On a server the organization supplied, it is
+ * them.
+ *
+ * On the hosted offering the operator is us, and the customer cannot restart
+ * anything or reach whoever can. Telling them it is "worth doing soon" hands
+ * them a problem they cannot act on. When `operatorAlertedAboutLoop` holds —
+ * hosted, our server, and an operator address to mail — the operator has been
+ * told already (`reportLoopToOperator` runs with no grace, so before this mail),
+ * and the mail says so: nothing for the reader to do, admin or member.
+ */
+function whatsappLoopCause(instance: AppInstance, canManage: boolean): string {
+  if (operatorAlertedAboutLoop(instance)) {
+    return 'Evolution keeps opening a new connection for this account and WhatsApp keeps replacing it. '
+      + 'This is on our side: we have been alerted and will restart the service. No QR scan is needed, '
+      + 'the phone stays linked, and there is nothing you need to do.'
+  }
+  const service = onDeploymentServer(instance)
+    ? 'whoever runs this deployment has to restart its Evolution service'
+    : 'the Evolution server this connection uses has to be restarted'
+  return canManage
+    ? `Evolution keeps opening a new connection for this account and WhatsApp keeps replacing it. Reconnect cannot end this — ${service}. No QR scan is needed, and the phone stays linked. Repeated logins can get a number flagged by WhatsApp, so this is worth doing soon.`
+    : `Evolution keeps opening a new connection for this account and WhatsApp keeps replacing it. Nothing needs scanning; ${service}, and an admin of your organization has been told as well.`
 }
 
 function whatsappOutageCause(health: ConnectionHealth, canManage: boolean): string {

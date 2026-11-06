@@ -89,9 +89,13 @@ const unlistable = computed(() =>
   && table.total.value < (props.total ?? 0),
 )
 
-/** The identifier shown beside a chat's name: a phone number, or a Telegram @username. */
+/**
+ * The identifier shown beside a chat's name: a phone number, or a Telegram
+ * @username. A WhatsApp LID chat shows the number behind it when WhatsApp
+ * revealed one; otherwise nothing, since its own digits are not a number.
+ */
 function secondaryId(chat: ScopedChat): string | undefined {
-  return props.kind === 'telegram' ? chat.username : chat.number
+  return props.kind === 'telegram' ? chat.username : chat.number ?? chat.phoneNumber
 }
 
 const columns = computed<{ key: SortKey, label: string }[]>(() => [
@@ -238,7 +242,18 @@ function formatLastActivity(chat: ScopedChat): string {
                     {{ chat.username ? `@${chat.username}` : '—' }}
                   </template>
                   <template v-else>
-                    {{ secondaryId(chat) ? `+${secondaryId(chat)}` : '—' }}
+                    <span
+                      v-if="!chat.number && chat.phoneNumber"
+                      :title="(chat.jids?.length ?? 0) > 1
+                        ? 'WhatsApp stored this person\'s messages under two ids, their privacy alias (LID) and their phone number. Both are shown here as one conversation.'
+                        : 'This chat is addressed by a WhatsApp privacy alias (LID). WhatsApp revealed this number on a message in it.'"
+                    >
+                      +{{ chat.phoneNumber }}
+                      <span class="text-xs text-muted-foreground">{{ (chat.jids?.length ?? 0) > 1 ? '2 ids' : 'via LID' }}</span>
+                    </span>
+                    <template v-else>
+                      {{ secondaryId(chat) ? `+${secondaryId(chat)}` : '—' }}
+                    </template>
                   </template>
                 </TableCell>
 

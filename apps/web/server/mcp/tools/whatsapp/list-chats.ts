@@ -9,10 +9,19 @@
  * `read-messages` and `list-tables` both carry an envelope to close. A model
  * told nothing concludes these are all the conversations there are.
  *
- * No page-size or offset argument, though, and that is not an omission: naming
- * the rows costs Evolution's entire contact table per call (see `listChats`), so
- * walking a small `skip` is far more expensive than one large page. The page
- * size stays this server's decision.
+ * No page-size or offset argument, though, and that is not an omission: every
+ * page is one aggregate over the account's whole message table (see
+ * `listChatActivity`), so walking a small `skip` costs that scan per page. One
+ * large page is cheaper. The page size stays this server's decision.
+ *
+ * Read live, not cached: a message that has reached the dashboard is in this
+ * listing on the next call.
+ *
+ * `phoneNumber` on a LID chat discloses nothing a token could not already reach:
+ * its evidence is the LID chat's own rows, and `filterChatsToScope` keeps it only
+ * when the LID is in scope. A person folded into one row (`jids`) is cut to the
+ * halves the token holds, never widened — scope is literal JIDs — and a cut
+ * half is reported as a count, not an id.
  */
 export default defineKindTool({
   name: 'list-chats',
@@ -20,13 +29,24 @@ export default defineKindTool({
   title: 'List WhatsApp chats',
   description:
     'List recent WhatsApp conversations, most recently active first, with the '
-    + '`jid` needed by read-messages. Includes conversations imported from the '
+    + '`jid` needed by read-messages and send-text-message. `number` is present only '
+    + 'for chats addressed by phone number: a jid ending in `@lid` is a WhatsApp '
+    + 'privacy alias whose digits are not a phone number. A `@lid` chat carries `phoneNumber` only '
+    + 'when WhatsApp has revealed the number behind it on a live message; its absence means the '
+    + 'number is unknown to this connector, not that the person has none. Even when present, '
+    + 'reply by the chat\'s `jid`, never by `phoneNumber`. A person WhatsApp stored under both a '
+    + '`@lid` and their phone number is listed once, under the `@lid`, with both ids in `jids`; '
+    + 'read-messages on that `jid` reads both. `linkedOutOfScope` means part of that person\'s '
+    + 'conversation is under an id this connector may not read. Includes conversations imported from the '
     + 'phone when the account was paired, not only ones active since. If this '
     + 'connector is scoped to specific chats, only those are listed. This '
     + 'answers with one page, most recently active first: when `hasMore` is true '
     + 'there are older conversations it did not include, so do not report the '
     + 'list as complete or conclude that a chat does not exist — search-messages '
-    + 'finds a conversation by what was said in it.',
+    + 'finds a conversation by what was said in it. It carries no read or unread '
+    + 'status: whether the user has read a message is not available to this '
+    + 'connector, so say so rather than telling the user they have, or have no, '
+    + 'unread messages. Timestamps are UTC.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,

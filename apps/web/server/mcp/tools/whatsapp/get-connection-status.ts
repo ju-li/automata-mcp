@@ -19,7 +19,11 @@ export default defineKindTool({
     'Report whether the connected WhatsApp account is currently online, along with '
     + 'the profile it is signed in as and how many messages, chats and contacts have '
     + 'been recorded. Call this before sending anything: only an account in the '
-    + '`open` state can send or receive.',
+    + '`open` state can send or receive. `flapping: true` means the account keeps '
+    + 'reconnecting over and over even though it reads `open`: messages may be missed '
+    + 'and sends may fail, and only restarting the Evolution service ends it. '
+    + 'With `operatorAlerted: true` as well, the team running this service has '
+    + 'already been alerted and will restart it, so the user has nothing to do.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,

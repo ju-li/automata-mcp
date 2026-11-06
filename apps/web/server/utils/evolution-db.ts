@@ -22,7 +22,9 @@ import { mentionedJidsOf } from './mentions'
  * `credentialsForInstance()` deliberately refuses. Three rules keep it contained,
  * and none of them is optional:
  *
- *   1. The role is read-only. Only SELECT on "Message" is granted (docs/whatsapp.md).
+ *   1. The role is read-only. SELECT on "Message" is what reading and searching
+ *      need; status reads add a column-level grant on "Instance" and "instanceId"
+ *      on "Chat"/"Contact", and fall back without them (docs/whatsapp.md).
  *      Nothing here writes, and nothing here runs DDL — the schema belongs to
  *      Evolution's Prisma migrations.
  *   2. Every query carries `"instanceId" = <this account>`. `searchMessages`
@@ -150,7 +152,7 @@ async function evolutionDbFor(instance: AppInstance): Promise<Sql> {
   return keyedPool(
     resolved.guard ? `evo:${instance.id}` : 'evo:default',
     resolved.url,
-    { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS, readOnly: true },
+    { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS, readOnly: true, jit: false },
   )
 }
 
@@ -198,11 +200,148 @@ export async function resolveEvolutionInstanceId(instance: AppInstance): Promise
   return id
 }
 
+/**
+ * The fields of Evolution's `"Instance"` row a status read needs — the same ones
+ * `fetchInstances` used to supply, minus the counts.
+ *
+ * Named columns, never `*`: the same row carries `token`, the instance's API key,
+ * and the optional least-privilege grant in docs/whatsapp.md is column-level for
+ * exactly that reason.
+ */
+export interface EvolutionInstanceRecord {
+  connectionStatus?: string
+  ownerJid?: string
+  profileName?: string
+  profilePicUrl?: string
+  number?: string
+  /** ISO 8601, UTC. */
+  disconnectionAt?: string
+}
+
+/**
+ * When Evolution last wrote this account's `"Instance"` row (its Prisma
+ * `@updatedAt`), ISO 8601, UTC — or `undefined` when there is no row or the
+ * column is NULL.
+ *
+ * 2.3.7 writes the row on four occasions only: a socket opening, a QR moving the
+ * column to `connecting`, a close it will not retry, and logout cleanup. The
+ * last three leave the column something other than `open`, so an `open` row
+ * written recently means a socket opened recently — the one signal of a
+ * reconnect loop the live state cannot give (see `rowChurn` in instances.ts).
+ * Only this SQL read supplies it. `fetchInstances` would, but that path is
+ * cached for minutes, which is too coarse to tell a loop from one reconnect.
+ *
+ * A separate statement from `readInstanceRecord`, not a seventh column there:
+ * the least-privilege grant in docs/whatsapp.md is column by column, and a role
+ * granted before this column was read would fail that whole query with 42501
+ * and push every status read onto `fetchInstances`. Here a missing grant costs
+ * only this signal. Same primary-key lookup, same `id = <this account>` rule.
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`.
+ */
+export async function readInstanceRowWrittenAt(instance: AppInstance): Promise<string | undefined> {
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const [row] = await sql<Array<{ updatedAt: Date | null }>>`
+    SELECT ("updatedAt" AT TIME ZONE 'UTC') AS "updatedAt"
+    FROM "Instance"
+    WHERE id = ${instanceId}
+  `
+  return row?.updatedAt?.toISOString()
+}
+
+/**
+ * This account's `"Instance"` row, by primary key — or `undefined` when there is
+ * no such row.
+ *
+ * **Why status reads come here instead of `fetchInstances`.** 2.3.7 answers that
+ * route with Prisma's `_count: { Message, Contact, Chat }`, which compiles to a
+ * `GROUP BY "instanceId"` over *every account's* rows, joined to the one instance
+ * afterwards. Each call was a full scan of `"Message"` — 42% of the production
+ * database's block reads, growing with every account and every poll. This is an
+ * index lookup.
+ *
+ * `id = <this account>` is this table's form of the `"instanceId"` rule above:
+ * `resolveEvolutionInstanceId()` throws rather than hand back an empty id.
+ *
+ * `disconnectionAt` is a `timestamp` without time zone that Prisma writes and
+ * reads as UTC; postgres.js would parse it in the process's local zone, so it is
+ * converted to `timestamptz` in the query rather than trusting the host's TZ.
+ *
+ * Errors are rethrown as the driver raised them — not as a `createError` — so the
+ * caller can tell a missing grant (42501) from an outage and fall back.
+ */
+export async function readInstanceRecord(instance: AppInstance): Promise<EvolutionInstanceRecord | undefined> {
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const [row] = await sql<Array<{
+    connectionStatus: string | null
+    ownerJid: string | null
+    profileName: string | null
+    profilePicUrl: string | null
+    number: string | null
+    disconnectionAt: Date | null
+  }>>`
+    SELECT "connectionStatus"::text AS "connectionStatus",
+           "ownerJid",
+           "profileName",
+           "profilePicUrl",
+           "number",
+           ("disconnectionAt" AT TIME ZONE 'UTC') AS "disconnectionAt"
+    FROM "Instance"
+    WHERE id = ${instanceId}
+  `
+  if (!row) return undefined
+
+  return {
+    connectionStatus: row.connectionStatus ?? undefined,
+    ownerJid: row.ownerJid ?? undefined,
+    profileName: row.profileName ?? undefined,
+    profilePicUrl: row.profilePicUrl ?? undefined,
+    number: row.number ?? undefined,
+    disconnectionAt: row.disconnectionAt?.toISOString(),
+  }
+}
+
+/**
+ * How many `"Message"`, `"Chat"` and `"Contact"` rows this account holds.
+ *
+ * Raw row counts, duplicates included — the same numbers Prisma's `_count` gave,
+ * so the dashboard's figures do not change meaning with this. Each subquery
+ * carries `"instanceId" = <this account>`, and all three tables have
+ * `@@index([instanceId])`, so this reads one account's rows and nobody else's.
+ * Still ~100 ms on an 840k-message account, which is why the caller caches it.
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`.
+ */
+export async function countInstanceRows(instance: AppInstance): Promise<{ messages: number, chats: number, contacts: number }> {
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const [row] = await sql<Array<{ messages: number, chats: number, contacts: number }>>`
+    SELECT (SELECT count(*) FROM "Message" WHERE "instanceId" = ${instanceId})::int AS messages,
+           (SELECT count(*) FROM "Chat"    WHERE "instanceId" = ${instanceId})::int AS chats,
+           (SELECT count(*) FROM "Contact" WHERE "instanceId" = ${instanceId})::int AS contacts
+  `
+  return {
+    messages: Number(row?.messages ?? 0),
+    chats: Number(row?.chats ?? 0),
+    contacts: Number(row?.contacts ?? 0),
+  }
+}
+
 export interface MessageSearchOptions {
   /** Every term must appear in the message body. Already split, not yet escaped. */
   terms: string[]
-  /** Restrict to one chat. */
-  jid?: string
+  /**
+   * Restrict to one conversation: the chat's JID, or both JIDs of a linked
+   * person (`whatsapp-identity.ts`), already cut to scope by `expandChat`.
+   * Emitted whenever present — an empty array matches nothing rather than
+   * widening to every chat.
+   */
+  jids?: readonly string[]
   /** The only chats this token may see. Omit for an all-chats token. */
   allowedJids?: string[]
   since?: string
@@ -292,6 +431,10 @@ export async function searchMessages(
     // `Message`. None of it touches scope: `instanceId`, `jid` and `allowedJids`
     // still bound the query, so an included reaction is only ever one from a
     // chat this token already reaches.
+    //
+    // `jids` may name two JIDs — one person stored under a LID and a phone
+    // number. `DISTINCT ON (key->>'id')` and everything outside the CTE are
+    // unchanged by that: they already run over whatever the predicate admits.
     rows = await sql<MessageRow[]>`
       WITH matched AS (
         SELECT DISTINCT ON (m.key->>'id')
@@ -312,7 +455,7 @@ export async function searchMessages(
         WHERE m."instanceId" = ${instanceId}
           AND t.body IS NOT NULL
           AND t.body ILIKE ALL (${patterns}::text[])
-          ${options.jid ? sql`AND m.key->>'remoteJid' = ${options.jid}` : sql``}
+          ${options.jids === undefined ? sql`` : sql`AND m.key->>'remoteJid' = ANY(${[...options.jids]}::text[])`}
           ${options.allowedJids ? sql`AND m.key->>'remoteJid' = ANY(${options.allowedJids}::text[])` : sql``}
           ${since === undefined ? sql`` : sql`AND m."messageTimestamp" >= ${since}`}
           ${until === undefined ? sql`` : sql`AND m."messageTimestamp" <= ${until}`}
@@ -367,15 +510,19 @@ export async function searchMessages(
 
 export interface MessagePageOptions {
   /**
-   * The one chat to read. A predicate in the SQL, never a filter over rows read.
+   * The one conversation to read: a chat's JID, or both JIDs of a person stored
+   * under a LID and a phone number (`whatsapp-identity.ts`), already cut to the
+   * token's scope. A predicate in the SQL, never a filter over rows read.
    *
    * Absent means the whole account, which exists for the **session** surface —
    * the dashboard's message table — and is unreachable from MCP: every tool goes
-   * through `listMessages()` in `chats.ts`, which takes `remoteJid` as a required
-   * positional argument, so no tool can widen to every chat by omitting a field.
-   * `instanceId` below is unconditional either way.
+   * through `listMessages()` in `chats.ts`, which takes a non-empty tuple of
+   * JIDs as a required positional argument, so no tool can widen to every chat
+   * by omitting a field. The predicate is emitted whenever this is present, so
+   * an empty array matches nothing rather than everything. `instanceId` below
+   * is unconditional either way.
    */
-  jid?: string
+  jids?: readonly string[]
   limit: number
   /** 1-based, counting back from the newest. */
   page: number
@@ -419,6 +566,11 @@ export interface MessageRecord {
  * ones, and a `total` that counted every copy. Collapsing after the fact cannot
  * fix either: the page boundaries were already drawn in the wrong place. Hence
  * `DISTINCT ON` inside a CTE, with `LIMIT`/`OFFSET` applied to what comes out.
+ *
+ * Reading one person across two JIDs changes none of it. The predicate admits
+ * both JIDs' rows; the dedupe, the count, the over-fetch and the tiebreak then
+ * run over the union exactly as over one chat, so pages stay disjoint and
+ * `total` counts distinct messages across both.
  *
  * Two details in the ordering carry weight. `bestNamed` makes the surviving row of
  * a duplicate set deterministic — otherwise a message's author changes between
@@ -469,7 +621,7 @@ export async function listMessagesPage(
         FROM "Message" m
         ${patterns ? messageBodyJoin(sql) : sql``}
         WHERE m."instanceId" = ${instanceId}
-          ${options.jid === undefined ? sql`` : sql`AND m.key->>'remoteJid' = ${options.jid}`}
+          ${options.jids === undefined ? sql`` : sql`AND m.key->>'remoteJid' = ANY(${[...options.jids]}::text[])`}
           ${patterns === undefined ? sql`` : sql`AND t.body ILIKE ALL (${patterns}::text[])`}
           ${since === undefined ? sql`` : sql`AND m."messageTimestamp" >= ${since}`}
           ${until === undefined ? sql`` : sql`AND m."messageTimestamp" <= ${until}`}
@@ -505,6 +657,288 @@ export async function listMessagesPage(
     hasMore: rows.length > options.limit,
     total: Number.isFinite(total) ? total : undefined,
   }
+}
+
+/**
+ * One conversation's activity, as the chat listing needs it.
+ *
+ * Rows only, like everything here: naming the chat and previewing its last
+ * message belong to `chats.ts`.
+ */
+export interface ChatActivityRow {
+  /** The conversation's id: a linked person's LID, else the chat's own JID. */
+  jid: string
+  /**
+   * Every stored JID folded into this row, sorted. One element for an ordinary
+   * chat; two for a person stored under a LID and a phone number.
+   */
+  jids: string[]
+  /** Unix seconds of the newest message that is not a control record. */
+  lastTimestamp: number | null
+  /** `"Message".id` of that message, for `lastMessagePayloads`. */
+  lastRowId: string | null
+}
+
+export interface ChatActivityOptions {
+  limit: number
+  offset: number
+  /**
+   * Phone-number JID → LID, from `lidLinks()`. Each phone-number chat named
+   * here is folded into its LID's row, so the listing counts people, not
+   * storage keys. Omitted or empty: every JID is its own row, as before.
+   */
+  links?: ReadonlyMap<string, string>
+}
+
+/**
+ * The account's conversations, most recent activity first.
+ *
+ * **This replaced `POST /chat/findChats`** and the 60-second cache that sat in
+ * front of it. That endpoint is itself a raw `DISTINCT ON (remoteJid)` over this
+ * table, so reading the table directly costs the same scan and drops the stale
+ * window — a message that has already reached the dashboard is no longer missing
+ * from `list-chats` for up to a minute.
+ *
+ * **No unread count, on purpose.** Evolution's `Chat.unreadMessages` reads 0
+ * almost always — 2.3.7's `messages.update` handler writes 0 on *any* status
+ * update in the chat. Deriving it here was tried and measured wrong: the signal
+ * that a chat was read on the phone is the app-state `chats.update` carrying
+ * `unreadCount: 0`, and 2.3.7's handler for it writes only `remoteJid` and
+ * forwards only `remoteJid` in its webhook, so that fact is never stored. Message
+ * `READ` statuses arrive too sporadically to stand in for it (a test account with
+ * zero unread badges on the phone computed 651 unread). A field that is always
+ * wrong is worse than none: an agent asked "anything unread?" should say it
+ * cannot tell. Re-check if Evolution starts persisting `chats.update`.
+ *
+ * **Cost — the shape is load-bearing, measured on an 840k-message account.**
+ * One scan of the account's rows (`@@index([instanceId])` is the only index).
+ * Postgres has no statistics on `key->>'remoteJid'`, so it guesses one chat per
+ * row (743k estimated against 675 real) and groups by *sorting*. Fed raw rows,
+ * that sort carries each row's whole `key` and `message` jsonb — 586 bytes —
+ * and spilled ~540 MB to disk: 91 s. The `MATERIALIZED` CTE reduces every row
+ * to a few scalars and a flag *before* the grouping, and is a fence so the
+ * planner cannot inline it and drag the jsonb back into the sort: ~3 s warm,
+ * ~6 s cold, 2.3 s warm with JIT off (the pool sets `jit: false`). Do not fold
+ * `msg` into `per_chat`.
+ *
+ * The last row comes from a plain `max()` over a sortable text key (zero-padded
+ * timestamp, message id, row id), not `array_agg(... ORDER BY ...)`, which needs
+ * its own sort per group. The last message's payload is *not* read here; `lastMessagePayloads` fetches it by primary key for the
+ * rows actually returned.
+ *
+ * `status@broadcast` is left out: it is Status updates, not a conversation, and
+ * nothing can be sent to it.
+ *
+ * **A linked person is one row, merged here rather than after paging.** The
+ * links (`lidLinks`) arrive as two bind arrays and join onto the *per-JID*
+ * aggregate — a few thousand rows at most — after the fenced scan, so the shape
+ * measured above is untouched. Merging after `LIMIT` would leave a person's
+ * halves on two pages and `total` counting storage keys. The newest row still
+ * comes from the same padded-key `max()`, now over both halves.
+ */
+export async function listChatActivity(
+  instance: AppInstance,
+  options: ChatActivityOptions,
+): Promise<{ rows: ChatActivityRow[], total: number }> {
+  // Database first, for the same reason as `listMessagesPage`.
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const pns = [...(options.links?.keys() ?? [])]
+  const lids = [...(options.links?.values() ?? [])]
+
+  let rows: Array<ChatActivityRow & { total: string | number }>
+  try {
+    rows = await sql`
+      WITH msg AS MATERIALIZED (
+        SELECT m.key->>'remoteJid' AS jid,
+               m."messageTimestamp" AS ts,
+               COALESCE(m.key->>'id', '') AS mid,
+               m.id AS row_id,
+               ${notControl(sql)} AS is_activity
+        FROM "Message" m
+        WHERE m."instanceId" = ${instanceId}
+          AND m.key->>'remoteJid' IS NOT NULL
+          AND m.key->>'remoteJid' <> 'status@broadcast'
+      ), per_jid AS (
+        SELECT jid,
+               max(ts) FILTER (WHERE is_activity) AS last_ts,
+               max(lpad(ts::text, 10, '0') || '|' || mid || '|' || row_id)
+                 FILTER (WHERE is_activity) AS last_key
+        FROM msg
+        GROUP BY jid
+      ), per_chat AS (
+        SELECT COALESCE(l.lid, p.jid) AS jid,
+               array_agg(p.jid ORDER BY p.jid) AS jids,
+               max(p.last_ts) AS last_ts,
+               split_part(max(p.last_key), '|', 3) AS last_row_id
+        FROM per_jid p
+        LEFT JOIN unnest(${pns}::text[], ${lids}::text[]) AS l(pn, lid) ON l.pn = p.jid
+        GROUP BY 1
+      )
+      SELECT jid,
+             jids,
+             last_ts AS "lastTimestamp",
+             NULLIF(last_row_id, '') AS "lastRowId",
+             COUNT(*) OVER () AS total
+      FROM per_chat
+      ORDER BY last_ts DESC NULLS LAST, jid
+      LIMIT ${options.limit} OFFSET ${options.offset}
+    `
+  }
+  catch (error) {
+    console.error('[chats] Evolution database query failed:', error)
+    throw createError({
+      statusCode: 503,
+      statusMessage: 'Listing conversations is temporarily unavailable',
+      cause: error,
+    })
+  }
+
+  // Rides on the returned rows, like `listMessagesPage`'s count: a page past the
+  // end has no row to carry it, and the caller treats that as "nothing here".
+  const total = Number(rows[0]?.total)
+
+  return {
+    rows: rows.map(({ total: _total, ...row }) => ({
+      ...row,
+      lastTimestamp: row.lastTimestamp === null ? null : Number(row.lastTimestamp),
+    })),
+    total: Number.isFinite(total) ? total : 0,
+  }
+}
+
+/**
+ * One `(remoteJid, remoteJidAlt)` combination seen on a LID chat's rows.
+ *
+ * `alt` is null for a LID chat whose rows never carried one — those rows are
+ * still returned, once per chat, so the caller can count LID chats that have
+ * no link at all. Raw, as stored: `whatsapp-identity.ts` decides which of these
+ * is a pair it will act on.
+ */
+export interface LidLinkRow {
+  jid: string
+  alt: string | null
+}
+
+/**
+ * The LID ↔ phone-number links WhatsApp itself revealed on this account's
+ * messages, for `whatsapp-identity.ts`.
+ *
+ * **Only `key.remoteJidAlt` on LID chats' own rows.** Baileys sets it on live traffic and
+ * history sync never does (#116), so this is partial by construction. It is the
+ * only source on purpose: Evolution's `"IsOnWhatsapp"` holds a `lid` column too,
+ * but that table has no `instanceId` — it is one cache filled by every account
+ * on the server, and reading pairs from it would show one tenant what another
+ * tenant's lookups learned. `"Contact"` holds no pairing at all. Group rows'
+ * `participantAlt` is left out: measured, it linked no 1:1 chat the chat's own
+ * rows did not, and merging two 1:1 chats on evidence from group rows would make
+ * a chat-scoped token's view depend on chats outside its scope — the same reason
+ * a phone-number chat's rows are not read for the reverse link.
+ *
+ * One scan of the account (`instanceId` is the only index), grouped down to
+ * distinct combinations, so the result is small — a few rows per person, never
+ * per message. Cached by the caller; never on a per-message path.
+ */
+export async function readLidLinks(instance: AppInstance): Promise<LidLinkRow[]> {
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  return await sql<LidLinkRow[]>`
+    SELECT m.key->>'remoteJid' AS jid, m.key->>'remoteJidAlt' AS alt
+    FROM "Message" m
+    WHERE m."instanceId" = ${instanceId}
+      AND m.key->>'remoteJid' LIKE '%@lid'
+    GROUP BY 1, 2
+  `
+}
+
+/**
+ * The payloads of the given rows, keyed by `"Message".id` — the last message of
+ * each chat on one page of the listing.
+ *
+ * Separate from `listChatActivity` so a listing that names and sorts thousands
+ * of chats in memory pays for payloads only on the page it returns. Still bound
+ * by `instanceId`, so an id from anywhere else reads nothing.
+ */
+export async function lastMessagePayloads(instance: AppInstance, rowIds: string[]): Promise<Map<string, unknown>> {
+  if (!rowIds.length) return new Map()
+
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const rows = await sql<Array<{ id: string, message: unknown }>>`
+    SELECT id, message FROM "Message"
+    WHERE "instanceId" = ${instanceId} AND id = ANY(${rowIds}::text[])
+  `
+
+  return new Map(rows.map(row => [row.id, row.message]))
+}
+
+export interface LidLocalPartOptions {
+  /** Only messages with `messageTimestamp` (unix seconds) at or after this. */
+  since?: number
+  /** Only this local part: answers with it, or with an empty set. */
+  localPart?: string
+}
+
+/**
+ * The local parts of every LID (`…@lid`) this account's messages name — as a
+ * chat, as a group sender, as either one's alternate form, or as an @-mention.
+ *
+ * For `assertNotBareLid` (`lid-guard.ts`): these are exactly the identifiers the
+ * read tools can put in front of a model, so they are the digits a model might
+ * strip a suffix from and pass back as a phone number. `"Message"` only, never
+ * `"Chat"` or `"Contact"`, because the optional `wamcp_search` grant covers this
+ * table and only `"instanceId"` on those two.
+ *
+ * A device suffix (`79972425314508:12@lid`) is cut along with the domain, so the
+ * answer is the digits a caller would see.
+ *
+ * Cost: one scan of the account's rows (`@@index([instanceId])` is the only
+ * index). The lateral yields only short text values, so the `DISTINCT` hashes a
+ * few thousand strings rather than sorting jsonb — none of `listChatActivity`'s
+ * spill. `since` and `localPart` narrow what is extracted, not what is read; with
+ * `localPart` the query stops at the first hit. `mentionedJid` is checked to be
+ * an array before it is expanded, since `jsonb_array_elements_text` throws on
+ * anything else and one odd row must not fail the whole read.
+ *
+ * Raw driver errors: the caller decides what an unreadable answer means.
+ */
+export async function lidLocalParts(instance: AppInstance, options: LidLocalPartOptions = {}): Promise<Set<string>> {
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const rows = await sql<Array<{ lid: string }>>`
+    SELECT DISTINCT split_part(split_part(ids.jid, '@', 1), ':', 1) AS lid
+    FROM "Message" m
+    CROSS JOIN LATERAL (
+      SELECT m.key->>'remoteJid'
+      UNION ALL SELECT m.key->>'participant'
+      UNION ALL SELECT m.key->>'remoteJidAlt'
+      UNION ALL SELECT m.key->>'participantAlt'
+      UNION ALL SELECT jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(m."contextInfo"->'mentionedJid') = 'array'
+             THEN m."contextInfo"->'mentionedJid' END
+      )
+    ) AS ids(jid)
+    WHERE m."instanceId" = ${instanceId}
+      ${options.since !== undefined ? sql`AND m."messageTimestamp" >= ${options.since}` : sql``}
+      AND ids.jid LIKE '%@lid'
+      ${options.localPart !== undefined
+        ? sql`AND split_part(split_part(ids.jid, '@', 1), ':', 1) = ${options.localPart} LIMIT 1`
+        : sql``}
+  `
+
+  return new Set(rows.map(row => row.lid).filter(Boolean))
+}
+
+/**
+ * Not a WhatsApp control record. An edit is kept: in history-synced data it is
+ * the only copy of the new text, so it is real activity in the chat.
+ */
+function notControl(sql: Sql) {
+  return sql`(m.message->'protocolMessage' IS NULL OR m.message->'protocolMessage'->'editedMessage' IS NOT NULL)`
 }
 
 /**

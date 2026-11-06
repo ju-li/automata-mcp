@@ -13,18 +13,19 @@ export type Db = postgres.Sql | postgres.TransactionSql
  *           only an organization's billing and entitlement columns, and appends
  *           `plan.changed` to `app.hosted_events`. It never touches `instances`
  *           credentials.
- *   cloud   this service's own state — consumer cursors on the event outbox.
- *           Created here at boot.
+ *   cloud   this service's own state — consumer cursors on the event outbox,
+ *           and CRM updates Brevo refused for good. Created here at boot.
  */
 export const CLOUD_SCHEMA = 'cloud'
 
 /**
- * The web app migration this service needs: it adds the entitlement columns,
- * the outbox and `app.entitlement_defaults`. The service waits for it rather
- * than failing, since the two are deployed together and either may start
- * first.
+ * The web app migration this service needs: the newest one whose columns it
+ * writes — `0013` adds `tool_calls_required`, on top of `0007`'s entitlement
+ * columns, outbox and `app.entitlement_defaults`. Migrations apply in order, so
+ * waiting for the newest covers the rest. The service waits rather than
+ * failing, since the two are deployed together and either may start first.
  */
-const REQUIRED_APP_MIGRATION = '0007_entitlement_defaults'
+const REQUIRED_APP_MIGRATION = '0013_mcp_tool_calls'
 
 export function connect(databaseUrl: string): Sql {
   return postgres(databaseUrl, {
@@ -66,6 +67,21 @@ export async function ensureCloudSchema(sql: Sql): Promise<void> {
       consumer text PRIMARY KEY,
       last_id  bigint NOT NULL,
       updated  timestamptz NOT NULL DEFAULT now()
+    )
+  `
+
+  // Contact updates Brevo refused for a reason retrying will not fix (an
+  // address it calls invalid, say). Kept so they can be replayed by hand once
+  // the cause is fixed — see "CRM (Brevo)" in docs/billing.md. event_id is
+  // NULL for a refusal during the one-off backfill. Never holds the address.
+  await sql`
+    CREATE TABLE IF NOT EXISTS cloud.crm_skipped (
+      id       bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      event_id bigint,
+      user_id  text NOT NULL,
+      status   integer NOT NULL,
+      code     text,
+      at       timestamptz NOT NULL DEFAULT now()
     )
   `
 }

@@ -1,7 +1,9 @@
 import { assertNever } from '#shared/connection'
 import { randomBytes } from 'node:crypto'
 import type { AppInstance } from './app-db'
+import type { EvolutionInstanceRecord } from './evolution-db'
 import type { ImapSecurity, ImapTarget } from './imap-client'
+import type { HostedEvent } from './hosted-events'
 import type { Actor } from './org'
 import type { ConnectionState } from '#shared/connection'
 
@@ -25,6 +27,19 @@ export type InstanceStatus = {
    * rather than by scanning a QR code.
    */
   sessionLost?: boolean
+  /**
+   * Evolution has been reopening this account's socket over and over for at
+   * least `CHURN_CONFIRM_MS`, while its column reads `open`. Reconnect cannot
+   * end it; restarting the Evolution service does. See `rowChurn`.
+   */
+  flapping?: boolean
+  /**
+   * Set only with `flapping`: the deployment's operator is alerted to the loop
+   * by itself and will restart Evolution, so the reader has nothing to do.
+   * Hosted offering only — `operatorAlertedAboutLoop` in alerts.ts is the rule,
+   * shared with the outage mail so the two cannot disagree.
+   */
+  operatorAlerted?: boolean
   profileName?: string
   profilePicUrl?: string
   number?: string
@@ -68,6 +83,11 @@ export interface PublicInstance {
    * a second implementation of that rule in the UI would drift.
    */
   canReadMessages?: boolean
+  /**
+   * WhatsApp only, and only while it has never been paired: when
+   * `reapUnpairedConnections` will delete it. Absent once paired, for good.
+   */
+  unpairedRemovalAt?: string
 }
 
 export function toPublicInstance(instance: AppInstance): PublicInstance {
@@ -91,6 +111,7 @@ export function toPublicInstance(instance: AppInstance): PublicInstance {
         // Not recomputed here: `canReadMessages` in evolution-db.ts is the rule,
         // and the comment there calls itself the only place it lives.
         canReadMessages: canReadMessages(instance),
+        unpairedRemovalAt: unpairedRemovalAt(instance),
       }
     case 'telegram':
       return {
@@ -565,14 +586,15 @@ export async function getImapHealth(instance: AppInstance): Promise<ConnectionHe
 }
 
 /**
- * Connection state and counts, in one call.
+ * Connection state, profile and counts — what the dashboard, the listing and
+ * `get-connection-status` show. The alert paths, which need no counts, use
+ * `getInstanceHealth` instead.
  *
- * `fetchInstances` with an instance's own token returns only that instance —
- * Evolution enforces the scoping, we do not have to filter. An unpaired or
- * unknown instance reports `close` and zeroes rather than throwing, because the
- * dashboard should render for an account that has never been paired.
+ * An unpaired or unknown instance reports `close` and zeroes rather than
+ * throwing, because the dashboard should render for an account that has never
+ * been paired.
  *
- * **The state does not come from `fetchInstances`.** Its `connectionStatus` is
+ * **The state does not come from Evolution's row.** Its `connectionStatus` is
  * Evolution's database column, and 2.3.7 writes that column only when a socket
  * opens and when one closes for a reason it will not retry (logged out,
  * forbidden, 402, 406). Every other close — a lost network, a server-side
@@ -581,7 +603,7 @@ export async function getImapHealth(instance: AppInstance): Promise<ConnectionHe
  * socket, and a badge read from it says Connected for an account that has
  * received nothing for days. That was a reported bug. `GET
  * /instance/connectionState` reads the in-memory state, so it is asked
- * alongside; the row still supplies the profile and the counts.
+ * alongside; the row still supplies the profile.
  *
  * If that second read fails the state is `unknown`, never the column's value —
  * falling back to the column is the bug.
@@ -590,32 +612,540 @@ export async function getImapHealth(instance: AppInstance): Promise<ConnectionHe
  * dropped session from an account with no session at all. A fresh instance and
  * a logout both leave the column `close`, and a QR on screen leaves it
  * `connecting`; only a retried close leaves it `open` with nothing live behind it.
+ *
+ * **Where the row and the counts come from — and why not `fetchInstances`.**
+ * That route answers with Prisma's `_count`, which counts every account's rows
+ * and joins the result to this one: a full scan of `"Message"` per call, 42% of
+ * production's block reads before this changed. So, when this connection has a
+ * message database (`canReadMessages`):
+ *
+ *   - the row is a primary-key lookup on `"Instance"` (`readInstanceRecord`),
+ *     uncached, so `sessionLost` is as fresh as the poll asking;
+ *   - the counts are per account (`countInstanceRows`) and cached for
+ *     `COUNTS_TTL_MS` — still ~100 ms on a large account, too much for a 15 s
+ *     poll. `freshCounts` bypasses that (down to a 2 s floor) for the one screen
+ *     that watches counts move: the history import after pairing.
+ *
+ * Without a message database — a bring-your-own server with no database URL —
+ * or when that SQL fails, `fetchInstances` is still asked, but cached per
+ * connection (`cachedApiRow`). That is the only path on which the row can be
+ * stale; see there.
  */
-export async function getInstanceStatus(instance: AppInstance): Promise<InstanceStatus> {
-  const evolution = evolutionClientForInstance(instance)
+export async function getInstanceStatus(
+  instance: AppInstance,
+  options: { freshCounts?: boolean } = {},
+): Promise<InstanceStatus> {
+  const { rowChurn: _churn, ...status } = await readStatus(instance, { counts: true, freshCounts: options.freshCounts })
+  return { ...status, stats: status.stats ?? zeroStats() }
+}
 
-  const [rows, live] = await Promise.all([
-    evolution<EvolutionInstanceRow[]>('/instance/fetchInstances').catch(() => undefined),
+export type InstanceHealth = Omit<InstanceStatus, 'stats'> & {
+  /**
+   * The churn observation after this read, for `evaluateConnectionHealth` to
+   * store — the only writer of `row_churn_since` / `row_churn_seen_at`. Not on
+   * `InstanceStatus`: the dashboard and MCP get the verdict, `flapping`.
+   */
+  rowChurn: RowChurn
+}
+
+/**
+ * `getInstanceStatus` without the counts: state, `sessionLost`, `flapping`,
+ * `ownerJid`, profile. For the alert sweep and webhook evaluation, which run
+ * once per connection every few minutes and read none of the counts — so they
+ * never cause one to be computed.
+ */
+export async function getInstanceHealth(instance: AppInstance): Promise<InstanceHealth> {
+  const { stats: _stats, ...health } = await readStatus(instance, { counts: false })
+  return health
+}
+
+// ── pairing, recorded ──────────────────────────────────────────────────────
+/**
+ * How long a WhatsApp connection may exist without ever being paired before
+ * `reapUnpairedConnections` deletes it. It is not inert while it waits:
+ * Evolution keeps it `connecting` and generates a fresh QR every few minutes
+ * (each printed to Evolution's log), holds a socket for it, and auto-connects
+ * it again at every Evolution boot; it also counts against `max_connections`.
+ */
+export const UNPAIRED_TTL_MS = 60 * 60_000
+
+/** When a never-paired WhatsApp connection is due for removal; `undefined` once paired. */
+export function unpairedRemovalAt(instance: AppInstance): string | undefined {
+  if (instanceKind(instance) !== 'whatsapp' || instance.paired_at || !instance.created) return undefined
+  const created = Date.parse(instance.created)
+  return Number.isNaN(created) ? undefined : new Date(created + UNPAIRED_TTL_MS).toISOString()
+}
+
+/**
+ * Record, once, that this WhatsApp account has been linked — `paired_at`.
+ *
+ * **Ours, because Evolution's own record cannot say it.** A connection nobody
+ * has scanned yet and one that was logged out both leave Evolution's column
+ * `close` with no `ownerJid`; only a fact written here while the account was
+ * linked tells them apart, and the reaper deletes on exactly that difference.
+ *
+ * Called from every live read that can see a link — `readStatus` (dashboard,
+ * MCP status, alert sweep, webhook) and the pairing page's QR poll. Fire and
+ * forget: the conditional UPDATE makes repeats harmless, and a failed write is
+ * retried by the next read, long before the hour runs out. The in-memory set
+ * only saves the write on a process that already made it.
+ */
+export function notePaired(instance: AppInstance): void {
+  if (instance.paired_at || pairedNoted.has(instance.id)) return
+  pairedNoted.add(instance.id)
+  storePaired(instance)
+    .catch((error) => {
+      pairedNoted.delete(instance.id)
+      console.error(`[instances] could not record that connection ${instance.id} is paired:`, error)
+    })
+}
+
+const pairedNoted = new Set<string>()
+
+/** Like `notePaired`, but awaited — for the reaper, which acts on the answer. */
+async function storePaired(instance: AppInstance): Promise<void> {
+  const sql = await appDb()
+  await sql`UPDATE app.instances SET paired_at = now() WHERE id = ${instance.id} AND paired_at IS NULL`
+  pairedNoted.add(instance.id)
+}
+
+/**
+ * Has this WhatsApp connection ever been paired — asked live, right before the
+ * reaper deletes it. Records `paired_at` when the answer is yes.
+ *
+ *   paired    Evolution's live state is `open`, its row carries an `ownerJid`,
+ *             or its database holds messages for the account. The last one is
+ *             what protects a connection paired before `paired_at` existed and
+ *             logged out since: no `ownerJid`, but its history is still there.
+ *   unpaired  Evolution answered, and none of the above. Includes Evolution
+ *             no longer knowing the instance at all (404).
+ *   unknown   Something could not be asked. Never deleted on.
+ *
+ * Every read here is uncached. The status caches exist to spare dashboards;
+ * this runs once per candidate per ten minutes and decides a deletion.
+ *
+ * **404 means gone — verified against 2.3.7.** The instance routes run
+ * `[instanceExistsGuard, instanceLoggedGuard, authGuard.apikey]` in that order
+ * (`src/api/routes/index.router.ts`), and `instanceExistsGuard` throws
+ * `NotFoundException` when the name is neither loaded nor in `"Instance"` — so a
+ * deleted instance answers 404 before its (now unknown) token is checked. The
+ * one exception is `CACHE_REDIS_SAVE_INSTANCES=true`, where a stale Redis key
+ * passes that guard and the auth guard answers 401; that reads as `unknown`
+ * here and the row is kept. Every compose file and the AIO image set it false.
+ */
+export async function pairingEvidence(instance: AppInstance): Promise<'paired' | 'unpaired' | 'unknown'> {
+  if (instance.paired_at) return 'paired'
+
+  let evolution: EvolutionClient
+  try {
+    evolution = evolutionClientForInstance(instance)
+  }
+  catch {
+    // No instance token: provisioning stores one before the row exists, so this
+    // is a row that was edited by hand. Not ours to guess about.
+    return 'unknown'
+  }
+
+  let missing = false
+  try {
+    if (await liveConnectionState(evolution, instance) === 'open') {
+      await storePaired(instance)
+      return 'paired'
+    }
+  }
+  catch (error) {
+    if (httpStatusOf(error) !== 404) return 'unknown'
+    missing = true
+  }
+
+  // The row's ownerJid: from SQL where there is a message database, else from
+  // Evolution's API. A 404 from either agrees with the live read that the
+  // instance is gone; anything else is a read that failed.
+  const canAskSql = canReadMessages(instance) && Boolean(instance.instance_id || !missing)
+  let ownerJid: string | undefined
+  let rowRead = false
+  if (canAskSql) {
+    try {
+      const record = await readInstanceRecord(instance)
+      if (record) {
+        ownerJid = record.ownerJid
+        rowRead = true
+      }
+    }
+    catch {
+      // Falls through to the API.
+    }
+  }
+  if (!rowRead && !missing) {
+    try {
+      const rows = await evolution<EvolutionInstanceRow[]>('/instance/fetchInstances')
+      const row = Array.isArray(rows) ? rows.find(r => r?.name === instance.name) : undefined
+      if (!row) return 'unknown'
+      ownerJid = row.ownerJid ?? undefined
+    }
+    catch (error) {
+      if (httpStatusOf(error) !== 404) return 'unknown'
+    }
+  }
+  if (ownerJid) {
+    await storePaired(instance)
+    return 'paired'
+  }
+
+  // Stored history outlives a logout. Without a message database there is
+  // nothing to count, and `paired_at` plus the reads above have to do.
+  if (canAskSql) {
+    try {
+      const { messages } = await countInstanceRows(instance)
+      if (messages > 0) {
+        await storePaired(instance)
+        return 'paired'
+      }
+    }
+    catch {
+      return 'unknown'
+    }
+  }
+
+  return 'unpaired'
+}
+
+// ── reconnect loops ────────────────────────────────────────────────────────
+/**
+ * How recently Evolution must have written an `open` row for the read to count
+ * as "a socket just opened". A loop writes it about once a second; one ordinary
+ * reconnect writes it once, and stops counting this long afterwards.
+ */
+const ROW_RECENT_MS = 2 * 60_000
+/**
+ * How long recent writes must keep being seen before the connection is called
+ * `flapping`. Two sweeps five minutes apart can each land just after an
+ * ordinary reconnect; three in a row that all do is a socket that will not
+ * settle. Also the gap in observation after which an episode starts over.
+ */
+const CHURN_CONFIRM_MS = 10 * 60_000
+
+/** First and latest evaluation that saw a recent `open` write. Both absent: none seen. */
+export interface RowChurn {
+  since?: string
+  seenAt?: string
+}
+
+/**
+ * Fold one status read into the stored churn observation, and say whether it
+ * now amounts to a reconnect loop.
+ *
+ * **Why this exists.** Evolution 2.3.7 retries every close except `loggedOut`,
+ * `forbidden`, 402 and 406 — at once, with no backoff and no attempt count —
+ * and `createClient` replaces `this.client` without ending the previous socket,
+ * whose handlers still reconnect when it closes. Two sockets on one set of
+ * credentials then replace each other (`conflict: replaced`, 440) dozens of
+ * times a minute, indefinitely. The column reads `open` throughout and every
+ * live read lands on whichever socket just opened, so `state` and `sessionLost`
+ * both say healthy. Production ran like that for hours and nobody was told
+ * (ju-li/automata-mcp#103). Only restarting the Evolution service ends it.
+ *
+ * **The signal is Evolution's own row, never the webhook.** Each open writes
+ * the `"Instance"` row, so `updatedAt` on an `open` row trails the newest open
+ * — see `readInstanceRowWrittenAt`. A count of `connection.update`
+ * deliveries would say the same thing, but deliveries are unsigned and anyone
+ * can post one; a stranger must not be able to mail a user that their account
+ * is unstable. The webhook still matters: it makes evaluations happen, which is
+ * what refreshes the observation between sweeps.
+ *
+ * The rule, on time rather than on sample count so the webhook's extra
+ * evaluations cannot shorten it: a recent write starts an episode, every later
+ * one extends it, any read that sees no recent write ends it. `flapping` once
+ * an episode has been extended for `CHURN_CONFIRM_MS` and was last extended
+ * within that long. A read that cannot see the write time at all — no message
+ * database, a missing grant, the SQL failing — leaves the observation as it
+ * was, and the last clause lets a stale one lapse on its own.
+ */
+export function rowChurn(
+  stored: RowChurn,
+  read: { columnOpen: boolean, rowWrittenAt?: string },
+  now = Date.now(),
+): { churn: RowChurn, flapping: boolean } {
+  const churn = nextChurn(stored, read, now)
+  return { churn, flapping: isFlapping(churn, now) }
+}
+
+/** The verdict half of `rowChurn`, for a stored observation with no new read. */
+export function isFlapping(churn: RowChurn, now = Date.now()): boolean {
+  const since = churn.since ? Date.parse(churn.since) : Number.NaN
+  const seenAt = churn.seenAt ? Date.parse(churn.seenAt) : Number.NaN
+  return seenAt - since >= CHURN_CONFIRM_MS && now - seenAt < CHURN_CONFIRM_MS
+}
+
+function nextChurn(stored: RowChurn, read: { columnOpen: boolean, rowWrittenAt?: string }, now: number): RowChurn {
+  const writtenAt = read.rowWrittenAt ? Date.parse(read.rowWrittenAt) : Number.NaN
+  if (Number.isNaN(writtenAt)) return stored
+
+  if (!read.columnOpen || now - writtenAt >= ROW_RECENT_MS) return {}
+
+  const lastSeen = stored.seenAt ? Date.parse(stored.seenAt) : Number.NaN
+  const continuing = stored.since !== undefined && now - lastSeen < CHURN_CONFIRM_MS
+  const at = new Date(now).toISOString()
+  return { since: continuing ? stored.since : at, seenAt: at }
+}
+
+/** Drop what this module has cached about one connection. */
+export function forgetInstanceStatus(instanceId: string): void {
+  apiRowCache.delete(instanceId)
+  countsCache.delete(instanceId)
+  holdRefreshedAt.delete(instanceId)
+}
+
+type InstanceStats = InstanceStatus['stats']
+
+async function readStatus(
+  instance: AppInstance,
+  options: { counts: boolean, freshCounts?: boolean },
+): Promise<InstanceHealth & { stats?: InstanceStats }> {
+  const evolution = evolutionClientForInstance(instance)
+  const viaSql = canReadMessages(instance)
+  const storedChurn: RowChurn = { since: instance.row_churn_since, seenAt: instance.row_churn_seen_at }
+
+  const [live, record, rowWrittenAt, sqlStats] = await Promise.all([
     liveConnectionState(evolution, instance).catch(() => undefined),
+    viaSql ? sqlInstanceRecord(instance) : undefined,
+    viaSql ? sqlRowWrittenAt(instance) : undefined,
+    viaSql && options.counts ? cachedSqlCounts(instance, Boolean(options.freshCounts)) : undefined,
   ])
 
-  const row = Array.isArray(rows) ? rows.find(r => r?.name === instance.name) ?? rows[0] : undefined
-  if (!row) return emptyStatus()
+  let row: EvolutionInstanceRecord | undefined = record
+  let stats = sqlStats
+  if (!row || (options.counts && !stats)) {
+    const api = await cachedApiRow(instance, evolution, live, Boolean(options.freshCounts))
+    row ??= api
+    if (options.counts) stats ??= api && statsFromApiRow(api)
+  }
+
+  if (!row) {
+    // Evolution answered, but not about an account it recognises.
+    return { state: 'close', rowChurn: storedChurn }
+  }
+
+  if (live === 'open' || row.ownerJid) notePaired(instance)
+
+  const { churn, flapping } = rowChurn(storedChurn, {
+    columnOpen: row.connectionStatus === 'open',
+    rowWrittenAt,
+  })
 
   return {
     state: live ?? 'unknown',
     sessionLost: row.connectionStatus === 'open' && live !== undefined && live !== 'open',
+    flapping,
+    ...(flapping && operatorAlertedAboutLoop(instance) && { operatorAlerted: true }),
+    rowChurn: churn,
     profileName: row.profileName ?? undefined,
     profilePicUrl: row.profilePicUrl ?? undefined,
     number: row.number ?? row.ownerJid?.split('@')[0],
     ownerJid: row.ownerJid ?? undefined,
     disconnectedAt: row.disconnectionAt ?? undefined,
-    stats: {
-      messages: row._count?.Message ?? 0,
-      chats: row._count?.Chat ?? 0,
-      contacts: row._count?.Contact ?? 0,
-    },
+    stats,
   }
+}
+
+// ── status caches ──────────────────────────────────────────────────────────
+// Per process, keyed on the connection id. Several replicas each keep their own,
+// which only multiplies a bounded cost; nothing here is a correctness boundary.
+
+const COUNTS_TTL_MS = 5 * 60_000
+/** How fresh "fresh" is: two import-screen polls in a row share one count. */
+const FRESH_FLOOR_MS = 2_000
+const API_ROW_TTL_MS = 5 * 60_000
+/** See `cachedApiRow`: a cached column that disagrees with the live state is re-read sooner. */
+const API_ROW_DISAGREE_TTL_MS = 60_000
+
+const countsCache = new Map<string, { at: number, stats: InstanceStats }>()
+const countsInFlight = new Map<string, Promise<InstanceStats>>()
+const apiRowCache = new Map<string, { at: number, row: EvolutionInstanceRow }>()
+const apiRowInFlight = new Map<string, Promise<EvolutionInstanceRow | undefined>>()
+
+/** The SQL row, or `undefined` for "use the fallback" — never throws. */
+async function sqlInstanceRecord(instance: AppInstance): Promise<EvolutionInstanceRecord | undefined> {
+  if (sqlDenied('instance row', instance)) return undefined
+  try {
+    // No row under this id is not proof the instance is gone — `instance_id`
+    // could be stale — so `undefined` sends the caller to the fallback, which
+    // asks Evolution by name, as before.
+    return await readInstanceRecord(instance)
+  }
+  catch (error) {
+    noteSqlFallback('instance row', instance, error)
+    return undefined
+  }
+}
+
+/**
+ * When Evolution last wrote the row, or `undefined` for "cannot tell" — never
+ * throws. Uncached, like the row: a loop is told from one reconnect by how
+ * recent this is. A missing grant on `"updatedAt"` is logged by
+ * `noteSqlFallback` like the other status grants, and costs only flapping
+ * detection — there is no fallback for it.
+ */
+async function sqlRowWrittenAt(instance: AppInstance): Promise<string | undefined> {
+  if (sqlDenied('row write time', instance)) return undefined
+  try {
+    return await readInstanceRowWrittenAt(instance)
+  }
+  catch (error) {
+    // No fallback behind this one, so the usual wording would be untrue.
+    noteSqlFallback('row write time', instance, error, {
+      denied: '[instances] the Evolution database role cannot read "Instance"."updatedAt", so a '
+        + 'WhatsApp reconnect loop is not detected. Add it to the status grants in '
+        + 'docs/whatsapp.md "Reading and searching messages".',
+      failed: '[instances] could not read when Evolution last wrote an instance row; reconnect-loop detection skipped:',
+    })
+    return undefined
+  }
+}
+
+/**
+ * Per-account counts, cached for `COUNTS_TTL_MS`; `undefined` means "use the
+ * fallback". Concurrent callers share one query, as `contactDirectory()` does.
+ *
+ * A failed recount serves the previous value if there is one — counts that are
+ * a few minutes old are still right enough for a dashboard, and falling back to
+ * `fetchInstances` is the expensive thing this exists to avoid. Failures are not
+ * cached, so the next read retries.
+ */
+async function cachedSqlCounts(instance: AppInstance, fresh: boolean): Promise<InstanceStats | undefined> {
+  const cached = countsCache.get(instance.id)
+  const maxAge = fresh ? FRESH_FLOOR_MS : COUNTS_TTL_MS
+  if (cached && Date.now() - cached.at < maxAge) return cached.stats
+  if (sqlDenied('counts', instance)) return undefined
+
+  let counting = countsInFlight.get(instance.id)
+  if (!counting) {
+    counting = countInstanceRows(instance)
+      .then((stats) => {
+        countsCache.set(instance.id, { at: Date.now(), stats })
+        return stats
+      })
+      .finally(() => countsInFlight.delete(instance.id))
+    countsInFlight.set(instance.id, counting)
+  }
+
+  try {
+    return await counting
+  }
+  catch (error) {
+    noteSqlFallback('counts', instance, error)
+    return cached?.stats
+  }
+}
+
+/**
+ * `fetchInstances`, cached per connection — the fallback for a connection with
+ * no message database, and for one whose SQL read failed.
+ *
+ * Still the expensive route, but at most once per window per connection rather
+ * than once per poll, and for a bring-your-own server the cost lands on that
+ * server.
+ *
+ * **The one place the row can be stale**, and it matters for `sessionLost`,
+ * which compares the cached column against the live state. Bounded three ways:
+ * our own logout, reconnect and delete drop the entry (`forgetInstanceStatus`);
+ * a cached column that disagrees with the live state — a pairing that just
+ * finished, a logout from the phone — is re-read after `API_ROW_DISAGREE_TTL_MS`
+ * rather than the full window; and `fresh` (the import screen) re-reads it down
+ * to the 2 s floor. A dropped session is a lasting disagreement, so it costs one
+ * re-read a minute while it lasts.
+ *
+ * Failures are not cached and answer `undefined`, which the caller reports as
+ * it always has.
+ */
+async function cachedApiRow(
+  instance: AppInstance,
+  evolution: EvolutionClient,
+  live: ConnectionState | undefined,
+  fresh: boolean,
+): Promise<EvolutionInstanceRow | undefined> {
+  const cached = apiRowCache.get(instance.id)
+  const disagrees = cached !== undefined && live !== undefined
+    && normalizeState(cached.row.connectionStatus) !== live
+  const maxAge = fresh ? FRESH_FLOOR_MS : disagrees ? API_ROW_DISAGREE_TTL_MS : API_ROW_TTL_MS
+  if (cached && Date.now() - cached.at < maxAge) return cached.row
+
+  const inFlight = apiRowInFlight.get(instance.id)
+  if (inFlight) return inFlight
+
+  const fetching = evolution<EvolutionInstanceRow[]>('/instance/fetchInstances')
+    .then((rows) => {
+      const row = Array.isArray(rows) ? rows.find(r => r?.name === instance.name) ?? rows[0] : undefined
+      if (row) apiRowCache.set(instance.id, { at: Date.now(), row })
+      return row
+    })
+    .catch(() => undefined)
+    .finally(() => apiRowInFlight.delete(instance.id))
+
+  apiRowInFlight.set(instance.id, fetching)
+  return fetching
+}
+
+function statsFromApiRow(row: EvolutionInstanceRow): InstanceStats {
+  return {
+    messages: row._count?.Message ?? 0,
+    chats: row._count?.Chat ?? 0,
+    contacts: row._count?.Contact ?? 0,
+  }
+}
+
+/**
+ * Say why a status read fell back to `fetchInstances` — once per cause per five
+ * minutes, since the sweep and the polls would otherwise repeat it constantly.
+ * The fallback keeps the status right, so without this a missing grant would
+ * only show up as the database load this change exists to remove.
+ *
+ * A missing grant (42501) also stops that read being tried for the same five
+ * minutes on that connection: it will not fix itself between two polls, and
+ * each attempt is an error line in Postgres's own log.
+ */
+const SQL_FALLBACK_QUIET_MS = 5 * 60_000
+const sqlFallbackLoggedAt = new Map<string, number>()
+// Not cleared by `forgetInstanceStatus`: a missing grant is about the database
+// role, not about anything a logout or reconnect changes.
+const sqlDeniedAt = new Map<string, number>()
+
+function sqlDenied(what: string, instance: AppInstance): boolean {
+  const at = sqlDeniedAt.get(`${what}:${instance.id}`)
+  return at !== undefined && Date.now() - at < SQL_FALLBACK_QUIET_MS
+}
+
+/** What a failed status read logs: a missing grant, or anything else. */
+interface SqlFallbackWording {
+  denied: string
+  failed: string
+}
+
+function fetchInstancesFallback(what: string): SqlFallbackWording {
+  return {
+    denied: `[instances] status ${what}: the Evolution database role lacks a grant, so status reads `
+      + 'fall back to Evolution\'s fetchInstances (a full "Message" scan, cached per connection). '
+      + 'Add the status grants in docs/whatsapp.md "Reading and searching messages".',
+    failed: `[instances] status ${what} could not be read from the Evolution database; using fetchInstances:`,
+  }
+}
+
+function noteSqlFallback(
+  what: string,
+  instance: AppInstance,
+  error: unknown,
+  wording: SqlFallbackWording = fetchInstancesFallback(what),
+): void {
+  const code = (error as { code?: unknown } | undefined)?.code
+  if (code === '42501') sqlDeniedAt.set(`${what}:${instance.id}`, Date.now())
+
+  const key = `${what}:${String(code ?? 'other')}`
+  const last = sqlFallbackLoggedAt.get(key)
+  if (last !== undefined && Date.now() - last < SQL_FALLBACK_QUIET_MS) return
+  sqlFallbackLoggedAt.set(key, Date.now())
+
+  if (code === '42501') console.warn(wording.denied)
+  else console.error(wording.failed, error)
 }
 
 /**
@@ -634,26 +1164,36 @@ async function liveConnectionState(evolution: EvolutionClient, instance: AppInst
  * Bring a dropped session back from its stored credentials, without a QR scan
  * if they still hold.
  *
- * Which Evolution call does that depends on the live state, and the wrong one is
- * a silent no-op:
+ * Only one live state has a call that does that safely:
  *
  *   close       `GET /instance/connect`. In `close` Evolution builds a new socket
  *               from the stored credentials.
- *   connecting  `POST /instance/restart`. `connect` in this state only returns
- *               the cached QR object, so a socket that hung while connecting is
- *               never replaced by it. Restart ends the socket, and Evolution's
- *               close handler reconnects.
- *   unknown     restart as well; Evolution answers that the instance does not
- *               exist, which is the error worth surfacing.
- *   open        nothing. This is also the one state in which neither call could
- *               help if the socket were in fact dead: Baileys' `end()` returns
- *               early on a socket it already closed, and both routes answer
- *               `open` with the state.
+ *   connecting  nothing — 409. `connect` in this state only returns the cached
+ *               QR object, and the other candidate, `restart`, is never sent
+ *               (below). A socket that hung while connecting is recovered by
+ *               restarting the Evolution service, which is what the refusal says.
+ *   unknown     nothing — 409. Evolution has no live socket it will tell us
+ *               about; the same restart is the remedy.
+ *   open        nothing. This is also the one state in which no call could help
+ *               if the socket were in fact dead: Baileys' `end()` returns early
+ *               on a socket it already closed.
  *
- * Either call can still leave the account needing a QR — rejected credentials
+ * **Never `POST /instance/restart`.** On Baileys, 2.3.7's controller takes a
+ * fallback branch (`instance.controller.ts` `restartInstance`) that calls
+ * `client.end()` — a close with no status code, which Evolution's own close
+ * handler answers by reconnecting — and then calls `connectToWhatsapp` itself.
+ * When the close has been processed by then, that is a second `createClient`
+ * beside the handler's, and `createClient` does not end the socket it replaces:
+ * two sockets on one set of credentials, replacing each other as fast as they
+ * can log in. It is a race, unconfirmed as the cause of
+ * ju-li/automata-mcp#103, but the loop it can start costs a real number its
+ * standing with WhatsApp, and in the order where it does not double up it does
+ * nothing a service restart would not.
+ *
+ * `connect` can still leave the account needing a QR — rejected credentials
  * make Evolution emit one — which the caller sees as a state it can pair from.
  *
- * Both routes catch their own failures and answer **200** with
+ * The route catches its own failures and answers **200** with
  * `{ error: true, message }`, so a resolved request is not a success.
  */
 export async function reconnectInstance(instance: AppInstance): Promise<ConnectionState> {
@@ -662,10 +1202,23 @@ export async function reconnectInstance(instance: AppInstance): Promise<Connecti
 
   const before = await liveConnectionState(evolution, instance)
   if (before === 'open') return before
+  if (before !== 'close') {
+    throw createError({
+      statusCode: 409,
+      statusMessage: before === 'connecting'
+        ? 'Evolution is still connecting this account. If it stays that way, restart the Evolution service — that reconnects it without a new QR scan.'
+        : 'Evolution has no live connection for this account. Restarting the Evolution service reconnects it without a new QR scan.',
+    })
+  }
+  if (!(await claimConnect(instance))) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: 'This account was asked to connect a moment ago. Wait a few seconds and look again before trying once more.',
+    })
+  }
+  forgetInstanceStatus(instance.id)
 
-  const response = before === 'close'
-    ? await evolution<EvolutionActionResponse>(`/instance/connect/${name}`)
-    : await evolution<EvolutionActionResponse>(`/instance/restart/${name}`, { method: 'POST' })
+  const response = await evolution<EvolutionActionResponse>(`/instance/connect/${name}`)
 
   if (response?.error) {
     // Handled, so Nitro would log nothing; the message is Evolution's own.
@@ -678,23 +1231,129 @@ export async function reconnectInstance(instance: AppInstance): Promise<Connecti
   return await liveConnectionState(evolution, instance)
 }
 
+// ── asking Evolution to connect ────────────────────────────────────────────
 /**
- * Current QR, or the connection state once pairing has completed.
+ * How long after the socket was last seen connecting or open — or after this
+ * app last asked Evolution to connect — before `close` is taken at its word.
+ * Covers the restart WhatsApp demands right after a QR scan with room to spare;
+ * a QR that really expired waits this long for its replacement.
+ */
+const CONNECT_HOLD_MS = 15_000
+/**
+ * The pairing poll pushes the hold forward at most this often per process, so
+ * two-second polls do not mean a write every two seconds. The hold then ends no
+ * sooner than `CONNECT_HOLD_MS - HOLD_REFRESH_MS` after the last activity seen.
+ */
+const HOLD_REFRESH_MS = 5_000
+const holdRefreshedAt = new Map<string, number>()
+
+/**
+ * Claim the right to send `GET /instance/connect` to an account Evolution
+ * holds in `close`. False means something saw the socket alive, or asked for a
+ * connect, within the hold — and the caller must not send it.
  *
- * `GET /instance/connect` is overloaded upstream: it returns a QR while the
- * instance is `close`/`connecting`, and a connection-state object once it is
- * `open`. Hitting it while `close` is also what starts the connection, so the
- * pairing page polling this is what drives pairing forward.
+ * **Why every `connect` we send goes through this.** In `close` that call makes
+ * Evolution 2.3.7 build a new client (`connectToWhatsapp` → `createClient`),
+ * and `createClient` never ends the socket it replaces. Evolution also calls
+ * `connectToWhatsapp` itself on every close it retries — notably the stream
+ * error 515 WhatsApp sends right after a QR scan, whose `close` lasts a moment
+ * before Evolution's own reconnect lands. A `connect` from us in that moment is
+ * a second socket on the same credentials; the two replace each other until the
+ * service restarts, which is the reconnect loop `flapping` reports, starting
+ * from the first minute of pairing (ju-li/automata-mcp#122; #103 is the same
+ * loop by another route).
+ *
+ * Stored on the row, claimed by conditional UPDATE, so two tabs, a reload and
+ * two replicas share one hold — memory in a browser or one process would not.
+ * Plain SQL: `updated` is not bumped.
+ */
+async function claimConnect(instance: AppInstance): Promise<boolean> {
+  const sql = await appDb()
+  const holdSecs = CONNECT_HOLD_MS / 1000
+  const rows = await sql`
+    UPDATE app.instances
+    SET connect_hold_until = now() + make_interval(secs => ${holdSecs})
+    WHERE id = ${instance.id}
+      AND (connect_hold_until IS NULL OR connect_hold_until < now())
+    RETURNING id
+  `
+  if (rows.length) holdRefreshedAt.set(instance.id, Date.now())
+  return rows.length > 0
+}
+
+/** The socket was just seen connecting or open: hold off any `connect`. */
+async function extendConnectHold(instance: AppInstance): Promise<void> {
+  const last = holdRefreshedAt.get(instance.id)
+  if (last !== undefined && Date.now() - last < HOLD_REFRESH_MS) return
+  const sql = await appDb()
+  const holdSecs = CONNECT_HOLD_MS / 1000
+  await sql`
+    UPDATE app.instances
+    SET connect_hold_until = now() + make_interval(secs => ${holdSecs})
+    WHERE id = ${instance.id}
+  `
+  holdRefreshedAt.set(instance.id, Date.now())
+}
+
+/**
+ * Lift the hold after we ended the session ourselves. A logout is a close
+ * Evolution does not retry, so nothing on its side is about to reconnect, and
+ * the pairing that follows should get its QR at once.
+ */
+async function releaseConnectHold(instance: AppInstance): Promise<void> {
+  holdRefreshedAt.delete(instance.id)
+  const sql = await appDb()
+  await sql`UPDATE app.instances SET connect_hold_until = NULL WHERE id = ${instance.id}`
+}
+
+/**
+ * Current QR, or the connection state once pairing has completed. The pairing
+ * page polls this every two seconds.
+ *
+ * **Live state first, and `connect` only where it is safe.** `GET
+ * /instance/connect` is what starts a connection and what hands out the QR, but
+ * what it does depends on Evolution's in-memory state:
+ *
+ *   open        answers a state object. We do not call it: the state read
+ *               already said so. Recorded as paired.
+ *   connecting  returns the cached QR and does nothing else — safe, and the
+ *               only way to get the QR, so it is called.
+ *   close       builds a new socket. Called only through `claimConnect`: at the
+ *               start of pairing (fresh instance, after a logout) the hold is
+ *               free and the QR comes back at once; right after a scan, while
+ *               Evolution reconnects by itself, the hold is still running and
+ *               the poll answers `close` with no QR. A `close` that outlasts
+ *               the hold — a QR that ran out — gets its connect then.
+ *   unknown     nothing. A state Evolution does not name is not one to start a
+ *               socket from.
+ *
+ * Residual window: the state read and the `connect` are two requests, so a
+ * close landing between them still reaches Evolution as a connect in `close`.
+ * It is milliseconds wide against the second-wide window this closes; shutting
+ * it would need Evolution to stop leaking the socket it replaces.
  */
 export async function getInstanceQr(instance: AppInstance): Promise<{ state: ConnectionState, qr?: InstanceQr }> {
   const evolution = evolutionClientForInstance(instance)
+
+  const before = await liveConnectionState(evolution, instance)
+  if (before === 'unknown') return { state: before }
+  if (before === 'open') {
+    await extendConnectHold(instance)
+    // The pairing page's poll is the first thing to see a scan land.
+    notePaired(instance)
+    return { state: before }
+  }
+  if (before === 'connecting') await extendConnectHold(instance)
+  else if (!(await claimConnect(instance))) return { state: 'close' }
 
   const response = await evolution<Record<string, any>>(
     `/instance/connect/${encodeURIComponent(instance.name)}`,
   )
 
   if (response?.instance?.state) {
-    return { state: normalizeState(response.instance.state) }
+    const state = normalizeState(response.instance.state)
+    if (state === 'open') notePaired(instance)
+    return { state }
   }
 
   if (response?.base64 || response?.code || response?.pairingCode) {
@@ -722,12 +1381,16 @@ export async function getInstanceQr(instance: AppInstance): Promise<{ state: Con
  */
 export async function logoutInstance(instance: AppInstance): Promise<void> {
   const evolution = evolutionClientForInstance(instance)
+  // Whatever happens below, the cached row (fallback path) predates it.
+  forgetInstanceStatus(instance.id)
   try {
     await evolution(`/instance/logout/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
   } catch (error) {
-    if (httpStatusOf(error) === 400) return
-    throw error
+    if (httpStatusOf(error) !== 400) throw error
   }
+  // Best effort: a hold left running only delays the next QR by its length.
+  await releaseConnectHold(instance).catch(error =>
+    console.error(`[instances] could not release the connect hold of ${instance.id}:`, error))
 }
 
 /**
@@ -779,8 +1442,14 @@ export async function enableFullHistorySync(instance: AppInstance): Promise<void
  *
  * A Postgres connection owns nothing outside this app: there is no remote
  * resource to release, only a local pool to close.
+ *
+ * `event` is the hosted outbox row for the delete, written in the same
+ * transaction as the row delete.
  */
-export async function deleteInstance(instance: AppInstance): Promise<void> {
+export async function deleteInstance(
+  instance: AppInstance,
+  options: { event?: HostedEvent } = {},
+): Promise<void> {
   // Release whatever this kind holds, then delete the row — once, for every
   // kind. The ordering is the rule stated above and it is the same either way:
   // if releasing throws, the row survives and still points at the thing.
@@ -802,6 +1471,7 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
     // A connection on its own server may hold a pool onto that server's message
     // database. Keyed on the row, so it outlives the row unless dropped here.
     await closeKeyedPool(`evo:${instance.id}`)
+    forgetInstanceStatus(instance.id)
 
     // Uses the same server the instance was created on, with that server's own
     // global key when it brought one.
@@ -834,20 +1504,20 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
     assertNever(kind, 'connection kind')
   }
 
+  // The outbox event commits with the row delete, so it exists exactly when the
+  // connection is gone.
   const sql = await appDb()
-  await sql`DELETE FROM app.instances WHERE id = ${instance.id}`
+  await sql.begin(async (tx) => {
+    await tx`DELETE FROM app.instances WHERE id = ${instance.id}`
+    if (options.event) await recordHostedEvent(tx, options.event)
+  })
 }
 
 // ── internals ──────────────────────────────────────────────────────────────
 
-interface EvolutionInstanceRow {
+/** One row of `fetchInstances` — the record `readInstanceRecord` reads, plus Prisma's counts. */
+interface EvolutionInstanceRow extends EvolutionInstanceRecord {
   name?: string
-  connectionStatus?: string
-  ownerJid?: string
-  profileName?: string
-  profilePicUrl?: string
-  number?: string
-  disconnectionAt?: string
   _count?: { Message?: number, Chat?: number, Contact?: number }
 }
 
@@ -916,7 +1586,7 @@ function settingsBody(current: EvolutionSettings | null, overrides: Partial<Evol
  * interchangeable: `close` reads to a person as "not paired, scan a QR code",
  * which is a wrong instruction for a connection whose credentials never
  * existed. `unknown` says the state could not be established, which is the
- * truth. `emptyStatus()` is deliberately not reused here for that reason.
+ * truth, so `unknownStatus()` answers here and never a `close` one.
  */
 export type ConnectionStateReport =
   | { state: ConnectionState, detail?: string, error?: string, warning?: string }
@@ -925,7 +1595,7 @@ export type ConnectionStateReport =
 
 export async function connectionState(
   instance: AppInstance,
-  options: { tolerant?: boolean } = {},
+  options: { tolerant?: boolean, freshCounts?: boolean } = {},
 ): Promise<ConnectionStateReport> {
   const kind = instanceKind(instance)
   switch (kind) {
@@ -934,8 +1604,8 @@ export async function connectionState(
       return { state: health.state, detail: health.detail, error: health.error, warning: health.warning }
     }
     case 'whatsapp':
-      if (!options.tolerant) return await getInstanceStatus(instance)
-      return await getInstanceStatus(instance).catch(() => unknownStatus())
+      if (!options.tolerant) return await getInstanceStatus(instance, { freshCounts: options.freshCounts })
+      return await getInstanceStatus(instance, { freshCounts: options.freshCounts }).catch(() => unknownStatus())
     case 'telegram':
       // Never throws: a bridge that cannot be asked answers `unknown`, for the
       // reason given above.
@@ -947,14 +1617,13 @@ export async function connectionState(
   }
 }
 
-/** Evolution answered, but not about an account it recognises. */
-function emptyStatus(): InstanceStatus {
-  return { state: 'close', stats: { messages: 0, chats: 0, contacts: 0 } }
+function zeroStats(): InstanceStats {
+  return { messages: 0, chats: 0, contacts: 0 }
 }
 
 /** Evolution could not be asked at all — see `connectionState`. */
 function unknownStatus(): InstanceStatus {
-  return { state: 'unknown', stats: { messages: 0, chats: 0, contacts: 0 } }
+  return { state: 'unknown', stats: zeroStats() }
 }
 
 function normalizeState(state: string | undefined): ConnectionState {

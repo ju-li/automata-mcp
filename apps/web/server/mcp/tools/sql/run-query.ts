@@ -8,6 +8,14 @@ import { z } from 'zod'
  * a read-only transaction. `DECLARE CURSOR` does the statement-kind check by
  * Postgres's own grammar, and the same cursor gives the row cap (FETCH) and
  * paging (MOVE) without ever wrapping the statement.
+ *
+ * `explain: true` returns the plan that cursor would run instead of its rows —
+ * through the same guards, see `explainReadQuery`. A flag rather than its own
+ * tool: anyone allowed to run a query is allowed to see its plan, so a separate
+ * tool would only add a scope choice with no meaning, and every token already
+ * granted `run-query` by name gets it without re-scoping. The answer has a
+ * different shape and no `rows` key on purpose — a plan must never read as an
+ * empty result.
  */
 export default defineKindTool({
   name: 'run-query',
@@ -32,7 +40,9 @@ export default defineKindTool({
     + 'results a keyset predicate (WHERE id > <last id>) is cheaper than a high '
     + 'page number. Long cells are clipped at 2000 characters unless you pass '
     + '`fullValues: true`. Never summarise a `hasMore: true` result as if it were '
-    + 'the full answer.',
+    + 'the full answer. Pass `explain: true` to get the query plan instead of rows '
+    + '— nothing is executed — when a query timed out or you need to know why it is '
+    + 'slow; its row figures are planner estimates, never counts.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -58,9 +68,33 @@ export default defineKindTool({
       + 'only when you need a long text or JSON value in full: a page of large cells '
       + 'can make a very large response.',
     ),
+    explain: z.boolean().default(false).describe(
+      'Return the plan this query would run instead of its rows. The query is planned, '
+      + 'not executed, so it costs about as much as the planning alone. Use it after a '
+      + 'timeout, or to find out why a query is slow — a Seq Scan over a large table or '
+      + 'a join with no usable index — before rewriting it. maxRows, page and fullValues '
+      + 'are ignored. The row figures in a plan are estimates from table statistics: '
+      + 'never report them as how many rows match.',
+    ),
   },
-  handler: async ({ sql, maxRows, page, timeoutMs, fullValues }) => {
+  handler: async ({ sql, maxRows, page, timeoutMs, fullValues, explain }) => {
     const { instance, scope } = useMcpAuth()
+
+    if (explain) {
+      const result = await explainSqlRead(instance, scope, sql.trim(), { timeoutMs })
+      return {
+        explain: true,
+        plan: result.plan,
+        ...(result.planTruncated && { planTruncated: true }),
+        ...(result.estimatedRows !== undefined && { estimatedRows: result.estimatedRows }),
+        elapsedMs: result.elapsedMs,
+        note: 'This is the plan run-query would use for this sql; the query was not run and no rows were read. '
+          + 'rows= and cost= in it are planner estimates from table statistics, and estimatedRows is the top one — '
+          + 'never report them as how many rows match. Call run-query without explain to get the rows.'
+          + (result.planTruncated ? ' The plan was too long and its last lines were dropped.' : ''),
+        ...(!scope.allTables && { scopedToAllowlist: true }),
+      }
+    }
 
     const result = await runSqlRead(instance, scope, sql.trim(), { maxRows, page, timeoutMs, fullValues })
 

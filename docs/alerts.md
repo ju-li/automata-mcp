@@ -53,6 +53,39 @@ What it will and will not send:
 - The mail says which fix applies: a dropped session asks for **Reconnect**, an
   unlinked account asks for a QR scan. Sending someone to scan a code they did
   not need to costs a real phone.
+- A WhatsApp **reconnect loop** counts as an outage too, even though nearly every
+  live read finds it `open`. Two sockets on one set of credentials keep
+  replacing each other (`conflict: replaced`), and neither the webhook nor the
+  live state shows it. The sweep reads when Evolution last wrote the account's
+  `"Instance"` row, which happens on every socket open. Ten minutes of fresh
+  writes on an `open` row marks the connection unstable, and the 10-minute grace
+  above runs from there, so the mail goes out 20–25 minutes into the loop. It
+  says restarting the Evolution service is the fix, since Reconnect cannot help,
+  and the web log gets a line saying the same. See [whatsapp.md](whatsapp.md)
+  "Stuck reconnecting".
+
+### Telling the operator about a reconnect loop
+
+A reconnect loop is the one outage nobody in the organization can fix: only
+whoever runs the Evolution service can restart it. Set `NUXT_OPS_ALERT_EMAIL`
+on the web service and that address is mailed as soon as a connection on the
+deployment's own Evolution server is marked unstable (no grace period), and once
+more when the loop has ended. The mail names the connection id, the Evolution
+instance name and the organization id, and nothing the organization typed. A
+connection on a server the organization supplied is not reported: that server
+is theirs to restart. Unset, no operator mail is sent.
+
+Like the organization's mail, it is sent at most once per loop, across replicas,
+and a failed send is retried on the next sweep rather than lost.
+
+**On the hosted offering** (`NUXT_CLOUD_URL` set), the address also changes
+what customers read. With it set (and SMTP configured), the outage mail, the
+dashboard and `get-connection-status` (`operatorAlerted: true`) say the loop is
+on our side, that we have been alerted, and that there is nothing for them to
+do — for admins and members alike. Without it they keep the self-hosted wording
+("whoever runs this deployment has to restart its Evolution service"), since
+promising that somebody has been told is only true if somebody was. Set it on
+every hosted deployment.
 
 **Telegram** follows the same rules, with four failures told apart:
 

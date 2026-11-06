@@ -188,3 +188,67 @@ export function useEvolutionClient(): EvolutionClient {
 
   return createEvolutionClient(auth.evolution)
 }
+
+/**
+ * Turn a failed `POST /message/sendText` into an answer the caller can act on.
+ *
+ * ofetch's own message is only `[POST] "…": 400 Bad Request`, and the MCP
+ * toolkit relays exactly that, so a model told "400" can neither fix its call
+ * nor tell the user why. Evolution 2.3.7 answers 400 with
+ * `{ status, error, response: { message: [...] } }` for three unrelated reasons:
+ *
+ *   - recipient not on WhatsApp: `sendMessageWithTyping` throws
+ *     `BadRequestException(isWA)`, so the entry is `{ exists: false, jid, number }`
+ *   - route schema validation: plain strings naming the field
+ *   - the send itself failed: the same method's `catch` wraps *any* error as
+ *     `BadRequestException(error.toString())`, so a dead socket arrives as a 400
+ *     reading `Error: Connection Closed`
+ *
+ * Each gets its own status. A handled error is invisible to Nitro, so every
+ * branch logs the classification (never the message text or recipient).
+ * Re-verify the envelope and those three throw sites on an Evolution tag bump.
+ */
+export function relayEvolutionSendError(error: unknown, number: string, instanceId: string): never {
+  const status = httpStatusOf(error)
+  const raw = (error as { data?: { response?: { message?: unknown } } } | undefined)?.data?.response?.message
+  const entries = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]
+
+  if (status === 400) {
+    if (entries.some(e => typeof e === 'object' && e !== null && (e as { exists?: unknown }).exists === false)) {
+      console.error(`[evolution] send on connection ${instanceId} refused: recipient is not a WhatsApp account`)
+      throw createError({
+        statusCode: 422,
+        message: number.includes('@')
+          ? `"${number}" is not a WhatsApp account, so nothing was sent. Pass a chat's jid exactly as list-chats or read-messages return it.`
+          // Bare digits: either a mistyped number or a LID with its suffix
+          // stripped. The second is worth naming — retrying with the digits
+          // reformatted would only try another stranger's number.
+          : `"${number}" is not a WhatsApp account, so nothing was sent. Pass the number in international format with the country code, digits only — no "+", spaces or dashes (e.g. 5511999999999). If these digits came from a jid ending in @lid, they are not a phone number: pass the full jid instead.`,
+      })
+    }
+
+    const texts = entries.filter((e): e is string => typeof e === 'string' && e.trim() !== '')
+    if (texts.some(t => /connection closed|not connected|connection lost|timed out/i.test(t))) {
+      console.error(`[evolution] send on connection ${instanceId} failed: WhatsApp socket not connected`)
+      throw createError({
+        statusCode: 503,
+        message: 'The WhatsApp connection is down, so the message was not sent. Check get-connection-status: when sessionLost is true the account owner can press Reconnect on the connection\'s page in the web app.',
+      })
+    }
+
+    if (texts.length) {
+      console.error(`[evolution] send on connection ${instanceId} refused with 400`)
+      const detail = texts.join('; ')
+      throw createError({
+        statusCode: 400,
+        message: `WhatsApp refused the message: ${detail.length > 300 ? `${detail.slice(0, 300)}…` : detail}`,
+      })
+    }
+  }
+
+  console.error(`[evolution] send on connection ${instanceId} failed: Evolution answered ${status ?? (error as Error | undefined)?.message ?? 'nothing'}`)
+  throw createError({
+    statusCode: 503,
+    message: 'The WhatsApp server did not accept the message, so it was not sent. Check get-connection-status and try again.',
+  })
+}

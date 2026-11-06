@@ -1,15 +1,17 @@
 import { Billing } from './billing.ts'
 import { type CloudConfig, loadConfig } from './config.ts'
+import { ConsentRegions } from './consent-region.ts'
+import { Crm } from './crm.ts'
 import { connect, ensureCloudSchema, waitForApp } from './db.ts'
 import { createCloudServer } from './http.ts'
 import { describeError } from './http-error.ts'
-import { consumeBillingEvents } from './outbox.ts'
+import { consumeBillingEvents, consumeCrmEvents } from './outbox.ts'
 import { applyPlanEntitlements, recordPlanChanges, writeEntitlementDefaults } from './plans.ts'
 
 /**
  * The hosted offering's service: everything the hosted deployment does that a
- * self-hosted one never should. Today that is plans and Stripe; the Brevo CRM
- * sync and PostHog telemetry join it, fed by the same outbox.
+ * self-hosted one never should: plans and Stripe, and the Brevo CRM sync, both
+ * fed by the web app's event outbox. PostHog telemetry joins them later.
  *
  * The web app enforces limits from its own database and knows no plan; this
  * service writes those limits. It never serves a browser — the web app calls
@@ -40,8 +42,10 @@ catch (error) {
 }
 
 const billing = new Billing(sql, config.stripe, config.appUrl)
+const crm = new Crm(sql, config.brevo)
 const state = { appReady: false, stopped: false }
-const server = createCloudServer(billing, config, state)
+const regions = new ConsentRegions(config.ipLookupUrl)
+const server = createCloudServer(billing, crm, regions, config, state)
 
 // :: accepts IPv6 and IPv4 (legacy Railway private networking is IPv6-only).
 // A host with IPv6 disabled refuses :: outright, so fall back to IPv4 there.
@@ -54,7 +58,16 @@ await new Promise<void>((resolve, reject) => {
 })
 console.info(`[cloud] listening on :${config.port}`)
 if (!billing.configured) {
-  console.warn('[cloud] STRIPE_* are not set — running without billing. Plan limits are still written; starting Pro answers 503.')
+  console.warn('[cloud] STRIPE_SECRET_KEY is not set — running without billing. Plan limits are still written; starting Pro answers 503.')
+  if (config.ignoredStripeVars.length > 0) {
+    console.warn(`[cloud] ignoring ${config.ignoredStripeVars.join(', ')}: they do nothing without STRIPE_SECRET_KEY.`)
+  }
+}
+if (!crm.configured) {
+  console.info('[cloud] BREVO_API_KEY is not set — running without the CRM sync.')
+  if (config.ignoredBrevoVars.length > 0) {
+    console.warn(`[cloud] ignoring ${config.ignoredBrevoVars.join(', ')}: they do nothing without BREVO_API_KEY.`)
+  }
 }
 
 const timers: NodeJS.Timeout[] = []
@@ -62,7 +75,7 @@ const timers: NodeJS.Timeout[] = []
 /**
  * Once the web app's schema is there: publish Free's limits for new
  * organizations, bring every organization's limits into line with its stored
- * plan, then start the outbox consumer and the reconcile.
+ * plan, then start the outbox consumers and the reconcile.
  */
 async function startWork(): Promise<void> {
   await waitForApp(sql, state)
@@ -77,14 +90,22 @@ async function startWork(): Promise<void> {
   state.appReady = true
   console.info('[cloud] ready')
 
-  let consuming = false
-  timers.push(setInterval(() => {
-    if (consuming) return
-    consuming = true
-    consumeBillingEvents(sql, billing)
-      .catch(error => console.error(`[outbox] pass failed: ${describeError(error)}`))
-      .finally(() => { consuming = false })
-  }, OUTBOX_INTERVAL_MS))
+  /** Run `pass` every interval, skipping a tick while the previous pass is still going. */
+  const everyOutboxTick = (label: string, pass: () => Promise<unknown>) => {
+    let running = false
+    timers.push(setInterval(() => {
+      if (running) return
+      running = true
+      pass()
+        .catch(error => console.error(`[${label}] pass failed: ${describeError(error)}`))
+        .finally(() => { running = false })
+    }, OUTBOX_INTERVAL_MS))
+  }
+
+  everyOutboxTick('outbox', () => consumeBillingEvents(sql, billing))
+  // A separate guard and cursor: a slow or paused Brevo never holds up seats
+  // and cancellations, and the reverse.
+  if (crm.configured) everyOutboxTick('crm', () => consumeCrmEvents(sql, crm))
 
   // The backstop for a lost webhook and a seat sync that failed: re-read every
   // billed organization. Idempotent, so several replicas may run it.

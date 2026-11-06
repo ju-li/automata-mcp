@@ -6,10 +6,20 @@ import { z } from 'zod'
  * healthy and fail every request, so it refuses to start instead. The error
  * names each variable and never echoes a value.
  *
- * **Stripe is all or nothing.** With none of the four Stripe variables set the
- * service still starts — it still owns plan definitions and entitlements — and
- * every billing route answers 503 `billing_not_configured`. One set without the
- * others refuses to start: a typo must fail loudly, not pass for "billing off".
+ * **`STRIPE_SECRET_KEY` switches Stripe on.** Without it the service still
+ * starts — it still owns plan definitions and entitlements — and every billing
+ * route answers 503 `billing_not_configured`; any other `STRIPE_*` values are
+ * ignored and named in `ignoredStripeVars`, which boot logs. That is what lets a
+ * Railway PR environment run: sealed variables (the two secrets) are never
+ * copied into one, while the price ids are. With the key set, the other three
+ * are required and a missing one refuses to start — a deployment that set
+ * billing up must fail loudly on a typo, not pass for "billing off".
+ *
+ * **`BREVO_API_KEY` switches the CRM sync on**, the same way and for the same
+ * reason: without it the sync is off and the list ids are ignored (named in
+ * `ignoredBrevoVars`). With the key set, both lists are required and must
+ * differ — a key without the marketing list would quietly drop consent people
+ * gave.
  */
 const schema = z.object({
   CLOUD_ADMIN_KEY: z.string().min(24, 'use at least 24 characters (openssl rand -hex 24)'),
@@ -21,6 +31,14 @@ const schema = z.object({
   STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
   STRIPE_PRICE_BASE: z.string().min(1).optional(),
   STRIPE_PRICE_SEAT: z.string().min(1).optional(),
+  BREVO_API_KEY: z.string().min(1).optional(),
+  BREVO_PRODUCT_LIST: z.string().regex(/^\d+$/, 'must be a numeric Brevo list id').optional(),
+  BREVO_MARKETING_LIST: z.string().regex(/^\d+$/, 'must be a numeric Brevo list id').optional(),
+  // The IP lookup that decides where the signup page's marketing box may start
+  // ticked (consent-region.ts). Defaults to RevBull's zip-prepop service.
+  IP_LOOKUP_URL: z.string().url().refine(url => /^https?:\/\//i.test(url), 'must be http or https').optional(),
+  // Only for pointing the sync at a local stub while testing failure handling.
+  BREVO_API_URL: z.string().url().refine(url => /^https?:\/\//i.test(url), 'must be http or https').optional(),
   CLOUD_PORT: z.coerce.number().int().min(1).max(65535).optional(),
   // Railway injects PORT into every service; following it is what makes the
   // service listen where the platform routes to.
@@ -36,16 +54,34 @@ export interface StripeSettings {
   priceSeat: string
 }
 
+export interface BrevoSettings {
+  apiKey: string
+  apiUrl: string
+  /** Every contact is added to it when created. */
+  productList: number
+  /** A contact whose user gave marketing consent at signup is added to it when created. */
+  marketingList: number
+}
+
 export interface CloudConfig {
   adminKey: string
   databaseUrl: string
   appUrl: string
   /** Absent when the service runs without Stripe. */
   stripe?: StripeSettings
+  /** `STRIPE_*` values set without `STRIPE_SECRET_KEY`, so not used. Logged at boot. */
+  ignoredStripeVars: string[]
+  /** `BREVO_*` list ids set without `BREVO_API_KEY`, so not used. Logged at boot. */
+  ignoredBrevoVars: string[]
+  /** Absent when the service runs without the CRM sync. */
+  brevo?: BrevoSettings
+  /** zip-prepop's `POST /zip`. */
+  ipLookupUrl: string
   port: number
 }
 
 const STRIPE_VARS = ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'STRIPE_PRICE_BASE', 'STRIPE_PRICE_SEAT'] as const
+const BREVO_VARS = ['BREVO_API_KEY', 'BREVO_PRODUCT_LIST', 'BREVO_MARKETING_LIST'] as const
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
   // An empty value in a compose file or .env means "unset", not zero.
@@ -58,19 +94,31 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
 
   const e = parsed.data
   const set = STRIPE_VARS.filter(name => e[name] !== undefined)
-  if (set.length > 0 && set.length < STRIPE_VARS.length) {
-    const missing = STRIPE_VARS.filter(name => e[name] === undefined)
-    throw new Error(
-      'cloud cannot start. Fix these environment variables:\n'
-      + missing.map(name => `  ${name}: set it too — the four STRIPE_* variables go together (leave all empty to run without billing)`).join('\n'),
-    )
+  const stripeOn = e.STRIPE_SECRET_KEY !== undefined
+  const brevoSet = BREVO_VARS.filter(name => e[name] !== undefined)
+  const brevoOn = e.BREVO_API_KEY !== undefined
+  const incomplete = [
+    ...(stripeOn
+      ? STRIPE_VARS.filter(name => e[name] === undefined)
+          .map(name => `  ${name}: set it too — STRIPE_SECRET_KEY turns billing on, and billing needs all four STRIPE_* variables (unset STRIPE_SECRET_KEY to run without billing)`)
+      : []),
+    ...(brevoOn
+      ? BREVO_VARS.filter(name => e[name] === undefined)
+          .map(name => `  ${name}: set it too — BREVO_API_KEY turns the CRM sync on, and the sync needs both list ids (unset BREVO_API_KEY to run without it)`)
+      : []),
+  ]
+  if (brevoOn && brevoSet.length === BREVO_VARS.length && e.BREVO_PRODUCT_LIST === e.BREVO_MARKETING_LIST) {
+    incomplete.push('  BREVO_MARKETING_LIST: must differ from BREVO_PRODUCT_LIST — everyone goes on the product list, only those who consented on the marketing one')
+  }
+  if (incomplete.length > 0) {
+    throw new Error(`cloud cannot start. Fix these environment variables:\n${incomplete.join('\n')}`)
   }
 
   return {
     adminKey: e.CLOUD_ADMIN_KEY,
     databaseUrl: e.CLOUD_DATABASE_URL,
     appUrl: e.APP_URL.replace(/\/+$/, ''),
-    stripe: set.length === STRIPE_VARS.length
+    stripe: stripeOn
       ? {
           secretKey: e.STRIPE_SECRET_KEY!,
           webhookSecret: e.STRIPE_WEBHOOK_SECRET!,
@@ -78,6 +126,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
           priceSeat: e.STRIPE_PRICE_SEAT!,
         }
       : undefined,
+    ignoredStripeVars: stripeOn ? [] : [...set],
+    brevo: brevoOn
+      ? {
+          apiKey: e.BREVO_API_KEY!,
+          apiUrl: (e.BREVO_API_URL ?? 'https://api.brevo.com/v3').replace(/\/+$/, ''),
+          productList: Number(e.BREVO_PRODUCT_LIST),
+          marketingList: Number(e.BREVO_MARKETING_LIST),
+        }
+      : undefined,
+    ignoredBrevoVars: brevoOn ? [] : [...brevoSet],
+    ipLookupUrl: e.IP_LOOKUP_URL ?? 'https://api.revbull-services.com/ip-to-zip/zip',
     port: e.CLOUD_PORT ?? e.PORT ?? 8096,
   }
 }

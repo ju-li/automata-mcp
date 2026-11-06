@@ -1,6 +1,6 @@
 {
   "name": "claude-whatsapp-mcp",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "type": "module",
   "private": true,
   "packageManager": "pnpm@11.22.0",
@@ -14,6 +14,7 @@
     "bridge:typecheck": "pnpm --filter telegram-bridge typecheck",
     "cloud:dev": "pnpm --filter cloud dev",
     "cloud:typecheck": "pnpm --filter cloud typecheck",
+    "cloud:crm-backfill": "pnpm --filter cloud crm-backfill",
     "release:version": "node .github/scripts/listings.mjs version",
     "listings:check": "node .github/scripts/listings.mjs check",
     "listings:tools": "node .github/scripts/listings.mjs tools",

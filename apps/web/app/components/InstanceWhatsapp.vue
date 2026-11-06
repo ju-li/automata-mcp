@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { useIntervalFn } from '@vueuse/core'
+import { Loader2Icon, TriangleAlertIcon } from '@lucide/vue'
+import { useIntervalFn, useNow } from '@vueuse/core'
 import { toast } from 'vue-sonner'
 
 /**
@@ -23,6 +24,10 @@ interface StatusResponse {
   state: ConnectionState
   /** Was connected, and Evolution's live socket no longer is. */
   sessionLost?: boolean
+  /** Evolution keeps reopening the socket; reads `open` most of the time. */
+  flapping?: boolean
+  /** With `flapping`: the deployment's operator is alerted and will restart Evolution. */
+  operatorAlerted?: boolean
   profileName?: string
   profilePicUrl?: string
   number?: string
@@ -36,7 +41,17 @@ interface QrResponse {
 
 const id = computed(() => props.id)
 
-const { data, refresh } = await useFetch<StatusResponse>(() => `/api/instances/${id.value}`)
+/**
+ * Set while the history import runs. The server caches counts for a few minutes,
+ * and the import screen decides it is done when they stop moving — so cached
+ * counts would end it early. `applyMode` sets it; the reactive query makes the
+ * status fetch ask for counts recomputed on (nearly) every poll.
+ */
+const freshCounts = ref(false)
+
+const { data, refresh } = await useFetch<StatusResponse>(() => `/api/instances/${id.value}`, {
+  query: computed(() => (freshCounts.value ? { fresh: 'counts' } : {})),
+})
 
 /**
  * The QR poll reports state far more often than the status fetch does, so it is
@@ -57,11 +72,25 @@ const connected = computed(() => state.value === 'open')
 const pairingRequested = ref(false)
 
 /**
+ * A scan completed while this page was open. WhatsApp hands its history over in
+ * the minute or so after a device links, so until the counts settle the page
+ * says it is importing rather than showing a dashboard of zeros. Only the QR
+ * poll sets it, and only managers run that poll. A reload during the import
+ * simply lands on the dashboard, whose counts keep climbing on the status poll.
+ */
+const justPaired = ref(false)
+const importDone = ref(false)
+/** When the scan was seen — the import's clock, read by the stats watcher. */
+const importStartedAt = ref(0)
+
+/**
  * What this page is showing. A lost session is its own mode rather than a
  * flavour of pairing: its phone is still linked, so the instruction is
  * different, and it must not be polled the way pairing is — see `applyMode`.
+ * `importing` is a connected account straight after its pairing, while the
+ * history WhatsApp sends with a new device link is still arriving.
  */
-type Mode = 'pairing' | 'lost' | 'connected'
+type Mode = 'pairing' | 'importing' | 'lost' | 'connected'
 
 /**
  * **A member never enters pairing mode**, and that is a safety property rather
@@ -76,13 +105,42 @@ type Mode = 'pairing' | 'lost' | 'connected'
  * usable and that somebody else has to fix.
  */
 const mode = computed<Mode>(() => {
-  if (connected.value) return 'connected'
+  if (connected.value) return justPaired.value && !importDone.value ? 'importing' : 'connected'
   if (!props.canManage) return 'lost'
   if (data.value?.sessionLost && !pairingRequested.value) return 'lost'
   return 'pairing'
 })
 
-const display = computed(() => describeState(state.value, 'whatsapp', { lost: mode.value === 'lost' }))
+const flapping = computed(() => data.value?.flapping === true)
+const operatorAlerted = computed(() => flapping.value && data.value?.operatorAlerted === true)
+
+const display = computed(() => describeState(state.value, 'whatsapp', {
+  lost: mode.value === 'lost',
+  flapping: flapping.value,
+  operatorAlerted: operatorAlerted.value,
+}))
+
+/**
+ * Reconnect is offered only from `close`: that is the one state with a safe call
+ * behind it, and the server refuses the others (`reconnectInstance`). From
+ * `connecting` or `unknown` the notice says what does help instead.
+ */
+const canReconnect = computed(() => state.value === 'close')
+const evolutionServer = computed(() => (data.value?.instance.ownServer ? 'your Evolution server' : 'the Evolution server'))
+
+/**
+ * A connection nobody has ever paired is deleted an hour after it was created
+ * (server/utils/unpaired-reaper.ts). Said on the pairing screen with the time
+ * left, so it is not a surprise later. The server decides whether it applies —
+ * a re-pair after a logout carries no deadline.
+ */
+const now = useNow({ interval: 30_000 })
+const removalMinutes = computed(() => {
+  const at = data.value?.instance.unpairedRemovalAt
+  if (!at) return undefined
+  const left = Date.parse(at) - now.value.getTime()
+  return Number.isNaN(left) ? undefined : Math.max(0, Math.ceil(left / 60_000))
+})
 
 const qr = ref<QrResponse['qr'] | null>(null)
 const pairingTimedOut = ref(false)
@@ -97,8 +155,10 @@ const needsDbUrl = computed(() =>
 )
 
 // ── pairing ────────────────────────────────────────────────────────────────
-// Polling the QR endpoint is what drives pairing: Evolution starts the
-// connection the first time it is asked for a QR on a disconnected instance.
+// Polling the QR endpoint is what drives pairing: the server starts the
+// connection the first time it is asked for a QR on a disconnected instance,
+// and again only once `close` has outlasted its connect hold — never in the
+// moment after a scan, when Evolution is reconnecting by itself (#122).
 const PAIRING_TIMEOUT_MS = 5 * 60 * 1000
 
 const { pause: pauseQrPoll, resume: resumeQrPoll } = useIntervalFn(async () => {
@@ -114,15 +174,25 @@ const { pause: pauseQrPoll, resume: resumeQrPoll } = useIntervalFn(async () => {
     const result = await $fetch<QrResponse>(`/api/instances/${id.value}/qr`)
     if (result.state === 'open') {
       qr.value = null
+      if (!justPaired.value) importStartedAt.value = Date.now()
+      justPaired.value = true
       // Refreshed rather than recorded, so the page does not flip to connected on
       // this poll's word and back again while the status fetch catches up.
       await refresh()
+      // But the state this poll recorded earlier must go now: `polledState` wins
+      // over the status fetch, so a stale `connecting` left here would hold the
+      // page on an empty QR frame for good — every later tick lands back in this
+      // branch and nothing else clears it. The status fetch decides from here.
+      polledState.value = null
       return
     }
     polledState.value = result.state
     // Keep the previous QR while Evolution generates the next one, so the image
-    // does not flicker between polls.
+    // does not flicker between polls. But `close` means the code on screen is
+    // spent — just scanned, with Evolution restarting the link, or expired and
+    // waiting out the server's connect hold — so it must not stay scannable.
     if (result.qr?.base64) qr.value = result.qr
+    else if (result.state === 'close') qr.value = null
   }
   catch {
     // Transient. The next tick retries; a hard failure surfaces on the status poll.
@@ -135,6 +205,64 @@ const { pause: pauseStatusPoll, resume: resumeStatusPoll } = useIntervalFn(
   15000,
   { immediate: false },
 )
+
+// ── importing history after pairing ────────────────────────────────────────
+/**
+ * Evolution says nothing when a history sync is finished, so the page decides
+ * from the counts: done once they have stopped moving for a while. History can
+ * start a few seconds after the link opens, so an account still at zero is
+ * given longer before it is called empty, and the wait is capped regardless —
+ * the dashboard's own status poll keeps the counts current after that.
+ */
+const IMPORT_POLL_MS = 3000
+const IMPORT_STABLE_POLLS = 5
+const IMPORT_EMPTY_MS = 60 * 1000
+const IMPORT_MAX_MS = 3 * 60 * 1000
+
+const lastImportTotal = ref<number | null>(null)
+const unchangedPolls = ref(0)
+
+const { pause: pauseImportPoll, resume: resumeImportPoll } = useIntervalFn(
+  () => refresh(),
+  IMPORT_POLL_MS,
+  { immediate: false },
+)
+
+function resetImport() {
+  justPaired.value = false
+  importDone.value = false
+  lastImportTotal.value = null
+  unchangedPolls.value = 0
+}
+
+function finishImport(announce: boolean) {
+  importDone.value = true
+  if (announce) toast.success('WhatsApp connected — history imported.')
+}
+
+watch(() => data.value?.stats, (stats) => {
+  if (mode.value !== 'importing' || !stats) return
+
+  const total = stats.messages + stats.chats + stats.contacts
+  unchangedPolls.value = total === lastImportTotal.value ? unchangedPolls.value + 1 : 0
+  lastImportTotal.value = total
+
+  const elapsed = Date.now() - importStartedAt.value
+  if (
+    (total > 0 && unchangedPolls.value >= IMPORT_STABLE_POLLS)
+    || (total === 0 && elapsed >= IMPORT_EMPTY_MS)
+    || elapsed >= IMPORT_MAX_MS
+  ) {
+    finishImport(true)
+  }
+})
+
+const format = new Intl.NumberFormat()
+const importProgress = computed(() => {
+  const stats = data.value?.stats
+  if (!stats || stats.messages + stats.chats === 0) return ''
+  return `${format.format(stats.messages)} messages · ${format.format(stats.chats)} chats so far`
+})
 
 // ── reconnecting ───────────────────────────────────────────────────────────
 // Three ways out: the session comes back (`applyMode` sees `connected`), the
@@ -165,19 +293,30 @@ const {
  * Evolution makes on its own is noticed without anyone pressing anything.
  */
 function applyMode(next: Mode) {
+  freshCounts.value = next === 'importing'
+
   if (next === 'pairing') {
     pauseStatusPoll()
+    pauseImportPoll()
     resumeQrPoll()
+  }
+  else if (next === 'importing') {
+    polledState.value = null
+    pauseQrPoll()
+    pauseStatusPoll()
+    resumeImportPoll()
   }
   else {
     polledState.value = null
     pauseQrPoll()
+    pauseImportPoll()
     resumeStatusPoll()
   }
 
   if (next !== 'lost') resetReconnect()
 
-  if (next === 'connected') pairingRequested.value = false
+  if (next === 'connected' || next === 'importing') pairingRequested.value = false
+  if (next === 'connected') justPaired.value = false
 }
 
 watch(mode, (next, previous) => {
@@ -213,6 +352,7 @@ function backToPairing(path: string, success: string, failure: string) {
       await $fetch(`/api/instances/${id.value}/${path}`, { method: 'POST' })
       qr.value = null
       polledState.value = null
+      resetImport()
       pairingRequested.value = true
       restartPairing()
       await refresh()
@@ -247,6 +387,7 @@ const importHistory = () => backToPairing(
       :state="state"
       kind="whatsapp"
       :lost="mode === 'lost'"
+      :flapping="flapping"
       @renamed="refresh()"
     >
       <!--
@@ -261,8 +402,40 @@ const importHistory = () => backToPairing(
       </p>
     </InstanceHeader>
 
+    <!-- ── scanned: linking, then importing history ────────────────────── -->
+    <!--
+      Covers the gap between the scan and the dashboard. Without it the QR frame
+      empties to a skeleton the moment the code is used and the page reads as
+      stuck, and the dashboard that follows would show counts of zero while the
+      history is still arriving.
+    -->
+    <Card v-if="mode === 'importing' || (mode === 'pairing' && justPaired)">
+      <CardContent class="flex flex-col items-center gap-3 py-12 text-center">
+        <Loader2Icon class="size-8 animate-spin text-muted-foreground" />
+        <p class="font-medium">
+          {{ mode === 'importing' ? 'Importing your WhatsApp history' : 'Linking your phone…' }}
+        </p>
+        <p class="max-w-md text-sm text-muted-foreground">
+          WhatsApp is sending your past conversations to this device. Keep your
+          phone online — this usually takes under a minute.
+        </p>
+        <p v-if="importProgress" class="text-sm tabular-nums">
+          {{ importProgress }}
+        </p>
+        <Button
+          v-if="mode === 'importing'"
+          variant="ghost"
+          size="sm"
+          class="mt-2"
+          @click="finishImport(false)"
+        >
+          Show dashboard now
+        </Button>
+      </CardContent>
+    </Card>
+
     <!-- ── pairing ─────────────────────────────────────────────────────── -->
-    <Card v-if="mode === 'pairing'">
+    <Card v-else-if="mode === 'pairing'">
       <CardHeader>
         <CardTitle>Scan to connect</CardTitle>
         <CardDescription>
@@ -276,6 +449,24 @@ const importHistory = () => backToPairing(
           Or enter code <code class="font-mono font-medium">{{ qr.pairingCode }}</code> on your phone.
         </p>
 
+        <p v-if="removalMinutes !== undefined && removalMinutes > 0" class="max-w-sm text-center text-xs text-muted-foreground">
+          A connection that isn't paired within an hour of being created is removed automatically.
+          {{ removalMinutes === 1 ? '1 minute' : `${removalMinutes} minutes` }} left.
+        </p>
+        <!-- Past the deadline: deletion is imminent and cannot be undone, so it
+             reads as a warning rather than as helper text. -->
+        <div
+          v-else-if="removalMinutes === 0"
+          role="alert"
+          class="flex max-w-sm items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+        >
+          <TriangleAlertIcon class="mt-0.5 size-4 shrink-0" />
+          <p>
+            This connection wasn't paired within an hour and is about to be removed automatically.
+            You can create a new one.
+          </p>
+        </div>
+
         <div v-if="pairingTimedOut" class="text-center">
           <p class="text-sm text-muted-foreground">
             The code expired.
@@ -288,27 +479,73 @@ const importHistory = () => backToPairing(
     </Card>
 
     <!-- ── connected, or was ───────────────────────────────────────────── -->
-    <template v-else>
+    <template v-else-if="mode === 'connected' || mode === 'lost'">
       <!--
         A dropped session keeps its profile and counts below: the phone is still
         linked, and everything stored up to the drop is still readable.
       -->
+      <!--
+        A reconnect loop, which reads `open` on most polls. Reconnect has no
+        socket to act on, so nobody gets a button — only who can end it.
+        Takes the place of the lost-session notice when both are true: a poll
+        that lands between two sockets sees a dropped session, and offering
+        Reconnect then is the wrong fix.
+      -->
+      <NoticeCard v-if="flapping" title="Evolution keeps reconnecting this account" tone="error">
+        <template #description>
+          <p class="mt-1 text-sm text-muted-foreground">
+            Its connection to WhatsApp is being replaced over and over, so messages
+            may be missing here and sends may fail.
+            <!--
+              Hosted offering: only we can restart Evolution, and we have been
+              mailed. Same words for admins and members — neither can act.
+            -->
+            <template v-if="operatorAlerted">
+              This is on our side: we have been alerted and will restart the
+              service. Nothing needs scanning, the phone stays linked, and there
+              is nothing you need to do.
+            </template>
+            <template v-else-if="canManage">
+              Reconnect cannot end this. Restarting {{ evolutionServer }} does, with
+              no new QR scan. Repeated logins can get a number flagged by WhatsApp,
+              so do it soon.
+            </template>
+            <template v-else>
+              Nothing needs scanning. Whoever runs {{ evolutionServer }} has to
+              restart it — an admin of your organization can see to that.
+            </template>
+          </p>
+        </template>
+      </NoticeCard>
+
       <SessionLostNotice
-        v-if="mode === 'lost'"
+        v-else-if="mode === 'lost'"
         service="WhatsApp"
         :can-manage="canManage"
         :reconnecting="reconnecting"
         :stalled="reconnectStalled"
         :busy="reconnectBusy"
+        :can-reconnect="canReconnect"
         @reconnect="reconnect"
       >
         <template #hint>
           The phone is still linked, so reconnecting normally needs no new QR code.
         </template>
         <template #stalled>
-          Evolution did not bring the connection back. Its session for this account
-          may be stuck — restarting {{ data?.instance.ownServer ? 'your Evolution server' : 'the Evolution server' }}
-          usually reconnects it without a new scan.
+          <template v-if="canReconnect">
+            Evolution did not bring the connection back. Its session for this account
+            may be stuck — restarting {{ evolutionServer }} usually reconnects it
+            without a new scan.
+          </template>
+          <template v-else-if="state === 'connecting'">
+            Evolution is still trying to connect this account. If it does not settle
+            within a minute or two, restarting {{ evolutionServer }} reconnects it
+            without a new scan.
+          </template>
+          <template v-else>
+            Evolution has no live connection for this account. Restarting
+            {{ evolutionServer }} reconnects it without a new scan.
+          </template>
         </template>
       </SessionLostNotice>
 
