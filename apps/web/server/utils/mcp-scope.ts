@@ -220,6 +220,9 @@ interface ScopeableChat {
   jids?: string[]
   number?: string
   phoneNumber?: string
+  /** Derived from the newest message across every folded JID — dropped on a cut. */
+  lastMessageAt?: string
+  lastMessagePreview?: string
 }
 
 /**
@@ -236,6 +239,14 @@ interface ScopeableChat {
  * a count, never the JID, as `referencedByOutOfScope` does for tables. A token
  * holding only the phone-number half keeps that chat's own `number`; one holding
  * only the LID keeps `phoneNumber`, whose evidence lives on the LID chat's rows.
+ *
+ * **A cut row carries no message content.** `lastMessagePreview` and
+ * `lastMessageAt` are computed in SQL over every folded JID, before scope is
+ * known, so on a cut row they may describe the newest message of the half the
+ * token cannot read — its full text, caption or filename. Both are dropped
+ * rather than recomputed: the listing query has only the merged last row, and a
+ * missing preview is honest where a wrong-half one is a leak. `read-messages`
+ * on the kept `jid` is the way to see the in-scope half's messages.
  */
 export function filterChatsToScope<T extends ScopeableChat>(
   scope: McpScope,
@@ -251,8 +262,10 @@ export function filterChatsToScope<T extends ScopeableChat>(
     if (reachable.length === members.length) return [chat]
 
     const jid = reachable.includes(chat.jid) ? chat.jid : reachable[0]!
+    // Possibly the dropped half's newest message: never carried across a cut.
+    const { lastMessageAt: _at, lastMessagePreview: _preview, ...rest } = chat
     return [{
-      ...chat,
+      ...rest as T,
       jid,
       jids: reachable.length > 1 ? reachable : undefined,
       number: jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0] : undefined,
