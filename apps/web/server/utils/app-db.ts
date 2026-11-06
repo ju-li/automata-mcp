@@ -405,10 +405,6 @@ export interface AppMcpToken {
   send_disclaimer?: string
 }
 
-/**
- * One MCP client that started a session with a token, as it described itself
- * in `initialize`. Client-chosen text throughout. See server/utils/mcp-clients.ts.
- */
 /** One recorded MCP tool call. See tool-calls.ts. */
 export interface AppMcpToolCall {
   id: string
@@ -421,6 +417,10 @@ export interface AppMcpToolCall {
   at: string
 }
 
+/**
+ * One MCP client that started a session with a token, as it described itself
+ * in `initialize`. Client-chosen text throughout. See server/utils/mcp-clients.ts.
+ */
 export interface AppMcpTokenClient {
   token_id: string
   client_name: string

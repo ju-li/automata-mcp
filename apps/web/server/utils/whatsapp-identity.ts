@@ -153,3 +153,13 @@ export function canonicalJid(links: LidLinks, jid: string): string {
 export function phoneNumberBehind(links: LidLinks, lid: string): string | undefined {
   return links.pnOf.get(lid)?.split('@')[0]
 }
+
+/**
+ * The phone number a chat's own JID spells, or nothing. Only a phone-number JID
+ * carries one: a LID's local part is a privacy alias, and handing it out as a
+ * number is what leads a model to send to it as one — reaching whoever owns
+ * that number, if anyone. Every `number` field goes through here.
+ */
+export function phoneNumberOf(jid: string): string | undefined {
+  return jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0] : undefined
+}

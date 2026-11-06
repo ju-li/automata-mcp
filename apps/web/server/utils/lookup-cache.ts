@@ -51,21 +51,34 @@ export interface StaleCacheOptions<T> {
  */
 export function staleWhileFailing<T>(options: StaleCacheOptions<T>) {
   const entries = new Map<string, { expiresAt: number, value: T }>()
+  // Callers that arrive while a key is being loaded wait on that load rather
+  // than starting their own: `lidLinks` is a scan of the account's messages, and
+  // an MCP client often asks several tools at once.
+  const inFlight = new Map<string, Promise<T>>()
 
-  return async function resolve(key: string, load: () => Promise<T | undefined>): Promise<T> {
-    const cached = entries.get(key)
-    if (cached && Date.now() < cached.expiresAt) return cached.value
-
+  async function refresh(key: string, load: () => Promise<T | undefined>): Promise<T> {
     const loaded = await load()
 
     if (loaded === undefined) {
-      const value = cached?.value ?? options.empty
+      const value = entries.get(key)?.value ?? options.empty
       entries.set(key, { expiresAt: Date.now() + options.retryTtlMs, value })
       return value
     }
 
     entries.set(key, { expiresAt: Date.now() + options.ttlMs, value: loaded })
     return loaded
+  }
+
+  return function resolve(key: string, load: () => Promise<T | undefined>): Promise<T> {
+    const cached = entries.get(key)
+    if (cached && Date.now() < cached.expiresAt) return Promise.resolve(cached.value)
+
+    let pending = inFlight.get(key)
+    if (!pending) {
+      pending = refresh(key, load).finally(() => inFlight.delete(key))
+      inFlight.set(key, pending)
+    }
+    return pending
   }
 }
 

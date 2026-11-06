@@ -241,12 +241,29 @@ export class Crm {
     return 'claimed'
   }
 
-  /** Remember a contact Brevo refused for good, for replaying by hand. */
-  async recordSkipped(eventId: bigint | undefined, userId: string, error: BrevoError): Promise<void> {
-    await this.sql`
-      INSERT INTO cloud.crm_skipped (event_id, user_id, status, code)
-      VALUES (${eventId === undefined ? null : eventId.toString()}, ${userId}, ${error.status}, ${error.code ?? null})
-    `
+  /**
+   * `upsert`, except that a contact Brevo refuses for good is remembered in
+   * `cloud.crm_skipped` (for replaying by hand) and answers `skipped`. Every
+   * other failure throws. The one rule the outbox consumer and the backfill both
+   * follow, so they cannot drift apart.
+   */
+  async upsertOrSkip(user: CrmUser, options: { facts?: SignupFacts, eventId?: bigint } = {}): Promise<Upserted | 'skipped'> {
+    try {
+      return await this.upsert(user, options.facts)
+    }
+    catch (error) {
+      if (!(error instanceof BrevoError) || error.kind !== 'permanent') throw error
+      const { eventId } = options
+      await this.sql`
+        INSERT INTO cloud.crm_skipped (event_id, user_id, status, code)
+        VALUES (${eventId === undefined ? null : eventId.toString()}, ${user.id}, ${error.status}, ${error.code ?? null})
+      `
+      console.warn(
+        `[crm] Brevo refused the contact for user ${user.id}${eventId === undefined ? '' : ` (event ${eventId})`}: `
+        + `${error.message}; recorded in cloud.crm_skipped`,
+      )
+      return 'skipped'
+    }
   }
 
   /**

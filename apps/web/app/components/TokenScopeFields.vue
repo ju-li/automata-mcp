@@ -156,25 +156,18 @@ function chatState(chat: ScopedChat): boolean | 'indeterminate' {
   return held === members.length ? true : 'indeterminate'
 }
 
-/** Tick or untick every JID of a row together. */
-function toggleChat(chat: ScopedChat, on: boolean) {
-  const next = new Set(scope.value.chat_jids)
-  for (const jid of membersOf(chat)) on ? next.add(jid) : next.delete(jid)
-  scope.value = { ...scope.value, chat_jids: [...next] }
-}
-
 /**
- * Add or remove one id on one axis.
+ * Add or remove ids on one axis.
  *
  * One function rather than one per axis: the set-dedupe is the only logic here,
  * and it was being maintained in three copies that differed solely in which key
- * they rebuilt.
+ * they rebuilt. A chat row passes every JID it shows, so they tick together.
  */
 type ScopeList = 'tool_names' | 'chat_jids' | 'table_names'
 
-function toggle(key: ScopeList, value: string, on: boolean) {
+function toggle(key: ScopeList, values: string | string[], on: boolean) {
   const next = new Set(scope.value[key])
-  on ? next.add(value) : next.delete(value)
+  for (const value of Array.isArray(values) ? values : [values]) on ? next.add(value) : next.delete(value)
   scope.value = { ...scope.value, [key]: [...next] }
 }
 
@@ -469,7 +462,7 @@ async function addByNumber() {
             :title="chat.name"
           >
             <span class="truncate">{{ chat.name }}</span>
-            <button type="button" class="shrink-0" :aria-label="`Remove ${chat.name}`" @click="toggleChat(chat, false)">
+            <button type="button" class="shrink-0" :aria-label="`Remove ${chat.name}`" @click="toggle('chat_jids', membersOf(chat), false)">
               <XIcon class="size-3" />
             </button>
           </Badge>
@@ -519,7 +512,7 @@ async function addByNumber() {
           >
             <Checkbox
               :model-value="chatState(chat)"
-              @update:model-value="toggleChat(chat, $event === true)"
+              @update:model-value="toggle('chat_jids', membersOf(chat), $event === true)"
             >
               <template #default="{ state }">
                 <MinusIcon v-if="state === 'indeterminate'" class="size-3.5" />

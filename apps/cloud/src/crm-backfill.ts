@@ -81,15 +81,10 @@ process.exit(exitCode)
 async function syncOne(user: CrmUser): Promise<Upserted | 'skipped'> {
   for (let tries = 1; ; tries++) {
     try {
-      return await crm.upsert(user)
+      return await crm.upsertOrSkip(user)
     }
     catch (error) {
       if (!(error instanceof BrevoError)) throw error
-      if (error.kind === 'permanent') {
-        await crm.recordSkipped(undefined, user.id, error)
-        console.warn(`[crm-backfill] Brevo refused the contact for user ${user.id}: ${error.message}; recorded in cloud.crm_skipped`)
-        return 'skipped'
-      }
       if (error.kind === 'auth' || tries >= ATTEMPTS) throw error
       const wait = Math.max((error.retryAt ?? 0) - Date.now(), 2 ** tries * 1000)
       console.warn(`[crm-backfill] ${error.message}; retrying in ${Math.ceil(wait / 1000)} s`)

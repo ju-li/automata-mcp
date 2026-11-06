@@ -44,6 +44,13 @@ const TTL_MS = 10 * 60_000
 /** After a failed build, how long sends rely on the recent check alone. */
 const RETRY_MS = 60_000
 const RECENT_MARGIN_S = 24 * 60 * 60
+/**
+ * A successful build that started this recently makes the recent check
+ * redundant: it read every row the check would, bar what arrived while it ran.
+ * Counted from the build's start, so it has to outlast the build itself (a few
+ * seconds on a large account).
+ */
+const JUST_BUILT_S = 30
 /** Connections held at once; oldest-built dropped first. */
 const MAX_ENTRIES = 500
 
@@ -77,6 +84,9 @@ export async function assertNotBareLid(instance: AppInstance, number: string): P
 
   const entry = await knownLids(instance)
   if (entry.lids?.has(digits)) refuse(number, digits)
+  // A set built moments ago — usually by this very call — already read nearly
+  // every row the recent check would; running it too is the same scan twice.
+  if (entry.lids && Date.now() / 1000 - entry.builtAt < JUST_BUILT_S) return
 
   const since = Math.floor(entry.builtAt) - RECENT_MARGIN_S
   let recent: Set<string>

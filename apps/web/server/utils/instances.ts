@@ -636,7 +636,7 @@ export async function getInstanceStatus(
   options: { freshCounts?: boolean } = {},
 ): Promise<InstanceStatus> {
   const { rowChurn: _churn, ...status } = await readStatus(instance, { counts: true, freshCounts: options.freshCounts })
-  return { ...status, stats: status.stats ?? { messages: 0, chats: 0, contacts: 0 } }
+  return { ...status, stats: status.stats ?? zeroStats() }
 }
 
 export type InstanceHealth = Omit<InstanceStatus, 'stats'> & {
@@ -693,8 +693,7 @@ export function unpairedRemovalAt(instance: AppInstance): string | undefined {
 export function notePaired(instance: AppInstance): void {
   if (instance.paired_at || pairedNoted.has(instance.id)) return
   pairedNoted.add(instance.id)
-  appDb()
-    .then(sql => sql`UPDATE app.instances SET paired_at = now() WHERE id = ${instance.id} AND paired_at IS NULL`)
+  storePaired(instance)
     .catch((error) => {
       pairedNoted.delete(instance.id)
       console.error(`[instances] could not record that connection ${instance.id} is paired:`, error)
@@ -762,9 +761,10 @@ export async function pairingEvidence(instance: AppInstance): Promise<'paired' |
   // The row's ownerJid: from SQL where there is a message database, else from
   // Evolution's API. A 404 from either agrees with the live read that the
   // instance is gone; anything else is a read that failed.
+  const canAskSql = canReadMessages(instance) && Boolean(instance.instance_id || !missing)
   let ownerJid: string | undefined
   let rowRead = false
-  if (canReadMessages(instance) && (instance.instance_id || !missing)) {
+  if (canAskSql) {
     try {
       const record = await readInstanceRecord(instance)
       if (record) {
@@ -794,7 +794,7 @@ export async function pairingEvidence(instance: AppInstance): Promise<'paired' |
 
   // Stored history outlives a logout. Without a message database there is
   // nothing to count, and `paired_at` plus the reads above have to do.
-  if (canReadMessages(instance) && (instance.instance_id || !missing)) {
+  if (canAskSql) {
     try {
       const { messages } = await countInstanceRows(instance)
       if (messages > 0) {
@@ -847,7 +847,7 @@ export interface RowChurn {
  *
  * **The signal is Evolution's own row, never the webhook.** Each open writes
  * the `"Instance"` row, so `updatedAt` on an `open` row trails the newest open
- * — see `EvolutionInstanceRecord.rowWrittenAt`. A count of `connection.update`
+ * — see `readInstanceRowWrittenAt`. A count of `connection.update`
  * deliveries would say the same thing, but deliveries are unsigned and anyone
  * can post one; a stranger must not be able to mail a user that their account
  * is unstable. The webhook still matters: it makes evaluations happen, which is
@@ -867,10 +867,14 @@ export function rowChurn(
   now = Date.now(),
 ): { churn: RowChurn, flapping: boolean } {
   const churn = nextChurn(stored, read, now)
+  return { churn, flapping: isFlapping(churn, now) }
+}
+
+/** The verdict half of `rowChurn`, for a stored observation with no new read. */
+export function isFlapping(churn: RowChurn, now = Date.now()): boolean {
   const since = churn.since ? Date.parse(churn.since) : Number.NaN
   const seenAt = churn.seenAt ? Date.parse(churn.seenAt) : Number.NaN
-  const flapping = seenAt - since >= CHURN_CONFIRM_MS && now - seenAt < CHURN_CONFIRM_MS
-  return { churn, flapping }
+  return seenAt - since >= CHURN_CONFIRM_MS && now - seenAt < CHURN_CONFIRM_MS
 }
 
 function nextChurn(stored: RowChurn, read: { columnOpen: boolean, rowWrittenAt?: string }, now: number): RowChurn {
@@ -918,7 +922,8 @@ async function readStatus(
   }
 
   if (!row) {
-    return options.counts ? { ...emptyStatus(), rowChurn: storedChurn } : { state: 'close', rowChurn: storedChurn }
+    // Evolution answered, but not about an account it recognises.
+    return { state: 'close', rowChurn: storedChurn }
   }
 
   if (live === 'open' || row.ownerJid) notePaired(instance)
@@ -939,7 +944,7 @@ async function readStatus(
     number: row.number ?? row.ownerJid?.split('@')[0],
     ownerJid: row.ownerJid ?? undefined,
     disconnectedAt: row.disconnectionAt ?? undefined,
-    ...(options.counts && { stats: stats ?? { messages: 0, chats: 0, contacts: 0 } }),
+    stats,
   }
 }
 
@@ -987,7 +992,13 @@ async function sqlRowWrittenAt(instance: AppInstance): Promise<string | undefine
     return await readInstanceRowWrittenAt(instance)
   }
   catch (error) {
-    noteSqlFallback('row write time', instance, error)
+    // No fallback behind this one, so the usual wording would be untrue.
+    noteSqlFallback('row write time', instance, error, {
+      denied: '[instances] the Evolution database role cannot read "Instance"."updatedAt", so a '
+        + 'WhatsApp reconnect loop is not detected. Add it to the status grants in '
+        + 'docs/whatsapp.md "Reading and searching messages".',
+      failed: '[instances] could not read when Evolution last wrote an instance row; reconnect-loop detection skipped:',
+    })
     return undefined
   }
 }
@@ -1104,7 +1115,27 @@ function sqlDenied(what: string, instance: AppInstance): boolean {
   return at !== undefined && Date.now() - at < SQL_FALLBACK_QUIET_MS
 }
 
-function noteSqlFallback(what: string, instance: AppInstance, error: unknown): void {
+/** What a failed status read logs: a missing grant, or anything else. */
+interface SqlFallbackWording {
+  denied: string
+  failed: string
+}
+
+function fetchInstancesFallback(what: string): SqlFallbackWording {
+  return {
+    denied: `[instances] status ${what}: the Evolution database role lacks a grant, so status reads `
+      + 'fall back to Evolution\'s fetchInstances (a full "Message" scan, cached per connection). '
+      + 'Add the status grants in docs/whatsapp.md "Reading and searching messages".',
+    failed: `[instances] status ${what} could not be read from the Evolution database; using fetchInstances:`,
+  }
+}
+
+function noteSqlFallback(
+  what: string,
+  instance: AppInstance,
+  error: unknown,
+  wording: SqlFallbackWording = fetchInstancesFallback(what),
+): void {
   const code = (error as { code?: unknown } | undefined)?.code
   if (code === '42501') sqlDeniedAt.set(`${what}:${instance.id}`, Date.now())
 
@@ -1113,29 +1144,8 @@ function noteSqlFallback(what: string, instance: AppInstance, error: unknown): v
   if (last !== undefined && Date.now() - last < SQL_FALLBACK_QUIET_MS) return
   sqlFallbackLoggedAt.set(key, Date.now())
 
-  if (what === 'row write time') {
-    // No fallback behind this one, so the usual wording would be untrue.
-    if (code === '42501') {
-      console.warn(
-        '[instances] the Evolution database role cannot read "Instance"."updatedAt", so a '
-        + 'WhatsApp reconnect loop is not detected. Add it to the status grants in '
-        + 'docs/whatsapp.md "Reading and searching messages".',
-      )
-      return
-    }
-    console.error('[instances] could not read when Evolution last wrote an instance row; reconnect-loop detection skipped:', error)
-    return
-  }
-
-  if (code === '42501') {
-    console.warn(
-      `[instances] status ${what}: the Evolution database role lacks a grant, so status reads `
-      + 'fall back to Evolution\'s fetchInstances (a full "Message" scan, cached per connection). '
-      + 'Add the status grants in docs/whatsapp.md "Reading and searching messages".',
-    )
-    return
-  }
-  console.error(`[instances] status ${what} could not be read from the Evolution database; using fetchInstances:`, error)
+  if (code === '42501') console.warn(wording.denied)
+  else console.error(wording.failed, error)
 }
 
 /**
@@ -1576,7 +1586,7 @@ function settingsBody(current: EvolutionSettings | null, overrides: Partial<Evol
  * interchangeable: `close` reads to a person as "not paired, scan a QR code",
  * which is a wrong instruction for a connection whose credentials never
  * existed. `unknown` says the state could not be established, which is the
- * truth. `emptyStatus()` is deliberately not reused here for that reason.
+ * truth, so `unknownStatus()` answers here and never a `close` one.
  */
 export type ConnectionStateReport =
   | { state: ConnectionState, detail?: string, error?: string, warning?: string }
@@ -1607,14 +1617,13 @@ export async function connectionState(
   }
 }
 
-/** Evolution answered, but not about an account it recognises. */
-function emptyStatus(): InstanceStatus {
-  return { state: 'close', stats: { messages: 0, chats: 0, contacts: 0 } }
+function zeroStats(): InstanceStats {
+  return { messages: 0, chats: 0, contacts: 0 }
 }
 
 /** Evolution could not be asked at all — see `connectionState`. */
 function unknownStatus(): InstanceStatus {
-  return { state: 'unknown', stats: { messages: 0, chats: 0, contacts: 0 } }
+  return { state: 'unknown', stats: zeroStats() }
 }
 
 function normalizeState(state: string | undefined): ConnectionState {

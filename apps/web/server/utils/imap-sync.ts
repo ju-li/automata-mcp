@@ -444,7 +444,9 @@ async function storeMessages(
 
   for (let i = 0; i < uids.length; i += 100) {
     const batch = uids.slice(i, i + 100)
-    let rows: Array<ReturnType<typeof toRow>> = []
+    // Keyed by UID: a server answering one UID twice would otherwise fail the
+    // batch with 21000, as a duplicated folder does above; the later answer wins.
+    const byUid = new Map<number, ReturnType<typeof toRow>>()
     for await (const message of client.fetch(batch, {
       uid: true,
       envelope: true,
@@ -454,12 +456,11 @@ async function storeMessages(
       size: true,
       headers: ['references'],
     }, { uid: true })) {
-      rows.push(toRow(instance.id, path, uidvalidity, message))
+      const row = toRow(instance.id, path, uidvalidity, message)
+      byUid.set(row.uid, row)
     }
-    if (!rows.length) continue
-    // A server answering one UID twice would otherwise fail the batch with
-    // 21000, as a duplicated folder does above; the later answer wins.
-    rows = [...new Map(rows.map(row => [row.uid, row])).values()]
+    if (!byUid.size) continue
+    const rows = [...byUid.values()]
 
     await sql`
       INSERT INTO app.mail_messages ${sql(rows)}

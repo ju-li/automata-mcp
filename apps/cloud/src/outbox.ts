@@ -185,16 +185,10 @@ export async function consumeCrmEvents(sql: Sql, crm: Crm): Promise<number> {
       continue
     }
     try {
-      counts[await crm.upsert(user, facts.get(userId))]++
+      counts[await crm.upsertOrSkip(user, { facts: facts.get(userId), eventId })]++
     }
     catch (error) {
       if (!(error instanceof BrevoError)) throw error
-      if (error.kind === 'permanent') {
-        await crm.recordSkipped(eventId, userId, error)
-        counts.skipped++
-        console.warn(`[crm] Brevo refused the contact for user ${userId} (event ${eventId}): ${error.message}; recorded in cloud.crm_skipped`)
-        continue
-      }
       crm.pauseFor(error)
       stoppedAt = eventId
       break

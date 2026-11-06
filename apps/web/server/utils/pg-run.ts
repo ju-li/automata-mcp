@@ -172,24 +172,29 @@ export async function runReadQuery(
   statement: string,
   options: ReadQueryOptions,
 ): Promise<ReadQueryResult> {
+  // Postgres's own "canceling statement due to statement timeout" tells the
+  // model nothing it can act on, and the usual next move is to retry the same
+  // query with a bigger timeout. The plan is the thing that says why.
+  return await timeoutAs504(
+    guardedRead(instance, scope, statement, options),
+    `The query was stopped by the ${options.timeoutMs} ms statement timeout and returned no rows. `
+    + 'Call run-query again with the same sql and explain: true to see the plan it would run, without running it: '
+    + 'a Seq Scan over a large table, or a join with no usable index, is the usual cause. '
+    + 'Then add a selective WHERE clause on an indexed column, aggregate instead of listing, or raise timeoutMs (at most 30000).'
+    + (options.page > 1
+      ? ` Page ${options.page} also re-reads every row of the pages before it; a keyset predicate (WHERE id > <last id>) avoids that.`
+      : ''),
+  )
+}
+
+/** A statement timeout answered as a 504 that says what to do next; anything else as thrown. */
+async function timeoutAs504<T>(work: Promise<T>, message: string): Promise<T> {
   try {
-    return await guardedRead(instance, scope, statement, options)
+    return await work
   }
   catch (error) {
     if (!isStatementTimeout(error)) throw error
-    // Postgres's own "canceling statement due to statement timeout" tells the
-    // model nothing it can act on, and the usual next move is to retry the same
-    // query with a bigger timeout. The plan is the thing that says why.
-    throw createError({
-      statusCode: 504,
-      message: `The query was stopped by the ${options.timeoutMs} ms statement timeout and returned no rows. `
-        + 'Call run-query again with the same sql and explain: true to see the plan it would run, without running it: '
-        + 'a Seq Scan over a large table, or a join with no usable index, is the usual cause. '
-        + 'Then add a selective WHERE clause on an indexed column, aggregate instead of listing, or raise timeoutMs (at most 30000).'
-        + (options.page > 1
-          ? ` Page ${options.page} also re-reads every row of the pages before it; a keyset predicate (WHERE id > <last id>) avoids that.`
-          : ''),
-    })
+    throw createError({ statusCode: 504, message })
   }
 }
 
@@ -274,47 +279,43 @@ export async function explainReadQuery(
   statement: string,
   options: ExplainQueryOptions,
 ): Promise<ExplainQueryResult> {
-  try {
-    return await withGuardedStatement(instance, scope, statement, {
-      readOnly: true,
-      timeoutMs: options.timeoutMs,
-      assertKind: assertNoWrites,
-    }, async (tx, startedAt) => {
-      const explained = await unsafeSingle(tx, `EXPLAIN (FORMAT TEXT, COSTS) ${declareCursor(statement)}`)
-      const lines = (explained as unknown as Array<Record<string, unknown>>)
-        .map(row => row['QUERY PLAN'])
-        .filter((line): line is string => typeof line === 'string')
+  const explaining = withGuardedStatement(instance, scope, statement, {
+    readOnly: true,
+    timeoutMs: options.timeoutMs,
+    assertKind: assertNoWrites,
+  }, async (tx, startedAt) => {
+    const explained = await unsafeSingle(tx, `EXPLAIN (FORMAT TEXT, COSTS) ${declareCursor(statement)}`)
+    const lines = (explained as unknown as Array<Record<string, unknown>>)
+      .map(row => row['QUERY PLAN'])
+      .filter((line): line is string => typeof line === 'string')
 
-      // Whole lines only: a node cut mid-line reads as a different node.
-      const kept: string[] = []
-      let length = 0
-      for (const line of lines) {
-        if (length + line.length + 1 > MAX_PLAN_CHARS) break
-        kept.push(line)
-        length += line.length + 1
-      }
+    // Whole lines only: a node cut mid-line reads as a different node.
+    const kept: string[] = []
+    let length = 0
+    for (const line of lines) {
+      if (length + line.length + 1 > MAX_PLAN_CHARS) break
+      kept.push(line)
+      length += line.length + 1
+    }
 
-      // The root line is always `<node>  (cost=a..b rows=N width=W)` with costs
-      // on. Read from the cursor plan rather than the guard's JSON plan, which
-      // is planned without cursor options and can be a different shape.
-      const rows = /\brows=(\d+)\b/.exec(lines[0] ?? '')?.[1]
+    // The root line is always `<node>  (cost=a..b rows=N width=W)` with costs
+    // on. Read from the cursor plan rather than the guard's JSON plan, which
+    // is planned without cursor options and can be a different shape.
+    const rows = /\brows=(\d+)\b/.exec(lines[0] ?? '')?.[1]
 
-      return {
-        plan: kept.join('\n'),
-        planTruncated: kept.length < lines.length,
-        ...(rows !== undefined && { estimatedRows: Number(rows) }),
-        elapsedMs: Date.now() - startedAt,
-      }
-    })
-  }
-  catch (error) {
-    if (!isStatementTimeout(error)) throw error
-    throw createError({
-      statusCode: 504,
-      message: `Planning the query alone took longer than the ${options.timeoutMs} ms statement timeout, so there is no plan to show. `
-        + 'Raise timeoutMs (at most 30000), or split the query: very many joined tables or a large IN list are the usual causes.',
-    })
-  }
+    return {
+      plan: kept.join('\n'),
+      planTruncated: kept.length < lines.length,
+      ...(rows !== undefined && { estimatedRows: Number(rows) }),
+      elapsedMs: Date.now() - startedAt,
+    }
+  })
+
+  return await timeoutAs504(
+    explaining,
+    `Planning the query alone took longer than the ${options.timeoutMs} ms statement timeout, so there is no plan to show. `
+    + 'Raise timeoutMs (at most 30000), or split the query: very many joined tables or a large IN list are the usual causes.',
+  )
 }
 
 export interface WriteStatementResult {

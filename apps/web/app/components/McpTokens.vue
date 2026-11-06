@@ -295,11 +295,6 @@ async function rotate(token: TokenRow) {
   await refresh()
 }
 
-function formatDate(value?: string) {
-  if (!value) return '—'
-  return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
-}
-
 function statusOf(token: TokenRow) {
   if (token.revoked) return { label: 'Revoked', variant: 'outline' as const }
   if (token.expired) return { label: 'Expired', variant: 'outline' as const }
