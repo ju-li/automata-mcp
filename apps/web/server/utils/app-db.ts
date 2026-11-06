@@ -370,6 +370,11 @@ export interface AppInstance {
   paired_at?: string
   /** That task's claim on this row, so two replicas never both delete it. */
   reap_lease_until?: string
+  /**
+   * WhatsApp only: until when nothing may ask Evolution to connect this
+   * account — see `claimConnect` in instances.ts, its only writer.
+   */
+  connect_hold_until?: string
 }
 
 export interface AppMcpToken {

@@ -889,6 +889,7 @@ function nextChurn(stored: RowChurn, read: { columnOpen: boolean, rowWrittenAt?:
 export function forgetInstanceStatus(instanceId: string): void {
   apiRowCache.delete(instanceId)
   countsCache.delete(instanceId)
+  holdRefreshedAt.delete(instanceId)
 }
 
 type InstanceStats = InstanceStatus['stats']
@@ -1199,6 +1200,12 @@ export async function reconnectInstance(instance: AppInstance): Promise<Connecti
         : 'Evolution has no live connection for this account. Restarting the Evolution service reconnects it without a new QR scan.',
     })
   }
+  if (!(await claimConnect(instance))) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: 'This account was asked to connect a moment ago. Wait a few seconds and look again before trying once more.',
+    })
+  }
   forgetInstanceStatus(instance.id)
 
   const response = await evolution<EvolutionActionResponse>(`/instance/connect/${name}`)
@@ -1214,16 +1221,120 @@ export async function reconnectInstance(instance: AppInstance): Promise<Connecti
   return await liveConnectionState(evolution, instance)
 }
 
+// ── asking Evolution to connect ────────────────────────────────────────────
 /**
- * Current QR, or the connection state once pairing has completed.
+ * How long after the socket was last seen connecting or open — or after this
+ * app last asked Evolution to connect — before `close` is taken at its word.
+ * Covers the restart WhatsApp demands right after a QR scan with room to spare;
+ * a QR that really expired waits this long for its replacement.
+ */
+const CONNECT_HOLD_MS = 15_000
+/**
+ * The pairing poll pushes the hold forward at most this often per process, so
+ * two-second polls do not mean a write every two seconds. The hold then ends no
+ * sooner than `CONNECT_HOLD_MS - HOLD_REFRESH_MS` after the last activity seen.
+ */
+const HOLD_REFRESH_MS = 5_000
+const holdRefreshedAt = new Map<string, number>()
+
+/**
+ * Claim the right to send `GET /instance/connect` to an account Evolution
+ * holds in `close`. False means something saw the socket alive, or asked for a
+ * connect, within the hold — and the caller must not send it.
  *
- * `GET /instance/connect` is overloaded upstream: it returns a QR while the
- * instance is `close`/`connecting`, and a connection-state object once it is
- * `open`. Hitting it while `close` is also what starts the connection, so the
- * pairing page polling this is what drives pairing forward.
+ * **Why every `connect` we send goes through this.** In `close` that call makes
+ * Evolution 2.3.7 build a new client (`connectToWhatsapp` → `createClient`),
+ * and `createClient` never ends the socket it replaces. Evolution also calls
+ * `connectToWhatsapp` itself on every close it retries — notably the stream
+ * error 515 WhatsApp sends right after a QR scan, whose `close` lasts a moment
+ * before Evolution's own reconnect lands. A `connect` from us in that moment is
+ * a second socket on the same credentials; the two replace each other until the
+ * service restarts, which is the reconnect loop `flapping` reports, starting
+ * from the first minute of pairing (ju-li/automata-mcp#122; #103 is the same
+ * loop by another route).
+ *
+ * Stored on the row, claimed by conditional UPDATE, so two tabs, a reload and
+ * two replicas share one hold — memory in a browser or one process would not.
+ * Plain SQL: `updated` is not bumped.
+ */
+async function claimConnect(instance: AppInstance): Promise<boolean> {
+  const sql = await appDb()
+  const holdSecs = CONNECT_HOLD_MS / 1000
+  const rows = await sql`
+    UPDATE app.instances
+    SET connect_hold_until = now() + make_interval(secs => ${holdSecs})
+    WHERE id = ${instance.id}
+      AND (connect_hold_until IS NULL OR connect_hold_until < now())
+    RETURNING id
+  `
+  if (rows.length) holdRefreshedAt.set(instance.id, Date.now())
+  return rows.length > 0
+}
+
+/** The socket was just seen connecting or open: hold off any `connect`. */
+async function extendConnectHold(instance: AppInstance): Promise<void> {
+  const last = holdRefreshedAt.get(instance.id)
+  if (last !== undefined && Date.now() - last < HOLD_REFRESH_MS) return
+  const sql = await appDb()
+  const holdSecs = CONNECT_HOLD_MS / 1000
+  await sql`
+    UPDATE app.instances
+    SET connect_hold_until = now() + make_interval(secs => ${holdSecs})
+    WHERE id = ${instance.id}
+  `
+  holdRefreshedAt.set(instance.id, Date.now())
+}
+
+/**
+ * Lift the hold after we ended the session ourselves. A logout is a close
+ * Evolution does not retry, so nothing on its side is about to reconnect, and
+ * the pairing that follows should get its QR at once.
+ */
+async function releaseConnectHold(instance: AppInstance): Promise<void> {
+  holdRefreshedAt.delete(instance.id)
+  const sql = await appDb()
+  await sql`UPDATE app.instances SET connect_hold_until = NULL WHERE id = ${instance.id}`
+}
+
+/**
+ * Current QR, or the connection state once pairing has completed. The pairing
+ * page polls this every two seconds.
+ *
+ * **Live state first, and `connect` only where it is safe.** `GET
+ * /instance/connect` is what starts a connection and what hands out the QR, but
+ * what it does depends on Evolution's in-memory state:
+ *
+ *   open        answers a state object. We do not call it: the state read
+ *               already said so. Recorded as paired.
+ *   connecting  returns the cached QR and does nothing else — safe, and the
+ *               only way to get the QR, so it is called.
+ *   close       builds a new socket. Called only through `claimConnect`: at the
+ *               start of pairing (fresh instance, after a logout) the hold is
+ *               free and the QR comes back at once; right after a scan, while
+ *               Evolution reconnects by itself, the hold is still running and
+ *               the poll answers `close` with no QR. A `close` that outlasts
+ *               the hold — a QR that ran out — gets its connect then.
+ *   unknown     nothing. A state Evolution does not name is not one to start a
+ *               socket from.
+ *
+ * Residual window: the state read and the `connect` are two requests, so a
+ * close landing between them still reaches Evolution as a connect in `close`.
+ * It is milliseconds wide against the second-wide window this closes; shutting
+ * it would need Evolution to stop leaking the socket it replaces.
  */
 export async function getInstanceQr(instance: AppInstance): Promise<{ state: ConnectionState, qr?: InstanceQr }> {
   const evolution = evolutionClientForInstance(instance)
+
+  const before = await liveConnectionState(evolution, instance)
+  if (before === 'unknown') return { state: before }
+  if (before === 'open') {
+    await extendConnectHold(instance)
+    // The pairing page's poll is the first thing to see a scan land.
+    notePaired(instance)
+    return { state: before }
+  }
+  if (before === 'connecting') await extendConnectHold(instance)
+  else if (!(await claimConnect(instance))) return { state: 'close' }
 
   const response = await evolution<Record<string, any>>(
     `/instance/connect/${encodeURIComponent(instance.name)}`,
@@ -1231,7 +1342,6 @@ export async function getInstanceQr(instance: AppInstance): Promise<{ state: Con
 
   if (response?.instance?.state) {
     const state = normalizeState(response.instance.state)
-    // The pairing page's poll is the first thing to see a scan land.
     if (state === 'open') notePaired(instance)
     return { state }
   }
@@ -1266,9 +1376,11 @@ export async function logoutInstance(instance: AppInstance): Promise<void> {
   try {
     await evolution(`/instance/logout/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
   } catch (error) {
-    if (httpStatusOf(error) === 400) return
-    throw error
+    if (httpStatusOf(error) !== 400) throw error
   }
+  // Best effort: a hold left running only delays the next QR by its length.
+  await releaseConnectHold(instance).catch(error =>
+    console.error(`[instances] could not release the connect hold of ${instance.id}:`, error))
 }
 
 /**

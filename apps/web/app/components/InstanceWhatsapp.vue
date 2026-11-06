@@ -155,8 +155,10 @@ const needsDbUrl = computed(() =>
 )
 
 // ── pairing ────────────────────────────────────────────────────────────────
-// Polling the QR endpoint is what drives pairing: Evolution starts the
-// connection the first time it is asked for a QR on a disconnected instance.
+// Polling the QR endpoint is what drives pairing: the server starts the
+// connection the first time it is asked for a QR on a disconnected instance,
+// and again only once `close` has outlasted its connect hold — never in the
+// moment after a scan, when Evolution is reconnecting by itself (#122).
 const PAIRING_TIMEOUT_MS = 5 * 60 * 1000
 
 const { pause: pauseQrPoll, resume: resumeQrPoll } = useIntervalFn(async () => {
@@ -186,8 +188,11 @@ const { pause: pauseQrPoll, resume: resumeQrPoll } = useIntervalFn(async () => {
     }
     polledState.value = result.state
     // Keep the previous QR while Evolution generates the next one, so the image
-    // does not flicker between polls.
+    // does not flicker between polls. But `close` means the code on screen is
+    // spent — just scanned, with Evolution restarting the link, or expired and
+    // waiting out the server's connect hold — so it must not stay scannable.
     if (result.qr?.base64) qr.value = result.qr
+    else if (result.state === 'close') qr.value = null
   }
   catch {
     // Transient. The next tick retries; a hard failure surfaces on the status poll.
