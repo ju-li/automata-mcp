@@ -205,6 +205,16 @@ What the connector does with them:
   else is consulted — not contact names, not the alias's own digits, not data
   from other accounts on the same Evolution server. The chat is still the LID:
   replies and token scope follow its JID, not the number.
+- **One person, two chats, shown as one.** Someone who moved from phone-number
+  to LID addressing has part of their history under each id. When the two are
+  linked as above, `list-chats` and the dashboard's Chats table show one row,
+  under the LID, with both ids in `jids`. `read-messages` and `search-messages`
+  given either id read both, as one timeline with no duplicates, and search
+  labels every hit with one id per person. A token reads only the halves it is
+  scoped to and is told, as a count, when part of the conversation is outside
+  its scope. A chat with no link says so (`linkUnknown`) where a second part
+  could exist. The dashboard's Chats *card* still shows Evolution's own count,
+  which is not comparable.
 
 What it can't do yet:
 
@@ -213,8 +223,6 @@ What it can't do yet:
   API for Baileys' own mapping. So `phoneNumber` is partial, and the model is
   told its absence means "unknown", not "none". It also needs the message
   database: a connection without one never shows it.
-- **Merge one person's two chats.** Someone reached both by LID and by phone
-  number can appear as two conversations, each holding part of the history.
 - **Link the two forms in token scope.** A token scoped to a person's
   phone-number chat does not reach their LID chat, and the reverse. The picker
   lists them as separate chats; tick both if the person has both.

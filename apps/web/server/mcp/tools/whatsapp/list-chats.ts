@@ -18,10 +18,10 @@
  * listing on the next call.
  *
  * `phoneNumber` on a LID chat discloses nothing a token could not already reach:
- * it rides on the chat's own row, and the scope filter above drops the row whole,
- * so a scoped token learns the number only for a conversation it may read. It
- * does not widen scope either — the token is scoped to the LID `jid`, and
- * sending still goes there.
+ * its evidence is the LID chat's own rows, and `filterChatsToScope` keeps it only
+ * when the LID is in scope. A person folded into one row (`jids`) is cut to the
+ * halves the token holds, never widened — scope is literal JIDs — and a cut
+ * half is reported as a count, not an id.
  */
 export default defineKindTool({
   name: 'list-chats',
@@ -34,7 +34,10 @@ export default defineKindTool({
     + 'privacy alias whose digits are not a phone number. A `@lid` chat carries `phoneNumber` only '
     + 'when WhatsApp has revealed the number behind it on a live message; its absence means the '
     + 'number is unknown to this connector, not that the person has none. Even when present, '
-    + 'reply by the chat\'s `jid`, never by `phoneNumber`. Includes conversations imported from the '
+    + 'reply by the chat\'s `jid`, never by `phoneNumber`. A person WhatsApp stored under both a '
+    + '`@lid` and their phone number is listed once, under the `@lid`, with both ids in `jids`; '
+    + 'read-messages on that `jid` reads both. `linkedOutOfScope` means part of that person\'s '
+    + 'conversation is under an id this connector may not read. Includes conversations imported from the '
     + 'phone when the account was paired, not only ones active since. If this '
     + 'connector is scoped to specific chats, only those are listed. This '
     + 'answers with one page, most recently active first: when `hasMore` is true '

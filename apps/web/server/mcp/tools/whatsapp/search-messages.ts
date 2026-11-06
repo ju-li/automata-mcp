@@ -40,7 +40,9 @@ export default defineKindTool({
     + 'is not searchable at all: its text is unknown to this connector, so a '
     + 'search finding nothing is not proof a message does not exist. Use this '
     + 'instead of paging read-messages when you are looking for something by '
-    + 'what it says.',
+    + 'what it says. One person can be stored under two ids — a `@lid` and their '
+    + 'phone number; when this connector has linked them, a `jid` filter covers '
+    + 'both (listed in `jids`) and every hit is labelled with one id per person.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -68,20 +70,27 @@ export default defineKindTool({
       throw createError({ statusCode: 400, message: '`query` needs at least one word to search for.' })
     }
 
-    if (jid) assertChatAllowed(scope, jid)
+    // A named chat is asserted exactly as before, then widened to the same
+    // person's other JID only when the token is scoped to that one too.
+    const links = await lidLinks(instance)
+    const chat = jid ? expandChat(scope, links, jid) : undefined
 
-    const { hits, truncated } = await searchMessages(instance, {
+    const { hits: stored, truncated } = await searchMessages(instance, {
       terms,
-      jid,
-      // A named chat is already checked above. Otherwise a scoped token gets its
-      // allowlist pushed into the query, so out-of-scope messages are never read.
-      allowedJids: jid || scope.allChats ? undefined : scope.chatJids,
+      jids: chat?.jids,
+      // Otherwise a scoped token gets its allowlist pushed into the query, so
+      // out-of-scope messages are never read.
+      allowedJids: chat || scope.allChats ? undefined : scope.chatJids,
       since,
       until,
       fromMe,
       includeReactions,
       limit,
     })
+
+    // Label each hit with its person's canonical id where this token may see it,
+    // so one conversation stored under two JIDs is never reported as two chats.
+    const hits = stored.map(hit => ({ ...hit, jid: displayJidInScope(scope, links, hit.jid) }))
 
     const [names, directory] = await Promise.all([
       chatNames(instance, hits),
@@ -104,6 +113,9 @@ export default defineKindTool({
       count: hits.length,
       // Say so rather than presenting a capped page as the whole answer.
       truncated,
+      // What a named chat covered, as `read-messages` reports it.
+      ...(chat && chat.jids.length > 1 && { jids: chat.jids }),
+      ...(chat && chat.outOfScope > 0 && { linkedOutOfScope: chat.outOfScope }),
       // Same principle: a whole message class this search never looked at.
       ...(!includeReactions && { reactionsExcluded: true }),
     }

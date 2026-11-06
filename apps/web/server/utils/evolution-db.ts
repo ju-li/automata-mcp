@@ -340,8 +340,13 @@ export async function countInstanceRows(instance: AppInstance): Promise<{ messag
 export interface MessageSearchOptions {
   /** Every term must appear in the message body. Already split, not yet escaped. */
   terms: string[]
-  /** Restrict to one chat. */
-  jid?: string
+  /**
+   * Restrict to one conversation: the chat's JID, or both JIDs of a linked
+   * person (`whatsapp-identity.ts`), already cut to scope by `expandChat`.
+   * Emitted whenever present — an empty array matches nothing rather than
+   * widening to every chat.
+   */
+  jids?: readonly string[]
   /** The only chats this token may see. Omit for an all-chats token. */
   allowedJids?: string[]
   since?: string
@@ -431,6 +436,10 @@ export async function searchMessages(
     // `Message`. None of it touches scope: `instanceId`, `jid` and `allowedJids`
     // still bound the query, so an included reaction is only ever one from a
     // chat this token already reaches.
+    //
+    // `jids` may name two JIDs — one person stored under a LID and a phone
+    // number. `DISTINCT ON (key->>'id')` and everything outside the CTE are
+    // unchanged by that: they already run over whatever the predicate admits.
     rows = await sql<MessageRow[]>`
       WITH matched AS (
         SELECT DISTINCT ON (m.key->>'id')
@@ -451,7 +460,7 @@ export async function searchMessages(
         WHERE m."instanceId" = ${instanceId}
           AND t.body IS NOT NULL
           AND t.body ILIKE ALL (${patterns}::text[])
-          ${options.jid ? sql`AND m.key->>'remoteJid' = ${options.jid}` : sql``}
+          ${options.jids === undefined ? sql`` : sql`AND m.key->>'remoteJid' = ANY(${[...options.jids]}::text[])`}
           ${options.allowedJids ? sql`AND m.key->>'remoteJid' = ANY(${options.allowedJids}::text[])` : sql``}
           ${since === undefined ? sql`` : sql`AND m."messageTimestamp" >= ${since}`}
           ${until === undefined ? sql`` : sql`AND m."messageTimestamp" <= ${until}`}
@@ -506,15 +515,19 @@ export async function searchMessages(
 
 export interface MessagePageOptions {
   /**
-   * The one chat to read. A predicate in the SQL, never a filter over rows read.
+   * The one conversation to read: a chat's JID, or both JIDs of a person stored
+   * under a LID and a phone number (`whatsapp-identity.ts`), already cut to the
+   * token's scope. A predicate in the SQL, never a filter over rows read.
    *
    * Absent means the whole account, which exists for the **session** surface —
    * the dashboard's message table — and is unreachable from MCP: every tool goes
-   * through `listMessages()` in `chats.ts`, which takes `remoteJid` as a required
-   * positional argument, so no tool can widen to every chat by omitting a field.
-   * `instanceId` below is unconditional either way.
+   * through `listMessages()` in `chats.ts`, which takes a non-empty tuple of
+   * JIDs as a required positional argument, so no tool can widen to every chat
+   * by omitting a field. The predicate is emitted whenever this is present, so
+   * an empty array matches nothing rather than everything. `instanceId` below
+   * is unconditional either way.
    */
-  jid?: string
+  jids?: readonly string[]
   limit: number
   /** 1-based, counting back from the newest. */
   page: number
@@ -558,6 +571,11 @@ export interface MessageRecord {
  * ones, and a `total` that counted every copy. Collapsing after the fact cannot
  * fix either: the page boundaries were already drawn in the wrong place. Hence
  * `DISTINCT ON` inside a CTE, with `LIMIT`/`OFFSET` applied to what comes out.
+ *
+ * Reading one person across two JIDs changes none of it. The predicate admits
+ * both JIDs' rows; the dedupe, the count, the over-fetch and the tiebreak then
+ * run over the union exactly as over one chat, so pages stay disjoint and
+ * `total` counts distinct messages across both.
  *
  * Two details in the ordering carry weight. `bestNamed` makes the surviving row of
  * a duplicate set deterministic — otherwise a message's author changes between
@@ -608,7 +626,7 @@ export async function listMessagesPage(
         FROM "Message" m
         ${patterns ? messageBodyJoin(sql) : sql``}
         WHERE m."instanceId" = ${instanceId}
-          ${options.jid === undefined ? sql`` : sql`AND m.key->>'remoteJid' = ${options.jid}`}
+          ${options.jids === undefined ? sql`` : sql`AND m.key->>'remoteJid' = ANY(${[...options.jids]}::text[])`}
           ${patterns === undefined ? sql`` : sql`AND t.body ILIKE ALL (${patterns}::text[])`}
           ${since === undefined ? sql`` : sql`AND m."messageTimestamp" >= ${since}`}
           ${until === undefined ? sql`` : sql`AND m."messageTimestamp" <= ${until}`}
@@ -653,7 +671,13 @@ export async function listMessagesPage(
  * message belong to `chats.ts`.
  */
 export interface ChatActivityRow {
+  /** The conversation's id: a linked person's LID, else the chat's own JID. */
   jid: string
+  /**
+   * Every stored JID folded into this row, sorted. One element for an ordinary
+   * chat; two for a person stored under a LID and a phone number.
+   */
+  jids: string[]
   /** Unix seconds of the newest message that is not a control record. */
   lastTimestamp: number | null
   /** `"Message".id` of that message, for `lastMessagePayloads`. */
@@ -663,6 +687,12 @@ export interface ChatActivityRow {
 export interface ChatActivityOptions {
   limit: number
   offset: number
+  /**
+   * Phone-number JID → LID, from `lidLinks()`. Each phone-number chat named
+   * here is folded into its LID's row, so the listing counts people, not
+   * storage keys. Omitted or empty: every JID is its own row, as before.
+   */
+  links?: ReadonlyMap<string, string>
 }
 
 /**
@@ -703,6 +733,13 @@ export interface ChatActivityOptions {
  *
  * `status@broadcast` is left out: it is Status updates, not a conversation, and
  * nothing can be sent to it.
+ *
+ * **A linked person is one row, merged here rather than after paging.** The
+ * links (`lidLinks`) arrive as two bind arrays and join onto the *per-JID*
+ * aggregate — a few thousand rows at most — after the fenced scan, so the shape
+ * measured above is untouched. Merging after `LIMIT` would leave a person's
+ * halves on two pages and `total` counting storage keys. The newest row still
+ * comes from the same padded-key `max()`, now over both halves.
  */
 export async function listChatActivity(
   instance: AppInstance,
@@ -711,6 +748,9 @@ export async function listChatActivity(
   // Database first, for the same reason as `listMessagesPage`.
   const sql = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const pns = [...(options.links?.keys() ?? [])]
+  const lids = [...(options.links?.values() ?? [])]
 
   let rows: Array<ChatActivityRow & { total: string | number }>
   try {
@@ -725,15 +765,24 @@ export async function listChatActivity(
         WHERE m."instanceId" = ${instanceId}
           AND m.key->>'remoteJid' IS NOT NULL
           AND m.key->>'remoteJid' <> 'status@broadcast'
-      ), per_chat AS (
+      ), per_jid AS (
         SELECT jid,
                max(ts) FILTER (WHERE is_activity) AS last_ts,
-               split_part(max(lpad(ts::text, 10, '0') || '|' || mid || '|' || row_id)
-                            FILTER (WHERE is_activity), '|', 3) AS last_row_id
+               max(lpad(ts::text, 10, '0') || '|' || mid || '|' || row_id)
+                 FILTER (WHERE is_activity) AS last_key
         FROM msg
         GROUP BY jid
+      ), per_chat AS (
+        SELECT COALESCE(l.lid, p.jid) AS jid,
+               array_agg(p.jid ORDER BY p.jid) AS jids,
+               max(p.last_ts) AS last_ts,
+               split_part(max(p.last_key), '|', 3) AS last_row_id
+        FROM per_jid p
+        LEFT JOIN unnest(${pns}::text[], ${lids}::text[]) AS l(pn, lid) ON l.pn = p.jid
+        GROUP BY 1
       )
       SELECT jid,
+             jids,
              last_ts AS "lastTimestamp",
              NULLIF(last_row_id, '') AS "lastRowId",
              COUNT(*) OVER () AS total

@@ -109,15 +109,50 @@ const visibleChats = computed(() => {
   const q = search.value.trim().toLowerCase()
   if (!q) return knownChats.value
   return knownChats.value.filter(c =>
-    c.name.toLowerCase().includes(q) || c.jid.toLowerCase().includes(q),
+    c.name.toLowerCase().includes(q)
+    || membersOf(c).some(jid => jid.toLowerCase().includes(q))
+    || (c.phoneNumber?.includes(q) ?? false),
   )
 })
 
-const selectedChats = computed(() =>
-  scope.value.chat_jids.map(jid =>
-    knownChats.value.find(c => c.jid === jid) ?? { jid, name: jid.split('@')[0]! },
-  ),
-)
+/**
+ * Every JID a picker row stands for. One, except for a WhatsApp person stored
+ * under both a privacy alias (LID) and a phone number, whom the listing folds
+ * into one row carrying both in `jids`.
+ *
+ * Scope stays a list of literal JIDs: ticking such a row writes both, so the
+ * admin grants exactly the ids the row showed them, and nothing on the server
+ * widens a token past what was ticked.
+ */
+function membersOf(chat: ScopedChat): string[] {
+  return chat.jids?.length ? chat.jids : [chat.jid]
+}
+
+/** The row a stored JID belongs to, if it is listed. */
+function chatFor(jid: string): ScopedChat | undefined {
+  return knownChats.value.find(c => membersOf(c).includes(jid))
+}
+
+/** One chip per row, however many of its JIDs are in scope. */
+const selectedChats = computed(() => {
+  const chips = new Map<string, ScopedChat>()
+  for (const jid of scope.value.chat_jids) {
+    const chat = chatFor(jid) ?? { jid, name: jid.split('@')[0]! }
+    if (!chips.has(chat.jid)) chips.set(chat.jid, chat)
+  }
+  return [...chips.values()]
+})
+
+function chatChecked(chat: ScopedChat): boolean {
+  return membersOf(chat).every(jid => scope.value.chat_jids.includes(jid))
+}
+
+/** Tick or untick every JID of a row together. */
+function toggleChat(chat: ScopedChat, on: boolean) {
+  const next = new Set(scope.value.chat_jids)
+  for (const jid of membersOf(chat)) on ? next.add(jid) : next.delete(jid)
+  scope.value = { ...scope.value, chat_jids: [...next] }
+}
 
 /**
  * Add or remove one id on one axis.
@@ -167,11 +202,11 @@ async function addByNumber() {
       { method: 'POST', body: props.kind === 'telegram' ? { query: number } : { number } },
     )
     if (props.kind === 'telegram') {
-      if (!knownChats.value.some(c => c.jid === result.jid)) {
+      if (!chatFor(result.jid)) {
         extraChats.value.push({ jid: result.jid, name: result.name?.trim() || result.jid, username: result.username })
       }
     }
-    else if (!knownChats.value.some(c => c.jid === result.jid)) {
+    else if (!chatFor(result.jid)) {
       // The number under the name comes off the resolved JID, not what was typed:
       // Evolution's rules may have rewritten it, and the JID is what scope matches.
       const resolvedNumber = result.jid.split('@')[0]!
@@ -423,7 +458,7 @@ async function addByNumber() {
             :title="chat.name"
           >
             <span class="truncate">{{ chat.name }}</span>
-            <button type="button" class="shrink-0" :aria-label="`Remove ${chat.name}`" @click="toggle('chat_jids', chat.jid, false)">
+            <button type="button" class="shrink-0" :aria-label="`Remove ${chat.name}`" @click="toggleChat(chat, false)">
               <XIcon class="size-3" />
             </button>
           </Badge>
@@ -472,8 +507,8 @@ async function addByNumber() {
             class="flex cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 hover:bg-accent"
           >
             <Checkbox
-              :model-value="scope.chat_jids.includes(chat.jid)"
-              @update:model-value="toggle('chat_jids', chat.jid, $event === true)"
+              :model-value="chatChecked(chat)"
+              @update:model-value="toggleChat(chat, $event === true)"
             />
             <img v-if="chat.profilePicUrl" :src="chat.profilePicUrl" alt="" class="size-8 rounded-full object-cover">
             <span v-else class="flex size-8 items-center justify-center rounded-full bg-muted">

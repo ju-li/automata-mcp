@@ -244,9 +244,12 @@ function formatLastActivity(chat: ScopedChat): string {
                   <template v-else>
                     <span
                       v-if="!chat.number && chat.phoneNumber"
-                      title="This chat is addressed by a WhatsApp privacy alias (LID). WhatsApp revealed this number on a message in it."
+                      :title="(chat.jids?.length ?? 0) > 1
+                        ? 'WhatsApp stored this person\'s messages under two ids, their privacy alias (LID) and their phone number. Both are shown here as one conversation.'
+                        : 'This chat is addressed by a WhatsApp privacy alias (LID). WhatsApp revealed this number on a message in it.'"
                     >
-                      +{{ chat.phoneNumber }} <span class="text-xs text-muted-foreground">via LID</span>
+                      +{{ chat.phoneNumber }}
+                      <span class="text-xs text-muted-foreground">{{ (chat.jids?.length ?? 0) > 1 ? '2 ids' : 'via LID' }}</span>
                     </span>
                     <template v-else>
                       {{ secondaryId(chat) ? `+${secondaryId(chat)}` : '—' }}

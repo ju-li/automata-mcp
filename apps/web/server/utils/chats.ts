@@ -4,7 +4,8 @@ import type { MentionDirectory } from './mentions'
 import { applyMentions, authorName, contactsToDirectory, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
 import type { ChatActivityRow } from './evolution-db'
 import { canReadMessages, lastMessagePayloads, listChatActivity, listMessagesPage, senderOf } from './evolution-db'
-import { lidLinks, phoneNumberBehind } from './whatsapp-identity'
+import type { LidLinks } from './whatsapp-identity'
+import { canonicalJid, lidLinks, linkedJidOf, phoneNumberBehind } from './whatsapp-identity'
 import { GROUP_SCAN_FAILURE_BACKOFF_MS, GROUP_SCAN_TIMEOUT_MS, claimGroupScan, readStoredGroups, recordGroupScanFailure, replaceStoredGroups } from './whatsapp-groups'
 
 /**
@@ -15,7 +16,17 @@ import { GROUP_SCAN_FAILURE_BACKOFF_MS, GROUP_SCAN_TIMEOUT_MS, claimGroupScan, r
  */
 
 export interface ChatSummary {
+  /**
+   * The conversation's id, to read or reply by. For a person stored under both
+   * a LID and a phone-number JID (`whatsapp-identity.ts`), the LID.
+   */
   jid: string
+  /**
+   * Every JID this row covers, present only when that is more than one: a
+   * person WhatsApp stored under a LID and a phone number, folded into one row.
+   * `read-messages` on `jid` reads all of them.
+   */
+  jids?: string[]
   name: string
   isGroup: boolean
   /**
@@ -176,10 +187,14 @@ interface ChatListing {
 async function chatListing(instance: AppInstance, window: { limit: number, offset: number }): Promise<ChatListing> {
   if (!canReadMessages(instance)) return walkFindChats(instance, window)
 
+  // Before the listing, so the fold happens in SQL and pages count people.
+  // Never throws: a failed read serves the last good links, or none.
+  const links = await lidLinks(instance)
+
   let rows: ChatActivityRow[]
   let total: number
   try {
-    ({ rows, total } = await listChatActivity(instance, window))
+    ({ rows, total } = await listChatActivity(instance, { ...window, links: links.lidOf }))
   }
   catch (error) {
     // Also covers resolving the Evolution instance id, which can fail before
@@ -190,6 +205,7 @@ async function chatListing(instance: AppInstance, window: { limit: number, offse
 
   const chats = await nameChats(instance, rows.map(row => ({
     jid: row.jid,
+    jids: row.jids,
     lastMessageAt: isoFromEpochSeconds(row.lastTimestamp),
     lastRowId: row.lastRowId ?? undefined,
   })))
@@ -267,6 +283,8 @@ async function walkFindChats(instance: AppInstance, window: { limit: number, off
 /** What a listing knows about a chat before it is named. */
 interface ChatDraft {
   jid: string
+  /** Every stored JID folded into this row. Only the SQL path folds. */
+  jids?: string[]
   /** A name the listing itself carried. Only the fallback walk has one. */
   chatName?: string
   profilePicUrl?: string
@@ -297,24 +315,28 @@ async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<Li
   const links = await lidLinks(instance)
 
   return drafts.map((draft) => {
-    const localPart = draft.jid.split('@')[0]!
     const isGroup = draft.jid.endsWith('@g.us')
-    const contact = contacts.get(draft.jid)
+    const person = isGroup ? undefined : personOf(contacts, links, draft.jid)
+    const contact = isGroup ? contacts.get(draft.jid) : person?.contact
     const group = groups.get(draft.jid)
 
     const name = isGroup
-      ? group?.subject ?? draft.chatName ?? contact?.name ?? localPart
-      : contact?.name ?? draft.chatName ?? localPart
+      ? group?.subject ?? draft.chatName ?? contact?.name ?? localPartOf(draft.jid)
+      : contact?.name ?? draft.chatName ?? person!.fallback
+
+    // The canonical id first, then whatever else was folded in.
+    const others = (draft.jids ?? []).filter(jid => jid !== draft.jid)
 
     return {
       jid: draft.jid,
+      ...(others.length > 0 && { jids: [draft.jid, ...others] }),
       name,
       isGroup,
       // Only a phone-number JID carries a number, as in `listContacts`. A LID
       // chat's local part is a privacy alias, and handing it out here as a
       // number is what leads a model to send to it as one — reaching whoever
       // owns that number, if anyone.
-      number: draft.jid.endsWith('@s.whatsapp.net') ? localPart : undefined,
+      number: draft.jid.endsWith('@s.whatsapp.net') ? localPartOf(draft.jid) : undefined,
       // The number behind a LID, only as WhatsApp itself revealed it on this
       // account's messages (`whatsapp-identity.ts`). Keyed on the LID, so a
       // phone-number chat never gets one here.
@@ -327,6 +349,33 @@ async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<Li
       lastRowId: draft.lastRowId,
     }
   })
+}
+
+function localPartOf(jid: string): string {
+  return jid.split('@')[0] || jid
+}
+
+/**
+ * Who a 1:1 chat is with, across both of their JIDs.
+ *
+ * The saved contact of the LID first, then of the phone-number JID — phone
+ * contacts are far more common, and a person moved to LID addressing usually
+ * has only that one. Resolved from the *canonical* id, so both halves of a
+ * linked person get the same name wherever they are labelled. The fallback is
+ * the phone number's digits when known (true, and what the owner recognises),
+ * else the bare local part, as before.
+ */
+function personOf(
+  contacts: Map<string, ContactInfo>,
+  links: LidLinks,
+  jid: string,
+): { contact?: ContactInfo, fallback: string } {
+  const canonical = canonicalJid(links, jid)
+  const other = linkedJidOf(links, canonical)
+  const contact = (contacts.get(canonical)?.name ? contacts.get(canonical) : undefined)
+    ?? (other ? contacts.get(other) : undefined)
+    ?? contacts.get(canonical)
+  return { contact, fallback: localPartOf(other ?? canonical) }
 }
 
 /**
@@ -595,13 +644,13 @@ export interface MessagePage {
  */
 export async function listMessages(
   instance: AppInstance,
-  remoteJid: string,
+  chat: readonly [string, ...string[]],
   query: MessageQuery = {},
 ): Promise<MessagePage> {
   const { limit = 50, page = 1, since, until, includeReactions = true } = query
 
   const { records, hasMore, total } = await listMessagesPage(instance, {
-    jid: remoteJid,
+    jids: chat,
     limit,
     page,
     since,
@@ -641,7 +690,7 @@ export async function listMessages(
         : mentionedJidsOf(nestedContextInfo(content.payload)),
     }))
 
-  const directory = await nameDirectory(instance, remoteJid, drafts)
+  const directory = await nameDirectory(instance, chat[0], drafts)
 
   return {
     messages: drafts.map(draft => ({
@@ -793,16 +842,18 @@ async function accountNames(
 
     const groups = needsGroups ? await groupsFor(instance, evolution) : emptyGroups
     const contacts = await contactDirectory(instance, evolution)
+    const links = await lidLinks(instance)
 
     return {
       directory: contactsToDirectory(contacts),
       // Same precedence as `listChats`: a group's subject is authoritative, a
-      // person's saved contact name is what they expect to read.
+      // person's saved contact name is what they expect to read — and the same
+      // name for both JIDs of a linked person, so one conversation is never
+      // labelled as two.
       chatName: (jid) => {
-        const contact = contacts.get(jid)
-        return jid.endsWith('@g.us')
-          ? groups.get(jid)?.subject ?? contact?.name ?? localPart(jid)
-          : contact?.name ?? localPart(jid)
+        if (jid.endsWith('@g.us')) return groups.get(jid)?.subject ?? contacts.get(jid)?.name ?? localPart(jid)
+        const person = personOf(contacts, links, jid)
+        return person.contact?.name ?? person.fallback
       },
     }
   }

@@ -2,6 +2,8 @@ import type { H3Event } from 'h3'
 import type { AppInstance } from './app-db'
 import type { McpAuth } from './mcp-auth'
 import type { InstanceKind } from '#shared/connection'
+import type { LidLinks } from './whatsapp-identity'
+import { canonicalJid, linkedJidOf } from './whatsapp-identity'
 
 /**
  * Connector token scope: which chats a token may touch, and which tools it may
@@ -211,17 +213,92 @@ export function assertChatAllowed(scope: McpScope, jid: string): void {
   })
 }
 
+/** The listing fields `filterChatsToScope` reads and may rewrite. */
+interface ScopeableChat {
+  jid: string
+  /** Every stored JID this row covers, when more than one (a linked person). */
+  jids?: string[]
+  number?: string
+  phoneNumber?: string
+}
+
 /**
  * Filter a chat listing down to scope.
  *
  * Silent, unlike the assertions above — filtering is the honest answer to "what
  * can I see". Refusing the whole listing because one row is out of scope would
  * make a scoped token useless for browsing.
+ *
+ * **A linked person's row is cut, never widened.** Scope is literal JIDs, so a
+ * row folding a LID and a phone-number JID together (`whatsapp-identity.ts`) is
+ * visible when either is in scope, and then shows only the halves that are:
+ * `jid` falls back to the allowed one, and `linkedOutOfScope` counts the rest —
+ * a count, never the JID, as `referencedByOutOfScope` does for tables. A token
+ * holding only the phone-number half keeps that chat's own `number`; one holding
+ * only the LID keeps `phoneNumber`, whose evidence lives on the LID chat's rows.
  */
-export function filterChatsToScope<T extends { jid: string }>(scope: McpScope, chats: T[]): T[] {
+export function filterChatsToScope<T extends ScopeableChat>(
+  scope: McpScope,
+  chats: T[],
+): Array<T & { linkedOutOfScope?: number }> {
   if (scope.allChats) return chats
   const allowed = new Set(scope.chatJids)
-  return chats.filter(chat => allowed.has(chat.jid))
+
+  return chats.flatMap((chat) => {
+    const members = chat.jids ?? [chat.jid]
+    const reachable = members.filter(jid => allowed.has(jid))
+    if (!reachable.length) return []
+    if (reachable.length === members.length) return [chat]
+
+    const jid = reachable.includes(chat.jid) ? chat.jid : reachable[0]!
+    return [{
+      ...chat,
+      jid,
+      jids: reachable.length > 1 ? reachable : undefined,
+      number: jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0] : undefined,
+      phoneNumber: jid.endsWith('@lid') ? chat.phoneNumber : undefined,
+      linkedOutOfScope: members.length - reachable.length,
+    }]
+  })
+}
+
+/** One conversation to read, as far as this token may read it. */
+export interface ChatExpansion {
+  /** JIDs to read, all in scope, the requested one included. Never empty. */
+  jids: [string, ...string[]]
+  /** Linked JIDs of the same person this token is not scoped to. */
+  outOfScope: number
+}
+
+/**
+ * The JIDs a read of `jid` should cover: the chat itself, plus the same
+ * person's other JID when they are linked (`whatsapp-identity.ts`) **and** the
+ * token is scoped to it.
+ *
+ * Asserts the requested chat first, unchanged, so nothing here can let a token
+ * reach a chat by naming its partner. The partner is then only *added* when it
+ * passes the same literal check — a link says two ids are one person, never
+ * that a token may read both. Cut halves are counted for the caller to report.
+ */
+export function expandChat(scope: McpScope, links: LidLinks, jid: string): ChatExpansion {
+  assertChatAllowed(scope, jid)
+
+  const other = linkedJidOf(links, jid)
+  if (!other) return { jids: [jid], outOfScope: 0 }
+  if (!isChatAllowed(scope, other)) return { jids: [jid], outOfScope: 1 }
+
+  const lid = jid.endsWith('@lid') ? jid : other
+  return { jids: [lid, lid === jid ? other : jid], outOfScope: 0 }
+}
+
+/**
+ * The id to label a hit or a row with: the person's canonical id (the LID) when
+ * this token may see it, else the stored JID itself. Never names a JID outside
+ * scope.
+ */
+export function displayJidInScope(scope: McpScope, links: LidLinks, jid: string): string {
+  const canonical = canonicalJid(links, jid)
+  return canonical === jid || isChatAllowed(scope, canonical) ? canonical : jid
 }
 
 /**

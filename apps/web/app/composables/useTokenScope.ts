@@ -9,6 +9,11 @@ export interface McpToolInfo {
 
 export interface ScopedChat {
   jid: string
+  /**
+   * WhatsApp only: every JID this row stands for, when more than one — a person
+   * stored under both a LID and a phone number. Picking the row picks all.
+   */
+  jids?: string[]
   name: string
   isGroup?: boolean
   /** Bare phone number of a 1:1 WhatsApp chat. Groups do not have one. */
