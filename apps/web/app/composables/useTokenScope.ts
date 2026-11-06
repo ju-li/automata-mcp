@@ -9,10 +9,21 @@ export interface McpToolInfo {
 
 export interface ScopedChat {
   jid: string
+  /**
+   * WhatsApp only: every JID this row stands for, when more than one — a person
+   * stored under both a LID and a phone number. Picking the row picks all.
+   */
+  jids?: string[]
   name: string
   isGroup?: boolean
   /** Bare phone number of a 1:1 WhatsApp chat. Groups do not have one. */
   number?: string
+  /**
+   * WhatsApp LID chats only: the phone number behind the alias, when WhatsApp
+   * revealed it on a live message. Absent means unknown, not "has none". The
+   * chat is still the LID — scope and replies follow `jid`, not this.
+   */
+  phoneNumber?: string
   /** Telegram only: the chat's public @username, without the @. */
   username?: string
   /** IMAP only: emails synced in this folder. */

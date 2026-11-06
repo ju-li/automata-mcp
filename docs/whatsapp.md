@@ -194,27 +194,52 @@ What the connector does with them:
 - **Names** for senders and @-mentions are resolved from the account's contacts
   and from group membership, which knows both forms of each member. A LID it
   cannot resolve stays a raw id rather than being guessed.
-- **Phone numbers** are shown only for chats addressed by phone number. A LID
-  chat has no `number` in `list-chats` and none in the dashboard, even when the
-  phone itself shows one.
+- **Phone numbers** are shown as `number` only for chats addressed by phone
+  number. A LID chat has no `number`; instead it carries `phoneNumber` in
+  `list-chats` (and shows it in the dashboard's Chats table, marked "via LID")
+  **when WhatsApp has revealed it**: Evolution keeps the phone-number form as
+  `remoteJidAlt` on some live messages in the LID chat. History import never
+  carries it, so a LID chat with only imported messages shows no number even
+  when the phone itself shows one. A LID seen with more than one number (or a
+  number with more than one LID) is left unlinked rather than guessed. Nothing
+  else is consulted — not contact names, not the alias's own digits, not data
+  from other accounts on the same Evolution server. The chat is still the LID:
+  replies and token scope follow its JID, not the number.
+- **One person, two chats, shown as one.** Someone who moved from phone-number
+  to LID addressing has part of their history under each id. When the two are
+  linked as above, `list-chats` and the dashboard's Chats table show one row,
+  under the LID, with both ids in `jids`. `read-messages` and `search-messages`
+  given either id read both, as one timeline with no duplicates, and search
+  labels every hit with one id per person. A token reads only the halves it is
+  scoped to and is told, as a count, when part of the conversation is outside
+  its scope. A chat with no link says so (`linkUnknown`) where a second part
+  could exist. The dashboard's Chats *card* still shows Evolution's own count,
+  which is not comparable.
 
 What it can't do yet:
 
-- **Tell you the phone number behind a LID.** WhatsApp reveals the link on some
-  live messages (Evolution keeps it as `remoteJidAlt`), never on imported history,
-  and Evolution has no API for Baileys' own mapping. The connector does not
-  surface the partial data it has, so the model is told the number may be
-  unknown.
-- **Merge one person's two chats.** Someone reached both by LID and by phone
-  number can appear as two conversations, each holding part of the history.
-- **Link the two forms in token scope.** A token scoped to a person's
-  phone-number chat does not reach their LID chat, and the reverse. The picker
-  lists them as separate chats; tick both if the person has both.
+- **Tell you the phone number behind every LID.** WhatsApp reveals the link
+  only on some live messages, never on imported history, and Evolution has no
+  API for Baileys' own mapping. So `phoneNumber` is partial, and the model is
+  told its absence means "unknown", not "none". It also needs the message
+  database: a connection without one never shows it.
+- **Link chats it has no link for.** A LID chat with no revealed number stays
+  a separate chat from that person's phone-number chat, if they have one. A
+  read of either says the conversation may continue under another id.
+
+**Token scope stays a list of exact chat ids.** A linked person is one row in
+the token's chat picker, showing their number and "2 chats". Ticking it allows
+both ids, and unticking removes both. A token that holds only one of the two
+(one scoped before they were linked, say) shows the row as partly ticked, with
+a note. It keeps reaching only that half until you tick the row, and the model
+is told part of the conversation is outside its scope. A link never lets a
+token reach an id that wasn't ticked.
 
 On a bring-your-own Evolution server with `DATABASE_SAVE_IS_ON_WHATSAPP=true`,
 Evolution may resolve a LID to the phone-number JID it has linked it to. For a
-token scoped to the LID chat, sending to that LID is then refused. Turning the
-setting off, or adding the phone-number chat to the token's scope, avoids it.
+token scoped only to the LID chat, sending to that LID is then refused, because
+the message would go to the phone-number id. The refusal says so. Ticking the
+person's row so both ids are included, or turning the setting off, avoids it.
 
 ## Stuck reconnecting (`conflict: replaced`)
 
