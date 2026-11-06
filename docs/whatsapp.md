@@ -194,17 +194,25 @@ What the connector does with them:
 - **Names** for senders and @-mentions are resolved from the account's contacts
   and from group membership, which knows both forms of each member. A LID it
   cannot resolve stays a raw id rather than being guessed.
-- **Phone numbers** are shown only for chats addressed by phone number. A LID
-  chat has no `number` in `list-chats` and none in the dashboard, even when the
-  phone itself shows one.
+- **Phone numbers** are shown as `number` only for chats addressed by phone
+  number. A LID chat has no `number`; instead it carries `phoneNumber` in
+  `list-chats` (and shows it in the dashboard's Chats table, marked "via LID")
+  **when WhatsApp has revealed it**: Evolution keeps the phone-number form as
+  `remoteJidAlt` on some live messages in the LID chat. History import never
+  carries it, so a LID chat with only imported messages shows no number even
+  when the phone itself shows one. A LID seen with more than one number (or a
+  number with more than one LID) is left unlinked rather than guessed. Nothing
+  else is consulted — not contact names, not the alias's own digits, not data
+  from other accounts on the same Evolution server. The chat is still the LID:
+  replies and token scope follow its JID, not the number.
 
 What it can't do yet:
 
-- **Tell you the phone number behind a LID.** WhatsApp reveals the link on some
-  live messages (Evolution keeps it as `remoteJidAlt`), never on imported history,
-  and Evolution has no API for Baileys' own mapping. The connector does not
-  surface the partial data it has, so the model is told the number may be
-  unknown.
+- **Tell you the phone number behind every LID.** WhatsApp reveals the link
+  only on some live messages, never on imported history, and Evolution has no
+  API for Baileys' own mapping. So `phoneNumber` is partial, and the model is
+  told its absence means "unknown", not "none". It also needs the message
+  database: a connection without one never shows it.
 - **Merge one person's two chats.** Someone reached both by LID and by phone
   number can appear as two conversations, each holding part of the history.
 - **Link the two forms in token scope.** A token scoped to a person's

@@ -4,6 +4,7 @@ import type { MentionDirectory } from './mentions'
 import { applyMentions, authorName, contactsToDirectory, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
 import type { ChatActivityRow } from './evolution-db'
 import { canReadMessages, lastMessagePayloads, listChatActivity, listMessagesPage, senderOf } from './evolution-db'
+import { lidLinks, phoneNumberBehind } from './whatsapp-identity'
 import { GROUP_SCAN_FAILURE_BACKOFF_MS, GROUP_SCAN_TIMEOUT_MS, claimGroupScan, readStoredGroups, recordGroupScanFailure, replaceStoredGroups } from './whatsapp-groups'
 
 /**
@@ -22,6 +23,19 @@ export interface ChatSummary {
    * chats (`…@lid`) do not have one — a LID's digits are not a phone number.
    */
   number?: string
+  /**
+   * The phone number behind a LID chat, bare digits — **present only when
+   * WhatsApp has revealed it**, and absence means nothing more than that.
+   *
+   * Read from `key.remoteJidAlt` on this LID chat's own live messages, and only
+   * when the link is one-to-one (`whatsapp-identity.ts`). History import never
+   * carries it, a connection with no message database cannot read it, and
+   * nothing else is consulted — never a contact name, never `pushName`, never
+   * the LID's own digits. Kept apart from `number`, which names how the chat is
+   * *addressed*: replying still goes to the LID `jid`, and a token scoped to
+   * this chat is scoped to the LID, not to this number.
+   */
+  phoneNumber?: string
   /** Members in a group, and only when the group lookup actually ran. */
   participantCount?: number
   profilePicUrl?: string
@@ -280,6 +294,7 @@ async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<Li
 
   const groups = needsGroups ? await groupsFor(instance, evolution) : emptyGroups
   const contacts = await contactDirectory(instance, evolution)
+  const links = await lidLinks(instance)
 
   return drafts.map((draft) => {
     const localPart = draft.jid.split('@')[0]!
@@ -300,6 +315,10 @@ async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<Li
       // number is what leads a model to send to it as one — reaching whoever
       // owns that number, if anyone.
       number: draft.jid.endsWith('@s.whatsapp.net') ? localPart : undefined,
+      // The number behind a LID, only as WhatsApp itself revealed it on this
+      // account's messages (`whatsapp-identity.ts`). Keyed on the LID, so a
+      // phone-number chat never gets one here.
+      phoneNumber: phoneNumberBehind(links, draft.jid),
       participantCount: group?.size,
       profilePicUrl: draft.profilePicUrl ?? contact?.profilePicUrl ?? group?.pictureUrl,
       updatedAt: draft.updatedAt,
@@ -380,7 +399,7 @@ export async function chatLabels(instance: AppInstance, jids: string[]): Promise
 export type ChatSortKey = 'name' | 'number' | 'type' | 'last'
 
 export interface ChatTableQuery {
-  /** Matched against name, JID and number. Case-insensitive, substring. */
+  /** Matched against name, JID, number and a LID chat's revealed number. Case-insensitive, substring. */
   q?: string
   sort?: ChatSortKey
   dir?: 'asc' | 'desc'
@@ -440,7 +459,8 @@ export async function listChatsPage(instance: AppInstance, query: ChatTableQuery
     ? listing.chats.filter(chat =>
         chat.name.toLowerCase().includes(needle)
         || chat.jid.toLowerCase().includes(needle)
-        || (chat.number?.toLowerCase().includes(needle) ?? false),
+        || (chat.number?.toLowerCase().includes(needle) ?? false)
+        || (chat.phoneNumber?.includes(needle) ?? false),
       )
     : listing.chats
 
@@ -481,7 +501,8 @@ function chatComparator(sort: ChatSortKey, dir: 'asc' | 'desc'): (a: ChatSummary
     case 'name':
       return (a, b) => sign * byName(a, b)
     case 'number':
-      return (a, b) => missingLast(a.number, b.number, (x, y) => x.localeCompare(y, undefined, { numeric: true }), sign) || byName(a, b)
+      // Sorted by what the column shows, which for a LID chat is the revealed number.
+      return (a, b) => missingLast(a.number ?? a.phoneNumber, b.number ?? b.phoneNumber, (x, y) => x.localeCompare(y, undefined, { numeric: true }), sign) || byName(a, b)
     case 'type':
       return (a, b) => sign * (Number(a.isGroup) - Number(b.isGroup)) || byName(a, b)
     case 'last':

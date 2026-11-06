@@ -149,7 +149,9 @@ function secondaryLine(chat: ScopedChat): string {
     if (!chat.participantCount) return ''
     return chat.participantCount === 1 ? '1 member' : `${chat.participantCount} members`
   }
-  return chat.number ? `+${chat.number}` : ''
+  if (chat.number) return `+${chat.number}`
+  // A LID chat: the scope entry is the alias, not this number, so say so.
+  return chat.phoneNumber ? `+${chat.phoneNumber} (via LID)` : ''
 }
 
 async function addByNumber() {

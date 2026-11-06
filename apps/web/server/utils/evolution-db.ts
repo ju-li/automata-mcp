@@ -765,6 +765,51 @@ export async function listChatActivity(
 }
 
 /**
+ * One `(remoteJid, remoteJidAlt)` combination seen on a LID chat's rows.
+ *
+ * `alt` is null for a LID chat whose rows never carried one — those rows are
+ * still returned, once per chat, so the caller can count LID chats that have
+ * no link at all. Raw, as stored: `whatsapp-identity.ts` decides which of these
+ * is a pair it will act on.
+ */
+export interface LidLinkRow {
+  jid: string
+  alt: string | null
+}
+
+/**
+ * The LID ↔ phone-number links WhatsApp itself revealed on this account's
+ * messages, for `whatsapp-identity.ts`.
+ *
+ * **Only `key.remoteJidAlt` on LID chats' own rows.** Baileys sets it on live traffic and
+ * history sync never does (#116), so this is partial by construction. It is the
+ * only source on purpose: Evolution's `"IsOnWhatsapp"` holds a `lid` column too,
+ * but that table has no `instanceId` — it is one cache filled by every account
+ * on the server, and reading pairs from it would show one tenant what another
+ * tenant's lookups learned. `"Contact"` holds no pairing at all. Group rows'
+ * `participantAlt` is left out: measured, it linked no 1:1 chat the chat's own
+ * rows did not, and merging two 1:1 chats on evidence from group rows would make
+ * a chat-scoped token's view depend on chats outside its scope — the same reason
+ * a phone-number chat's rows are not read for the reverse link.
+ *
+ * One scan of the account (`instanceId` is the only index), grouped down to
+ * distinct combinations, so the result is small — a few rows per person, never
+ * per message. Cached by the caller; never on a per-message path.
+ */
+export async function readLidLinks(instance: AppInstance): Promise<LidLinkRow[]> {
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  return await sql<LidLinkRow[]>`
+    SELECT m.key->>'remoteJid' AS jid, m.key->>'remoteJidAlt' AS alt
+    FROM "Message" m
+    WHERE m."instanceId" = ${instanceId}
+      AND m.key->>'remoteJid' LIKE '%@lid'
+    GROUP BY 1, 2
+  `
+}
+
+/**
  * The payloads of the given rows, keyed by `"Message".id` — the last message of
  * each chat on one page of the listing.
  *

@@ -13,6 +13,12 @@ export interface ScopedChat {
   isGroup?: boolean
   /** Bare phone number of a 1:1 WhatsApp chat. Groups do not have one. */
   number?: string
+  /**
+   * WhatsApp LID chats only: the phone number behind the alias, when WhatsApp
+   * revealed it on a live message. Absent means unknown, not "has none". The
+   * chat is still the LID — scope and replies follow `jid`, not this.
+   */
+  phoneNumber?: string
   /** Telegram only: the chat's public @username, without the @. */
   username?: string
   /** IMAP only: emails synced in this folder. */

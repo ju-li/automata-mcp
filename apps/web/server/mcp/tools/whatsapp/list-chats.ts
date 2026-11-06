@@ -16,6 +16,12 @@
  *
  * Read live, not cached: a message that has reached the dashboard is in this
  * listing on the next call.
+ *
+ * `phoneNumber` on a LID chat discloses nothing a token could not already reach:
+ * it rides on the chat's own row, and the scope filter above drops the row whole,
+ * so a scoped token learns the number only for a conversation it may read. It
+ * does not widen scope either — the token is scoped to the LID `jid`, and
+ * sending still goes there.
  */
 export default defineKindTool({
   name: 'list-chats',
@@ -25,7 +31,10 @@ export default defineKindTool({
     'List recent WhatsApp conversations, most recently active first, with the '
     + '`jid` needed by read-messages and send-text-message. `number` is present only '
     + 'for chats addressed by phone number: a jid ending in `@lid` is a WhatsApp '
-    + 'privacy alias whose digits are not a phone number. Includes conversations imported from the '
+    + 'privacy alias whose digits are not a phone number. A `@lid` chat carries `phoneNumber` only '
+    + 'when WhatsApp has revealed the number behind it on a live message; its absence means the '
+    + 'number is unknown to this connector, not that the person has none. Even when present, '
+    + 'reply by the chat\'s `jid`, never by `phoneNumber`. Includes conversations imported from the '
     + 'phone when the account was paired, not only ones active since. If this '
     + 'connector is scoped to specific chats, only those are listed. This '
     + 'answers with one page, most recently active first: when `hasMore` is true '
