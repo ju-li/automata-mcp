@@ -77,7 +77,7 @@ export function recordToolCall(
   if (!auth.recordToolCalls) return
 
   const reason = cleanReason(call.reason)
-  const userAgent = call.userAgent ? clipClientText(call.userAgent, MAX_USER_AGENT) || undefined : undefined
+  const userAgent = clipUserAgent(call.userAgent)
   const { tokenId } = auth
   const instanceId = auth.instance.id
 

@@ -37,8 +37,7 @@ export const MAX_CLIENTS_PER_TOKEN = 20
 const MAX_NAME = 100
 const MAX_VERSION = 100
 const MAX_PROTOCOL = 100
-/** Also the clip for `app.mcp_tool_calls.user_agent`, so the two tables agree. */
-export const MAX_USER_AGENT = 200
+const MAX_USER_AGENT = 200
 
 /**
  * A client counts as new on a token when its name was first seen more than
@@ -85,6 +84,11 @@ export function clipClientText(value: string, max: number): string {
   return points.length > max ? points.slice(0, max).join('') : clean
 }
 
+/** A `User-Agent` as both `app.mcp_token_clients` and `app.mcp_tool_calls` store it. */
+export function clipUserAgent(userAgent: string | undefined): string | undefined {
+  return userAgent ? clipClientText(userAgent, MAX_USER_AGENT) || undefined : undefined
+}
+
 /**
  * The client's self-description, if this body is an `initialize` the SDK will
  * accept. Pure; never throws.
@@ -119,7 +123,7 @@ export function parseClientHello(raw: string | undefined, userAgent?: string): C
     name: clipClientText(name, MAX_NAME),
     version: clipClientText(version, MAX_VERSION),
     protocolVersion: typeof protocolVersion === 'string' ? clipClientText(protocolVersion, MAX_PROTOCOL) || undefined : undefined,
-    userAgent: userAgent ? clipClientText(userAgent, MAX_USER_AGENT) || undefined : undefined,
+    userAgent: clipUserAgent(userAgent),
   }
 }
 

@@ -216,25 +216,20 @@ export interface EvolutionInstanceRecord {
   number?: string
   /** ISO 8601, UTC. */
   disconnectionAt?: string
-  /**
-   * When Evolution last wrote this row (its Prisma `@updatedAt`), ISO 8601, UTC.
-   * Read by `readInstanceRowWrittenAt`, not by `readInstanceRecord`; see there.
-   * 2.3.7 writes it on four occasions only: a socket opening, a QR moving the
-   * column to `connecting`, a close it will not retry, and logout cleanup. The
-   * last three leave the column something other than `open`, so an `open` row
-   * written recently means a socket opened recently — the one signal of a
-   * reconnect loop the live state cannot give (see `rowChurn` in instances.ts).
-   *
-   * Only this SQL read supplies it. `fetchInstances` would, but that path is
-   * cached for minutes, which is too coarse to tell a loop from one reconnect.
-   */
-  rowWrittenAt?: string
 }
 
 /**
- * When Evolution last wrote this account's `"Instance"` row — see
- * `EvolutionInstanceRecord.rowWrittenAt` — or `undefined` when there is no row
- * or the column is NULL.
+ * When Evolution last wrote this account's `"Instance"` row (its Prisma
+ * `@updatedAt`), ISO 8601, UTC — or `undefined` when there is no row or the
+ * column is NULL.
+ *
+ * 2.3.7 writes the row on four occasions only: a socket opening, a QR moving the
+ * column to `connecting`, a close it will not retry, and logout cleanup. The
+ * last three leave the column something other than `open`, so an `open` row
+ * written recently means a socket opened recently — the one signal of a
+ * reconnect loop the live state cannot give (see `rowChurn` in instances.ts).
+ * Only this SQL read supplies it. `fetchInstances` would, but that path is
+ * cached for minutes, which is too coarse to tell a loop from one reconnect.
  *
  * A separate statement from `readInstanceRecord`, not a seventh column there:
  * the least-privilege grant in docs/whatsapp.md is column by column, and a role

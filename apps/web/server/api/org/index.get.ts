@@ -12,12 +12,17 @@
  */
 export default defineEventHandler(async (event) => {
   const actor = await requireMembership(event)
+  const [members, invites, toolCalls] = await Promise.all([
+    listOrgMembers(actor.org.id),
+    actor.role === 'admin' ? listPendingInvites(actor.org.id) : undefined,
+    loadToolCallSetting(actor.org.id),
+  ])
 
   return {
     org: { id: actor.org.id, name: actor.org.name },
     role: actor.role,
-    members: await listOrgMembers(actor.org.id),
-    invites: actor.role === 'admin' ? await listPendingInvites(actor.org.id) : undefined,
-    toolCalls: await loadToolCallSetting(actor.org.id),
+    members,
+    invites,
+    toolCalls,
   }
 })

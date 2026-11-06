@@ -3,7 +3,7 @@ import type { AppInstance } from './app-db'
 import type { McpAuth } from './mcp-auth'
 import type { InstanceKind } from '#shared/connection'
 import type { LidLinks } from './whatsapp-identity'
-import { canonicalJid, lidLinks, linkedJidOf } from './whatsapp-identity'
+import { canonicalJid, lidLinks, linkedJidOf, phoneNumberOf } from './whatsapp-identity'
 
 /**
  * Connector token scope: which chats a token may touch, and which tools it may
@@ -255,7 +255,7 @@ export function filterChatsToScope<T extends ScopeableChat>(
       ...chat,
       jid,
       jids: reachable.length > 1 ? reachable : undefined,
-      number: jid.endsWith('@s.whatsapp.net') ? jid.split('@')[0] : undefined,
+      number: phoneNumberOf(jid),
       phoneNumber: jid.endsWith('@lid') ? chat.phoneNumber : undefined,
       linkedOutOfScope: members.length - reachable.length,
     }]

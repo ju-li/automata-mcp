@@ -5,7 +5,7 @@ import { applyMentions, authorName, contactsToDirectory, meaningfulName, mention
 import type { ChatActivityRow } from './evolution-db'
 import { canReadMessages, lastMessagePayloads, listChatActivity, listMessagesPage, senderOf } from './evolution-db'
 import type { LidLinks } from './whatsapp-identity'
-import { canonicalJid, lidLinks, linkedJidOf, phoneNumberBehind } from './whatsapp-identity'
+import { canonicalJid, lidLinks, linkedJidOf, phoneNumberBehind, phoneNumberOf } from './whatsapp-identity'
 import { GROUP_SCAN_FAILURE_BACKOFF_MS, GROUP_SCAN_TIMEOUT_MS, claimGroupScan, readStoredGroups, recordGroupScanFailure, replaceStoredGroups } from './whatsapp-groups'
 
 /**
@@ -304,15 +304,9 @@ interface ChatDraft {
 async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<ListedChat[]> {
   if (!drafts.length) return []
 
-  const evolution = evolutionClientForInstance(instance)
-
-  // Only touch the group cache when it can change an answer. The refresh is
-  // never awaited — see `groupsFor`; a cold cache waits only on the app DB.
+  // Only touch the group cache when it can change an answer.
   const needsGroups = drafts.some(draft => draft.jid.endsWith('@g.us') && !draft.chatName)
-
-  const groups = needsGroups ? await groupsFor(instance, evolution) : emptyGroups
-  const contacts = await contactDirectory(instance, evolution)
-  const links = await lidLinks(instance)
+  const { groups, contacts, links } = await nameSources(instance, needsGroups)
 
   return drafts.map((draft) => {
     const isGroup = draft.jid.endsWith('@g.us')
@@ -321,7 +315,7 @@ async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<Li
     const group = groups.get(draft.jid)
 
     const name = isGroup
-      ? group?.subject ?? draft.chatName ?? contact?.name ?? localPartOf(draft.jid)
+      ? group?.subject ?? draft.chatName ?? contact?.name ?? jidLabel(draft.jid)
       : contact?.name ?? draft.chatName ?? person!.fallback
 
     // The canonical id first, then whatever else was folded in.
@@ -332,11 +326,7 @@ async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<Li
       ...(others.length > 0 && { jids: [draft.jid, ...others] }),
       name,
       isGroup,
-      // Only a phone-number JID carries a number, as in `listContacts`. A LID
-      // chat's local part is a privacy alias, and handing it out here as a
-      // number is what leads a model to send to it as one — reaching whoever
-      // owns that number, if anyone.
-      number: draft.jid.endsWith('@s.whatsapp.net') ? localPartOf(draft.jid) : undefined,
+      number: phoneNumberOf(draft.jid),
       // The number behind a LID, only as WhatsApp itself revealed it on this
       // account's messages (`whatsapp-identity.ts`). Keyed on the LID, so a
       // phone-number chat never gets one here.
@@ -351,8 +341,24 @@ async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<Li
   })
 }
 
-function localPartOf(jid: string): string {
+/** A chat's bare id as a last-resort label: its local part, or the whole JID. */
+function jidLabel(jid: string): string {
   return jid.split('@')[0] || jid
+}
+
+/**
+ * The three caches a chat label is built from, loaded together. The group
+ * refresh is never awaited — see `groupsFor`; a cold cache waits only on the
+ * app DB — so skip it when no group needs a name.
+ */
+async function nameSources(instance: AppInstance, needsGroups: boolean) {
+  const evolution = evolutionClientForInstance(instance)
+  const [groups, contacts, links] = await Promise.all([
+    needsGroups ? groupsFor(instance, evolution) : emptyGroups,
+    contactDirectory(instance, evolution),
+    lidLinks(instance),
+  ])
+  return { groups, contacts, links }
 }
 
 /**
@@ -372,10 +378,9 @@ function personOf(
 ): { contact?: ContactInfo, fallback: string } {
   const canonical = canonicalJid(links, jid)
   const other = linkedJidOf(links, canonical)
-  const contact = (contacts.get(canonical)?.name ? contacts.get(canonical) : undefined)
-    ?? (other ? contacts.get(other) : undefined)
-    ?? contacts.get(canonical)
-  return { contact, fallback: localPartOf(other ?? canonical) }
+  const own = contacts.get(canonical)
+  const contact = own?.name ? own : (other && contacts.get(other)) || own
+  return { contact, fallback: jidLabel(other ?? canonical) }
 }
 
 /**
@@ -834,15 +839,9 @@ async function accountNames(
   instance: AppInstance,
   chatJids: string[],
 ): Promise<{ chatName: (jid: string) => string, directory?: MentionDirectory }> {
-  const localPart = (jid: string) => jid.split('@')[0] || jid
-
   try {
-    const evolution = evolutionClientForInstance(instance)
     const needsGroups = chatJids.some(jid => jid.endsWith('@g.us'))
-
-    const groups = needsGroups ? await groupsFor(instance, evolution) : emptyGroups
-    const contacts = await contactDirectory(instance, evolution)
-    const links = await lidLinks(instance)
+    const { groups, contacts, links } = await nameSources(instance, needsGroups)
 
     return {
       directory: contactsToDirectory(contacts),
@@ -851,7 +850,7 @@ async function accountNames(
       // name for both JIDs of a linked person, so one conversation is never
       // labelled as two.
       chatName: (jid) => {
-        if (jid.endsWith('@g.us')) return groups.get(jid)?.subject ?? contacts.get(jid)?.name ?? localPart(jid)
+        if (jid.endsWith('@g.us')) return groups.get(jid)?.subject ?? contacts.get(jid)?.name ?? jidLabel(jid)
         const person = personOf(contacts, links, jid)
         return person.contact?.name ?? person.fallback
       },
@@ -859,7 +858,7 @@ async function accountNames(
   }
   catch (error) {
     console.error('[messages] could not resolve names:', error)
-    return { chatName: localPart }
+    return { chatName: jidLabel }
   }
 }
 
@@ -991,14 +990,10 @@ export async function listContacts(
   const contacts = await contactDirectory(instance, evolution)
 
   const rows: ContactSummary[] = [...contacts].map(([jid, info]) => {
-    const localPart = jid.split('@')[0] || jid
     return {
       jid,
-      name: info.name ?? localPart,
-      // Only a real phone-number JID carries a number. A LID is a per-user
-      // identity with no country code to read off it, and presenting one as a
-      // phone number is the misattribution `mentions.ts` exists to prevent.
-      number: jid.endsWith('@s.whatsapp.net') ? localPart : undefined,
+      name: info.name ?? jidLabel(jid),
+      number: phoneNumberOf(jid),
       isGroup: jid.endsWith('@g.us'),
       profilePicUrl: info.profilePicUrl,
     }

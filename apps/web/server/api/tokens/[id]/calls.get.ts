@@ -17,15 +17,14 @@ const query = z.object({
  */
 export default defineEventHandler(async (event) => {
   const { token, actor } = await resolveTokenForActor(event, getRouterParam(event, 'id'))
-  const parsed = query.safeParse(getQuery(event))
-  if (!parsed.success) throw createError({ statusCode: 400, statusMessage: 'Invalid page' })
+  const { page: pageNumber } = await getValidatedQuery(event, q => query.parse(q))
 
   try {
     const [page, toolCalls] = await Promise.all([
-      listToolCalls(token.id, parsed.data.page),
+      listToolCalls(token.id, pageNumber),
       loadToolCallSetting(actor.org.id),
     ])
-    return { ...page, page: parsed.data.page, toolCalls }
+    return { ...page, page: pageNumber, toolCalls }
   }
   catch (error) {
     // A handled 503 is invisible to Nitro; say why here. Token id only.

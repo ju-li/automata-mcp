@@ -55,12 +55,6 @@ watch(() => [props.open, props.tokenId] as const, ([open]) => {
   failed.value = false
   if (open) load(1)
 }, { immediate: true })
-
-function formatDateTime(value: string) {
-  return new Date(value).toLocaleString(undefined, {
-    day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
-  })
-}
 </script>
 
 <template>

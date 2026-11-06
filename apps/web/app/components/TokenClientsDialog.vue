@@ -13,16 +13,6 @@ defineProps<{
 }>()
 
 defineEmits<{ 'update:open': [value: boolean] }>()
-
-function formatDate(value: string) {
-  return new Date(value).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
-}
-
-function formatDateTime(value: string) {
-  return new Date(value).toLocaleString(undefined, {
-    day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit',
-  })
-}
 </script>
 
 <template>

@@ -148,7 +148,7 @@ async function storeRowChurn(instance: AppInstance, churn: RowChurn, flapping: b
     WHERE id = ${instance.id}
   `
 
-  const wasFlapping = rowChurn({ since, seenAt }, { columnOpen: false }).flapping
+  const wasFlapping = isFlapping({ since, seenAt })
   if (flapping && !wasFlapping) {
     console.error(
       `[alerts] WhatsApp connection ${instance.id} (${instance.name}) has been reconnecting continuously `
@@ -231,11 +231,11 @@ async function evaluate(instance: AppInstance): Promise<void> {
   // Before the paired check, and with no grace: the operator is the one person
   // who can end a loop, so they hear about it as soon as it amounts to one.
   // Its failure is logged and does not stop the organization's own alert.
-  if (kind === 'whatsapp') {
-    await reportLoopToOperator(instance, health).catch((error) => {
-      console.error(`[alerts] could not report connection ${instance.id}'s reconnect loop to the operator:`, error)
-    })
-  }
+  // Kind-agnostic: only WhatsApp health can be `flapping`, and only a WhatsApp
+  // row ever carries `ops_alerted_at`.
+  await reportLoopToOperator(instance, health).catch((error) => {
+    console.error(`[alerts] could not report connection ${instance.id}'s reconnect loop to the operator:`, error)
+  })
 
   if (!health.paired) {
     // Unlinked on purpose — a Telegram logout clears the account — while an
