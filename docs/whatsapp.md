@@ -241,9 +241,11 @@ The app detects the loop from Evolution's own `"Instance"` row, not from
 webhooks (deliveries are unsigned): every socket that opens writes the row. A
 connection whose `open` row keeps being freshly written for ten minutes is
 marked **Unstable** on the dashboard, and `get-connection-status` returns
-`flapping: true`. The web log gets one line naming the instance and the fix.
+`flapping: true`. The web log gets one line naming the instance and the fix,
+and with `NUXT_OPS_ALERT_EMAIL` set the operator is mailed straight away.
 After the usual ten-minute grace period, everyone who can reach the connection
-is emailed (see [alerts.md](alerts.md)). That takes the message database URL
+is emailed (see [alerts.md](alerts.md), which also covers what the hosted
+offering tells customers instead). That takes the message database URL
 and, with a dedicated role, the `"updatedAt"` grant above.
 
 ## Connections never paired are removed after an hour

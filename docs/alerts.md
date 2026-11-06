@@ -64,6 +64,29 @@ What it will and will not send:
   and the web log gets a line saying the same. See [whatsapp.md](whatsapp.md)
   "Stuck reconnecting".
 
+### Telling the operator about a reconnect loop
+
+A reconnect loop is the one outage nobody in the organization can fix: only
+whoever runs the Evolution service can restart it. Set `NUXT_OPS_ALERT_EMAIL`
+on the web service and that address is mailed as soon as a connection on the
+deployment's own Evolution server is marked unstable (no grace period), and once
+more when the loop has ended. The mail names the connection id, the Evolution
+instance name and the organization id, and nothing the organization typed. A
+connection on a server the organization supplied is not reported: that server
+is theirs to restart. Unset, no operator mail is sent.
+
+Like the organization's mail, it is sent at most once per loop, across replicas,
+and a failed send is retried on the next sweep rather than lost.
+
+**On the hosted offering** (`NUXT_CLOUD_URL` set), the address also changes
+what customers read. With it set (and SMTP configured), the outage mail, the
+dashboard and `get-connection-status` (`operatorAlerted: true`) say the loop is
+on our side, that we have been alerted, and that there is nothing for them to
+do — for admins and members alike. Without it they keep the self-hosted wording
+("whoever runs this deployment has to restart its Evolution service"), since
+promising that somebody has been told is only true if somebody was. Set it on
+every hosted deployment.
+
 **Telegram** follows the same rules, with four failures told apart:
 
 | What happened | What the mail says |
