@@ -50,6 +50,11 @@ What the checks do enforce, on every statement:
 - **Bounded writes.** A statement that would change more rows than its `maxRows`
   is rolled back whole, and an `UPDATE` or `DELETE` with no `WHERE` needs
   `allowWholeTable: true`.
+- **Plans, never `ANALYZE`.** `run-query` with `explain: true` returns the plan
+  it would run instead of the rows, after the same checks. The model sends a
+  query, not `EXPLAIN` text; the server adds its own `EXPLAIN` options, so
+  nothing is executed and the server's settings are not disclosed. A plan names
+  only tables that passed the scope check.
 
 **Outbound host guard.** A connection string is an address a user chose, so by
 default this server refuses one that resolves to a private or loopback address:

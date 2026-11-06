@@ -5,11 +5,11 @@ import type { McpScope } from './mcp-scope'
 /**
  * Running caller-supplied SQL.
  *
- * Everything a user's SQL touches goes through one of the two exported
- * functions here, and both compose the same checks in the same order because
- * both delegate to `withGuardedStatement` — which is where that order, and the
- * reasoning for it, lives. See `pg-guard.ts` for why each individual check
- * exists and what is still open.
+ * Everything a user's SQL touches goes through one of the three exported
+ * functions here — read, explain, write — and all three compose the same checks
+ * in the same order because all three delegate to `withGuardedStatement` —
+ * which is where that order, and the reasoning for it, lives. See `pg-guard.ts`
+ * for why each individual check exists and what is still open.
  */
 
 /**
@@ -30,6 +30,14 @@ async function planFacts(tx: TransactionSql, statement: string): Promise<PlanFac
   return readPlan((explained as unknown as Array<Record<string, unknown>>)[0]?.['QUERY PLAN'])
 }
 
+/**
+ * The cursor `runReadQuery` opens, in one place: the explain path must plan
+ * exactly the statement the read path runs, or it explains a different query.
+ */
+function declareCursor(statement: string): string {
+  return `DECLARE _mcp NO SCROLL CURSOR FOR ${statement}`
+}
+
 export interface ReadQueryOptions {
   maxRows: number
   /** 1-based page of `maxRows` rows. */
@@ -46,6 +54,40 @@ export interface ReadQueryResult {
   hasMore: boolean
   truncatedValues: number
   elapsedMs: number
+}
+
+export interface ExplainQueryOptions {
+  timeoutMs: number
+}
+
+export interface ExplainQueryResult {
+  /** Postgres's own text rendering, one line per row of EXPLAIN output. */
+  plan: string
+  /** Lines were dropped from the end to stay under `MAX_PLAN_CHARS`. */
+  planTruncated: boolean
+  /** The root node's `rows=` estimate. A planner statistic, never a count. */
+  estimatedRows?: number
+  elapsedMs: number
+}
+
+/**
+ * Cap on the plan text. A plan is one line per node plus a few detail lines
+ * each, so this is hundreds of nodes — reached only by a very wide UNION or a
+ * deeply nested view, where the top of the plan is the useful part anyway.
+ */
+const MAX_PLAN_CHARS = 20_000
+
+/**
+ * Postgres's error for a statement cut off by `statement_timeout`.
+ *
+ * 57014 alone is not enough: it is `query_canceled`, also raised by
+ * `pg_cancel_backend` and by a client-side cancel, where advice about making
+ * the query cheaper would be wrong. The message is Postgres's fixed wording.
+ */
+function isStatementTimeout(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const { code, message } = error as { code?: unknown, message?: unknown }
+  return code === '57014' && typeof message === 'string' && message.includes('statement timeout')
 }
 
 /**
@@ -75,7 +117,8 @@ async function applySessionGuards(tx: TransactionSql, scope: McpScope, timeoutMs
  * Both entry points used to carry their own copy of it, kept in step by hand
  * while this module's header claimed they "compose the same checks in the same
  * order" — a claim a reader had to verify by diffing two functions. Now the only
- * thing either one chooses is the transaction mode and the statement-kind gate.
+ * thing each one chooses is the transaction mode, the statement-kind gate, and
+ * what it does once the checks have passed.
  *
  * **One transaction, not two.** The plan check and the execution share it, so
  * the `AccessShareLock` that EXPLAIN takes is still held while the statement
@@ -129,6 +172,33 @@ export async function runReadQuery(
   statement: string,
   options: ReadQueryOptions,
 ): Promise<ReadQueryResult> {
+  try {
+    return await guardedRead(instance, scope, statement, options)
+  }
+  catch (error) {
+    if (!isStatementTimeout(error)) throw error
+    // Postgres's own "canceling statement due to statement timeout" tells the
+    // model nothing it can act on, and the usual next move is to retry the same
+    // query with a bigger timeout. The plan is the thing that says why.
+    throw createError({
+      statusCode: 504,
+      message: `The query was stopped by the ${options.timeoutMs} ms statement timeout and returned no rows. `
+        + 'Call run-query again with the same sql and explain: true to see the plan it would run, without running it: '
+        + 'a Seq Scan over a large table, or a join with no usable index, is the usual cause. '
+        + 'Then add a selective WHERE clause on an indexed column, aggregate instead of listing, or raise timeoutMs (at most 30000).'
+        + (options.page > 1
+          ? ` Page ${options.page} also re-reads every row of the pages before it; a keyset predicate (WHERE id > <last id>) avoids that.`
+          : ''),
+    })
+  }
+}
+
+async function guardedRead(
+  instance: Pick<AppInstance, 'id' | 'dsn'>,
+  scope: McpScope,
+  statement: string,
+  options: ReadQueryOptions,
+): Promise<ReadQueryResult> {
   return await withGuardedStatement(instance, scope, statement, {
     readOnly: true,
     timeoutMs: options.timeoutMs,
@@ -140,7 +210,7 @@ export async function runReadQuery(
     // data-modifying WITH. Two of those — CTAS and SELECT INTO — plan to a bare
     // Result node with no target relation, so the relation check above cannot
     // see them at all.
-    await unsafeSingle(tx, `DECLARE _mcp NO SCROLL CURSOR FOR ${statement}`)
+    await unsafeSingle(tx, declareCursor(statement))
 
     // Paging moves the same cursor, never wraps the statement in OFFSET: a wrap
     // would reopen everything DECLARE CURSOR closes above. Each page is its own
@@ -169,6 +239,82 @@ export async function runReadQuery(
       elapsedMs: Date.now() - startedAt,
     }
   })
+}
+
+/**
+ * The plan `runReadQuery` would run for this statement, without running it.
+ *
+ * **Same guards, same order, nothing new reaches the database.** It goes
+ * through `withGuardedStatement` like the read path, so the text-level function
+ * check runs before any planning (planning folds IMMUTABLE functions), and the
+ * relation and function gates have passed before a line of plan comes back: a
+ * plan this returns can only name relations the token may read, plus the
+ * catalogs. The guard already EXPLAINs every statement; this is the one path
+ * that shows the caller a plan.
+ *
+ * **`EXPLAIN DECLARE`, not `EXPLAIN <statement>`.** `runReadQuery` executes
+ * through a cursor, and Postgres plans a cursor differently — for fast start
+ * (`cursor_tuple_fraction`), and never in parallel. Verified on Postgres 16: the
+ * same `ORDER BY` planned to a parallel sort as a bare EXPLAIN and to an index
+ * scan as a cursor. Explaining the bare statement would show a plan run-query
+ * never runs. `EXPLAIN DECLARE` without ANALYZE opens no cursor, and it is
+ * refused for exactly what `DECLARE` refuses — INSERT/UPDATE/DELETE by grammar,
+ * `SELECT … INTO` by name, a data-modifying WITH with 0A000 — so it is also the
+ * statement-kind gate here, the same one the read path relies on.
+ *
+ * **The options are ours, never the caller's.** The caller sends a query, not
+ * EXPLAIN text, so `ANALYZE` — which executes the statement, triggers included
+ * — cannot be asked for, nor `SETTINGS`, which would disclose the server's
+ * non-default configuration. Text format, costs on, not VERBOSE: VERBOSE's
+ * per-node `Output` lists are most of its bulk and the least of its use.
+ */
+export async function explainReadQuery(
+  instance: Pick<AppInstance, 'id' | 'dsn'>,
+  scope: McpScope,
+  statement: string,
+  options: ExplainQueryOptions,
+): Promise<ExplainQueryResult> {
+  try {
+    return await withGuardedStatement(instance, scope, statement, {
+      readOnly: true,
+      timeoutMs: options.timeoutMs,
+      assertKind: assertNoWrites,
+    }, async (tx, startedAt) => {
+      const explained = await unsafeSingle(tx, `EXPLAIN (FORMAT TEXT, COSTS) ${declareCursor(statement)}`)
+      const lines = (explained as unknown as Array<Record<string, unknown>>)
+        .map(row => row['QUERY PLAN'])
+        .filter((line): line is string => typeof line === 'string')
+
+      // Whole lines only: a node cut mid-line reads as a different node.
+      const kept: string[] = []
+      let length = 0
+      for (const line of lines) {
+        if (length + line.length + 1 > MAX_PLAN_CHARS) break
+        kept.push(line)
+        length += line.length + 1
+      }
+
+      // The root line is always `<node>  (cost=a..b rows=N width=W)` with costs
+      // on. Read from the cursor plan rather than the guard's JSON plan, which
+      // is planned without cursor options and can be a different shape.
+      const rows = /\brows=(\d+)\b/.exec(lines[0] ?? '')?.[1]
+
+      return {
+        plan: kept.join('\n'),
+        planTruncated: kept.length < lines.length,
+        ...(rows !== undefined && { estimatedRows: Number(rows) }),
+        elapsedMs: Date.now() - startedAt,
+      }
+    })
+  }
+  catch (error) {
+    if (!isStatementTimeout(error)) throw error
+    throw createError({
+      statusCode: 504,
+      message: `Planning the query alone took longer than the ${options.timeoutMs} ms statement timeout, so there is no plan to show. `
+        + 'Raise timeoutMs (at most 30000), or split the query: very many joined tables or a large IN list are the usual causes.',
+    })
+  }
 }
 
 export interface WriteStatementResult {
