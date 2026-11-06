@@ -223,14 +223,23 @@ What it can't do yet:
   API for Baileys' own mapping. So `phoneNumber` is partial, and the model is
   told its absence means "unknown", not "none". It also needs the message
   database: a connection without one never shows it.
-- **Link the two forms in token scope.** A token scoped to a person's
-  phone-number chat does not reach their LID chat, and the reverse. The picker
-  lists them as separate chats; tick both if the person has both.
+- **Link chats it has no link for.** A LID chat with no revealed number stays
+  a separate chat from that person's phone-number chat, if they have one. A
+  read of either says the conversation may continue under another id.
+
+**Token scope stays a list of exact chat ids.** A linked person is one row in
+the token's chat picker, showing their number and "2 chats". Ticking it allows
+both ids, and unticking removes both. A token that holds only one of the two
+(one scoped before they were linked, say) shows the row as partly ticked, with
+a note. It keeps reaching only that half until you tick the row, and the model
+is told part of the conversation is outside its scope. A link never lets a
+token reach an id that wasn't ticked.
 
 On a bring-your-own Evolution server with `DATABASE_SAVE_IS_ON_WHATSAPP=true`,
 Evolution may resolve a LID to the phone-number JID it has linked it to. For a
-token scoped to the LID chat, sending to that LID is then refused. Turning the
-setting off, or adding the phone-number chat to the token's scope, avoids it.
+token scoped only to the LID chat, sending to that LID is then refused, because
+the message would go to the phone-number id. The refusal says so. Ticking the
+person's row so both ids are included, or turning the setting off, avoids it.
 
 ## Stuck reconnecting (`conflict: replaced`)
 

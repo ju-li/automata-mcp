@@ -3,7 +3,7 @@ import type { AppInstance } from './app-db'
 import type { McpAuth } from './mcp-auth'
 import type { InstanceKind } from '#shared/connection'
 import type { LidLinks } from './whatsapp-identity'
-import { canonicalJid, linkedJidOf } from './whatsapp-identity'
+import { canonicalJid, lidLinks, linkedJidOf } from './whatsapp-identity'
 
 /**
  * Connector token scope: which chats a token may touch, and which tools it may
@@ -350,8 +350,16 @@ export async function resolveNumberToJid(
  * cache (`DATABASE_SAVE_IS_ON_WHATSAPP`, off in our compose files) and that
  * cache has linked the LID to a phone number, in which case it answers the
  * phone-number JID. A token scoped to the LID chat is then refused a send to
- * it — closed, and confusing — while one scoped to the phone-number chat may
- * send to the LID, which that cache says is the same person (#119).
+ * it, while one scoped to the phone-number chat may send to the LID, which that
+ * cache says is the same person (#119).
+ *
+ * **That refusal stays.** The send would go to the phone-number JID, and a
+ * token reaches only JIDs an admin ticked; widening here because the two are
+ * one person would be the implicit scope this module never grants. What
+ * changes is the wording: the generic "not scoped to <jid>" named the very
+ * chat the token *is* scoped to, which reads as a bug. When the requested JID
+ * is in scope and Evolution rewrote it, the refusal says so and says the fix —
+ * the picker shows a linked person as one row, and ticking it includes both.
  */
 export async function assertNumberAllowed(
   instance: AppInstance,
@@ -372,6 +380,23 @@ export async function assertNumberAllowed(
       statusCode: 503,
       message: 'Could not verify the recipient against this token\'s allowed chats, so the message was not sent. The WhatsApp account may be disconnected.',
       cause: error,
+    })
+  }
+
+  if (!isChatAllowed(scope, resolved.jid) && resolved.jid !== number && isChatAllowed(scope, number)) {
+    const links = await lidLinks(instance)
+    const linked = linkedJidOf(links, number) === resolved.jid
+    console.warn(`[scope] send on connection ${instance.id} refused: Evolution resolved an in-scope chat to an id outside scope`)
+    throw createError({
+      statusCode: 403,
+      // The other id is not named: it is outside this token's scope, and for a
+      // LID-scoped token it would be the phone number it was never granted.
+      message: `Nothing was sent. This connector token is scoped to ${number}, but the WhatsApp server `
+        + `resolves that chat to the same person's other id (their ${resolved.jid.endsWith('@lid') ? 'privacy alias' : 'phone number'}), `
+        + 'which this token is not scoped to. Ask the account owner to include both of this person\'s chats '
+        + (linked
+          ? '(they appear as one row in the token\'s chat list; ticking it includes both).'
+          : 'in the token\'s allowed chats.'),
     })
   }
 

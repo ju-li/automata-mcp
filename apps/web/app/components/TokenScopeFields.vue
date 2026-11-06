@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { FolderIcon, PlusIcon, SearchIcon, UsersIcon, XIcon } from '@lucide/vue'
+import { CheckIcon, FolderIcon, MinusIcon, PlusIcon, SearchIcon, UsersIcon, XIcon } from '@lucide/vue'
 import { assertNever, connectionFamily } from '#shared/connection'
 
 /**
@@ -143,8 +143,17 @@ const selectedChats = computed(() => {
   return [...chips.values()]
 })
 
-function chatChecked(chat: ScopedChat): boolean {
-  return membersOf(chat).every(jid => scope.value.chat_jids.includes(jid))
+/**
+ * Ticked, unticked, or `indeterminate` when a token holds only some of a row's
+ * JIDs — a token scoped before the two ids were linked, or by number. Shown,
+ * never repaired silently: what an existing token reaches changes only when the
+ * admin ticks the row, which then includes every JID it shows.
+ */
+function chatState(chat: ScopedChat): boolean | 'indeterminate' {
+  const members = membersOf(chat)
+  const held = members.filter(jid => scope.value.chat_jids.includes(jid)).length
+  if (held === 0) return false
+  return held === members.length ? true : 'indeterminate'
 }
 
 /** Tick or untick every JID of a row together. */
@@ -185,6 +194,8 @@ function secondaryLine(chat: ScopedChat): string {
     return chat.participantCount === 1 ? '1 member' : `${chat.participantCount} members`
   }
   if (chat.number) return `+${chat.number}`
+  // One person stored under a LID and a phone number: ticking writes both ids.
+  if (membersOf(chat).length > 1) return `+${chat.phoneNumber ?? '?'} · 2 chats, LID and phone number`
   // A LID chat: the scope entry is the alias, not this number, so say so.
   return chat.phoneNumber ? `+${chat.phoneNumber} (via LID)` : ''
 }
@@ -507,9 +518,14 @@ async function addByNumber() {
             class="flex cursor-pointer items-center gap-3 rounded-md px-2 py-1.5 hover:bg-accent"
           >
             <Checkbox
-              :model-value="chatChecked(chat)"
+              :model-value="chatState(chat)"
               @update:model-value="toggleChat(chat, $event === true)"
-            />
+            >
+              <template #default="{ state }">
+                <MinusIcon v-if="state === 'indeterminate'" class="size-3.5" />
+                <CheckIcon v-else class="size-3.5" />
+              </template>
+            </Checkbox>
             <img v-if="chat.profilePicUrl" :src="chat.profilePicUrl" alt="" class="size-8 rounded-full object-cover">
             <span v-else class="flex size-8 items-center justify-center rounded-full bg-muted">
               <FolderIcon v-if="kind === 'imap'" class="size-3.5" />
@@ -521,6 +537,10 @@ async function addByNumber() {
                 v-if="secondaryLine(chat)"
                 class="block truncate text-xs text-muted-foreground tabular-nums"
               >{{ secondaryLine(chat) }}</span>
+              <span
+                v-if="chatState(chat) === 'indeterminate'"
+                class="block text-xs text-amber-700 dark:text-amber-400"
+              >Only one of this person's two chats is included. Tick to include both.</span>
             </span>
             <Badge v-if="chat.isGroup" variant="outline" class="text-[10px]">
               group
