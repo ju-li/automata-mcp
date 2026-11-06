@@ -682,4 +682,21 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN ops_alerted_at timestamptz;
     `,
   },
+  {
+    name: '0017_instance_connect_hold',
+    sql: /* sql */ `
+      -- WhatsApp only: until when this app must not ask Evolution to connect
+      -- this account (GET /instance/connect in state 'close'). Evolution
+      -- 2.3.7 builds a new socket for that call and never ends the one it
+      -- replaces, so a call landing while Evolution is reconnecting by itself
+      -- (the restart WhatsApp asks for right after a QR scan) leaves two
+      -- sockets on one set of credentials replacing each other until the
+      -- service restarts (ju-li/automata-mcp#122). Pushed forward whenever
+      -- the pairing poll sees the socket connecting or open, and claimed by a
+      -- conditional UPDATE before every connect, so replicas and browser tabs
+      -- share it. NULL means no hold. Written only by instances.ts.
+      ALTER TABLE app.instances
+        ADD COLUMN connect_hold_until timestamptz;
+    `,
+  },
 ]
