@@ -356,6 +356,12 @@ export interface AppInstance {
   row_churn_since?: string
   row_churn_seen_at?: string
   /**
+   * WhatsApp only: the deployment's operator has been mailed about the current
+   * reconnect loop (`NUXT_OPS_ALERT_EMAIL`). Written only by
+   * server/utils/alerts.ts; empty means no loop reported to them.
+   */
+  ops_alerted_at?: string
+  /**
    * WhatsApp only: when this app first saw the account linked. Never cleared —
    * a logout does not make a paired connection an unfinished one. Written by
    * `notePaired` in instances.ts; a connection still without it an hour after

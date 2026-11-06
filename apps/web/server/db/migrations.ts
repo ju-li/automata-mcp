@@ -669,4 +669,17 @@ export const APP_MIGRATIONS: AppMigration[] = [
       $$;
     `,
   },
+  {
+    name: '0016_instance_ops_alerted_at',
+    sql: /* sql */ `
+      -- WhatsApp only: the deployment's operator (NUXT_OPS_ALERT_EMAIL) has
+      -- been mailed about this connection's current reconnect loop. Set by a
+      -- conditional UPDATE before the mail goes out, so two replicas cannot
+      -- both send it, and put back if the send fails; cleared once the loop
+      -- has ended and the operator has been told so. Written only by
+      -- server/utils/alerts.ts. NULL means no loop reported.
+      ALTER TABLE app.instances
+        ADD COLUMN ops_alerted_at timestamptz;
+    `,
+  },
 ]

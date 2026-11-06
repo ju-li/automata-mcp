@@ -46,6 +46,8 @@ export interface InstanceListRow {
   sessionLost?: boolean
   /** WhatsApp only: Evolution keeps reopening the socket. See `rowChurn` on the server. */
   flapping?: boolean
+  /** With `flapping`: the deployment's operator is alerted and will restart Evolution. */
+  operatorAlerted?: boolean
   target?: string
   detail?: string
   profileName?: string

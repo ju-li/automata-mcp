@@ -33,6 +33,13 @@ export type InstanceStatus = {
    * end it; restarting the Evolution service does. See `rowChurn`.
    */
   flapping?: boolean
+  /**
+   * Set only with `flapping`: the deployment's operator is alerted to the loop
+   * by itself and will restart Evolution, so the reader has nothing to do.
+   * Hosted offering only — `operatorAlertedAboutLoop` in alerts.ts is the rule,
+   * shared with the outage mail so the two cannot disagree.
+   */
+  operatorAlerted?: boolean
   profileName?: string
   profilePicUrl?: string
   number?: string
@@ -924,6 +931,7 @@ async function readStatus(
     state: live ?? 'unknown',
     sessionLost: row.connectionStatus === 'open' && live !== undefined && live !== 'open',
     flapping,
+    ...(flapping && operatorAlertedAboutLoop(instance) && { operatorAlerted: true }),
     rowChurn: churn,
     profileName: row.profileName ?? undefined,
     profilePicUrl: row.profilePicUrl ?? undefined,

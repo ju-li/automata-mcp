@@ -26,6 +26,8 @@ interface StatusResponse {
   sessionLost?: boolean
   /** Evolution keeps reopening the socket; reads `open` most of the time. */
   flapping?: boolean
+  /** With `flapping`: the deployment's operator is alerted and will restart Evolution. */
+  operatorAlerted?: boolean
   profileName?: string
   profilePicUrl?: string
   number?: string
@@ -110,8 +112,13 @@ const mode = computed<Mode>(() => {
 })
 
 const flapping = computed(() => data.value?.flapping === true)
+const operatorAlerted = computed(() => flapping.value && data.value?.operatorAlerted === true)
 
-const display = computed(() => describeState(state.value, 'whatsapp', { lost: mode.value === 'lost', flapping: flapping.value }))
+const display = computed(() => describeState(state.value, 'whatsapp', {
+  lost: mode.value === 'lost',
+  flapping: flapping.value,
+  operatorAlerted: operatorAlerted.value,
+}))
 
 /**
  * Reconnect is offered only from `close`: that is the one state with a safe call
@@ -484,7 +491,16 @@ const importHistory = () => backToPairing(
           <p class="mt-1 text-sm text-muted-foreground">
             Its connection to WhatsApp is being replaced over and over, so messages
             may be missing here and sends may fail.
-            <template v-if="canManage">
+            <!--
+              Hosted offering: only we can restart Evolution, and we have been
+              mailed. Same words for admins and members — neither can act.
+            -->
+            <template v-if="operatorAlerted">
+              This is on our side: we have been alerted and will restart the
+              service. Nothing needs scanning, the phone stays linked, and there
+              is nothing you need to do.
+            </template>
+            <template v-else-if="canManage">
               Reconnect cannot end this. Restarting {{ evolutionServer }} does, with
               no new QR scan. Repeated logins can get a number flagged by WhatsApp,
               so do it soon.

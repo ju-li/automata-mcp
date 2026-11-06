@@ -282,7 +282,14 @@ NUXT_CLOUD_URL=http://<cloud service>.railway.internal:8080   # its private addr
 NUXT_CLOUD_ADMIN_KEY=…                              # the same value as CLOUD_ADMIN_KEY
 NUXT_PUBLIC_APP_URL=https://mcp.getautomata.app
 NUXT_SIGNUP=open
+NUXT_OPS_ALERT_EMAIL=…                              # where reconnect loops on our Evolution are reported
 ```
+
+`NUXT_OPS_ALERT_EMAIL` is not about billing, but hosted mode is what makes it
+matter: with it set, a customer whose WhatsApp connection is stuck reconnecting
+is told the fix is on us and that we have been alerted. Without it they are told
+"whoever runs this deployment" has to restart Evolution, which they cannot do.
+See [alerts.md](alerts.md).
 
 Railway injects `PORT=8080` into every service, and the cloud service follows it.
 

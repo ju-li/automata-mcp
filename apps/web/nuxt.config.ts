@@ -92,6 +92,11 @@ export default defineNuxtConfig({
     smtpTls: 'false',
     mailFrom: '',
     mailFromName: 'Automata MCP',
+    // Where a WhatsApp reconnect loop on the deployment's own Evolution server
+    // is reported, since only whoever runs that service can end it. Optional:
+    // empty sends no operator mail. On the hosted offering, setting it is what
+    // lets the customer-facing wording say the fix is on us. See alerts.ts.
+    opsAlertEmail: '',
 
     // The *default* Evolution server, used by any WhatsApp connection that did
     // not bring its own. Optional: with these unset the app still runs, and the
