@@ -87,7 +87,7 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              db-rows, sql-engine, pg-pool, pg-guard,
                              pg-run, pg-catalog, chats, alerts, mailer,
                              mcp-kind-tool, mcp-clients, tool-calls, telegram, telegram-db,
-                             telegram-instances, imap-client, imap-sync, imap-db, unpaired-reaper,
+                             telegram-instances, imap-client, imap-sync, imap-db, unpaired-reaper, lid-guard,
                              mail-format, whatsapp-groups, mfa, totp, webauthn, entitlements,
                              hosted-events, cloud, …
   shared/connection.ts       InstanceKind, assertNever — imported as #shared
@@ -405,6 +405,8 @@ Baileys stores `participant` for group message on live and history paths, `parti
 All best-effort, degrades to raw id: participants need live socket, so disconnected account resolves nothing, must still return messages. `read-messages` = one chat, one lookup; `search-messages` spans many, resolves from contacts first, pays for group membership only where unresolved, capped busiest-group-first. Raw id honest; wrong name = failure module exists to prevent.
 
 **LID digits are never a phone number — anywhere, not just mentions.** `…@lid` = WhatsApp's per-person privacy alias, used for group members and many 1:1 chats (often history-imported). Digits carry no country code; sending to them as number reaches whoever owns that number, if anyone, and can't be unsent. So: `number` on chat/contact rows set only for `@s.whatsapp.net` (`ChatSummary` once copied any non-group local part — LID chats showed in `list-chats` and scope picker as `+7997…`); `send-text-message` takes chat's full JID, description + `WHATSAPP_INSTRUCTIONS` tell model to pass it unchanged, never strip suffix. Verified on real account (#114): send to `<lid>@lid` lands in existing conversation, stored under LID, `remoteJidAlt` null. Scope check runs JID through `/chat/whatsappNumbers` like a number — answers LID unchanged, **unless** server has `DATABASE_SAVE_IS_ON_WHATSAPP` cache linking it to phone JID (then phone JID; LID-scoped token refused). Phone behind LID: only on live rows' `remoteJidAlt`/`participantAlt`, never history; not surfaced; Evolution exposes no Baileys mapping. Any future field exposing it optional, absence ≠ "no phone number". `docs/whatsapp.md` "Chats addressed by LID" = user side.
+
+**Bare LID digits refused at send (#113).** `assertNotBareLid` (`lid-guard.ts`) runs first in `send-text-message`: value Evolution's `createJid()` would treat as digits (no `@lid`/`@s.whatsapp.net`/`@g.us`/`@broadcast`) whose digits match a LID this account's `"Message"` rows name (chat, `participant`, `*Alt`, `mentionedJid` — `lidLocalParts` in `evolution-db.ts`) → 422 naming the full `<digits>@lid`. **Fails closed only on positive match**: unknown digits send (cold sends supported), lookup failure sends + logs (else message-DB outage stops every send), no message DB = unchecked. Set = one account scan, cached 10 min per connection; between rebuilds a miss pays one `LIMIT 1` scan extracting only from messages newer than build − 24 h (late delivery keeps old timestamp). `recipientDigits` approximates `createJid` only to refuse — never addresses anything, so not local normalisation. Re-check `createJid`'s passthrough list on tag bump.
 
 ## Webhooks are registered per instance, and the global one is off
 

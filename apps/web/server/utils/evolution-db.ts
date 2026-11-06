@@ -786,6 +786,64 @@ export async function lastMessagePayloads(instance: AppInstance, rowIds: string[
   return new Map(rows.map(row => [row.id, row.message]))
 }
 
+export interface LidLocalPartOptions {
+  /** Only messages with `messageTimestamp` (unix seconds) at or after this. */
+  since?: number
+  /** Only this local part: answers with it, or with an empty set. */
+  localPart?: string
+}
+
+/**
+ * The local parts of every LID (`…@lid`) this account's messages name — as a
+ * chat, as a group sender, as either one's alternate form, or as an @-mention.
+ *
+ * For `assertNotBareLid` (`lid-guard.ts`): these are exactly the identifiers the
+ * read tools can put in front of a model, so they are the digits a model might
+ * strip a suffix from and pass back as a phone number. `"Message"` only, never
+ * `"Chat"` or `"Contact"`, because the optional `wamcp_search` grant covers this
+ * table and only `"instanceId"` on those two.
+ *
+ * A device suffix (`79972425314508:12@lid`) is cut along with the domain, so the
+ * answer is the digits a caller would see.
+ *
+ * Cost: one scan of the account's rows (`@@index([instanceId])` is the only
+ * index). The lateral yields only short text values, so the `DISTINCT` hashes a
+ * few thousand strings rather than sorting jsonb — none of `listChatActivity`'s
+ * spill. `since` and `localPart` narrow what is extracted, not what is read; with
+ * `localPart` the query stops at the first hit. `mentionedJid` is checked to be
+ * an array before it is expanded, since `jsonb_array_elements_text` throws on
+ * anything else and one odd row must not fail the whole read.
+ *
+ * Raw driver errors: the caller decides what an unreadable answer means.
+ */
+export async function lidLocalParts(instance: AppInstance, options: LidLocalPartOptions = {}): Promise<Set<string>> {
+  const sql = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const rows = await sql<Array<{ lid: string }>>`
+    SELECT DISTINCT split_part(split_part(ids.jid, '@', 1), ':', 1) AS lid
+    FROM "Message" m
+    CROSS JOIN LATERAL (
+      SELECT m.key->>'remoteJid'
+      UNION ALL SELECT m.key->>'participant'
+      UNION ALL SELECT m.key->>'remoteJidAlt'
+      UNION ALL SELECT m.key->>'participantAlt'
+      UNION ALL SELECT jsonb_array_elements_text(
+        CASE WHEN jsonb_typeof(m."contextInfo"->'mentionedJid') = 'array'
+             THEN m."contextInfo"->'mentionedJid' END
+      )
+    ) AS ids(jid)
+    WHERE m."instanceId" = ${instanceId}
+      ${options.since !== undefined ? sql`AND m."messageTimestamp" >= ${options.since}` : sql``}
+      AND ids.jid LIKE '%@lid'
+      ${options.localPart !== undefined
+        ? sql`AND split_part(split_part(ids.jid, '@', 1), ':', 1) = ${options.localPart} LIMIT 1`
+        : sql``}
+  `
+
+  return new Set(rows.map(row => row.lid).filter(Boolean))
+}
+
 /**
  * Not a WhatsApp control record. An edit is kept: in history-synced data it is
  * the only copy of the new text, so it is real activity in the chat.

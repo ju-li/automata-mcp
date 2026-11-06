@@ -188,6 +188,9 @@ What the connector does with them:
   (`…@lid`) and the message lands in the existing conversation, stored under the
   LID. The tool description and the server instructions tell the model to pass
   the JID as returned, and never to strip the suffix and send to the digits.
+  If it does anyway, a send to digits this account has seen as a LID (as a chat,
+  a group sender or an @-mention) is refused with the full JID to use instead.
+  Digits it has never seen as a LID — a new contact's phone number — still send.
 - **Names** for senders and @-mentions are resolved from the account's contacts
   and from group membership, which knows both forms of each member. A LID it
   cannot resolve stays a raw id rather than being guessed.
