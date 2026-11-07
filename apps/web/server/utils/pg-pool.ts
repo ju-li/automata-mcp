@@ -401,6 +401,33 @@ export function pgPrivilegeWarning(identity: PgIdentity): string | undefined {
 export type PgProbe = PgIdentity
 
 /**
+ * What the commonest probe failures mean, in words a person can act on.
+ *
+ * Only for the probe, whose target `net-guard` already approved — so naming
+ * which of these happened tells the user about their own server, not about
+ * this deployment's network. Keyed on the driver's `code`: a SQLSTATE from the
+ * server, or Node's socket / TLS error code. Anything unlisted keeps the
+ * generic advice, with its code still shown.
+ */
+const PROBE_FAILURE_HINTS: Record<string, string> = {
+  '28P01': 'The server rejected the user name or password.',
+  '28000': 'The server refused this user. Check the user name, and that the server allows connections from this app (pg_hba.conf, or an IP allowlist).',
+  '3D000': 'That database does not exist on the server. Check the database name.',
+  '53300': 'The server has no free connections. Try again, or connect through its pooler.',
+  '57P03': 'The server is starting up or shutting down. Try again in a moment.',
+  'ECONNREFUSED': 'Nothing accepted the connection on that host and port. Check the port, and that the server is running.',
+  'CONNECT_TIMEOUT': 'The server did not answer in time. A firewall may be dropping the connection, or the server only accepts connections from an allowlist.',
+  'ETIMEDOUT': 'The server did not answer in time. A firewall may be dropping the connection, or the server only accepts connections from an allowlist.',
+  'EHOSTUNREACH': 'That host cannot be reached from this server.',
+  'ENETUNREACH': 'That host cannot be reached from this server. If it has only an IPv6 address, this server may have no IPv6 route.',
+  'ECONNRESET': 'The server closed the connection before it was ready. If it requires SSL, add ?sslmode=require to the connection string.',
+  'DEPTH_ZERO_SELF_SIGNED_CERT': 'The server\'s certificate is self-signed, which sslmode=verify-full refuses. Use sslmode=require, or install a trusted certificate.',
+  'SELF_SIGNED_CERT_IN_CHAIN': 'The server\'s certificate chain is not trusted, which sslmode=verify-full refuses. Use sslmode=require, or install a trusted certificate.',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE': 'The server\'s certificate could not be verified, which sslmode=verify-full refuses. Use sslmode=require, or install a trusted certificate.',
+  'ERR_TLS_CERT_ALTNAME_INVALID': 'The server\'s certificate is not issued for this host name. Connect by the name on the certificate, or use sslmode=require.',
+}
+
+/**
  * Open a throwaway connection to prove a DSN works, and report what is behind
  * it. Used when a connection is created, so a broken DSN fails the create
  * rather than becoming a row that fails every later tool call.
@@ -460,11 +487,17 @@ export async function probePgConnection(dsn: string, options: {
     // The DSN carries a password; never let the driver's message, which may
     // echo connection parameters, reach the client verbatim.
     console.error(`[pg] probe failed for ${target.host}:${target.port}/${target.database}`, cause)
+    const reason = (cause as { code?: unknown })?.code
+    const code = typeof reason === 'string' ? reason : undefined
+    const hint = code ? PROBE_FAILURE_HINTS[code] : undefined
     throw createError({
       statusCode: 422,
       message: `Could not connect to ${target.host}:${target.port}/${target.database}. `
-        + `Check the host, port, database, user and password, and that this server is allowed to reach it. `
-        + `(${(cause as { code?: string })?.code ?? 'connection failed'})`,
+        + (hint ?? 'Check the host, port, database, user and password, and that this server is allowed to reach it.')
+        + ` (${code ?? 'connection failed'})`,
+      // Machine-readable for the error toast's Details. The code alone, never
+      // the driver's message, for the reason above.
+      data: { code: 'pg_connect_failed', ...(code && { reason: code }) },
     })
   }
   finally {

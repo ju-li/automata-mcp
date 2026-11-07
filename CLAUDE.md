@@ -649,6 +649,8 @@ cd apps/web && pnpx shadcn-vue@latest add <component>
 
 **Token list shown even while connection down** — else couldn't revoke token for offline account or unreachable DB, exactly when you'd want to.
 
+**Errors are never silent; one place toasts them.** `showErrorToast()` (`composables/errorToast.ts`) = every error toast: title = what was attempted, server's message under it, status + request line, `data.code`/`data.reason`, Copy details (`errorDetails.ts` — never request body or query, so no DSN on clipboard). `toastApiError` / `useApiAction` go through it. **`plugins/error-toasts.client.ts` = global net** for what nobody caught: `useFetch`/`useAsyncData` errors (watches Nuxt-internal `payload._errors`, incl. SSR ones — **Nuxt bump = re-check**), `vue:error`, `unhandledrejection`; skips 401, aborts, anything marked. Caught = owned: `apiErrorMessage` and `showErrorToast` mark handled; page rendering a fetch error itself calls `handlesErrorItself(error)`. Net waits for `page:finish` (hydration re-runs failed SSR fetch, so `handlesErrorItself` after `await useFetch` lands late), background repeats ≤ once/min. Toast body fixed-height: vue-sonner measures once at mount, expandable panel spilled out of card. **`vue-sonner/style.css` must stay in `nuxt.config` `css`** — v2 injects none; without it toasts render unstyled below the fold (why a 422 on create looked silent).
+
 **Restart dev server after adding shadcn components.** Component manifest built at startup; component added while running renders as literal unknown element (`<radiogroupitem>`), SSR still 200. Page loading ≠ proof it works.
 
 ## Things that cost real money or a phone number

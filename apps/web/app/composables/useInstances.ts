@@ -90,8 +90,12 @@ export function describeKind(kind: InstanceKind): string {
  * `statusMessage` is the generic. Five call sites had drifted into three
  * different orderings of these two keys, so the same failure read differently
  * depending on which component you were looking at.
+ *
+ * Reading the message is showing it: the caller renders it inline, so the
+ * error is marked handled and the global error toast stays off it.
  */
 export function apiErrorMessage(error: unknown, fallback: string): string {
+  markErrorHandled(error)
   const data = (error as { data?: { message?: string, statusMessage?: string } })?.data
   return data?.message || data?.statusMessage || fallback
 }

@@ -39,12 +39,14 @@ const pending = computed(() => data.value?.pending ?? null)
 
 // What the link would confirm, read without spending it. Client only, like the
 // pending read above: nothing about the token belongs in the SSR request.
-const { data: link, status: linkStatus } = await useFetch<Pending>('/api/auth/verify/link-info', {
+const { data: link, status: linkStatus, error: linkError } = await useFetch<Pending>('/api/auth/verify/link-info', {
   method: 'POST',
   body: { token },
   immediate: Boolean(token.value),
   server: false,
 })
+// A spent or expired link gets its own card below, not a toast.
+handlesErrorItself(linkError)
 
 const code = ref('')
 const { busy, run } = useApiAction()
