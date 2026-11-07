@@ -159,7 +159,18 @@ async function runClaimed(instance: AppInstance, lease: Lease): Promise<SyncOutc
     await resetIfIdentityChanged(instance, lease.target)
     client = await openImap(lease.target, undefined, { signal: abort.signal })
     if (cutOff) throw new DeadlineExceededError(`syncing mailbox ${instance.id}`, RUN_HARD_LIMIT_MS)
-    await syncFolders(instance, client, lease, deadline)
+    const folderFailed = await syncFolders(instance, client, lease, deadline)
+    if (folderFailed) {
+      // Not a success: last_success_at is what `syncedAt`, `staleSyncNote`
+      // and the dashboard read as "listings are current up to here", and a
+      // folder that failed was not brought up to date. The other folders'
+      // progress is kept in their own rows.
+      await sql`
+        UPDATE app.mail_sync_state
+        SET last_error_code = ${folderFailed}, last_error_at = now(), auth_failed = false, lease_until = now()
+        WHERE instance_id = ${instance.id}`
+      return 'failed'
+    }
     await sql`
       UPDATE app.mail_sync_state
       SET last_success_at = now(), last_error_code = NULL, auth_failed = false, lease_until = now()
@@ -207,7 +218,8 @@ export async function resetIfIdentityChanged(instance: Pick<AppInstance, 'id'>, 
   })
 }
 
-async function syncFolders(instance: AppInstance, client: ImapFlow, lease: Lease, deadline: number): Promise<void> {
+/** Answers the error code of the first folder that failed, or nothing when none did. */
+async function syncFolders(instance: AppInstance, client: ImapFlow, lease: Lease, deadline: number): Promise<string | undefined> {
   const sql = await appDb()
   const listed = uniqueFolders(await client.list())
 
@@ -242,6 +254,7 @@ async function syncFolders(instance: AppInstance, client: ImapFlow, lease: Lease
     f.path.toUpperCase() === 'INBOX' ? 0 : f.special_use === '\\Sent' ? 1 : 2
   const toSync = folders.filter(f => f.synced).sort((a, b) => order(a) - order(b) || a.path.localeCompare(b.path))
 
+  let failed: string | undefined
   for (const folder of toSync) {
     if (Date.now() > deadline) break
     try {
@@ -251,9 +264,12 @@ async function syncFolders(instance: AppInstance, client: ImapFlow, lease: Lease
       // One unreadable folder must not stop the rest. A connection-level
       // failure will fail the next folder too and end the run there.
       if (!client.usable) throw cause
-      console.error(`[imap-sync] connection ${instance.id}: a folder failed (${describeImapError(cause).code})`, cause)
+      const code = describeImapError(cause).code
+      console.error(`[imap-sync] connection ${instance.id}: a folder failed (${code})`, cause)
+      failed ??= code
     }
   }
+  return failed
 }
 
 /**
@@ -531,15 +547,74 @@ async function storeMessages(
     if (!byUid.size) continue
     const rows = [...byUid.values()]
 
-    await sql`
-      INSERT INTO app.mail_messages ${sql(rows)}
-      ON CONFLICT (instance_id, folder_path, uid) DO UPDATE
-      SET uidvalidity = EXCLUDED.uidvalidity, message_id = EXCLUDED.message_id,
-          in_reply_to = EXCLUDED.in_reply_to, refs = EXCLUDED.refs, subject = EXCLUDED.subject,
-          from_addr = EXCLUDED.from_addr, to_addr = EXCLUDED.to_addr, cc_addr = EXCLUDED.cc_addr,
-          sent_at = EXCLUDED.sent_at, received_at = EXCLUDED.received_at, flags = EXCLUDED.flags,
-          size = EXCLUDED.size, text_part = EXCLUDED.text_part, html_part = EXCLUDED.html_part,
-          attachments = EXCLUDED.attachments`
+    try {
+      await upsertMessages(rows)
+    }
+    catch (cause) {
+      if (!isDataError(cause)) throw cause
+      // One row the database refuses must not fail the other 99, and must not
+      // hold the folder's cursor behind it: the next run would select the
+      // same UIDs and fail on the same row, so no later mail in the folder
+      // would ever be stored (GHSA-89q9-r9vm-6vp2). Each row on its own, then
+      // a refused one again with every sender-chosen field dropped.
+      let degraded = 0
+      for (const row of rows) {
+        try {
+          await upsertMessages([row])
+        }
+        catch (rowCause) {
+          if (!isDataError(rowCause)) throw rowCause
+          await upsertMessages([degradedRow(row)])
+          degraded++
+        }
+      }
+      if (degraded) {
+        console.error(`[imap-sync] connection ${instance.id}: stored ${degraded} message(s) without their headers, which the database refused`, cause)
+      }
+    }
+  }
+}
+
+async function upsertMessages(rows: Array<ReturnType<typeof toRow>>): Promise<void> {
+  const sql = await appDb()
+  await sql`
+    INSERT INTO app.mail_messages ${sql(rows)}
+    ON CONFLICT (instance_id, folder_path, uid) DO UPDATE
+    SET uidvalidity = EXCLUDED.uidvalidity, message_id = EXCLUDED.message_id,
+        in_reply_to = EXCLUDED.in_reply_to, refs = EXCLUDED.refs, subject = EXCLUDED.subject,
+        from_addr = EXCLUDED.from_addr, to_addr = EXCLUDED.to_addr, cc_addr = EXCLUDED.cc_addr,
+        sent_at = EXCLUDED.sent_at, received_at = EXCLUDED.received_at, flags = EXCLUDED.flags,
+        size = EXCLUDED.size, text_part = EXCLUDED.text_part, html_part = EXCLUDED.html_part,
+        attachments = EXCLUDED.attachments`
+}
+
+/**
+ * SQLSTATE class 22 (data exception: bad json, bad encoding, value too long):
+ * the row's content, not the database, is at fault, so the row can be retried
+ * alone. Anything else — the database gone, a constraint — fails the batch.
+ */
+function isDataError(cause: unknown): boolean {
+  const code = (cause as { code?: unknown })?.code
+  return typeof code === 'string' && code.startsWith('22')
+}
+
+/**
+ * A message kept with only what the server, not the sender, decided: its UID,
+ * dates, flags, size and body part numbers. Listed with no subject or sender
+ * rather than left out, and its body still readable through `read-email`.
+ */
+function degradedRow(row: ReturnType<typeof toRow>): ReturnType<typeof toRow> {
+  return {
+    ...row,
+    message_id: undefined,
+    in_reply_to: undefined,
+    refs: [],
+    subject: '',
+    from_addr: [],
+    to_addr: [],
+    cc_addr: [],
+    flags: row.flags.filter(flag => /^[\x21-\x7e]+$/.test(flag)),
+    attachments: [],
   }
 }
 
@@ -553,10 +628,10 @@ function toRow(instanceId: string, path: string, uidvalidity: string, message: F
     folder_path: path,
     uidvalidity,
     uid: message.uid,
-    message_id: cleanText(envelope.messageId)?.slice(0, 998),
-    in_reply_to: cleanText(envelope.inReplyTo)?.slice(0, 998),
+    message_id: cleanText(envelope.messageId, 998),
+    in_reply_to: cleanText(envelope.inReplyTo, 998),
     refs: parseReferences(message.headers),
-    subject: (cleanText(envelope.subject) ?? '').slice(0, 2000),
+    subject: cleanText(envelope.subject, 2000) ?? '',
     from_addr: addresses(envelope.from),
     to_addr: addresses(envelope.to),
     cc_addr: addresses(envelope.cc),
@@ -573,8 +648,8 @@ function toRow(instanceId: string, path: string, uidvalidity: string, message: F
 /** At most 50 addresses per header: a mass mailing's To line is not worth a megabyte. */
 function addresses(list: MessageAddressObject[] | undefined) {
   return (list ?? []).slice(0, 50).map(entry => ({
-    ...(cleanText(entry.name) && { name: cleanText(entry.name)!.slice(0, 200) }),
-    ...(cleanText(entry.address) && { address: cleanText(entry.address)!.slice(0, 320) }),
+    ...(cleanText(entry.name, 200) && { name: cleanText(entry.name, 200)! }),
+    ...(cleanText(entry.address, 320) && { address: cleanText(entry.address, 320)! }),
   })).filter(entry => entry.name || entry.address)
 }
 
