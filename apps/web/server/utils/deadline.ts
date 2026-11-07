@@ -36,6 +36,14 @@
 export const OUTBOUND_REQUEST_DEADLINE_MS = 30_000
 
 /**
+ * How long one connection's work in a scheduled task may take: a status read
+ * can make two requests back to back (a live read, then an API row read), and
+ * what follows — mail, a delete — needs room too. Derived, so it moves with
+ * the request deadline.
+ */
+export const CONNECTION_WORK_DEADLINE_MS = 3 * OUTBOUND_REQUEST_DEADLINE_MS
+
+/**
  * For an ofetch `onRequest` hook: arm a fresh deadline covering the whole
  * request, response body included, for this one request.
  *
@@ -99,7 +107,7 @@ export async function forEachBounded<T>(
     while (next < items.length) {
       const item = items[next++]!
       try {
-        await withDeadline(Promise.resolve().then(() => work(item)), options.deadlineMs, options.what(item))
+        await withDeadline(work(item), options.deadlineMs, options.what(item))
       }
       catch (error) {
         options.onError(item, error)

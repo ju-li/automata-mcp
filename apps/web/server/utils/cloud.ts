@@ -67,10 +67,10 @@ export function requireHosted(): void {
  * (none existed on the hosted service when this was added); refusing it at
  * request time would read as an outage and mail everyone who uses it.
  *
- * The one rule: checked by `provisionWhatsappInstance`,
- * `provisionTelegramInstance` and both message-database PATCH routes before
- * anything is dialled. The create page hides the option on `/api/hosted`, but
- * that is presentation — this is the control.
+ * The one rule. Check it wherever a request could create or point a
+ * connection at a user's own server, before the address is resolved or
+ * dialled. The create page hides the option on `/api/hosted`, but that is
+ * presentation — this is the control.
  */
 export function ownServersAllowed(): boolean {
   return !hostedMode()

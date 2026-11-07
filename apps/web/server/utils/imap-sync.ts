@@ -82,20 +82,19 @@ export async function runImapSync(): Promise<{ claimed: number, failed: number }
   // `RUN_HARD_LIMIT_MS`: a mailbox server is user-chosen, and a run that never
   // settles would hold this task, and through Nitro's `runTask` every later
   // one, for every other mailbox (GHSA-g2cf-mx92-xc53).
+  const tally = (outcome: SyncOutcome) => {
+    if (outcome === 'synced' || outcome === 'failed') claimed++
+    if (outcome === 'failed') failed++
+  }
   await forEachBounded(instances, {
     concurrency: CONCURRENCY,
     deadlineMs: RUN_HARD_LIMIT_MS + 60_000,
     what: instance => `syncing mailbox ${instance.id}`,
     onError: (instance, error) => {
-      claimed++
-      failed++
+      tally('failed')
       console.error(`[imap-sync] sync of ${instance.id} did not finish`, error)
     },
-  }, async (instance) => {
-    const outcome = await syncMailbox(instance)
-    if (outcome === 'synced' || outcome === 'failed') claimed++
-    if (outcome === 'failed') failed++
-  })
+  }, async instance => tally(await syncMailbox(instance)))
   return { claimed, failed }
 }
 

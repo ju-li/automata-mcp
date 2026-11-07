@@ -209,14 +209,20 @@ const GRACE_MS = 10 * 60 * 1000
  * sweep can land together — registering a Telegram webhook to a new URL makes
  * the bridge deliver the current state straight away — and two evaluations that
  * both read `alerted_at` empty would both mail.
+ *
+ * Bounded for every caller, sweep and webhook alike: a bring-your-own server
+ * that never finishes its answer must not hold either (GHSA-g2cf-mx92-xc53).
+ * The deadline stops the waiting, not the evaluation, which stays in
+ * `inFlight` until it settles — so a late one can never run beside a second
+ * and mail twice.
  */
 export function evaluateConnectionHealth(instance: AppInstance): Promise<void> {
-  const running = inFlight.get(instance.id)
-  if (running) return running
-
-  const evaluation = evaluate(instance).finally(() => inFlight.delete(instance.id))
-  inFlight.set(instance.id, evaluation)
-  return evaluation
+  let evaluation = inFlight.get(instance.id)
+  if (!evaluation) {
+    evaluation = evaluate(instance).finally(() => inFlight.delete(instance.id))
+    inFlight.set(instance.id, evaluation)
+  }
+  return withDeadline(evaluation, CONNECTION_WORK_DEADLINE_MS, `evaluating connection ${instance.id}`)
 }
 
 /** Per worker, like the webhook cooldown. The sweep and the webhook run in the same one. */
@@ -278,12 +284,6 @@ async function evaluate(instance: AppInstance): Promise<void> {
   if (sent) await updateRow('instances', instance.id, { alerted_at: new Date() })
 }
 
-/**
- * How long one connection's evaluation may hold a sweep or re-registration
- * worker. Above two request deadlines back to back — `readStatus` can make a
- * live read and then an API row read — plus mail. See deadline.ts.
- */
-const EVALUATION_DEADLINE_MS = 90_000
 /** Connections evaluated at once, so a few slow servers cannot add their deadlines up past the five-minute interval. */
 const SWEEP_CONCURRENCY = 4
 
@@ -324,7 +324,7 @@ export async function sweepConnectionAlerts(): Promise<{ checked: number, failed
 
   await forEachBounded(instances, {
     concurrency: SWEEP_CONCURRENCY,
-    deadlineMs: EVALUATION_DEADLINE_MS,
+    deadlineMs: CONNECTION_WORK_DEADLINE_MS,
     what: instance => `evaluating connection ${instance.id}`,
     onError: (instance, error) => {
       failed++
@@ -353,7 +353,7 @@ export async function reregisterConnectionWebhooks(): Promise<{ registered: numb
   // never finishes its answer must not stall registration for everyone after it.
   await forEachBounded(instances, {
     concurrency: SWEEP_CONCURRENCY,
-    deadlineMs: EVALUATION_DEADLINE_MS,
+    deadlineMs: CONNECTION_WORK_DEADLINE_MS,
     what: instance => `registering connection ${instance.id}'s webhook`,
     // Other failures stay as quiet as before; a missed deadline is new, and a
     // handled one is otherwise invisible.

@@ -359,23 +359,25 @@ async function create() {
 
           <!-- Telegram -->
           <template v-else-if="kind === 'telegram'">
-            <Separator v-if="!hosted" />
-            <div v-if="!hosted" class="flex items-start gap-2">
-              <Checkbox
-                id="own-bridge"
-                :model-value="ownServer"
-                @update:model-value="value => ownServer = value === true"
-              />
-              <div class="space-y-1">
-                <Label for="own-bridge" class="font-normal">
-                  Use my own Telegram bridge
-                </Label>
-                <p class="text-xs text-muted-foreground">
-                  Bring your own bridge for more privacy. Leave it off to use the
-                  one this app is configured with.
-                </p>
+            <template v-if="!hosted">
+              <Separator />
+              <div class="flex items-start gap-2">
+                <Checkbox
+                  id="own-bridge"
+                  :model-value="ownServer"
+                  @update:model-value="value => ownServer = value === true"
+                />
+                <div class="space-y-1">
+                  <Label for="own-bridge" class="font-normal">
+                    Use my own Telegram bridge
+                  </Label>
+                  <p class="text-xs text-muted-foreground">
+                    Bring your own bridge for more privacy. Leave it off to use the
+                    one this app is configured with.
+                  </p>
+                </div>
               </div>
-            </div>
+            </template>
 
             <template v-if="!ownServer">
               <NoticeCard
@@ -420,7 +422,7 @@ async function create() {
               </NoticeCard>
             </template>
 
-            <div v-if="ownServer && !hosted" class="space-y-4 rounded-md border p-3">
+            <div v-if="ownServer" class="space-y-4 rounded-md border p-3">
               <div class="space-y-2">
                 <Label for="bridge-url">Bridge URL</Label>
                 <Input
@@ -464,25 +466,27 @@ async function create() {
 
           <!-- WhatsApp -->
           <template v-else>
-            <Separator v-if="!hosted" />
-            <div v-if="!hosted" class="flex items-start gap-2">
-              <Checkbox
-                id="own-server"
-                :model-value="ownServer"
-                @update:model-value="value => ownServer = value === true"
-              />
-              <div class="space-y-1">
-                <Label for="own-server" class="font-normal">
-                  Use my own Evolution API server
-                </Label>
-                <p class="text-xs text-muted-foreground">
-                  Bring your own server for more privacy. Leave it off to use the
-                  one this app is configured with.
-                </p>
+            <template v-if="!hosted">
+              <Separator />
+              <div class="flex items-start gap-2">
+                <Checkbox
+                  id="own-server"
+                  :model-value="ownServer"
+                  @update:model-value="value => ownServer = value === true"
+                />
+                <div class="space-y-1">
+                  <Label for="own-server" class="font-normal">
+                    Use my own Evolution API server
+                  </Label>
+                  <p class="text-xs text-muted-foreground">
+                    Bring your own server for more privacy. Leave it off to use the
+                    one this app is configured with.
+                  </p>
+                </div>
               </div>
-            </div>
+            </template>
 
-            <div v-if="ownServer && !hosted" class="space-y-4 rounded-md border p-3">
+            <div v-if="ownServer" class="space-y-4 rounded-md border p-3">
               <div class="space-y-2">
                 <Label for="server-url">Server URL</Label>
                 <Input

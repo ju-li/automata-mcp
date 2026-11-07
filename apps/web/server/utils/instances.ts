@@ -203,14 +203,14 @@ export async function provisionWhatsappInstance(
 ): Promise<AppInstance> {
   const { label, server } = input
 
-  // First, before the address is resolved or dialled: on the hosted service a
-  // user's own server is refused outright. See `ownServersAllowed`.
-  if (server) assertOwnServersAllowed('Evolution server', actor.org.id)
-
-  // Guarded before the first request rather than only inside the client, so a
+  // Refused on the hosted service before the address is even resolved; then
+  // guarded before the first request rather than only inside the client, so a
   // bad URL fails the create with a message about the URL instead of surfacing
   // as a failed Evolution call.
-  if (server) await assertPublicUrl(server.baseUrl, 'Evolution server URL')
+  if (server) {
+    assertOwnServersAllowed('Evolution server', actor.org.id)
+    await assertPublicUrl(server.baseUrl, 'Evolution server URL')
+  }
 
   // Proved before anything is provisioned, so a bad database URL costs nothing
   // — no Evolution instance to tear down, no row to clean up. `requireTable`

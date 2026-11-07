@@ -136,13 +136,13 @@ export type BridgeSent = {
   date: string
 }
 
+const BRIDGE_REQUEST_DEADLINE_MS = 20_000
+
 /**
  * A `$fetch` bound to one bridge and one bearer key. Same check-not-pin caveat
  * as `createEvolutionClient`: `$fetch` resolves DNS itself, so the guard narrows
  * the rebinding window rather than closing it.
  */
-const BRIDGE_REQUEST_DEADLINE_MS = 20_000
-
 function bridgeFetch(baseUrl: string, key: string, userSupplied: boolean) {
   return $fetch.create({
     baseURL: baseUrl,

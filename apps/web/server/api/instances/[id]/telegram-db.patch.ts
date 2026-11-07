@@ -16,8 +16,7 @@ const body = z.object({
  */
 export default defineEventHandler(async (event) => {
   const { instance } = await requireManagedInstanceOfKind(event, getRouterParam(event, 'id'), 'telegram')
-  // After the role check, so a member still gets 403; before anything is dialled.
-  assertOwnServersAllowed('Telegram bridge', instance.org)
+  assertOwnServersAllowed('Telegram bridge', instance.org) // after the role check: a member still gets 403
   const { dbUrl: raw } = await parseBody(event, body)
   const dbUrl = raw.trim()
 
