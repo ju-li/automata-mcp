@@ -531,6 +531,8 @@ Pending invitations admin-only on `/api/org`; member roster not, since "ask admi
 
 Node runs `src/*.ts` directly (type stripping, Node ≥ 22.18), no build step, `erasableSyntaxOnly` on: no enums, namespaces, parameter properties. `pnpm typecheck` doesn't cover it — use `pnpm bridge:typecheck`, or `cd apps/telegram-bridge && node_modules/.bin/tsc --noEmit`.
 
+**Unhandled rejection = whole process down, every tenant** (bridge and `apps/cloud` alike). Request target parsed inside guard (bad one → 400), handler dispatched with `.catch`, never `void`; any promise a route starts and doesn't await gets own `.catch`. `unhandledRejection` in both `main.ts` logs and keeps serving — backstop, not license.
+
 **One process per session, enforced.** Two connections on one auth key make Telegram answer `AUTH_KEY_DUPLICATED` and kill key = QR scan cost — rolling deploy overlapping old and new is exactly that. `locks.ts` takes Postgres advisory lock per session, all on **one dedicated connection**: session-level lock belongs to its backend, so replaced connection silently drops every lock. Backend pid re-checked every 5 s; changed pid *or failed check* stops every client holding one. Neither pool timeout may rotate that connection (`idle_timeout: 0`, `max_lifetime: null`). Lock key = 64 bits of sha256, not `hashtext`'s 32, so two sessions can't block each other.
 
 **State is live, never a column** — WhatsApp lesson. `session_enc` says session exists, `revoked_at` that Telegram refused it; `open` requires connected client whose last probe (`updates.getState`, every 30 s) answered. Revocation recognised by RPC error **code** (`REVOKED` in `sessions.ts`), not teleproto's error classes, which bump can rename; on it sealed session cleared, only new pairing recovers.
