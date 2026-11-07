@@ -209,14 +209,20 @@ const GRACE_MS = 10 * 60 * 1000
  * sweep can land together — registering a Telegram webhook to a new URL makes
  * the bridge deliver the current state straight away — and two evaluations that
  * both read `alerted_at` empty would both mail.
+ *
+ * Bounded for every caller, sweep and webhook alike: a bring-your-own server
+ * that never finishes its answer must not hold either (GHSA-g2cf-mx92-xc53).
+ * The deadline stops the waiting, not the evaluation, which stays in
+ * `inFlight` until it settles — so a late one can never run beside a second
+ * and mail twice.
  */
 export function evaluateConnectionHealth(instance: AppInstance): Promise<void> {
-  const running = inFlight.get(instance.id)
-  if (running) return running
-
-  const evaluation = evaluate(instance).finally(() => inFlight.delete(instance.id))
-  inFlight.set(instance.id, evaluation)
-  return evaluation
+  let evaluation = inFlight.get(instance.id)
+  if (!evaluation) {
+    evaluation = evaluate(instance).finally(() => inFlight.delete(instance.id))
+    inFlight.set(instance.id, evaluation)
+  }
+  return withDeadline(evaluation, CONNECTION_WORK_DEADLINE_MS, `evaluating connection ${instance.id}`)
 }
 
 /** Per worker, like the webhook cooldown. The sweep and the webhook run in the same one. */
@@ -278,14 +284,28 @@ async function evaluate(instance: AppInstance): Promise<void> {
   if (sent) await updateRow('instances', instance.id, { alerted_at: new Date() })
 }
 
+/** Connections evaluated at once, so a few slow servers cannot add their deadlines up past the five-minute interval. */
+const SWEEP_CONCURRENCY = 4
+
 /**
  * The five-minute pass. Registered as the `alerts:sweep` scheduled task.
  *
- * Sequential, and every connection is wrapped on its own: one unreachable
- * Evolution server or Telegram bridge must not decide that the connections after
- * it in the list go unchecked. The failure is logged per connection — a handled error is invisible
- * to Nitro, and "the sweep quietly did half its work" is the exact shape of
- * problem that goes unnoticed for a week.
+ * Every connection is wrapped on its own: one unreachable Evolution server or
+ * Telegram bridge must not decide that the connections after it in the list go
+ * unchecked. The failure is logged per connection — a handled error is
+ * invisible to Nitro, and "the sweep quietly did half its work" is the exact
+ * shape of problem that goes unnoticed for a week.
+ *
+ * **Wrapped means bounded, not just caught (GHSA-g2cf-mx92-xc53).** A `catch`
+ * handles a rejection, never a promise that does not settle — and a
+ * bring-your-own server is chosen by whoever signed up, so it can answer with
+ * headers and then trickle its body for ever. Unbounded, the sweep stalls on
+ * that connection, and Nitro's `runTask` hands every later tick the same pending
+ * run, so no other tenant's connection is ever checked again in this process.
+ * Each evaluation therefore has a deadline, and a few run at once. An
+ * evaluation past its deadline keeps running and may still finish; that is
+ * harmless, since `evaluateConnectionHealth` shares one in-flight evaluation per
+ * connection and writes only what it read.
  *
  * A connection whose status read fails reads as `unknown`, which is unhealthy.
  * That is the honest answer: a connection this server cannot reach is one its
@@ -302,15 +322,15 @@ export async function sweepConnectionAlerts(): Promise<{ checked: number, failed
 
   let failed = 0
 
-  for (const instance of instances) {
-    try {
-      await evaluateConnectionHealth(instance)
-    }
-    catch (error) {
+  await forEachBounded(instances, {
+    concurrency: SWEEP_CONCURRENCY,
+    deadlineMs: CONNECTION_WORK_DEADLINE_MS,
+    what: instance => `evaluating connection ${instance.id}`,
+    onError: (instance, error) => {
       failed++
       console.error(`[alerts] could not evaluate connection ${instance.id} (${instance.name}):`, error)
-    }
-  }
+    },
+  }, instance => evaluateConnectionHealth(instance))
 
   return { checked: instances.length, failed }
 }
@@ -329,9 +349,18 @@ export async function reregisterConnectionWebhooks(): Promise<{ registered: numb
   const instances = await sql<AppInstance[]>`
     SELECT * FROM app.instances WHERE kind IN ('whatsapp', 'telegram') ORDER BY created
   `
-  for (const instance of instances) {
-    await registerWebhookFor(instance).catch(() => {})
-  }
+  // Bounded per connection for the same reason as the sweep: a server that
+  // never finishes its answer must not stall registration for everyone after it.
+  await forEachBounded(instances, {
+    concurrency: SWEEP_CONCURRENCY,
+    deadlineMs: CONNECTION_WORK_DEADLINE_MS,
+    what: instance => `registering connection ${instance.id}'s webhook`,
+    // Other failures stay as quiet as before; a missed deadline is new, and a
+    // handled one is otherwise invisible.
+    onError: (_, error) => {
+      if (error instanceof DeadlineExceededError) console.warn(`[alerts] ${error.message}`)
+    },
+  }, instance => registerWebhookFor(instance))
   return { registered: instances.length }
 }
 

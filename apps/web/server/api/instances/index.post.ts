@@ -14,6 +14,9 @@ import { z } from 'zod'
  * for why pairing our key with their URL, or theirs with ours, is the bug this
  * shape prevents.
  *
+ * `server` is refused on the hosted service (`ownServersAllowed` in cloud.ts),
+ * inside the provision functions, before the address is dialled.
+ *
  * `dbUrl` sits inside `server` because it only means anything for a user's own
  * server, and is optional inside it because reading is the only thing it buys:
  * pairing, listing chats and sending all work without it.

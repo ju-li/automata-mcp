@@ -323,6 +323,13 @@ If the web app is upgraded with `NUXT_BILLING` still set and no `NUXT_CLOUD_URL`
 
 ## Things to keep in mind
 
+- **Hosted mode turns off bring-your-own Evolution servers and Telegram
+  bridges.** Creating a WhatsApp or Telegram connection on a user's own server,
+  or setting a per-connection message database URL, answers 422 and the create
+  page doesn't offer it. Every self-signup is an organization admin, and such a
+  server is an address they chose that this deployment dials on a schedule
+  (GHSA-g2cf-mx92-xc53). Rows created before hosted mode was turned on keep
+  working. IMAP and Postgres connections are unaffected.
 - **An organization deleted by its last member leaving cancels its
   subscription.** When the only member of an organization accepts an
   invitation elsewhere, the old organization is deleted. The cloud service

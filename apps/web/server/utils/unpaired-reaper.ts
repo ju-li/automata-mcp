@@ -87,7 +87,13 @@ export async function reapUnpairedConnections(): Promise<{ candidates: number, r
 }
 
 async function reapOne(instance: AppInstance): Promise<boolean> {
-  const verdict = await pairingEvidence(instance)
+  // Bounded: the evidence comes from the connection's own Evolution server and
+  // message database, which for a bring-your-own one is whoever signed up's to
+  // run — and a server that never finishes its answer would otherwise hold this
+  // run, and through Nitro's `runTask` every later one (GHSA-g2cf-mx92-xc53). A
+  // missed deadline is a read that failed: `unknown`, kept, never deleted.
+  const verdict = await withDeadline(pairingEvidence(instance), CONNECTION_WORK_DEADLINE_MS, `pairing evidence for ${instance.id}`)
+    .catch((): 'unknown' => 'unknown')
 
   if (verdict === 'paired') {
     undecidedLogged.delete(instance.id)
