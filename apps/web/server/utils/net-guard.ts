@@ -68,25 +68,8 @@ export interface ResolvedTarget {
   address: string
 }
 
-/**
- * The eight 16-bit groups of an IPv6 literal, or undefined when it is not one.
- * Handles `::` and a dotted v4 tail; a zone (`%eth0`) is dropped.
- */
-function v6Groups(literal: string): number[] | undefined {
-  let text = literal.split('%')[0]!.toLowerCase()
-  if (isIP(text) !== 6) return undefined
-  const dotted = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text)
-  if (dotted) {
-    const [a, b, c, d] = dotted.slice(1).map(Number) as [number, number, number, number]
-    text = `${text.slice(0, dotted.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`
-  }
-  const [head, tail] = text.split('::') as [string, string | undefined]
-  const parse = (part: string) => (part ? part.split(':').map(h => Number.parseInt(h, 16)) : [])
-  const front = parse(head)
-  const back = tail === undefined ? [] : parse(tail)
-  const groups = tail === undefined ? front : [...front, ...Array<number>(8 - front.length - back.length).fill(0), ...back]
-  return groups.length === 8 ? groups : undefined
-}
+/** An IPv4-mapped address as `URL` writes it: `::ffff:7f00:1`, whatever the input spelling. */
+const V4_MAPPED = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/
 
 /**
  * One spelling per address, so the checks below see what the kernel dials.
@@ -102,17 +85,20 @@ function v6Groups(literal: string): number[] | undefined {
  */
 function canonicalAddress(address: string, family: number): { address: string, family: 4 | 6 } {
   if (family !== 6 && isIP(address) !== 6) return { address, family: 4 }
-  const groups = v6Groups(address)
-  if (!groups) return { address, family: 6 }
-  if (groups.slice(0, 5).every(g => g === 0) && groups[5] === 0xFFFF) {
-    const [hi, lo] = [groups[6]!, groups[7]!]
+  const [bare, zone] = address.split('%') as [string, string | undefined]
+  if (isIP(bare) !== 6) return { address, family: 6 }
+  // WHATWG URL serialisation is the one IPv6 parser here: it expands `::`,
+  // turns a dotted tail into hex and compresses, so every spelling of an
+  // address comes out the same.
+  const compressed = new URL(`http://[${bare}]`).hostname.slice(1, -1)
+  const mapped = V4_MAPPED.exec(compressed)
+  if (mapped) {
+    const [hi, lo] = [Number.parseInt(mapped[1]!, 16), Number.parseInt(mapped[2]!, 16)]
     return { address: `${hi >> 8}.${hi & 0xFF}.${lo >> 8}.${lo & 0xFF}`, family: 4 }
   }
-  const compressed = new URL(`http://[${groups.map(g => g.toString(16)).join(':')}]`).hostname.slice(1, -1)
   // The zone stays on: a link-local address is dialled through it, and this
   // is the address callers pin.
-  const zone = address.includes('%') ? address.slice(address.indexOf('%')) : ''
-  return { address: compressed + zone, family: 6 }
+  return { address: zone === undefined ? compressed : `${compressed}%${zone}`, family: 6 }
 }
 
 /**

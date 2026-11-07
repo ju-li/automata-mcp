@@ -60,6 +60,12 @@ export function clientIp(event: H3Event): string {
   return last ?? getRequestIP(event) ?? 'unknown'
 }
 
+/** The 429 every throttle here answers, with `Retry-After` for the time left. */
+function throwThrottled(event: H3Event, retryInMs: number, message: string): never {
+  setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil(retryInMs / 1000)))
+  throw createError({ statusCode: 429, statusMessage: message })
+}
+
 function keysFor(event: H3Event, email: string): string[] {
   return [`email:${normaliseEmail(email)}`, `ip:${clientIp(event)}`]
 }
@@ -85,11 +91,7 @@ export function claimPasswordAttempt(event: H3Event, email: string): number {
   if (retryAt) {
     // One message for both keys: which limit hit would say whether the address
     // has an account behind it.
-    setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil((retryAt - now) / 1000)))
-    throw createError({
-      statusCode: 429,
-      statusMessage: 'Too many failed sign-in attempts. Try again in a few minutes.',
-    })
+    throwThrottled(event, retryAt - now, 'Too many failed sign-in attempts. Try again in a few minutes.')
   }
 
   for (const key of keys) failures.set(key, [...(failures.get(key) ?? []), now])
@@ -129,11 +131,7 @@ export function assertSignupCodeAllowed(event: H3Event): void {
   if (times.length < LOGIN_FAILURE_LIMIT) return
 
   const retryAt = times[times.length - LOGIN_FAILURE_LIMIT]! + LOGIN_WINDOW_MS
-  setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil((retryAt - now) / 1000)))
-  throw createError({
-    statusCode: 429,
-    statusMessage: 'Too many wrong signup codes. Try again in a few minutes.',
-  })
+  throwThrottled(event, retryAt - now, 'Too many wrong signup codes. Try again in a few minutes.')
 }
 
 export function recordSignupCodeFailure(event: H3Event): void {
@@ -164,11 +162,7 @@ export function assertVerifyCodeAllowed(event: H3Event, email: string): void {
   if (times.length < LOGIN_FAILURE_LIMIT) return
 
   const retryAt = times[times.length - LOGIN_FAILURE_LIMIT]! + LOGIN_WINDOW_MS
-  setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil((retryAt - now) / 1000)))
-  throw createError({
-    statusCode: 429,
-    statusMessage: 'Too many wrong codes for this address. Use the link in the email, or try again in a few minutes.',
-  })
+  throwThrottled(event, retryAt - now, 'Too many wrong codes for this address. Use the link in the email, or try again in a few minutes.')
 }
 
 export function recordVerifyCodeFailure(email: string): void {

@@ -31,32 +31,28 @@
  * one toast a minute, not one every two seconds.
  */
 export default defineNuxtPlugin((nuxtApp) => {
-  const checked = new WeakSet<object>()
-
-  function ignorable(error: unknown): boolean {
-    if (!error || typeof error !== 'object') return true
-    const e = error as { name?: string, statusCode?: number, cause?: { name?: string }, response?: { status?: number } }
-    if (e.name === 'AbortError' || e.cause?.name === 'AbortError') return true
-    const status = e.response?.status ?? e.statusCode
-    return status === 401
+  function isAbort(error: object): boolean {
+    const e = error as { name?: string, cause?: { name?: string } }
+    return e.name === 'AbortError' || e.cause?.name === 'AbortError'
   }
 
   function report(error: unknown): void {
-    if (ignorable(error) || isErrorHandled(error)) return
+    if (!error || typeof error !== 'object' || isAbort(error) || isErrorHandled(error)) return
+    // The status as `errorDetails` reads it, so a wrapped or serialised 401
+    // counts as one too.
     const details = errorDetails(error)
+    if (details.status === 401) return
     // A bug's own message ("Cannot read properties of undefined") is detail,
     // not a headline a person can act on.
     const isRequest = details.status !== undefined || details.network || details.path !== undefined
     showErrorToast(error, { background: true, ...(!isRequest && { title: 'Something went wrong on this page' }) })
   }
 
+  // No separate "already checked" set: an error once toasted is marked handled
+  // by showErrorToast, so a later pass skips it in report().
   function checkFetchErrors(): void {
     setTimeout(() => {
-      for (const error of Object.values(nuxtApp.payload._errors ?? {})) {
-        if (!error || typeof error !== 'object' || checked.has(error)) continue
-        checked.add(error)
-        report(error)
-      }
+      for (const error of Object.values(nuxtApp.payload._errors ?? {})) report(error)
     }, 0)
   }
 

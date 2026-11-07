@@ -45,8 +45,8 @@ export async function reapUnpairedConnections(): Promise<{ candidates: number, r
   const ttlSecs = UNPAIRED_TTL_MS / 1000
   const leaseSecs = REAP_LEASE_MS / 1000
 
-  const candidates = await sql<Array<{ id: string }>>`
-    SELECT id FROM app.instances
+  const candidates = await sql<Array<{ id: string, org: string }>>`
+    SELECT id, org FROM app.instances
     WHERE kind = 'whatsapp'
       AND paired_at IS NULL
       AND created < now() - make_interval(secs => ${ttlSecs})
@@ -58,7 +58,18 @@ export async function reapUnpairedConnections(): Promise<{ candidates: number, r
   let reaped = 0
   let failed = 0
 
-  for (const { id } of candidates) {
+  // A few at once, like the alert sweep: each candidate may wait out a
+  // deadline on its own server, and one at a time a batch could outlast the
+  // task's interval. The per-row lease makes concurrent claims safe. No
+  // deadline here — reapOne bounds the read that can hang.
+  await forEachBounded(candidates, {
+    concurrency: CONNECTION_WORK_CONCURRENCY,
+    onError: ({ id, org }, error) => {
+      failed++
+      // Handled, so Nitro logs nothing. The lease lapses and the next run retries.
+      console.error(`[reaper] could not delete unpaired connection ${id} (org ${org}):`, error)
+    },
+  }, async ({ id }) => {
     // The claim re-reads the row, so a pairing recorded since the SELECT, or
     // another replica's lease, ends this here.
     const [instance] = await sql<AppInstance[]>`
@@ -71,17 +82,8 @@ export async function reapUnpairedConnections(): Promise<{ candidates: number, r
         AND (reap_lease_until IS NULL OR reap_lease_until < now())
       RETURNING *
     `
-    if (!instance) continue
-
-    try {
-      if (await reapOne(instance)) reaped++
-    }
-    catch (error) {
-      failed++
-      // Handled, so Nitro logs nothing. The lease lapses and the next run retries.
-      console.error(`[reaper] could not delete unpaired connection ${instance.id} (org ${instance.org}):`, error)
-    }
-  }
+    if (instance && await reapOne(instance)) reaped++
+  })
 
   return { candidates: candidates.length, reaped, failed }
 }

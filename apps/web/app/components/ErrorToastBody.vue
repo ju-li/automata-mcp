@@ -25,12 +25,8 @@ const copied = ref<'idle' | 'done' | 'failed'>('idle')
 
 const showMessage = computed(() => props.details.message !== props.title)
 
-const summary = computed(() => {
-  const d = props.details
-  const status = d.status ? `${d.status}${d.statusText ? ` ${d.statusText}` : ''}` : d.network ? 'No response' : undefined
-  const request = d.path ? `${d.method ?? 'GET'} ${d.path}` : undefined
-  return [status, request].filter(Boolean).join(' · ')
-})
+const summary = computed(() =>
+  [errorStatusLine(props.details), errorRequestLine(props.details)].filter(Boolean).join(' · '))
 
 /** `pg_connect_failed · 28P01` — what to search the docs or logs for. */
 const codes = computed(() => [props.details.code, props.details.reason].filter(Boolean).join(' · '))

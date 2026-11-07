@@ -44,6 +44,13 @@ export const OUTBOUND_REQUEST_DEADLINE_MS = 30_000
 export const CONNECTION_WORK_DEADLINE_MS = 3 * OUTBOUND_REQUEST_DEADLINE_MS
 
 /**
+ * Connections worked on at once in a scheduled task (alert sweep, webhook
+ * registration, unpaired reaper), so a few slow servers cannot add their
+ * deadlines up past the task's interval.
+ */
+export const CONNECTION_WORK_CONCURRENCY = 4
+
+/**
  * For an ofetch `onRequest` hook: arm a fresh deadline covering the whole
  * request, response body included, for this one request.
  *
@@ -85,8 +92,9 @@ export function withDeadline<T>(work: Promise<T>, ms: number, what: string): Pro
 
 /**
  * Run `work` over `items` with at most `concurrency` at once, each bounded by
- * `deadlineMs`. Never rejects: a failure or a missed deadline is passed to
- * `onError` for that item and the rest carry on.
+ * `deadlineMs` when given — leave it off when `work` already bounds itself.
+ * Never rejects: a failure or a missed deadline is passed to `onError` for that
+ * item and the rest carry on.
  *
  * The bound is what makes a scheduled task over tenants' servers safe; the
  * concurrency keeps a handful of slow servers from adding their deadlines up
@@ -96,10 +104,11 @@ export async function forEachBounded<T>(
   items: readonly T[],
   options: {
     concurrency: number
-    deadlineMs: number
-    what: (item: T) => string
     onError: (item: T, error: unknown) => void
-  },
+  } & (
+    | { deadlineMs: number, what: (item: T) => string }
+    | { deadlineMs?: undefined, what?: undefined }
+  ),
   work: (item: T) => Promise<unknown>,
 ): Promise<void> {
   let next = 0
@@ -107,7 +116,9 @@ export async function forEachBounded<T>(
     while (next < items.length) {
       const item = items[next++]!
       try {
-        await withDeadline(work(item), options.deadlineMs, options.what(item))
+        await (options.deadlineMs === undefined
+          ? work(item)
+          : withDeadline(work(item), options.deadlineMs, options.what(item)))
       }
       catch (error) {
         options.onError(item, error)
