@@ -1,8 +1,8 @@
 import { isIP } from 'node:net'
 import { ImapFlow } from 'imapflow'
 import type { ImapFlowError, MessageStructureObject } from 'imapflow'
-import { convert as htmlToText } from 'html-to-text'
 import type { AppInstance } from './app-db'
+import { htmlToText } from './html-text'
 
 /**
  * Everything that speaks IMAP to a user's mail server: opening a connection,
@@ -534,9 +534,8 @@ export async function fetchMessageBody(instance: AppInstance, ref: StoredMessage
     }
     const { buffer, cut } = await collect(download.content, BODY_MAX_BYTES)
     const raw = buffer.toString('utf8')
-    const text = source === 'html'
-      ? htmlToText(raw, { wordwrap: false, selectors: [{ selector: 'img', format: 'skip' }] })
-      : raw
+    // Synchronous on the shared event loop: html-text.ts keeps it linear.
+    const text = source === 'html' ? htmlToText(raw) : raw
     return { text: text.replace(/\0/g, '').replace(/\r\n/g, '\n'), source, cutAtSource: cut }
   })
 }
