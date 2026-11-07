@@ -244,6 +244,8 @@ Deliberate non-goals, not oversights: deletion dropped like any control record, 
 
 **Token redaction:** `server/plugins/redact-mcp.ts` scrubs `event.node.req.originalUrl` (what Nitro's error handler reads — scrubbing `event.path` alone insufficient) and sets `event.context.noLog`. `mcp.logging` off for same reason. Route any added error reporter/logger through `redactPath` / `redactHeaders` in `server/utils/redact.ts`.
 
+**Request bodies capped before buffering** (`body-limit.ts`): `middleware/00-body-limit.ts` reads every non-MCP body into h3's raw-body cache under per-path cap (64 KiB; token scope 1 MiB; webhooks 256 KiB) → 413, so later `readBody` replays bounded buffer. `/mcp` capped in `server/mcp/index.ts` *after* auth (2 MiB). Never attach own `data` listener; `mcp.logging` stays off also because toolkit's evlog tag reads body before auth.
+
 ## Credential rules that are easy to break later
 
 **No global-key fallback in per-instance credentials.** `credentialsForInstance()` returns `undefined` when instance has no `api_key`; callers must fail. Global-key fallback hands any MCP token holder *every* account on that Evolution server. Global keys have exactly two callers, both in `server/utils/instances.ts`: create and delete.

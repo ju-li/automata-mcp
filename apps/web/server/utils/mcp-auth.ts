@@ -316,6 +316,19 @@ export function useMcpAuth(): McpAuth {
  * clients can surface something useful. Never return 200 on an auth failure —
  * a 200 with an error body reads as "the tool ran and said no".
  */
+/**
+ * A body over MCP_BODY_LIMIT (413) or one that could not be read (400),
+ * JSON-RPC shaped like every other refusal on this surface. `connection: close`
+ * because the rest of an oversized body is never read.
+ */
+export function mcpBodyRefused(status: 400 | 413): Response {
+  const message = status === 413 ? `Request body is larger than ${MCP_BODY_LIMIT} bytes` : 'Request body could not be read'
+  return new Response(
+    JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32600, message } }),
+    { status, headers: { 'content-type': 'application/json', 'connection': 'close' } },
+  )
+}
+
 export function mcpUnauthorized(reason = 'invalid_token'): Response {
   return new Response(
     JSON.stringify({
