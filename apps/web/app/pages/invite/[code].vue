@@ -33,7 +33,9 @@ interface InvitePreview {
   emailMatches?: boolean
 }
 
-const { data, status } = await useFetch<InvitePreview>(() => `/api/invites/${code.value}`)
+const { data, status, error } = await useFetch<InvitePreview>(() => `/api/invites/${code.value}`)
+// A bad or spent code gets its own card below, not a toast.
+handlesErrorItself(error)
 
 const password = ref('')
 const name = ref('')

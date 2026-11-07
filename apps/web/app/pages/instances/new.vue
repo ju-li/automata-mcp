@@ -136,6 +136,13 @@ const groups: {
 // bridge). All or nothing — half of it is not completed from our configuration,
 // see evolutionAdminCredentials() and telegramAdminCredentials().
 const ownServer = ref(false)
+// Bring-your-own is self-hosted only: the hosted service refuses it
+// (`ownServersAllowed` in server/utils/cloud.ts), so the option is not offered.
+// Hiding it is presentation; the server is the control.
+const hosted = useHosted()
+watch(hosted, (isHosted) => {
+  if (isHosted) ownServer.value = false
+}, { immediate: true })
 const serverUrl = ref('')
 const serverKey = ref('')
 // Optional even with a server: it only buys reading. Pairing and sending work
@@ -352,23 +359,25 @@ async function create() {
 
           <!-- Telegram -->
           <template v-else-if="kind === 'telegram'">
-            <Separator />
-            <div class="flex items-start gap-2">
-              <Checkbox
-                id="own-bridge"
-                :model-value="ownServer"
-                @update:model-value="value => ownServer = value === true"
-              />
-              <div class="space-y-1">
-                <Label for="own-bridge" class="font-normal">
-                  Use my own Telegram bridge
-                </Label>
-                <p class="text-xs text-muted-foreground">
-                  Bring your own bridge for more privacy. Leave it off to use the
-                  one this app is configured with.
-                </p>
+            <template v-if="!hosted">
+              <Separator />
+              <div class="flex items-start gap-2">
+                <Checkbox
+                  id="own-bridge"
+                  :model-value="ownServer"
+                  @update:model-value="value => ownServer = value === true"
+                />
+                <div class="space-y-1">
+                  <Label for="own-bridge" class="font-normal">
+                    Use my own Telegram bridge
+                  </Label>
+                  <p class="text-xs text-muted-foreground">
+                    Bring your own bridge for more privacy. Leave it off to use the
+                    one this app is configured with.
+                  </p>
+                </div>
               </div>
-            </div>
+            </template>
 
             <template v-if="!ownServer">
               <NoticeCard
@@ -383,7 +392,7 @@ async function create() {
                     <span class="font-mono">TELEGRAM_API_ID</span> and
                     <span class="font-mono">TELEGRAM_API_HASH</span> on the Telegram
                     bridge service and redeploy it. If you don't run this deployment,
-                    ask whoever does — or use your own bridge.
+                    ask whoever does<template v-if="!hosted"> — or use your own bridge</template>.
                   </p>
                 </template>
               </NoticeCard>
@@ -395,7 +404,7 @@ async function create() {
                   <p class="mt-1 text-sm text-muted-foreground">
                     Set <span class="font-mono">NUXT_TELEGRAM_URL</span> and
                     <span class="font-mono">NUXT_TELEGRAM_ADMIN_KEY</span> on the web
-                    service to use one, or use your own bridge.
+                    service to use one<template v-if="!hosted">, or use your own bridge</template>.
                   </p>
                 </template>
               </NoticeCard>
@@ -457,23 +466,25 @@ async function create() {
 
           <!-- WhatsApp -->
           <template v-else>
-            <Separator />
-            <div class="flex items-start gap-2">
-              <Checkbox
-                id="own-server"
-                :model-value="ownServer"
-                @update:model-value="value => ownServer = value === true"
-              />
-              <div class="space-y-1">
-                <Label for="own-server" class="font-normal">
-                  Use my own Evolution API server
-                </Label>
-                <p class="text-xs text-muted-foreground">
-                  Bring your own server for more privacy. Leave it off to use the
-                  one this app is configured with.
-                </p>
+            <template v-if="!hosted">
+              <Separator />
+              <div class="flex items-start gap-2">
+                <Checkbox
+                  id="own-server"
+                  :model-value="ownServer"
+                  @update:model-value="value => ownServer = value === true"
+                />
+                <div class="space-y-1">
+                  <Label for="own-server" class="font-normal">
+                    Use my own Evolution API server
+                  </Label>
+                  <p class="text-xs text-muted-foreground">
+                    Bring your own server for more privacy. Leave it off to use the
+                    one this app is configured with.
+                  </p>
+                </div>
               </div>
-            </div>
+            </template>
 
             <div v-if="ownServer" class="space-y-4 rounded-md border p-3">
               <div class="space-y-2">

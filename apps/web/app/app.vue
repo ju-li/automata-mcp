@@ -4,6 +4,6 @@
     <NuxtLayout>
       <NuxtPage />
     </NuxtLayout>
-    <Toaster rich-colors position="top-center" />
+    <Toaster rich-colors position="top-right" />
   </div>
 </template>

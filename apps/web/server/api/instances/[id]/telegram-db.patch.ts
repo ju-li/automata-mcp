@@ -11,10 +11,12 @@ const body = z.object({
  * The Telegram counterpart of `evolution-db.patch.ts`, and refused on the
  * deployment's own bridge for the same reason: that connection already reads
  * through NUXT_TELEGRAM_DATABASE_URL, and a stored value silently outranking the
- * operator's configuration would be very hard to explain later.
+ * operator's configuration would be very hard to explain later. Refused
+ * outright on the hosted service (`ownServersAllowed`).
  */
 export default defineEventHandler(async (event) => {
   const { instance } = await requireManagedInstanceOfKind(event, getRouterParam(event, 'id'), 'telegram')
+  assertOwnServersAllowed('Telegram bridge', instance.org) // after the role check: a member still gets 403
   const { dbUrl: raw } = await parseBody(event, body)
   const dbUrl = raw.trim()
 

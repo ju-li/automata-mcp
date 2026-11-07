@@ -213,8 +213,9 @@ What the connector does with them:
   labels every hit with one id per person. A token reads only the halves it is
   scoped to and is told, as a count, when part of the conversation is outside
   its scope. A chat with no link says so (`linkUnknown`) where a second part
-  could exist. The dashboard's Chats *card* still shows Evolution's own count,
-  which is not comparable.
+  could exist. Links are re-read every half hour, so a link revealed by a new
+  message can take that long to merge the two rows. The dashboard's Chats
+  *card* still shows Evolution's own count, which is not comparable.
 
 What it can't do yet:
 
@@ -366,6 +367,10 @@ Caveats worth knowing before you rely on it:
   `instanceId` only; `remoteJid` lives inside a JSONB column with no index.
 
 ## Bring your own Evolution server
+
+**Self-hosted only.** The hosted service refuses it (422) and doesn't offer the
+option: there, any self-signup could point our scheduled tasks at a server they
+control. Self-hosted deployments are unaffected.
 
 A WhatsApp connection can be created against a user's own Evolution server: the
 create form takes the base URL and that server's `AUTHENTICATION_API_KEY`, and
