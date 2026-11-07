@@ -69,5 +69,7 @@ Telegram bridge database (`NUXT_TELEGRAM_DATABASE_URL`) is always refused.
 
 The guard runs whenever a connection is opened, not only when it is saved, so
 turning the setting off stops existing connections to private addresses. The
-approved address is pinned, so the driver cannot resolve the name to somewhere
-else afterwards — except for an IPv6 address, which is checked but not pinned.
+approved address — IPv4 or IPv6 — is pinned, so the driver cannot resolve the name
+to somewhere else afterwards. A connection string must name exactly one host, so
+one listing several (`host1,host2`) is refused, and an `@` or `#` in the user
+name or password must be percent-encoded (`%40`, `%23`).

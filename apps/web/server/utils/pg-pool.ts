@@ -28,6 +28,18 @@ import type { AppInstance } from './app-db'
  * for the driver's cannot exist, because the driver never performs one. This is
  * the half of the DNS-rebinding problem that the Evolution path (which goes
  * through `$fetch`, which resolves for itself) cannot close today.
+ *
+ * **The pin is the only host the driver ever sees, IPv6 included.** postgres.js
+ * parses a DSN with its own `parseUrl`, which disagrees with the WHATWG `URL`
+ * the guard reads: it takes the authority after the *first* `@` (WHATWG: the
+ * last), and reads a comma in it as a multihost list. So
+ * `postgres://u:pw@127.0.0.1:5432,x@[2606:4700::1111]/db` showed the guard a
+ * public IPv6 literal while the driver dialled 127.0.0.1:5432. Two rules close
+ * it, and neither alone is enough: every guarded pool passes the approved
+ * address as an array (`driverOptions`), which postgres.js uses verbatim, and
+ * `assertDriverAgrees` refuses a DSN whose authority the two parsers would split
+ * differently, so the user, password and database the driver sends are the ones
+ * the guard saw too.
  */
 
 const PER_POOL_MAX = 3
@@ -81,8 +93,52 @@ export function describeDsn(dsn: string): { host: string, port: number, database
   }
 }
 
+/**
+ * Refuse a DSN that postgres.js's own `parseUrl` would read differently from
+ * `describeDsn`.
+ *
+ * Mirrors the driver's split verbatim — authority = everything after `://` up
+ * to the first `/` or `?` — and refuses each shape where the two disagree:
+ *
+ * - more than one `@`: the driver's userinfo ends at the first, WHATWG's at the
+ *   last, so the "host" each one sees is a different string;
+ * - a `,`: the driver reads a multihost list and dials every entry in turn;
+ * - a `#`: WHATWG ends the authority there, the driver does not;
+ * - a `%` in the host half: the driver `decodeURIComponent`s it (so `%2C`
+ *   becomes a multihost comma), WHATWG keeps a non-special scheme's host opaque.
+ *
+ * Only for guarded (user-supplied) DSNs. Our own configured URLs are not run
+ * through the guard and may use whatever postgres.js accepts.
+ */
+function assertDriverAgrees(dsn: string): void {
+  const authority = dsn.slice(dsn.indexOf('://') + 3).split(/[?/]/)[0] ?? ''
+  const at = authority.lastIndexOf('@')
+  const userinfo = at === -1 ? '' : authority.slice(0, at)
+  const host = authority.slice(at + 1)
+
+  if (userinfo.includes('@')) {
+    throw createError({
+      statusCode: 422,
+      message: 'Connection string has more than one @. Percent-encode an @ in the user name or password as %40.',
+    })
+  }
+  if (authority.includes(',')) {
+    throw createError({ statusCode: 422, message: 'Connection string names more than one host; only one is supported.' })
+  }
+  if (authority.includes('#')) {
+    throw createError({
+      statusCode: 422,
+      message: 'Connection string has a # before its database name. Percent-encode a # in the user name or password as %23.',
+    })
+  }
+  if (host.includes('%')) {
+    throw createError({ statusCode: 422, message: 'Connection string host must not be percent-encoded.' })
+  }
+}
+
 /** Parse, then run the host guard. Throws 422 with something a person can act on. */
 export async function resolvePgTarget(dsn: string): Promise<PgTarget> {
+  assertDriverAgrees(dsn)
   const parsed = describeDsn(dsn)
   const approved = await assertPublicTarget(parsed.host, parsed.port, 'Database host')
   return { ...parsed, address: approved.address }
@@ -118,17 +174,24 @@ function sslFor(target: PgTarget): postgres.Options<Record<string, never>>['ssl'
 function driverOptions(target: PgTarget, options: { guard: boolean, max: number, statementTimeoutMs: number, readOnly?: boolean, jit?: boolean }) {
   const ssl = sslFor(target)
 
+  if (options.guard && !target.address) {
+    // Never fall back to letting the driver parse the host of a guarded DSN:
+    // that is the parser differential `assertDriverAgrees` documents.
+    throw createError({ statusCode: 500, message: 'Database host was not approved.' })
+  }
+
   return {
-    // The pin. postgres.js prefers this over the URL's hostname.
+    // The pin. postgres.js prefers this over the URL's hostname — and over its
+    // own multihost parse of the URL, which is what makes it the pin.
     //
-    // Skipped for an IPv6 address, and that is not optional: postgres.js parses
-    // its `host` option with `host.split(':')[0]` and takes the port from
-    // `split(':')[1]`, so pinning `2606:4700::6810:85e5` dials host "2606" on
-    // port 4700 and every IPv6-only provider (Supabase direct connections among
-    // them) fails to connect at all. The guard still ran and still refused a
-    // private address; only the pin is given up, so this host keeps the
-    // check-don't-pin posture the Evolution path documents.
-    ...(options.guard && canPin(target) && { host: target.address, port: target.port }),
+    // **Arrays, never strings.** A string `host` goes through postgres.js's
+    // `host.split(',').map(x => x.split(':')[0])`, so `2606:4700::6810:85e5`
+    // would dial host "2606" on port 4700; this pin used to be skipped for IPv6
+    // for that reason, which handed the DSN back to the driver's own parser.
+    // An array is used verbatim (`Array.isArray(host) ? host : …`, likewise
+    // `port`), and `net.connect` takes an unbracketed IPv6 literal, so every
+    // approved address is pinned, whatever its family.
+    ...(options.guard && pinTo(target)),
     // Only when there is one: an explicit `ssl: undefined` still counts as
     // present to postgres.js's `k in o ? o[k] : query[k]`, which would override
     // a DSN's own `?ssl=true` or `?sslrootcert=…` and silently connect in the
@@ -154,9 +217,19 @@ function driverOptions(target: PgTarget, options: { guard: boolean, max: number,
   }
 }
 
-/** postgres.js cannot express an IPv6 host in its `host` option. See `driverOptions`. */
-function canPin(target: PgTarget): boolean {
-  return target.address !== '' && !target.address.includes(':')
+/**
+ * The pin, as the one-element arrays postgres.js uses verbatim. See `driverOptions`.
+ *
+ * The cast is the driver's typings, not ours: `parseOptions` accepts an array
+ * for both (`Array.isArray(host) ? host : …`) and dials `host[i]` / `port[i]`,
+ * but `Options` declares `host: string` and `port: number`. Same situation as
+ * the `simple` flag `unsafeSingle()` casts for. Re-verify on a postgres.js bump.
+ */
+function pinTo(target: PgTarget): { host: string, port: number } {
+  return {
+    host: [target.address] as unknown as string,
+    port: [target.port] as unknown as number,
+  }
 }
 
 export interface KeyedPoolOptions {
