@@ -1,6 +1,7 @@
 import type { Sql } from 'postgres'
 import postgres from 'postgres'
 import type { AppInstance } from './app-db'
+import type { KeyedResourceSpec } from './keyed-resource'
 
 /**
  * Every Postgres connection this app opens — a user's own database, and
@@ -271,7 +272,7 @@ export interface KeyedPoolOptions {
   jit?: boolean
   /**
    * Destroy a connection once one answer passes this many bytes, before the
-   * driver has buffered the rest. See `pg-socket.ts`. Set by `pgFor` only.
+   * driver has buffered the rest. See `pg-socket.ts`. Set by `withPg` only.
    */
   maxResponseBytes?: number
 }
@@ -286,7 +287,19 @@ export interface KeyedPoolOptions {
  * cannot collide on one instance id.
  */
 export async function keyedPool(key: string, dsn: string, options: KeyedPoolOptions): Promise<Sql> {
-  return keyedResource<Sql>(key, dsn, {
+  return keyedResource<Sql>(key, dsn, poolSpec(key, dsn, options))
+}
+
+/**
+ * `keyedPool`, leased for as long as `fn` runs, so the pool is not swept,
+ * evicted or drained under a query still running on it. See `withKeyedResource`.
+ */
+export async function withKeyedPool<R>(key: string, dsn: string, options: KeyedPoolOptions, fn: (sql: Sql) => Promise<R>): Promise<R> {
+  return withKeyedResource<Sql, R>(key, dsn, poolSpec(key, dsn, options), fn)
+}
+
+function poolSpec(key: string, dsn: string, options: KeyedPoolOptions): KeyedResourceSpec<Sql> {
+  return {
     build: async () => {
       // Unguarded means unpinned: with no approved address there is nothing to
       // substitute for the hostname, so postgres.js resolves it as usual.
@@ -314,7 +327,7 @@ export async function keyedPool(key: string, dsn: string, options: KeyedPoolOpti
     // understand. `resolvePgTarget` throws if the host has since been
     // re-pointed somewhere it may not go.
     ...(options.guard && { reguard: async () => { await resolvePgTarget(dsn) } }),
-  })
+  }
 }
 
 /**
@@ -389,8 +402,15 @@ export function closeKeyedPool(key: string): Promise<void> {
   return closeKeyedResource(key)
 }
 
-/** The pool for a Postgres *connection* — the kind a user configured as one. */
-export async function pgFor(instance: Pick<AppInstance, 'id' | 'dsn'>): Promise<Sql> {
+/**
+ * Run `fn` with the pool for a Postgres *connection* — the kind a user
+ * configured as one — leased for as long as `fn` runs.
+ *
+ * Every Postgres-kind read and write goes through this, not a bare pool: a
+ * user's query can run for minutes (`MAX_READ_TIMEOUT_MS`), and an unleased
+ * pool looks idle for all of them.
+ */
+export async function withPg<R>(instance: Pick<AppInstance, 'id' | 'dsn'>, fn: (sql: Sql) => Promise<R>): Promise<R> {
   const dsn = instance.dsn
   if (!dsn) {
     throw createError({
@@ -398,7 +418,7 @@ export async function pgFor(instance: Pick<AppInstance, 'id' | 'dsn'>): Promise<
       statusMessage: 'This database connection has no connection string.',
     })
   }
-  return keyedPool(`pg:${instance.id}`, dsn, { guard: true, maxResponseBytes: PG_MAX_RESPONSE_BYTES })
+  return withKeyedPool(`pg:${instance.id}`, dsn, { guard: true, maxResponseBytes: PG_MAX_RESPONSE_BYTES }, fn)
 }
 
 /**
@@ -408,7 +428,7 @@ export async function pgFor(instance: Pick<AppInstance, 'id' | 'dsn'>): Promise<
  */
 export const PG_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 
-/** True when `pgFor(instanceId)`'s pool hit `PG_MAX_RESPONSE_BYTES` at or after `since`. */
+/** True when `withPg(instanceId)`'s pool hit `PG_MAX_RESPONSE_BYTES` at or after `since`. */
 export function pgResponseCapTripped(instanceId: string, since: number): boolean {
   return responseCapTripped(`pg:${instanceId}`, since)
 }

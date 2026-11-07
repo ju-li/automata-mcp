@@ -65,9 +65,61 @@ function resultTooLarge(what: string): Error {
  * One place, so the awkward cast around the toolkit-shaped response exists once
  * — both run paths were carrying their own copy of it.
  */
-async function planFacts(tx: TransactionSql, statement: string): Promise<PlanFacts> {
-  const explained = await unsafeSingle(tx, `EXPLAIN (FORMAT JSON, VERBOSE) ${statement}`)
+async function planFacts(tx: TransactionSql, statement: string, signal?: AbortSignal): Promise<PlanFacts> {
+  // Cancellable too: planning alone can take seconds (a very wide join, a huge
+  // IN list), and the plan check is the first thing to touch user SQL.
+  const explained = await cancellable(unsafeSingle(tx, `EXPLAIN (FORMAT JSON, VERBOSE) ${statement}`), signal)
   return readPlan((explained as unknown as Array<Record<string, unknown>>)[0]?.['QUERY PLAN'])
+}
+
+/**
+ * The ceiling on `run-query`'s `timeoutMs`, and the number its timeout hints
+ * quote, so the two cannot drift.
+ *
+ * Two minutes, not more, and safe at two minutes only because of two other
+ * things: an abandoned request cancels its query (`cancellable`, below), and a
+ * pool with a query running is never swept or evicted under it (`withPg`).
+ * Without the first, a client or proxy that gives up sooner leaves the query
+ * running on the customer's database and holding one of the connection's
+ * three pool slots while the model retries it. Longer limits are a
+ * per-connection decision, not a default.
+ */
+export const MAX_READ_TIMEOUT_MS = 120_000
+
+/**
+ * Await one statement, cancelling it on the database if `signal` aborts first.
+ *
+ * `signal` is the MCP request's (`requestAbortSignal`): it aborts when the
+ * client goes away before the answer is written. `statement_timeout` is then
+ * the only other thing that would stop the query, and nobody is waiting for
+ * it. postgres.js's `cancel()` sends a CancelRequest on a new socket built from
+ * the pool's own options, so it dials the same approved, pinned address. The
+ * cancelled query rejects with 57014 "canceling statement due to user request",
+ * which `isStatementTimeout` deliberately does not read as a timeout.
+ *
+ * Wrap the statements that do the work — the plan, the FETCH, the write — not
+ * the catalog lookups between them, which are short. An abort that lands
+ * between statements is caught here before the next one is sent.
+ */
+async function cancellable<T>(query: PromiseLike<T> & { cancel: () => void }, signal: AbortSignal | undefined): Promise<T> {
+  if (!signal) return await query
+  if (signal.aborted) {
+    query.cancel()
+    throw clientGone()
+  }
+  const onAbort = () => query.cancel()
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    return await query
+  }
+  finally {
+    signal.removeEventListener('abort', onAbort)
+  }
+}
+
+/** Nobody reads this answer; it exists so the transaction rolls back and the lease is released. */
+function clientGone() {
+  return createError({ statusCode: 499, message: 'The client closed the request before the query finished; it was cancelled.' })
 }
 
 /**
@@ -83,6 +135,8 @@ export interface ReadQueryOptions {
   /** 1-based page of `maxRows` rows. */
   page: number
   timeoutMs: number
+  /** Cancels the query when it aborts — the MCP request's `requestAbortSignal()`. */
+  signal?: AbortSignal
   /** Return every cell whole instead of clipping at `MAX_CELL_CHARS`. */
   fullValues: boolean
 }
@@ -98,6 +152,7 @@ export interface ReadQueryResult {
 
 export interface ExplainQueryOptions {
   timeoutMs: number
+  signal?: AbortSignal
 }
 
 export interface ExplainQueryResult {
@@ -176,10 +231,10 @@ async function withGuardedStatement<T>(
     timeoutMs: number
     /** `assertNoWrites` or `assertIsModify` — the only difference between the two callers. */
     assertKind: (facts: PlanFacts) => void
+    signal?: AbortSignal
   },
   body: (tx: TransactionSql, startedAt: number) => Promise<T>,
 ): Promise<T> {
-  const sql = await pgFor(instance)
   const startedAt = Date.now()
 
   const guarded = async (tx: TransactionSql): Promise<T> => {
@@ -190,7 +245,7 @@ async function withGuardedStatement<T>(
     // run it and no longer names it. See `functionNamesInText`.
     await assertFunctionsSafe(tx, functionNamesInText(statement))
 
-    const facts = await planFacts(tx, statement)
+    const facts = await planFacts(tx, statement, options.signal)
 
     options.assertKind(facts)
     // Again from the plan, which catches what the text cannot — a function
@@ -201,10 +256,12 @@ async function withGuardedStatement<T>(
     return await body(tx, startedAt)
   }
 
+  // Leased, so the pool is not swept or evicted under a query that runs for
+  // minutes. See `withPg`.
   try {
-    return options.readOnly
+    return await withPg(instance, async sql => options.readOnly
       ? await sql.begin('read only', guarded) as T
-      : await sql.begin(guarded) as T
+      : await sql.begin(guarded) as T)
   }
   catch (error) {
     // The socket cap closed the connection mid-answer; the driver only says
@@ -232,7 +289,7 @@ export async function runReadQuery(
     `The query was stopped by the ${options.timeoutMs} ms statement timeout and returned no rows. `
     + 'Call run-query again with the same sql and explain: true to see the plan it would run, without running it: '
     + 'a Seq Scan over a large table, or a join with no usable index, is the usual cause. '
-    + 'Then add a selective WHERE clause on an indexed column, aggregate instead of listing, or raise timeoutMs (at most 30000).'
+    + `Then add a selective WHERE clause on an indexed column, aggregate instead of listing, or raise timeoutMs (at most ${MAX_READ_TIMEOUT_MS}).`
     + (options.page > 1
       ? ` Page ${options.page} also re-reads every row of the pages before it; a keyset predicate (WHERE id > <last id>) avoids that.`
       : ''),
@@ -260,6 +317,7 @@ async function guardedRead(
     readOnly: true,
     timeoutMs: options.timeoutMs,
     assertKind: assertNoWrites,
+    signal: options.signal,
   }, async (tx, startedAt) => {
     // The statement-kind gate, enforced by Postgres's own grammar rather than by
     // parsing: DECLARE CURSOR refuses INSERT/UPDATE/DELETE/CREATE TABLE AS
@@ -274,7 +332,7 @@ async function guardedRead(
     // transaction and re-runs the query, so pages line up only under an ORDER BY
     // on a unique key, and MOVE still reads every row it skips.
     if (options.page > 1) {
-      await unsafeSingle(tx, `MOVE FORWARD ${(options.page - 1) * options.maxRows} FROM _mcp`)
+      await cancellable(unsafeSingle(tx, `MOVE FORWARD ${(options.page - 1) * options.maxRows} FROM _mcp`), options.signal)
     }
 
     // One row past the cap, so `hasMore` is "the page came back full" rather
@@ -287,7 +345,9 @@ async function guardedRead(
     let bytes = 0
     while (raw.length < want) {
       const ask = Math.min(FETCH_BATCH_ROWS, want - raw.length)
-      const batch = await unsafeSingle(tx, `FETCH FORWARD ${ask} FROM _mcp`) as unknown as Array<Record<string, unknown>> & { columns?: Array<{ name: string }> }
+      // The FETCH is where the query actually runs — DECLARE only plans it —
+      // so it is what a client disconnect cancels.
+      const batch = await cancellable(unsafeSingle(tx, `FETCH FORWARD ${ask} FROM _mcp`), options.signal) as unknown as Array<Record<string, unknown>> & { columns?: Array<{ name: string }> }
       columns ??= batch.columns?.map(c => c.name)
       for (const row of batch) {
         bytes += approxRowBytes(row)
@@ -350,8 +410,9 @@ export async function explainReadQuery(
     readOnly: true,
     timeoutMs: options.timeoutMs,
     assertKind: assertNoWrites,
+    signal: options.signal,
   }, async (tx, startedAt) => {
-    const explained = await unsafeSingle(tx, `EXPLAIN (FORMAT TEXT, COSTS) ${declareCursor(statement)}`)
+    const explained = await cancellable(unsafeSingle(tx, `EXPLAIN (FORMAT TEXT, COSTS) ${declareCursor(statement)}`), options.signal)
     const lines = (explained as unknown as Array<Record<string, unknown>>)
       .map(row => row['QUERY PLAN'])
       .filter((line): line is string => typeof line === 'string')
@@ -381,7 +442,7 @@ export async function explainReadQuery(
   return await timeoutAs504(
     explaining,
     `Planning the query alone took longer than the ${options.timeoutMs} ms statement timeout, so there is no plan to show. `
-    + 'Raise timeoutMs (at most 30000), or split the query: very many joined tables or a large IN list are the usual causes.',
+    + `Raise timeoutMs (at most ${MAX_READ_TIMEOUT_MS}), or split the query: very many joined tables or a large IN list are the usual causes.`,
   )
 }
 
@@ -400,6 +461,8 @@ export interface WriteStatementOptions {
   /** Return every cell whole instead of clipping at `MAX_CELL_CHARS`. */
   fullValues: boolean
   allowWholeTable?: boolean
+  /** Cancels the statement when it aborts; the transaction then rolls back. */
+  signal?: AbortSignal
 }
 
 export async function runWriteStatement(
@@ -416,8 +479,10 @@ export async function runWriteStatement(
     // so requiring one refuses all three as well as a plain SELECT sent here by
     // mistake.
     assertKind: facts => assertIsModify(facts, options.allowWholeTable),
+    signal: options.signal,
   }, async (tx, startedAt) => {
-    const result = await unsafeSingle(tx, statement)
+    // A cancelled write rejects, so the transaction rolls back: nothing changed.
+    const result = await cancellable(unsafeSingle(tx, statement), options.signal)
     const rows = result as unknown as Array<Record<string, unknown>> & { count: number, command: string }
 
     // A hard cap, not a report. Throwing here rolls the transaction back, so a
