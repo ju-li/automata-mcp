@@ -2,6 +2,11 @@ import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 
 import type { H3Event } from 'h3'
 import { assertNever } from '#shared/connection'
 import type { AppInvitation, AppUser, Db } from './app-db'
+import {
+  alreadyRegisteredEmail, emailChangedNoticeEmail, emailChangeVerificationEmail,
+  invitedSignupVerificationEmail, signupVerificationEmail,
+} from '../emails/account'
+import type { EmailBrand, RenderedEmail } from '../emails/layout'
 
 /**
  * Proving an address before it becomes someone's sign-in: at signup (with or
@@ -238,6 +243,11 @@ async function inviteContext(db: Db, inviteId: string | undefined): Promise<Invi
   return row ? { orgName: row.org_name, role: row.role } : undefined
 }
 
+/**
+ * Which of the four verification mails a row gets, and what it says. The
+ * templates in `server/emails/account.ts` own the wording; this decides only
+ * which one applies.
+ */
 export function verificationMail(input: {
   purpose: VerificationPurpose
   code: string
@@ -246,52 +256,23 @@ export function verificationMail(input: {
   alreadyRegistered?: boolean
   /** Set for an invited signup: named in the mail, so it cannot pass for any other. */
   invite?: InviteContext
-}): { subject: string, text: string } {
-  if (input.alreadyRegistered) {
-    return {
-      subject: 'You already have an account',
-      text: [
-        'Someone tried to create an account with this email address, which already has one.',
-        '',
-        'If that was you, sign in instead. If not, you can ignore this email — nothing was changed.',
-      ].join('\n'),
-    }
-  }
+  /** For an address change: the address the account signs in with until this is confirmed. */
+  currentEmail?: string
+  /** The address the mail goes to. */
+  email: string
+}, brand: EmailBrand): RenderedEmail {
+  if (input.alreadyRegistered) return alreadyRegisteredEmail(brand)
 
-  if (input.invite) {
-    const role = input.invite.role === 'admin' ? 'an admin' : 'a member'
-    return {
-      subject: `Confirm your email to join ${input.invite.orgName}`,
-      text: [
-        `Someone signed up with this address to join the organization "${input.invite.orgName}" as ${role}, and chose a password for the account.`,
-        '',
-        'If that was you, enter this code in the browser where you signed up:',
-        '',
-        `    ${input.code}`,
-        '',
-        ...(input.url ? ['Or open this link in that same browser:', input.url, ''] : []),
-        'The code and link expire in 30 minutes.',
-        '',
-        'If you did not sign up yourself, do not confirm: someone holding your invitation link may be trying to join as you. Ignore this email and tell whoever invited you.',
-      ].join('\n'),
-    }
-  }
-
-  const what = input.purpose === 'signup' ? 'finish creating your account' : 'confirm your new sign-in address'
-  return {
-    subject: input.purpose === 'signup' ? 'Confirm your email address' : 'Confirm your new email address',
-    text: [
-      `Use this code to ${what}:`,
-      '',
-      `    ${input.code}`,
-      '',
-      ...(input.url
-        ? [input.purpose === 'email_change' ? 'Or open this link in the browser where you asked for the change:' : 'Or open this link:', input.url, '']
-        : []),
-      'The code and link expire in 30 minutes.',
-      '',
-      'If you did not ask for this, you can ignore this email.',
-    ].join('\n'),
+  const verification = { code: input.code, url: input.url, expiresInMs: VERIFICATION_TTL_MS }
+  switch (input.purpose) {
+    case 'signup':
+      return input.invite
+        ? invitedSignupVerificationEmail({ ...verification, orgName: input.invite.orgName, role: input.invite.role }, brand)
+        : signupVerificationEmail(verification, brand)
+    case 'email_change':
+      return emailChangeVerificationEmail({ ...verification, currentEmail: input.currentEmail ?? '', newEmail: input.email }, brand)
+    default:
+      return assertNever(input.purpose)
   }
 }
 
@@ -309,7 +290,7 @@ async function addressRegistered(db: Db, email: string): Promise<boolean> {
  */
 async function mailVerification(
   event: H3Event,
-  row: Pick<VerificationRow, 'purpose' | 'email' | 'invite_id'>,
+  row: Pick<VerificationRow, 'purpose' | 'email' | 'invite_id' | 'user_id'>,
   secrets: { code: string, linkToken: string },
 ): Promise<boolean> {
   const sql = await appDb()
@@ -320,9 +301,18 @@ async function mailVerification(
     url: verificationUrl(secrets.linkToken),
     alreadyRegistered,
     invite: row.purpose === 'signup' ? await inviteContext(sql, row.invite_id) : undefined,
-  })
+    currentEmail: row.purpose === 'email_change' ? await currentEmailOf(sql, row.user_id) : undefined,
+    email: row.email,
+  }, emailBrand())
   recordVerificationMail(event, row.email)
-  return sendAppEmail({ to: row.email, subject: mail.subject, text: mail.text })
+  return sendAppEmail({ to: row.email, subject: mail.subject, html: mail.html, text: mail.text })
+}
+
+/** The address an account signs in with now, named in the address-change mail. */
+async function currentEmailOf(db: Db, userId: string | undefined): Promise<string | undefined> {
+  if (!userId) return undefined
+  const [row] = await db<Pick<AppUser, 'email'>[]>`SELECT email FROM app.users WHERE id = ${userId}`
+  return row?.email
 }
 
 // ── starting ───────────────────────────────────────────────────────────────
@@ -382,7 +372,8 @@ export async function startVerification(event: H3Event, input: StartInput): Prom
   })
 
   const inviteId = input.purpose === 'signup' ? input.inviteId : undefined
-  if (!await mailVerification(event, { purpose: input.purpose, email, invite_id: inviteId }, secrets)) {
+  const userId = input.purpose === 'email_change' ? input.userId : undefined
+  if (!await mailVerification(event, { purpose: input.purpose, email, invite_id: inviteId, user_id: userId }, secrets)) {
     await sql`DELETE FROM app.email_verifications WHERE id = ${id}`
     throw verificationUndeliverable()
   }
@@ -677,15 +668,8 @@ async function complete(
   if (signedIn) await startSession(event, userId!)
   if (previousEmail) {
     // Best effort: tells the owner of the old address, in case it was not them.
-    void sendAppEmail({
-      to: previousEmail,
-      subject: 'Your sign-in email address was changed',
-      text: [
-        `The sign-in address of your account was changed from ${previousEmail} to ${row.email}.`,
-        '',
-        'If you did not do this, contact an admin of your organization.',
-      ].join('\n'),
-    })
+    const notice = emailChangedNoticeEmail({ previousEmail, newEmail: row.email, changedAt: new Date() }, emailBrand())
+    void sendAppEmail({ to: previousEmail, subject: notice.subject, html: notice.html, text: notice.text })
   }
 
   const next = signedIn && row.plan === 'pro' && !row.invite_id && hostedMode() ? 'checkout' as const : undefined
