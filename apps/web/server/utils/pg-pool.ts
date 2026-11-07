@@ -269,6 +269,11 @@ export interface KeyedPoolOptions {
    * refuses one refuses both.
    */
   jit?: boolean
+  /**
+   * Destroy a connection once one answer passes this many bytes, before the
+   * driver has buffered the rest. See `pg-socket.ts`. Set by `pgFor` only.
+   */
+  maxResponseBytes?: number
 }
 
 /**
@@ -299,6 +304,7 @@ export async function keyedPool(key: string, dsn: string, options: KeyedPoolOpti
         }),
         idle_timeout: 30,
         max_lifetime: 60 * 30,
+        ...(options.maxResponseBytes && { socket: cappedSocketFactory(key, options.maxResponseBytes) }),
       })
     },
     destroy: sql => sql.end({ timeout: 5 }),
@@ -392,7 +398,19 @@ export async function pgFor(instance: Pick<AppInstance, 'id' | 'dsn'>): Promise<
       statusMessage: 'This database connection has no connection string.',
     })
   }
-  return keyedPool(`pg:${instance.id}`, dsn, { guard: true })
+  return keyedPool(`pg:${instance.id}`, dsn, { guard: true, maxResponseBytes: PG_MAX_RESPONSE_BYTES })
+}
+
+/**
+ * Per answer from a user's database: twice `pg-run.ts`'s result budget, so a
+ * result that merely overruns that budget gets its own clear refusal, and this
+ * catches the single huge row or the server lying about lengths.
+ */
+export const PG_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+/** True when `pgFor(instanceId)`'s pool hit `PG_MAX_RESPONSE_BYTES` at or after `since`. */
+export function pgResponseCapTripped(instanceId: string, since: number): boolean {
+  return responseCapTripped(`pg:${instanceId}`, since)
 }
 
 export function closePgPool(instanceId: string): Promise<void> {
