@@ -699,4 +699,21 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN connect_hold_until timestamptz;
     `,
   },
+  {
+    name: '0018_totp_setup_bound',
+    sql: /* sql */ `
+      -- An unconfirmed authenticator secret is the password check at
+      -- totp/setup carried forward to totp/confirm, which asks only for a
+      -- session. So it is bound and bounded like a sign-in challenge: only
+      -- the session that ran setup may confirm it (setup_session; a session
+      -- ending clears it, and NULL never matches), within a short window
+      -- from created, and attempts counts wrong codes, claimed before each
+      -- is checked; the fifth deletes the secret. Rows left from before this
+      -- carry no session and could never be confirmed, so they go now.
+      ALTER TABLE app.totp_credentials
+        ADD COLUMN attempts integer NOT NULL DEFAULT 0,
+        ADD COLUMN setup_session text REFERENCES app.sessions (id) ON DELETE SET NULL;
+      DELETE FROM app.totp_credentials WHERE confirmed_at IS NULL;
+    `,
+  },
 ]

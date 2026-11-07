@@ -270,6 +270,11 @@ export interface KeyedPoolOptions {
    * refuses one refuses both.
    */
   jit?: boolean
+  /**
+   * Destroy a connection once one answer passes this many bytes, before the
+   * driver has buffered the rest. See `pg-socket.ts`. Set by `withPg` only.
+   */
+  maxResponseBytes?: number
 }
 
 /**
@@ -282,7 +287,7 @@ export interface KeyedPoolOptions {
  * cannot collide on one instance id.
  */
 export async function keyedPool(key: string, dsn: string, options: KeyedPoolOptions): Promise<Sql> {
-  return keyedResource<Sql>(key, dsn, poolSpec(dsn, options))
+  return keyedResource<Sql>(key, dsn, poolSpec(key, dsn, options))
 }
 
 /**
@@ -290,10 +295,10 @@ export async function keyedPool(key: string, dsn: string, options: KeyedPoolOpti
  * evicted or drained under a query still running on it. See `withKeyedResource`.
  */
 export async function withKeyedPool<R>(key: string, dsn: string, options: KeyedPoolOptions, fn: (sql: Sql) => Promise<R>): Promise<R> {
-  return withKeyedResource<Sql, R>(key, dsn, poolSpec(dsn, options), fn)
+  return withKeyedResource<Sql, R>(key, dsn, poolSpec(key, dsn, options), fn)
 }
 
-function poolSpec(dsn: string, options: KeyedPoolOptions): KeyedResourceSpec<Sql> {
+function poolSpec(key: string, dsn: string, options: KeyedPoolOptions): KeyedResourceSpec<Sql> {
   return {
     build: async () => {
       // Unguarded means unpinned: with no approved address there is nothing to
@@ -312,6 +317,7 @@ function poolSpec(dsn: string, options: KeyedPoolOptions): KeyedResourceSpec<Sql
         }),
         idle_timeout: 30,
         max_lifetime: 60 * 30,
+        ...(options.maxResponseBytes && { socket: cappedSocketFactory(key, options.maxResponseBytes) }),
       })
     },
     destroy: sql => sql.end({ timeout: 5 }),
@@ -321,6 +327,73 @@ function poolSpec(dsn: string, options: KeyedPoolOptions): KeyedResourceSpec<Sql
     // understand. `resolvePgTarget` throws if the host has since been
     // re-pointed somewhere it may not go.
     ...(options.guard && { reguard: async () => { await resolvePgTarget(dsn) } }),
+  }
+}
+
+/**
+ * A pool several connections share, as the message pools for this deployment's
+ * own Evolution server and Telegram bridge are: one `Sql` plus `run`, which every
+ * statement goes through.
+ *
+ * **Why.** Those pools hold `PER_POOL_MAX` connections for every tenant on the
+ * deployment, and postgres.js queues a statement for a free one with no timeout
+ * of its own. A slow statement is cheap to cause — a scan of a large account, a
+ * search — so one connection with a few in flight held every slot, and every
+ * other account's reads waited behind it (GHSA-fpmx-gmx5-84vc). `run` lets each
+ * connection have `SHARED_POOL_SLOTS_PER_CONNECTION` statement in flight on the
+ * shared pool; the rest of its statements wait *here*, in a per-connection queue
+ * of at most `SHARED_POOL_QUEUE_PER_CONNECTION`, and past that are refused with
+ * 429 rather than parked without bound.
+ *
+ * A pool of the connection's own (a user-supplied URL) gets a pass-through
+ * `run`: nobody else's reads are behind it.
+ *
+ * `run` must wrap one statement and nothing that takes another slot — a callback
+ * awaiting a second `run` for the same connection would wait on itself.
+ */
+export interface SharedPool {
+  sql: Sql
+  run: <T>(statement: () => Promise<T>) => Promise<T>
+}
+
+const SHARED_POOL_SLOTS_PER_CONNECTION = 1
+const SHARED_POOL_QUEUE_PER_CONNECTION = 8
+
+const connectionSlots = new Map<string, { active: number, waiting: Array<() => void> }>()
+
+export function sharedPoolFor(sql: Sql, shared: boolean, connectionKey: string): SharedPool {
+  if (!shared) return { sql, run: statement => statement() }
+  return { sql, run: statement => withConnectionSlot(connectionKey, statement) }
+}
+
+async function withConnectionSlot<T>(key: string, statement: () => Promise<T>): Promise<T> {
+  let slots = connectionSlots.get(key)
+  if (!slots) {
+    slots = { active: 0, waiting: [] }
+    connectionSlots.set(key, slots)
+  }
+
+  if (slots.active < SHARED_POOL_SLOTS_PER_CONNECTION) {
+    slots.active++
+  }
+  else {
+    if (slots.waiting.length >= SHARED_POOL_QUEUE_PER_CONNECTION) {
+      throw createError({
+        statusCode: 429,
+        statusMessage: 'Too many reads are already running for this connection. Wait for them to finish and try again.',
+      })
+    }
+    // Handed the slot by whoever finishes; `active` stays as it was.
+    await new Promise<void>(resolve => slots.waiting.push(resolve))
+  }
+
+  try {
+    return await statement()
+  }
+  finally {
+    const next = slots.waiting.shift()
+    if (next) next()
+    else if (--slots.active === 0) connectionSlots.delete(key)
   }
 }
 
@@ -345,7 +418,19 @@ export async function withPg<R>(instance: Pick<AppInstance, 'id' | 'dsn'>, fn: (
       statusMessage: 'This database connection has no connection string.',
     })
   }
-  return withKeyedPool(`pg:${instance.id}`, dsn, { guard: true }, fn)
+  return withKeyedPool(`pg:${instance.id}`, dsn, { guard: true, maxResponseBytes: PG_MAX_RESPONSE_BYTES }, fn)
+}
+
+/**
+ * Per answer from a user's database: twice `pg-run.ts`'s result budget, so a
+ * result that merely overruns that budget gets its own clear refusal, and this
+ * catches the single huge row or the server lying about lengths.
+ */
+export const PG_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+/** True when `withPg(instanceId)`'s pool hit `PG_MAX_RESPONSE_BYTES` at or after `since`. */
+export function pgResponseCapTripped(instanceId: string, since: number): boolean {
+  return responseCapTripped(`pg:${instanceId}`, since)
 }
 
 export function closePgPool(instanceId: string): Promise<void> {

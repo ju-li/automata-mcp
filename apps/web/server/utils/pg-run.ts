@@ -19,6 +19,46 @@ import type { McpScope } from './mcp-scope'
  */
 const PG_SERIALISE = { binaryLabel: 'bytea' } as const
 
+const MIB = 1024 * 1024
+
+/**
+ * Most a read or a RETURNING may hold in this process, roughly in characters.
+ *
+ * The process is shared by every tenant, and the row cap and cell clipping
+ * both run on rows already received — so without this, `maxRows` rows of
+ * `repeat('x', 32 MiB)` were all held before being clipped to 2000 characters.
+ * Reads fetch in batches and stop at the first batch past it; the socket cap in
+ * `pg-socket.ts` (`PG_MAX_RESPONSE_BYTES`, twice this) bounds one batch, one
+ * huge row, and a server lying about lengths.
+ */
+const MAX_RESULT_BYTES = 8 * MIB
+
+/**
+ * Rows per FETCH, so the budget is checked before the next batch is asked for.
+ * Above the tool's default page (200 + 1), which stays one round trip.
+ */
+const FETCH_BATCH_ROWS = 250
+
+/** Approximate size of one row as received: what the budget counts. */
+function approxRowBytes(row: Record<string, unknown>): number {
+  let bytes = 0
+  for (const value of Object.values(row)) {
+    if (typeof value === 'string') bytes += value.length
+    else if (Buffer.isBuffer(value)) bytes += value.length
+    else if (value !== null && typeof value === 'object' && !(value instanceof Date)) bytes += JSON.stringify(value)?.length ?? 0
+    else bytes += 8
+  }
+  return bytes
+}
+
+/** 413 with the way out, so the model narrows the query rather than retrying it. */
+function resultTooLarge(what: string): Error {
+  return createError({
+    statusCode: 413,
+    message: `${what} Select fewer or narrower columns, take a prefix of long values (left(col, 2000)), or ask for fewer rows.`,
+  })
+}
+
 /**
  * EXPLAIN the statement and read the facts the guards need.
  *
@@ -218,9 +258,21 @@ async function withGuardedStatement<T>(
 
   // Leased, so the pool is not swept or evicted under a query that runs for
   // minutes. See `withPg`.
-  return await withPg(instance, async sql => options.readOnly
-    ? await sql.begin('read only', guarded) as T
-    : await sql.begin(guarded) as T)
+  try {
+    return await withPg(instance, async sql => options.readOnly
+      ? await sql.begin('read only', guarded) as T
+      : await sql.begin(guarded) as T)
+  }
+  catch (error) {
+    // The socket cap closed the connection mid-answer; the driver only says
+    // CONNECTION_CLOSED. Closing it aborted the transaction, so a write was
+    // rolled back by the server.
+    if (pgResponseCapTripped(instance.id, startedAt)) {
+      throw resultTooLarge(`The database sent more than ${PG_MAX_RESPONSE_BYTES / MIB} MiB in one answer, `
+        + 'so the connection was closed: nothing was returned, and a write was rolled back.')
+    }
+    throw error
+  }
 }
 
 export async function runReadQuery(
@@ -284,10 +336,26 @@ async function guardedRead(
     }
 
     // One row past the cap, so `hasMore` is "the page came back full" rather
-    // than a count that could be wrong — the same rule as MessagePage.
-    // The FETCH is where the query actually runs — DECLARE only plans it.
-    const fetched = await cancellable(unsafeSingle(tx, `FETCH FORWARD ${options.maxRows + 1} FROM _mcp`), options.signal)
-    const raw = fetched as unknown as Array<Record<string, unknown>> & { columns?: Array<{ name: string }> }
+    // than a count that could be wrong — the same rule as MessagePage. Fetched
+    // in batches from the same cursor, so the byte budget is checked before the
+    // next batch is held rather than after the whole page is.
+    const want = options.maxRows + 1
+    const raw: Array<Record<string, unknown>> = []
+    let columns: string[] | undefined
+    let bytes = 0
+    while (raw.length < want) {
+      const ask = Math.min(FETCH_BATCH_ROWS, want - raw.length)
+      // The FETCH is where the query actually runs — DECLARE only plans it —
+      // so it is what a client disconnect cancels.
+      const batch = await cancellable(unsafeSingle(tx, `FETCH FORWARD ${ask} FROM _mcp`), options.signal) as unknown as Array<Record<string, unknown>> & { columns?: Array<{ name: string }> }
+      columns ??= batch.columns?.map(c => c.name)
+      for (const row of batch) {
+        bytes += approxRowBytes(row)
+        raw.push(row)
+      }
+      if (bytes > MAX_RESULT_BYTES) throw resultTooLarge(`This page of the result is more than ${MAX_RESULT_BYTES / MIB} MiB, so no rows were returned.`)
+      if (batch.length < ask) break
+    }
 
     const hasMore = raw.length > options.maxRows
     const kept = raw.slice(0, options.maxRows)
@@ -295,7 +363,7 @@ async function guardedRead(
     const { rows, truncatedValues } = serialiseRows(kept, { ...PG_SERIALISE, fullValues: options.fullValues })
 
     return {
-      columns: raw.columns?.map(c => c.name) ?? Object.keys(kept[0] ?? {}),
+      columns: columns ?? Object.keys(kept[0] ?? {}),
       rows,
       rowCount: rows.length,
       hasMore,
@@ -427,6 +495,12 @@ export async function runWriteStatement(
         message: `That statement would have changed ${rows.count.toLocaleString('en-US')} rows but maxRows was ${options.maxRows}, so nothing was changed. `
           + 'Narrow the WHERE clause, or raise maxRows if that number is what you meant.',
       })
+    }
+
+    // Same budget as a read, and the same consequence as the row cap: throwing
+    // rolls the statement back. The socket cap has already bounded what arrived.
+    if (rows.reduce((sum, row) => sum + approxRowBytes(row), 0) > MAX_RESULT_BYTES) {
+      throw resultTooLarge(`The RETURNING rows are more than ${MAX_RESULT_BYTES / MIB} MiB, so the statement was rolled back and nothing was changed.`)
     }
 
     const serialised = serialiseRows([...rows], { ...PG_SERIALISE, fullValues: options.fullValues })
