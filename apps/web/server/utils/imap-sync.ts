@@ -36,6 +36,13 @@ import type { ImapTarget } from './imap-client'
 const LEASE_MS = 10 * 60_000
 /** Work per mailbox per run. Whatever is left is the next run's. */
 const RUN_BUDGET_MS = 4 * 60_000
+/**
+ * Where a run is cut off, not wound down. `RUN_BUDGET_MS` is only checked
+ * between folders and chunks, and imapflow's `socketTimeout` is an idle timer,
+ * so a server that trickles a reply never trips either. Past this the socket is
+ * closed under the run. Inside `LEASE_MS`, so the lease really does outlive it.
+ */
+const RUN_HARD_LIMIT_MS = RUN_BUDGET_MS + 2 * 60_000
 /** Headers fetched per folder per run, newest first, while backfilling. */
 const BACKFILL_CHUNK = 500
 /** New mail fetched per folder per run. A mailbox offline for a month catches up over several runs. */
@@ -71,15 +78,24 @@ export async function runImapSync(): Promise<{ claimed: number, failed: number }
 
   let claimed = 0
   let failed = 0
-  const queue = [...instances]
-  const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
-    for (let instance = queue.shift(); instance; instance = queue.shift()) {
-      const outcome = await syncMailbox(instance)
-      if (outcome === 'synced' || outcome === 'failed') claimed++
-      if (outcome === 'failed') failed++
-    }
+  // Each mailbox bounded on top of the socket being closed at
+  // `RUN_HARD_LIMIT_MS`: a mailbox server is user-chosen, and a run that never
+  // settles would hold this task, and through Nitro's `runTask` every later
+  // one, for every other mailbox (GHSA-g2cf-mx92-xc53).
+  await forEachBounded(instances, {
+    concurrency: CONCURRENCY,
+    deadlineMs: RUN_HARD_LIMIT_MS + 60_000,
+    what: instance => `syncing mailbox ${instance.id}`,
+    onError: (instance, error) => {
+      claimed++
+      failed++
+      console.error(`[imap-sync] sync of ${instance.id} did not finish`, error)
+    },
+  }, async (instance) => {
+    const outcome = await syncMailbox(instance)
+    if (outcome === 'synced' || outcome === 'failed') claimed++
+    if (outcome === 'failed') failed++
   })
-  await Promise.all(workers)
   return { claimed, failed }
 }
 
@@ -129,9 +145,17 @@ async function runClaimed(instance: AppInstance, lease: Lease): Promise<SyncOutc
   const sql = await appDb()
   const deadline = Date.now() + RUN_BUDGET_MS
   let client: ImapFlow | undefined
+  let cutOff = false
+  // Closing the socket rejects whatever command is waiting on it, so the run
+  // unwinds through the ordinary failure path below.
+  const watchdog = setTimeout(() => {
+    cutOff = true
+    client?.close()
+  }, RUN_HARD_LIMIT_MS)
   try {
     await resetIfIdentityChanged(instance, lease.target)
     client = await openImap(lease.target)
+    if (cutOff) throw new DeadlineExceededError(`syncing mailbox ${instance.id}`, RUN_HARD_LIMIT_MS)
     await syncFolders(instance, client, lease, deadline)
     await sql`
       UPDATE app.mail_sync_state
@@ -155,6 +179,7 @@ async function runClaimed(instance: AppInstance, lease: Lease): Promise<SyncOutc
   }
   finally {
     if (client) await closeImap(client)
+    clearTimeout(watchdog)
   }
 }
 

@@ -141,13 +141,18 @@ export type BridgeSent = {
  * as `createEvolutionClient`: `$fetch` resolves DNS itself, so the guard narrows
  * the rebinding window rather than closing it.
  */
+const BRIDGE_REQUEST_DEADLINE_MS = 20_000
+
 function bridgeFetch(baseUrl: string, key: string, userSupplied: boolean) {
   return $fetch.create({
     baseURL: baseUrl,
     headers: { authorization: `Bearer ${key}` },
     retry: 0,
-    timeout: 20_000,
     async onRequest({ options }) {
+      // Request and body, not headers alone: ofetch's `timeout` stops at the
+      // headers, so a bridge trickling its body would hold the caller for ever
+      // (GHSA-g2cf-mx92-xc53). See deadline.ts.
+      applyRequestDeadline(options, BRIDGE_REQUEST_DEADLINE_MS)
       if (!userSupplied) return
       await assertPublicUrl(baseUrl, 'Telegram bridge URL')
       options.redirect = 'error'
@@ -244,7 +249,8 @@ export async function deploymentBridgeReadiness(): Promise<BridgeReadiness> {
   const creds = telegramAdminCredentials()
   if (!creds) return 'absent'
   try {
-    const health = await $fetch<{ telegram?: unknown }>('/health', { baseURL: creds.baseUrl, retry: 0, timeout: 5_000 })
+    // A signal, not `timeout`, so the body is covered too — see deadline.ts.
+    const health = await $fetch<{ telegram?: unknown }>('/health', { baseURL: creds.baseUrl, retry: 0, signal: AbortSignal.timeout(5_000) })
     return health?.telegram === 'unconfigured' ? 'unconfigured' : 'ready'
   }
   catch (error) {

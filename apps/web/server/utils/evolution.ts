@@ -78,6 +78,12 @@ export function createEvolutionClient(creds: EvolutionCredentials) {
      * wider exposure of the two, and it is the one that is pinned.
      */
     async onRequest({ options }) {
+      // A hard deadline on every request, body included, and on ours as well
+      // as user-supplied ones: ofetch's own `timeout` is cleared once headers
+      // arrive, so a server trickling its body would otherwise hold the caller
+      // for ever (GHSA-g2cf-mx92-xc53). A caller's `timeout` becomes this
+      // end-to-end deadline. See deadline.ts.
+      applyRequestDeadline(options)
       if (!creds.userSupplied) return
       await assertPublicUrl(creds.baseUrl, 'Evolution server URL')
       // Refuse a redirect off the approved host rather than following it.
