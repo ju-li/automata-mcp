@@ -54,6 +54,14 @@ DENY_V6.addSubnet('fc00::', 7, 'ipv6') // unique-local
 DENY_V6.addSubnet('fe80::', 10, 'ipv6') // link-local
 DENY_V6.addSubnet('ff00::', 8, 'ipv6') // multicast
 DENY_V6.addSubnet('64:ff9b::', 96, 'ipv6') // NAT64 — wraps a v4 address
+DENY_V6.addSubnet('64:ff9b:1::', 48, 'ipv6') // local-use NAT64 — wraps a v4 address
+// Every other way of carrying a v4 address in a v6 one. `canonicalAddress`
+// already unwraps ::ffff:0:0/96 to its v4 address, so that entry is the
+// backstop; the other two are not routed to v4 by Linux, and nothing public
+// lives in either.
+DENY_V6.addSubnet('::ffff:0:0', 96, 'ipv6') // IPv4-mapped
+DENY_V6.addSubnet('::', 96, 'ipv6') // IPv4-compatible (deprecated), incl. :: and ::1
+DENY_V6.addSubnet('::ffff:0:0:0', 96, 'ipv6') // IPv4-translated (SIIT)
 
 /** Only the approved address is used by callers; the rest stayed unread. */
 export interface ResolvedTarget {
@@ -61,13 +69,64 @@ export interface ResolvedTarget {
 }
 
 /**
- * `::ffff:10.0.0.1` is a v4 address wearing a v6 hat. Unwrap before checking, or
- * the v6 blocklist waves it through and the socket connects to 10.0.0.1.
+ * The eight 16-bit groups of an IPv6 literal, or undefined when it is not one.
+ * Handles `::` and a dotted v4 tail; a zone (`%eth0`) is dropped.
  */
-function unwrapV4Mapped(address: string, family: number): { address: string, family: 4 | 6 } {
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address)
-  if (mapped?.[1]) return { address: mapped[1], family: 4 }
-  return { address, family: family === 6 ? 6 : 4 }
+function v6Groups(literal: string): number[] | undefined {
+  let text = literal.split('%')[0]!.toLowerCase()
+  if (isIP(text) !== 6) return undefined
+  const dotted = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text)
+  if (dotted) {
+    const [a, b, c, d] = dotted.slice(1).map(Number) as [number, number, number, number]
+    text = `${text.slice(0, dotted.index)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`
+  }
+  const [head, tail] = text.split('::') as [string, string | undefined]
+  const parse = (part: string) => (part ? part.split(':').map(h => Number.parseInt(h, 16)) : [])
+  const front = parse(head)
+  const back = tail === undefined ? [] : parse(tail)
+  const groups = tail === undefined ? front : [...front, ...Array<number>(8 - front.length - back.length).fill(0), ...back]
+  return groups.length === 8 ? groups : undefined
+}
+
+/**
+ * One spelling per address, so the checks below see what the kernel dials.
+ *
+ * An IPv4-mapped address (`::ffff:0:0/96`) is the v4 address it carries — a
+ * socket opened to `::ffff:7f00:1` connects to 127.0.0.1 — so it comes back as
+ * that v4 address, whichever way it was written: `::ffff:127.0.0.1`,
+ * `::ffff:7f00:1`, `0:0:0:0:0:ffff:7f00:1`. Only the dotted form used to be
+ * recognised, and the hex forms were checked as v6, where nothing denied them
+ * (GHSA-rm8v-cvpx-c3g6). Any other v6 address comes back fully compressed and
+ * lower-case, as `URL` writes it, so two spellings of one address compare
+ * equal.
+ */
+function canonicalAddress(address: string, family: number): { address: string, family: 4 | 6 } {
+  if (family !== 6 && isIP(address) !== 6) return { address, family: 4 }
+  const groups = v6Groups(address)
+  if (!groups) return { address, family: 6 }
+  if (groups.slice(0, 5).every(g => g === 0) && groups[5] === 0xFFFF) {
+    const [hi, lo] = [groups[6]!, groups[7]!]
+    return { address: `${hi >> 8}.${hi & 0xFF}.${lo >> 8}.${lo & 0xFF}`, family: 4 }
+  }
+  const compressed = new URL(`http://[${groups.map(g => g.toString(16)).join(':')}]`).hostname.slice(1, -1)
+  // The zone stays on: a link-local address is dialled through it, and this
+  // is the address callers pin.
+  const zone = address.includes('%') ? address.slice(address.indexOf('%')) : ''
+  return { address: compressed + zone, family: 6 }
+}
+
+/**
+ * Every address a socket reaches this host by: 127.0.0.0/8, `::1`, and the
+ * unspecified addresses, which Linux dials as loopback too.
+ */
+const LOOPBACK = new BlockList()
+LOOPBACK.addSubnet('127.0.0.0', 8)
+LOOPBACK.addSubnet('0.0.0.0', 8)
+LOOPBACK.addAddress('::1', 'ipv6')
+LOOPBACK.addAddress('::', 'ipv6')
+
+function isLoopback(target: { address: string, family: 4 | 6 }): boolean {
+  return LOOPBACK.check(target.address.split('%')[0]!, target.family === 4 ? 'ipv4' : 'ipv6')
 }
 
 function refuse(label: string, detail: string): never {
@@ -110,7 +169,7 @@ export async function assertPublicTarget(
 
   if (answers.length === 0) refuse(label, `${hostname} does not resolve`)
 
-  const resolved = answers.map(a => unwrapV4Mapped(a.address, a.family))
+  const resolved = answers.map(a => canonicalAddress(a.address, a.family))
   const allowPrivate = useRuntimeConfig().allowPrivateTargets === true
 
   if (!allowPrivate) {
@@ -152,7 +211,7 @@ export async function assertPublicUrl(rawUrl: string, label: string): Promise<Re
 
 // ── our own infrastructure ─────────────────────────────────────────────────
 
-interface OwnTarget { address: string, port: number, what: string }
+interface OwnTarget { address: string, family: 4 | 6, port: number, what: string }
 
 let ownCache: { at: number, targets: OwnTarget[] } | undefined
 const OWN_TTL_MS = 5 * 60_000
@@ -196,12 +255,16 @@ async function ownTargets(): Promise<OwnTarget[]> {
     }
     const port = Number(url.port)
       || (url.protocol === 'https:' ? 443 : url.protocol === 'http:' ? 80 : source.defaultPort)
+    // `URL` keeps an IPv6 literal's brackets in `hostname`; with them it is
+    // neither an IP nor a resolvable name, and the backend silently dropped
+    // out of this list.
+    const host = url.hostname.replace(/^\[(.*)\]$/, '$1')
     try {
-      const answers = isIP(url.hostname)
-        ? [{ address: url.hostname, family: isIP(url.hostname) }]
-        : await lookup(url.hostname, { all: true, verbatim: true })
+      const answers = isIP(host)
+        ? [{ address: host, family: isIP(host) }]
+        : await lookup(host, { all: true, verbatim: true })
       for (const a of answers) {
-        targets.push({ ...unwrapV4Mapped(a.address, a.family), port, what: source.what })
+        targets.push({ ...canonicalAddress(a.address, a.family), port, what: source.what })
       }
     }
     catch (cause) {
@@ -218,8 +281,14 @@ async function ownTargets(): Promise<OwnTarget[]> {
   return targets
 }
 
+/**
+ * Both sides are canonical (`canonicalAddress`), so `::ffff:7f00:1` matches an
+ * own 127.0.0.1. And a backend on loopback is reachable by *every* loopback
+ * address on its port — 127.0.0.2 and `::1` reach a listener on 127.0.0.1 or on
+ * `localhost` — so any loopback address on that port is the backend.
+ */
 async function assertNotOwnInfrastructure(
-  resolved: Array<{ address: string }>,
+  resolved: Array<{ address: string, family: 4 | 6 }>,
   port: number,
   hostname: string,
   label: string,
@@ -227,8 +296,9 @@ async function assertNotOwnInfrastructure(
   const own = await ownTargets()
   if (own.length === 0) return
 
-  for (const { address } of resolved) {
-    const hit = own.find(t => t.address === address && t.port === port)
+  for (const candidate of resolved) {
+    const hit = own.find(t => t.port === port
+      && (t.address === candidate.address || (isLoopback(t) && isLoopback(candidate))))
     if (hit) {
       refuse(
         label,
