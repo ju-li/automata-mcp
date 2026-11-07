@@ -8,6 +8,7 @@
 3. **WhatsApp:** continue to the QR code and scan it — WhatsApp → Settings →
    Linked devices → Link a device. To use an Evolution server other than this
    app's, tick **Use my own Evolution API server** first (see [Bring your own Evolution server](whatsapp.md#bring-your-own-evolution-server)).
+   That option exists only on self-hosted deployments.
    A WhatsApp connection not paired within an hour is deleted with its tokens;
    the pairing screen counts down (see [Connections never paired are removed after an hour](whatsapp.md#connections-never-paired-are-removed-after-an-hour)).
    **Telegram:** on the connection's page press **Show QR code** and scan it —

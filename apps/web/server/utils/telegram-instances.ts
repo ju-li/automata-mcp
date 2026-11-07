@@ -26,6 +26,9 @@ export interface TelegramProvisionInput {
 export async function provisionTelegramInstance(actor: Actor, input: TelegramProvisionInput = {}): Promise<AppInstance> {
   const { label, server } = input
 
+  // First, before the address is resolved or dialled. See `ownServersAllowed`.
+  if (server) assertOwnServersAllowed('Telegram bridge', actor.org.id)
+
   if (server) await assertPublicUrl(server.baseUrl, 'Telegram bridge URL')
   // Proved before anything is created. `requireTable` is what separates the
   // wrong database from an account with no chats, which otherwise look alike.
@@ -36,7 +39,7 @@ export async function provisionTelegramInstance(actor: Actor, input: TelegramPro
     throw createError({
       statusCode: 422,
       statusMessage: 'No Telegram bridge is available. Set NUXT_TELEGRAM_URL and NUXT_TELEGRAM_ADMIN_KEY '
-        + 'to provide a default, or supply your own bridge URL and admin key.',
+        + 'to provide a default' + (ownServersAllowed() ? ', or supply your own bridge URL and admin key.' : '.'),
     })
   }
 

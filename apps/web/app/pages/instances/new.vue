@@ -136,6 +136,13 @@ const groups: {
 // bridge). All or nothing — half of it is not completed from our configuration,
 // see evolutionAdminCredentials() and telegramAdminCredentials().
 const ownServer = ref(false)
+// Bring-your-own is self-hosted only: the hosted service refuses it
+// (`ownServersAllowed` in server/utils/cloud.ts), so the option is not offered.
+// Hiding it is presentation; the server is the control.
+const hosted = useHosted()
+watch(hosted, (isHosted) => {
+  if (isHosted) ownServer.value = false
+}, { immediate: true })
 const serverUrl = ref('')
 const serverKey = ref('')
 // Optional even with a server: it only buys reading. Pairing and sending work
@@ -352,8 +359,8 @@ async function create() {
 
           <!-- Telegram -->
           <template v-else-if="kind === 'telegram'">
-            <Separator />
-            <div class="flex items-start gap-2">
+            <Separator v-if="!hosted" />
+            <div v-if="!hosted" class="flex items-start gap-2">
               <Checkbox
                 id="own-bridge"
                 :model-value="ownServer"
@@ -383,7 +390,7 @@ async function create() {
                     <span class="font-mono">TELEGRAM_API_ID</span> and
                     <span class="font-mono">TELEGRAM_API_HASH</span> on the Telegram
                     bridge service and redeploy it. If you don't run this deployment,
-                    ask whoever does — or use your own bridge.
+                    ask whoever does<template v-if="!hosted"> — or use your own bridge</template>.
                   </p>
                 </template>
               </NoticeCard>
@@ -395,7 +402,7 @@ async function create() {
                   <p class="mt-1 text-sm text-muted-foreground">
                     Set <span class="font-mono">NUXT_TELEGRAM_URL</span> and
                     <span class="font-mono">NUXT_TELEGRAM_ADMIN_KEY</span> on the web
-                    service to use one, or use your own bridge.
+                    service to use one<template v-if="!hosted">, or use your own bridge</template>.
                   </p>
                 </template>
               </NoticeCard>
@@ -413,7 +420,7 @@ async function create() {
               </NoticeCard>
             </template>
 
-            <div v-if="ownServer" class="space-y-4 rounded-md border p-3">
+            <div v-if="ownServer && !hosted" class="space-y-4 rounded-md border p-3">
               <div class="space-y-2">
                 <Label for="bridge-url">Bridge URL</Label>
                 <Input
@@ -457,8 +464,8 @@ async function create() {
 
           <!-- WhatsApp -->
           <template v-else>
-            <Separator />
-            <div class="flex items-start gap-2">
+            <Separator v-if="!hosted" />
+            <div v-if="!hosted" class="flex items-start gap-2">
               <Checkbox
                 id="own-server"
                 :model-value="ownServer"
@@ -475,7 +482,7 @@ async function create() {
               </div>
             </div>
 
-            <div v-if="ownServer" class="space-y-4 rounded-md border p-3">
+            <div v-if="ownServer && !hosted" class="space-y-4 rounded-md border p-3">
               <div class="space-y-2">
                 <Label for="server-url">Server URL</Label>
                 <Input

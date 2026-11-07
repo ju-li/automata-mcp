@@ -50,6 +50,42 @@ export function requireHosted(): void {
 }
 
 /**
+ * Whether an organization may put a WhatsApp or Telegram connection on a server
+ * it runs itself — its own Evolution server or Telegram bridge, and that
+ * server's message database. Self-hosted only.
+ *
+ * On the hosted service every self-signup is an organization admin, so a
+ * bring-your-own server is an address a stranger chose that this deployment
+ * then dials on its own schedule: the alert sweep, the unpaired reaper and
+ * webhook re-registration. That is GHSA-g2cf-mx92-xc53's whole surface, plus a
+ * DNS-rebinding window `evolution.ts` documents and a message database with no
+ * client-side query timeout — for a feature no hosted customer used. A
+ * self-hosted deployment is single-tenant: there is no stranger to defend
+ * against, and running your own server is the point.
+ *
+ * Stops new ones only. A row that already names its own server keeps working
+ * (none existed on the hosted service when this was added); refusing it at
+ * request time would read as an outage and mail everyone who uses it.
+ *
+ * The one rule: checked by `provisionWhatsappInstance`,
+ * `provisionTelegramInstance` and both message-database PATCH routes before
+ * anything is dialled. The create page hides the option on `/api/hosted`, but
+ * that is presentation — this is the control.
+ */
+export function ownServersAllowed(): boolean {
+  return !hostedMode()
+}
+
+/** 422 unless `ownServersAllowed()`. Logged, since Nitro does not log a handled refusal. */
+export function assertOwnServersAllowed(what: 'Evolution server' | 'Telegram bridge', org: string): void {
+  if (ownServersAllowed()) return
+  console.warn(`[cloud] refused a bring-your-own ${what} for org ${org}: not available on the hosted service`)
+  const message = `Your own ${what} isn't available on the hosted service. Use the one provided, `
+    + 'or self-host Automata to bring your own.'
+  throw createError({ statusCode: 422, statusMessage: message, message })
+}
+
+/**
  * Call the cloud service as the web app, with its admin key.
  *
  * A 4xx from the service carries a message written for the person in the

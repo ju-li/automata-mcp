@@ -367,6 +367,10 @@ Caveats worth knowing before you rely on it:
 
 ## Bring your own Evolution server
 
+**Self-hosted only.** The hosted service refuses it (422) and doesn't offer the
+option: there, any self-signup could point our scheduled tasks at a server they
+control. Self-hosted deployments are unaffected.
+
 A WhatsApp connection can be created against a user's own Evolution server: the
 create form takes the base URL and that server's `AUTHENTICATION_API_KEY`, and
 the app provisions an instance on it exactly as it does on the default server.

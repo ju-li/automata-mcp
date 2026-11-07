@@ -203,6 +203,10 @@ export async function provisionWhatsappInstance(
 ): Promise<AppInstance> {
   const { label, server } = input
 
+  // First, before the address is resolved or dialled: on the hosted service a
+  // user's own server is refused outright. See `ownServersAllowed`.
+  if (server) assertOwnServersAllowed('Evolution server', actor.org.id)
+
   // Guarded before the first request rather than only inside the client, so a
   // bad URL fails the create with a message about the URL instead of surfacing
   // as a failed Evolution call.
@@ -220,8 +224,8 @@ export async function provisionWhatsappInstance(
     throw createError({
       statusCode: 422,
       statusMessage: 'No Evolution server is available. Set NUXT_EVOLUTION_URL and '
-        + 'NUXT_EVOLUTION_ADMIN_KEY to provide a default, or supply your own server '
-        + 'URL and admin key.',
+        + 'NUXT_EVOLUTION_ADMIN_KEY to provide a default'
+        + (ownServersAllowed() ? ', or supply your own server URL and admin key.' : '.'),
     })
   }
 
