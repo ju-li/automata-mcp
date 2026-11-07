@@ -20,15 +20,11 @@ export default defineEventHandler(async (event) => {
   // unless the password was wrong.
   const attempt = claimPasswordAttempt(event, email)
 
-  let user: Awaited<ReturnType<typeof checkPassword>>
-  try {
-    user = await checkPassword(email, password)
-  }
-  catch (cause) {
+  const user = await checkPassword(email, password).catch((cause: unknown) => {
     // A database outage throws out of checkPassword as 503 and is not counted.
     releasePasswordAttempt(event, email, attempt)
     throw cause
-  }
+  })
   if (!user) throw authFailed()
   releasePasswordAttempt(event, email, attempt)
   clearLoginFailures(email)

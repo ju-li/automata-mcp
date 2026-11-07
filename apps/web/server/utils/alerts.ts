@@ -284,9 +284,6 @@ async function evaluate(instance: AppInstance): Promise<void> {
   if (sent) await updateRow('instances', instance.id, { alerted_at: new Date() })
 }
 
-/** Connections evaluated at once, so a few slow servers cannot add their deadlines up past the five-minute interval. */
-const SWEEP_CONCURRENCY = 4
-
 /**
  * The five-minute pass. Registered as the `alerts:sweep` scheduled task.
  *
@@ -322,10 +319,10 @@ export async function sweepConnectionAlerts(): Promise<{ checked: number, failed
 
   let failed = 0
 
+  // No deadline here: evaluateConnectionHealth carries its own, for the
+  // webhook too, and a second identical one could never fire first.
   await forEachBounded(instances, {
-    concurrency: SWEEP_CONCURRENCY,
-    deadlineMs: CONNECTION_WORK_DEADLINE_MS,
-    what: instance => `evaluating connection ${instance.id}`,
+    concurrency: CONNECTION_WORK_CONCURRENCY,
     onError: (instance, error) => {
       failed++
       console.error(`[alerts] could not evaluate connection ${instance.id} (${instance.name}):`, error)
@@ -352,7 +349,7 @@ export async function reregisterConnectionWebhooks(): Promise<{ registered: numb
   // Bounded per connection for the same reason as the sweep: a server that
   // never finishes its answer must not stall registration for everyone after it.
   await forEachBounded(instances, {
-    concurrency: SWEEP_CONCURRENCY,
+    concurrency: CONNECTION_WORK_CONCURRENCY,
     deadlineMs: CONNECTION_WORK_DEADLINE_MS,
     what: instance => `registering connection ${instance.id}'s webhook`,
     // Other failures stay as quiet as before; a missed deadline is new, and a

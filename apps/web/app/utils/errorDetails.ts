@@ -141,13 +141,26 @@ export function errorDetails(error: unknown, fallback = 'Something went wrong'):
   }
 }
 
+/** `422 Unprocessable Content`, or `No response` when the request got no answer. */
+export function errorStatusLine(details: ErrorDetails): string | undefined {
+  if (details.status) return details.statusText ? `${details.status} ${details.statusText}` : String(details.status)
+  return details.network ? 'No response' : undefined
+}
+
+/** `POST /api/instances` — `method` is always set when `path` is. */
+export function errorRequestLine(details: ErrorDetails): string | undefined {
+  return details.path ? `${details.method} ${details.path}` : undefined
+}
+
 /** Plain text for the clipboard. Holds nothing `errorDetails` would not show. */
 export function errorDetailsText(details: ErrorDetails, title?: string): string {
+  const status = errorStatusLine(details)
+  const request = errorRequestLine(details)
   return [
     title && title !== details.message ? title : undefined,
     details.message,
-    details.status ? `Status: ${details.status}${details.statusText ? ` ${details.statusText}` : ''}` : details.network ? 'Status: no response' : undefined,
-    details.path ? `Request: ${details.method ?? 'GET'} ${details.path}` : undefined,
+    status && `Status: ${status}`,
+    request && `Request: ${request}`,
     details.code ? `Code: ${details.code}` : undefined,
     details.reason ? `Reason: ${details.reason}` : undefined,
     typeof location === 'undefined' ? undefined : `Page: ${location.pathname}`,

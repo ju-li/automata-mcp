@@ -168,14 +168,10 @@ export function authFailed(): Error {
 export async function requireCurrentPassword(user: AppUser, password: string): Promise<void> {
   const throttleKey = `reauth:${user.id}`
   const claimedAt = claimAuthAttempt(throttleKey)
-  let ok: boolean
-  try {
-    ok = Boolean(await checkPassword(user.email, password))
-  }
-  catch (cause) {
+  const ok = await checkPassword(user.email, password).catch((cause: unknown) => {
     forgiveAuthAttempt(throttleKey, claimedAt)
     throw cause
-  }
+  })
   if (!ok) {
     throw createError({ statusCode: 403, statusMessage: 'Current password is incorrect' })
   }

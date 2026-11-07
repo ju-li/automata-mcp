@@ -400,6 +400,10 @@ export function pgPrivilegeWarning(identity: PgIdentity): string | undefined {
 
 export type PgProbe = PgIdentity
 
+const TIMEOUT_HINT = 'The server did not answer in time. A firewall may be dropping the connection, or the server only accepts connections from an allowlist.'
+const untrustedCertificate = (what: string) =>
+  `The server's certificate ${what}, which sslmode=verify-full refuses. Use sslmode=require, or install a trusted certificate.`
+
 /**
  * What the commonest probe failures mean, in words a person can act on.
  *
@@ -416,15 +420,15 @@ const PROBE_FAILURE_HINTS: Record<string, string> = {
   '53300': 'The server has no free connections. Try again, or connect through its pooler.',
   '57P03': 'The server is starting up or shutting down. Try again in a moment.',
   'ECONNREFUSED': 'Nothing accepted the connection on that host and port. Check the port, and that the server is running.',
-  'CONNECT_TIMEOUT': 'The server did not answer in time. A firewall may be dropping the connection, or the server only accepts connections from an allowlist.',
-  'ETIMEDOUT': 'The server did not answer in time. A firewall may be dropping the connection, or the server only accepts connections from an allowlist.',
+  'CONNECT_TIMEOUT': TIMEOUT_HINT,
+  'ETIMEDOUT': TIMEOUT_HINT,
   'EHOSTUNREACH': 'That host cannot be reached from this server.',
   'ENETUNREACH': 'That host cannot be reached from this server. If it has only an IPv6 address, this server may have no IPv6 route.',
   'EAFNOSUPPORT': 'That host has only an IPv6 address, and this server has no IPv6 networking.',
   'ECONNRESET': 'The server closed the connection before it was ready. If it requires SSL, add ?sslmode=require to the connection string.',
-  'DEPTH_ZERO_SELF_SIGNED_CERT': 'The server\'s certificate is self-signed, which sslmode=verify-full refuses. Use sslmode=require, or install a trusted certificate.',
-  'SELF_SIGNED_CERT_IN_CHAIN': 'The server\'s certificate chain is not trusted, which sslmode=verify-full refuses. Use sslmode=require, or install a trusted certificate.',
-  'UNABLE_TO_VERIFY_LEAF_SIGNATURE': 'The server\'s certificate could not be verified, which sslmode=verify-full refuses. Use sslmode=require, or install a trusted certificate.',
+  'DEPTH_ZERO_SELF_SIGNED_CERT': untrustedCertificate('is self-signed'),
+  'SELF_SIGNED_CERT_IN_CHAIN': untrustedCertificate('chain is not trusted'),
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE': untrustedCertificate('could not be verified'),
   'ERR_TLS_CERT_ALTNAME_INVALID': 'The server\'s certificate is not issued for this host name. Connect by the name on the certificate, or use sslmode=require.',
 }
 
