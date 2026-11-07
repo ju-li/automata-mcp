@@ -460,7 +460,7 @@ export function messagePartsOf(structure: MessageStructureObject | undefined): M
   if (!structure) return out
 
   const visit = (node: MessageStructureObject, root: boolean) => {
-    const type = (node.type || 'application/octet-stream').toLowerCase()
+    const type = cleanText(node.type)?.toLowerCase() ?? 'application/octet-stream'
     if (type.startsWith('multipart/') && node.childNodes?.length) {
       for (const child of node.childNodes) visit(child, false)
       return
@@ -486,7 +486,7 @@ export function messagePartsOf(structure: MessageStructureObject | undefined): M
       ...(filename && { filename }),
       ...(node.size !== undefined && { size: decodedSize(node.size, node.encoding) }),
       ...(disposition === 'inline' && { inline: true }),
-      ...(node.id && { contentId: node.id.replace(/^<|>$/g, '') }),
+      ...(cleanText(node.id) && { contentId: cleanText(node.id)!.replace(/^<|>$/g, '') }),
     })
   }
 
@@ -498,10 +498,21 @@ function decodedSize(encoded: number, encoding: string | undefined): number {
   return encoding?.toLowerCase() === 'base64' ? Math.floor(encoded * 3 / 4) : encoded
 }
 
-/** What the database can hold: no NUL bytes, which Postgres `text` refuses. */
-export function cleanText(value: string | undefined | null): string | undefined {
+/**
+ * What the database can hold, from text an outside sender chose: no NUL bytes,
+ * which Postgres `text` refuses, and no unpaired UTF-16 surrogate, which
+ * `jsonb` refuses (22P02) — a UTF-16 encoded word or RFC 2231 parameter can
+ * decode to one, and one such value fails the whole batch insert it rides in.
+ * `max` clips by code point, never by UTF-16 unit, so the cut cannot split a
+ * pair and make the surrogate itself (GHSA-89q9-r9vm-6vp2).
+ */
+export function cleanText(value: string | undefined | null, max?: number): string | undefined {
   if (value === undefined || value === null) return undefined
-  const cleaned = value.replace(/\0/g, '').trim()
+  const cleaned = value.toWellFormed().replace(/\0/g, '').trim()
+  if (max !== undefined && cleaned.length > max) {
+    const points = Array.from(cleaned)
+    if (points.length > max) return points.slice(0, max).join('').trimEnd() || undefined
+  }
   return cleaned || undefined
 }
 
