@@ -197,7 +197,7 @@ export function invitationEmail(p: {
     blocks: [
       eyebrow('Invitation'),
       heading(`${inviter} invited you to ${org}.`),
-      lead(`Automata lets AI tools like Claude reach WhatsApp, Telegram and PostgreSQL, limited to the exact chats and tables an admin allows. ${org} uses it, and wants you on board.`),
+      lead(`Automata lets AI tools like Claude reach WhatsApp, Telegram, email and PostgreSQL, limited to the exact chats, folders and tables an admin allows. ${org} uses it, and wants you on board.`),
       chipCard(card.title, card.text, card.chip),
       button('Accept invitation', p.url),
       pasteLink('Button not working? Paste this link into your browser:', p.url),

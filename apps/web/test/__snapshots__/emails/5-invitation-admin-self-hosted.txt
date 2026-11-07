@@ -5,7 +5,7 @@ INVITATION
 
 Jane Doe invited you to Acme.
 
-Automata lets AI tools like Claude reach WhatsApp, Telegram and PostgreSQL, limited to the exact chats and tables an admin allows. Acme uses it, and wants you on board.
+Automata lets AI tools like Claude reach WhatsApp, Telegram, email and PostgreSQL, limited to the exact chats, folders and tables an admin allows. Acme uses it, and wants you on board.
 
 You’ll join as an Admin
 Manage the organization: invite people, create connections, assign them and mint tokens.
