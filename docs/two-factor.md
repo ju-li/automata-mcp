@@ -80,7 +80,7 @@ turned on.
 
 | Table | Holds |
 |---|---|
-| `totp_credentials` | the authenticator secret (plain), the last step a code was accepted for, `confirmed_at` |
+| `totp_credentials` | the authenticator secret (plain), the last step a code was accepted for, `confirmed_at`; until confirmed, the session that started setup and the wrong-code count (15 minutes, 5 codes, then set up again) |
 | `webauthn_credentials` | credential id, public key, signature counter, transports, name, `last_used_at` |
 | `recovery_codes` | SHA-256 of each code, `used_at` |
 | `mfa_challenges` | pending sign-ins and passkey registrations, short-lived |

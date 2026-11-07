@@ -197,6 +197,7 @@ Rules easy to undo:
 - **`requireCurrentPassword` throttled per account** (`claimAuthAttempt` under `reauth:<id>`, claimed before the compare, forgiven on success or outage). Unthrottled, a stolen session guessed the password at scrypt speed — password must stay a second proof beyond cookie.
 - **Adding a factor needs current password, not just removing.** Stolen session enrolling attacker's authenticator locks owner out. First factor (decided under `lockUserFactors` row lock, so two enrolments agree) mints recovery codes and calls `endOtherSessions`; last factor removed deletes recovery codes in same transaction. Recovery codes alone ≠ factor.
 - **RP ID and origin from `NUXT_PUBLIC_APP_URL`, never request `Host`.** Unset → passkey routes 501, UI hides them. Domain change kills every passkey; TOTP survives.
+- **Unconfirmed TOTP secret = setup's password check carried forward**, so `totp/confirm` (session only) is bound like a login challenge: `setup_session` must match, 15 min from `created`, 5 codes claimed before check (`claimTotpSetupAttempt`), stale row deleted on refusal. Never confirm a pending secret without it.
 - **Passkey and registration challenges in DB** (`mfa_challenges.purpose`), not memory — second replica must finish what first started.
 
 TOTP secret = plain column, same trade as `instances` credentials. Recovery codes 60-bit random, stored SHA-256 (fast hash fine at that entropy).
