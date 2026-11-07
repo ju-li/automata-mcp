@@ -80,6 +80,21 @@ const CONNECT_TIMEOUT_MS = 15_000
 const OPEN_DEADLINE_MS = 60_000
 /** What a body fetch may pull over the wire before it is cut. */
 const BODY_MAX_BYTES = 2 * 1024 * 1024
+/**
+ * The longest single response line the server may send. Every SEARCH answer is
+ * one line, and imapflow turns it into one object per number, about 125 bytes
+ * of heap per byte on the wire. Its own default is 1 GiB, so a mail server a
+ * tenant named could exhaust the heap of the process every tenant shares with
+ * one answer (GHSA-mqp8-94pq-4pwx). 1 MiB holds about 95,000 UIDs, and the
+ * sync asks in UID windows small enough to stay under it (imap-sync.ts).
+ */
+const MAX_LINE_BYTES = 1024 * 1024
+
+/** The largest attachment `get-email-attachment` returns. Operator setting. */
+export function attachmentMaxBytes(): number {
+  const value = Number(useRuntimeConfig().imapAttachmentMaxBytes)
+  return Number.isFinite(value) && value > 0 ? value : 10 * 1024 * 1024
+}
 /** How long a server-side body search may take across every folder. */
 const SEARCH_BUDGET_MS = 25_000
 const SEARCH_MAX_FOLDERS = 20
@@ -114,6 +129,14 @@ export async function openImap(
 ): Promise<ImapFlow> {
   const { address } = await assertPublicTarget(target.host, target.port, label)
 
+  // A literal is buffered whole before any caller-side cap applies, and the
+  // download caps (BODY_MAX_BYTES, the attachment cap) cut only what reaches
+  // the caller. Downloads ask in 64 KiB pieces, so this only has to clear the
+  // largest single part a server that ignores partial fetches might send: the
+  // attachment cap (+1, how readAttachment notices an oversized part) or the
+  // body cap. Read per call: useRuntimeConfig needs the Nitro runtime.
+  const maxLiteral = Math.max(attachmentMaxBytes() + 1, BODY_MAX_BYTES) + 64 * 1024
+
   const client = new ImapFlow({
     host: address,
     port: target.port,
@@ -133,6 +156,11 @@ export async function openImap(
     connectionTimeout: CONNECT_TIMEOUT_MS,
     greetingTimeout: CONNECT_TIMEOUT_MS,
     socketTimeout: 120_000,
+    // Past these imapflow fails the stream (LineTooLarge, LiteralTooLarge,
+    // ResponseTooLarge) instead of buffering and parsing what the server sent.
+    maxLineLength: MAX_LINE_BYTES,
+    maxLiteralSize: maxLiteral,
+    maxResponseSize: maxLiteral + MAX_LINE_BYTES,
   })
   client.on('error', (error: ImapFlowError) => {
     console.error(`[imap] connection to ${target.host} failed (${error.code ?? 'error'})`)
@@ -237,7 +265,9 @@ export function describeImapError(cause: unknown): DescribedImapError {
         ? 'timeout'
         : error.code === 'ENOTFOUND' || error.code === 'EAI_AGAIN'
           ? 'dns'
-          : error.code ?? 'connection failed'
+          : error.code === 'LineTooLarge' || error.code === 'LiteralTooLarge' || error.code === 'ResponseTooLarge'
+            ? 'too_large'
+            : error.code ?? 'connection failed'
   return { code, auth: code === 'auth', message: imapErrorMessage(code) }
 }
 
@@ -263,6 +293,8 @@ export function imapErrorMessage(code: string): string {
         + 'The server log has the cause; the sync retries every two minutes.'
     case 'host_refused':
       return 'The mail server\'s address is not one this deployment may connect to.'
+    case 'too_large':
+      return 'The mail server sent a reply larger than this connector accepts, and the connection was closed.'
     default:
       return `Could not reach the mail server (${code}).`
   }
