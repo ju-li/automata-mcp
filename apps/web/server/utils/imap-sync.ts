@@ -330,8 +330,9 @@ async function syncFolder(instance: AppInstance, client: ImapFlow, path: string,
     let oldestUid = state.oldest_uid === undefined ? undefined : Number(state.oldest_uid)
 
     // ── first sight of this folder: the newest chunk inside the age limit ──
+    const topUid = Number(mailbox.uidNext) - 1
     if (oldestUid === undefined) {
-      const recent = await uidSearch(client, { since: cutoff })
+      const recent = await uidSearchWindowed(client, { since: cutoff }, 1, topUid, { descending: true, enough: BACKFILL_CHUNK })
       const newest = recent.sort((a, b) => b - a).slice(0, BACKFILL_CHUNK)
       await storeMessages(instance, client, path, uidvalidity, newest)
       lastUid = Math.max(newest[0] ?? 0, Number(mailbox.uidNext) - 1, 0)
@@ -340,7 +341,7 @@ async function syncFolder(instance: AppInstance, client: ImapFlow, path: string,
     }
     // ── new mail since the last run ──
     else if (Number(mailbox.uidNext) - 1 > lastUid) {
-      const fresh = (await uidSearch(client, { uid: `${lastUid + 1}:*` }))
+      const fresh = (await uidSearchWindowed(client, {}, lastUid + 1, topUid, { enough: NEW_CHUNK }))
         .filter(uid => uid > lastUid)
         .sort((a, b) => a - b)
         .slice(0, NEW_CHUNK)
@@ -359,7 +360,7 @@ async function syncFolder(instance: AppInstance, client: ImapFlow, path: string,
       SELECT count(*) FROM app.mail_messages WHERE instance_id = ${instance.id} AND folder_path = ${path}`
     let storedCount = Number(counted?.count ?? 0)
     if (lease.runs % EXPUNGE_EVERY === 0 || storedCount > mailbox.exists) {
-      const present = await uidSearch(client, { all: true })
+      const present = await uidSearchWindowed(client, {}, 1, topUid)
       const result = await sql`
         DELETE FROM app.mail_messages
         WHERE instance_id = ${instance.id} AND folder_path = ${path}
@@ -376,13 +377,14 @@ async function syncFolder(instance: AppInstance, client: ImapFlow, path: string,
     // and a folder that said "complete" over a year of skipped mail would tell
     // the model there is no older mail when there is.
     const finished = async (): Promise<BackfillOutcome> =>
-      (await uidSearch(client, { before: cutoff })).length
+      (await uidSearchWindowed(client, { before: cutoff }, 1, topUid, { enough: 1 })).length
         ? { complete: false, stopped: 'days' }
         : { complete: true, stopped: null }
 
     let backfill: BackfillOutcome = {}
     if (oldestUid > 1 && Date.now() < deadline) {
-      const older = (await uidSearch(client, { uid: `1:${oldestUid - 1}`, since: cutoff })).sort((a, b) => b - a)
+      const older = (await uidSearchWindowed(client, { since: cutoff }, 1, oldestUid - 1, { descending: true, enough: BACKFILL_CHUNK }))
+        .sort((a, b) => b - a)
       if (older.length && storedCount >= limits.max) {
         backfill = { complete: false, stopped: 'count' }
       }
@@ -413,9 +415,48 @@ async function syncFolder(instance: AppInstance, client: ImapFlow, path: string,
   }
 }
 
+/**
+ * imapflow answers a failed SEARCH with `false`, not a rejection: a dropped
+ * connection, or a reply past the line cap. Read as "no UIDs", that made the
+ * expunge pass delete every synced row of the folder, so it throws instead and
+ * the folder's run fails as a whole.
+ */
 async function uidSearch(client: ImapFlow, query: Parameters<ImapFlow['search']>[0]): Promise<number[]> {
   const result = await client.search(query, { uid: true })
-  return Array.isArray(result) ? result : []
+  if (!Array.isArray(result)) throw new Error('IMAP SEARCH failed')
+  return result
+}
+
+/** UIDs per SEARCH: at most 50,000 numbers of up to 11 bytes, about half the client's 1 MiB line cap. */
+const SEARCH_UID_WINDOW = 50_000
+
+/**
+ * UID SEARCH asked in UID windows of `from`..`to`, so no single answer can
+ * outgrow the line cap openImap sets. A server answers SEARCH on one line, and
+ * an unbounded `ALL` or `BEFORE` on a large folder would fail the connection
+ * (LineTooLarge) and stop the folder's sync. Walks the windows upward, or
+ * downward with `descending`, and stops once `enough` UIDs are found, so
+ * callers after the newest or oldest few pay for few round trips. A missing
+ * UIDNEXT falls back to one open-ended search.
+ */
+async function uidSearchWindowed(
+  client: ImapFlow,
+  query: Parameters<ImapFlow['search']>[0],
+  from: number,
+  to: number,
+  options: { descending?: boolean, enough?: number } = {},
+): Promise<number[]> {
+  if (!Number.isFinite(to)) return uidSearch(client, { ...query, uid: `${from}:*` })
+  const found: number[] = []
+  if (to < from) return found
+  const windows = Math.ceil((to - from + 1) / SEARCH_UID_WINDOW)
+  for (let i = 0; i < windows; i++) {
+    const low = from + (options.descending ? windows - 1 - i : i) * SEARCH_UID_WINDOW
+    const high = Math.min(to, low + SEARCH_UID_WINDOW - 1)
+    for (const uid of await uidSearch(client, { ...query, uid: `${low}:${high}` })) found.push(uid)
+    if (options.enough !== undefined && found.length >= options.enough) break
+  }
+  return found
 }
 
 /**
