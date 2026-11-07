@@ -721,6 +721,11 @@ export interface ChatActivityOptions {
  * ~6 s cold, 2.3 s warm with JIT off (the pool sets `jit: false`). Do not fold
  * `msg` into `per_chat`.
  *
+ * The scan must not open `message` for every row: the payload is TOASTed, and
+ * reading it was most of the I/O (~96k buffers on a 310k-message account).
+ * `notControl` opens it only for rows whose `messageType` can carry a control
+ * record — see there.
+ *
  * The last row comes from a plain `max()` over a sortable text key (zero-padded
  * timestamp, message id, row id), not `array_agg(... ORDER BY ...)`, which needs
  * its own sort per group. The last message's payload is *not* read here; `lastMessagePayloads` fetches it by primary key for the
@@ -936,9 +941,29 @@ export async function lidLocalParts(instance: AppInstance, options: LidLocalPart
 /**
  * Not a WhatsApp control record. An edit is kept: in history-synced data it is
  * the only copy of the new text, so it is real activity in the chat.
+ *
+ * **`messageType` decides whether to look; the payload still decides (#128).**
+ * `message` is the whole WhatsApp payload, usually stored out of line (TOAST),
+ * so reading it for every row of an account is what made `listChatActivity`
+ * cost ~750 MB of reads on a 310k-message account and time out cold. Only the
+ * two types that can carry a control record open the payload: `protocolMessage`,
+ * and `messageContextInfo`, because Baileys' `getContentType()` returns the
+ * *first* key and a wrapper can come first. Every other type is activity
+ * without looking — measured: no row typed otherwise had `protocolMessage` in
+ * its payload. `CASE`, never `OR`: Postgres does not promise to short-circuit
+ * `OR`, so the payload arm could still be evaluated for every row.
+ *
+ * Used by `listChatActivity` only. The other payload checks (search's control
+ * filter, the reaction filters) have not been measured with this shape; widen
+ * it to them one at a time, each with its own evidence. Re-run the type check
+ * in CLAUDE.md on an Evolution tag bump.
  */
 function notControl(sql: Sql) {
-  return sql`(m.message->'protocolMessage' IS NULL OR m.message->'protocolMessage'->'editedMessage' IS NOT NULL)`
+  return sql`(CASE WHEN m."messageType" IN ('protocolMessage', 'messageContextInfo')
+                   THEN (m.message->'protocolMessage' IS NULL
+                         OR m.message->'protocolMessage'->'editedMessage' IS NOT NULL)
+                   ELSE true
+              END)`
 }
 
 /**
