@@ -420,11 +420,33 @@ const PROBE_FAILURE_HINTS: Record<string, string> = {
   'ETIMEDOUT': 'The server did not answer in time. A firewall may be dropping the connection, or the server only accepts connections from an allowlist.',
   'EHOSTUNREACH': 'That host cannot be reached from this server.',
   'ENETUNREACH': 'That host cannot be reached from this server. If it has only an IPv6 address, this server may have no IPv6 route.',
+  'EAFNOSUPPORT': 'That host has only an IPv6 address, and this server has no IPv6 networking.',
   'ECONNRESET': 'The server closed the connection before it was ready. If it requires SSL, add ?sslmode=require to the connection string.',
   'DEPTH_ZERO_SELF_SIGNED_CERT': 'The server\'s certificate is self-signed, which sslmode=verify-full refuses. Use sslmode=require, or install a trusted certificate.',
   'SELF_SIGNED_CERT_IN_CHAIN': 'The server\'s certificate chain is not trusted, which sslmode=verify-full refuses. Use sslmode=require, or install a trusted certificate.',
   'UNABLE_TO_VERIFY_LEAF_SIGNATURE': 'The server\'s certificate could not be verified, which sslmode=verify-full refuses. Use sslmode=require, or install a trusted certificate.',
   'ERR_TLS_CERT_ALTNAME_INVALID': 'The server\'s certificate is not issued for this host name. Connect by the name on the certificate, or use sslmode=require.',
+}
+
+/**
+ * `PROBE_FAILURE_HINTS`, with one case that the code alone cannot name.
+ *
+ * Supabase's direct host, `db.<ref>.supabase.co`, resolves only to IPv6, so on
+ * a server with no outbound IPv6 — Railway among them, production included —
+ * it fails with ENETUNREACH. The generic "may have no IPv6 route" is true, but
+ * the fix is Supabase-specific: its Session pooler string, which is IPv4.
+ * Keyed on the hostname as written, never the resolved address.
+ */
+function probeFailureHint(code: string | undefined, host: string): string | undefined {
+  if (!code) return undefined
+  // Railway answers ENETUNREACH (IPv6 stack, no route); a host with no IPv6
+  // stack at all answers EAFNOSUPPORT. Same cause, same fix.
+  const unreachable = code === 'ENETUNREACH' || code === 'EHOSTUNREACH' || code === 'EAFNOSUPPORT'
+  if (unreachable && /\.supabase\.co$/i.test(host)) {
+    return 'Supabase direct connections are IPv6-only, and this server has no IPv6 route to them. '
+      + 'Use the Session pooler connection string instead (in Supabase: Connect, then Session pooler).'
+  }
+  return PROBE_FAILURE_HINTS[code]
 }
 
 /**
@@ -489,7 +511,7 @@ export async function probePgConnection(dsn: string, options: {
     console.error(`[pg] probe failed for ${target.host}:${target.port}/${target.database}`, cause)
     const reason = (cause as { code?: unknown })?.code
     const code = typeof reason === 'string' ? reason : undefined
-    const hint = code ? PROBE_FAILURE_HINTS[code] : undefined
+    const hint = probeFailureHint(code, target.host)
     throw createError({
       statusCode: 422,
       message: `Could not connect to ${target.host}:${target.port}/${target.database}. `

@@ -73,3 +73,22 @@ approved address — IPv4 or IPv6 — is pinned, so the driver cannot resolve th
 to somewhere else afterwards. A connection string must name exactly one host, so
 one listing several (`host1,host2`) is refused, and an `@` or `#` in the user
 name or password must be percent-encoded (`%40`, `%23`).
+
+**Supabase: use the Session pooler connection string.** In the Supabase
+dashboard, open **Connect** and copy the **Session pooler** string, which looks
+like `postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`.
+Don't use the direct one (`db.<ref>.supabase.co`). Supabase's direct hosts resolve
+only to IPv6, and a deployment with no outbound IPv6 can't reach them: Railway
+has none, so there the connection fails with `ENETUNREACH`. The create form
+warns when you paste a direct host, and the error names the pooler, but neither
+refuses it, since a server with IPv6 connects fine.
+
+- **Session pooler, not Transaction pooler** (port 6543). Session mode gives each
+  connection its own server session, the way a direct connection does, which is
+  what `run-query`'s cursors and per-transaction settings are written against.
+  The Transaction pooler hasn't been tested with this app.
+- **The pooler's user name carries the project ref.** It's `postgres.<ref>`, not
+  `postgres`. A role of your own, like `claude_reader` above, is written
+  `claude_reader.<ref>` the same way.
+- **Or keep the direct host** by buying Supabase's IPv4 add-on, which gives it
+  an IPv4 address.
