@@ -146,14 +146,18 @@ async function runClaimed(instance: AppInstance, lease: Lease): Promise<SyncOutc
   let client: ImapFlow | undefined
   let cutOff = false
   // Closing the socket rejects whatever command is waiting on it, so the run
-  // unwinds through the ordinary failure path below.
+  // unwinds through the ordinary failure path below. Before `openImap` has
+  // returned there is no client here to close, so the abort reaches it there
+  // (GHSA-rv5g-x6rm-cvh5).
+  const abort = new AbortController()
   const watchdog = setTimeout(() => {
     cutOff = true
+    abort.abort()
     client?.close()
   }, RUN_HARD_LIMIT_MS)
   try {
     await resetIfIdentityChanged(instance, lease.target)
-    client = await openImap(lease.target)
+    client = await openImap(lease.target, undefined, { signal: abort.signal })
     if (cutOff) throw new DeadlineExceededError(`syncing mailbox ${instance.id}`, RUN_HARD_LIMIT_MS)
     await syncFolders(instance, client, lease, deadline)
     await sql`
