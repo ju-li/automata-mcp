@@ -14,6 +14,9 @@ const id = computed(() => route.params.id as string)
 const { data, error } = await useFetch<{ instance: PublicInstanceRow, canManage: boolean }>(
   () => `/api/instances/${id.value}/summary`,
 )
+// The template explains a missing connection itself (the unpaired reaper's
+// one-hour rule included); a toast on top would say it twice.
+handlesErrorItself(error)
 
 const kind = computed(() => data.value?.instance.kind)
 

@@ -35,7 +35,9 @@ interface BillingResponse {
 
 const route = useRoute()
 const { refresh: refreshSession } = useSession()
-const { data, refresh, status: fetchStatus } = await useFetch<BillingResponse>('/api/billing')
+const { data, refresh, status: fetchStatus, error: fetchError } = await useFetch<BillingResponse>('/api/billing')
+// Said in the page itself ("Could not load billing").
+handlesErrorItself(fetchError)
 
 const checkoutBusy = ref(false)
 const { busy: portalBusy, run: runPortal } = useApiAction()

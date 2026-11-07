@@ -8,6 +8,13 @@ import type { H3Event } from 'h3'
  * failures count. A blocked attempt is refused before the account read and the
  * hash comparison, so it costs nothing.
  *
+ * An attempt is counted when it is claimed (`claimPasswordAttempt`), in the same
+ * synchronous step as the check, and handed back (`releasePasswordAttempt`) once
+ * it turns out not to be a wrong password — a success, or an outage, which is
+ * not counted. Checking first and recording after `checkPassword` let a burst
+ * arriving together all pass the check before any of them was recorded: the
+ * cap held for serial guesses only. Same shape as `claimAuthAttempt` in mfa.ts.
+ *
  * Both keys, because each alone leaves a hole: per-address only leaves guessing
  * spread over many addresses unbounded; per-email only lets one address spray
  * every account. The per-email key has a known price — a stranger who knows an
@@ -57,33 +64,51 @@ function keysFor(event: H3Event, email: string): string[] {
   return [`email:${normaliseEmail(email)}`, `ip:${clientIp(event)}`]
 }
 
-/** Throws 429 if either this email or this address has failed too often. */
-export function assertLoginAllowed(event: H3Event, email: string): void {
+/**
+ * Checks both keys and, when neither is at the cap, counts this attempt against
+ * both — with no `await` between the two, so concurrent attempts see each
+ * other. Throws 429 otherwise. Returns the claim's timestamp, which the caller
+ * passes to `releasePasswordAttempt` unless the password turned out wrong.
+ */
+export function claimPasswordAttempt(event: H3Event, email: string): number {
   const now = Date.now()
   prune(now)
 
+  const keys = keysFor(event, email)
   let retryAt = 0
-  for (const key of keysFor(event, email)) {
+  for (const key of keys) {
     const times = failures.get(key) ?? []
     if (times.length >= LOGIN_FAILURE_LIMIT) {
       retryAt = Math.max(retryAt, times[times.length - LOGIN_FAILURE_LIMIT]! + LOGIN_WINDOW_MS)
     }
   }
-  if (!retryAt) return
+  if (retryAt) {
+    // One message for both keys: which limit hit would say whether the address
+    // has an account behind it.
+    setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil((retryAt - now) / 1000)))
+    throw createError({
+      statusCode: 429,
+      statusMessage: 'Too many failed sign-in attempts. Try again in a few minutes.',
+    })
+  }
 
-  // One message for both keys: which limit hit would say whether the address
-  // has an account behind it.
-  setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil((retryAt - now) / 1000)))
-  throw createError({
-    statusCode: 429,
-    statusMessage: 'Too many failed sign-in attempts. Try again in a few minutes.',
-  })
+  for (const key of keys) failures.set(key, [...(failures.get(key) ?? []), now])
+  return now
 }
 
-export function recordLoginFailure(event: H3Event, email: string): void {
-  const now = Date.now()
+/**
+ * Hands back the attempt claimed at `at`: it was not a wrong password. Removes
+ * one entry with that timestamp from each key — entries with equal timestamps
+ * are interchangeable, so which one goes does not matter. A claim already
+ * pruned or evicted is simply absent.
+ */
+export function releasePasswordAttempt(event: H3Event, email: string, at: number): void {
   for (const key of keysFor(event, email)) {
-    failures.set(key, [...(failures.get(key) ?? []), now])
+    const times = failures.get(key)
+    const index = times?.indexOf(at) ?? -1
+    if (index < 0) continue
+    times!.splice(index, 1)
+    if (!times!.length) failures.delete(key)
   }
 }
 
