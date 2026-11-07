@@ -311,6 +311,73 @@ export async function keyedPool(key: string, dsn: string, options: KeyedPoolOpti
   })
 }
 
+/**
+ * A pool several connections share, as the message pools for this deployment's
+ * own Evolution server and Telegram bridge are: one `Sql` plus `run`, which every
+ * statement goes through.
+ *
+ * **Why.** Those pools hold `PER_POOL_MAX` connections for every tenant on the
+ * deployment, and postgres.js queues a statement for a free one with no timeout
+ * of its own. A slow statement is cheap to cause — a scan of a large account, a
+ * search — so one connection with a few in flight held every slot, and every
+ * other account's reads waited behind it (GHSA-fpmx-gmx5-84vc). `run` lets each
+ * connection have `SHARED_POOL_SLOTS_PER_CONNECTION` statement in flight on the
+ * shared pool; the rest of its statements wait *here*, in a per-connection queue
+ * of at most `SHARED_POOL_QUEUE_PER_CONNECTION`, and past that are refused with
+ * 429 rather than parked without bound.
+ *
+ * A pool of the connection's own (a user-supplied URL) gets a pass-through
+ * `run`: nobody else's reads are behind it.
+ *
+ * `run` must wrap one statement and nothing that takes another slot — a callback
+ * awaiting a second `run` for the same connection would wait on itself.
+ */
+export interface SharedPool {
+  sql: Sql
+  run: <T>(statement: () => Promise<T>) => Promise<T>
+}
+
+const SHARED_POOL_SLOTS_PER_CONNECTION = 1
+const SHARED_POOL_QUEUE_PER_CONNECTION = 8
+
+const connectionSlots = new Map<string, { active: number, waiting: Array<() => void> }>()
+
+export function sharedPoolFor(sql: Sql, shared: boolean, connectionKey: string): SharedPool {
+  if (!shared) return { sql, run: statement => statement() }
+  return { sql, run: statement => withConnectionSlot(connectionKey, statement) }
+}
+
+async function withConnectionSlot<T>(key: string, statement: () => Promise<T>): Promise<T> {
+  let slots = connectionSlots.get(key)
+  if (!slots) {
+    slots = { active: 0, waiting: [] }
+    connectionSlots.set(key, slots)
+  }
+
+  if (slots.active < SHARED_POOL_SLOTS_PER_CONNECTION) {
+    slots.active++
+  }
+  else {
+    if (slots.waiting.length >= SHARED_POOL_QUEUE_PER_CONNECTION) {
+      throw createError({
+        statusCode: 429,
+        statusMessage: 'Too many reads are already running for this connection. Wait for them to finish and try again.',
+      })
+    }
+    // Handed the slot by whoever finishes; `active` stays as it was.
+    await new Promise<void>(resolve => slots.waiting.push(resolve))
+  }
+
+  try {
+    return await statement()
+  }
+  finally {
+    const next = slots.waiting.shift()
+    if (next) next()
+    else if (--slots.active === 0) connectionSlots.delete(key)
+  }
+}
+
 /** Drop one pool by key. */
 export function closeKeyedPool(key: string): Promise<void> {
   return closeKeyedResource(key)
