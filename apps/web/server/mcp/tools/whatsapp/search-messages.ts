@@ -50,7 +50,10 @@ export default defineKindTool({
     openWorldHint: true,
   },
   inputSchema: {
-    query: z.string().min(2).describe('Words to look for. All of them must appear in the message.'),
+    query: z.string().min(2).max(MAX_SEARCH_QUERY_LENGTH).describe(
+      `Words to look for. All of them must appear in the message. At most ${MAX_SEARCH_TERMS} words `
+      + `of at most ${MAX_SEARCH_TERM_LENGTH} characters each.`,
+    ),
     jid: z.string().optional().describe('Restrict to one chat, using a `jid` from list-chats. Omit to search every chat.'),
     since: z.string().optional().describe('Only messages at or after this date, e.g. 2024-03-01 or 2024-03-01T12:00:00Z'),
     until: z.string().optional().describe('Only messages at or before this date'),
@@ -65,7 +68,7 @@ export default defineKindTool({
   handler: async ({ query, jid, since, until, fromMe, limit, includeReactions }) => {
     const { instance, scope } = useMcpAuth()
 
-    const terms = query.split(/\s+/).filter(Boolean)
+    const terms = splitSearchTerms(query, 'query')
     if (!terms.length) {
       throw createError({ statusCode: 400, message: '`query` needs at least one word to search for.' })
     }
