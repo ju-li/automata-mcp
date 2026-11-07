@@ -59,7 +59,7 @@ async function assign(member: AssignableMember) {
     await refresh()
     toast.success(`${member.email} can now use this ${describeKind(props.kind)}.`)
   } catch (error) {
-    toast.error(apiErrorMessage(error, 'Could not assign the connection'))
+    showErrorToast(error, { title: 'Could not assign the connection' })
   } finally {
     pending.value = null
   }
@@ -77,7 +77,7 @@ async function unassign(member: AssignableMember) {
       ? `${member.email} no longer has access. ${result.revokedTokens} token(s) revoked.`
       : `${member.email} no longer has access.`)
   } catch (error) {
-    toast.error(apiErrorMessage(error, 'Could not remove the assignment'))
+    showErrorToast(error, { title: 'Could not remove the assignment' })
   } finally {
     pending.value = null
   }

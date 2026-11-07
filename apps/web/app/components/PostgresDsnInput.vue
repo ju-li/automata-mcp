@@ -52,6 +52,29 @@ watchEffect(() => {
 })
 
 const id = (field: string) => `${props.idPrefix}-${field}`
+
+/**
+ * The host the active tab names, lower-cased, for hints only — the server
+ * parses for real, and nothing here decides what is accepted. Split the way
+ * the server's `assertDriverAgrees` reads an authority: user info ends at the
+ * last `@`.
+ */
+const typedHost = computed(() => {
+  if (mode.value === 'params') return host.value.trim().replace(/^\[|\]$/g, '').toLowerCase()
+  const value = raw.value.trim()
+  const start = value.indexOf('://')
+  if (start === -1) return ''
+  const authority = value.slice(start + 3).split(/[/?#]/)[0] ?? ''
+  return authority.slice(authority.lastIndexOf('@') + 1).replace(/:\d*$/, '').toLowerCase()
+})
+
+/**
+ * Supabase's direct host (`db.<ref>.supabase.co`) resolves only to IPv6, and a
+ * server with no outbound IPv6 — Railway among them — fails it with
+ * ENETUNREACH. A hint, not a refusal: a deployment that has IPv6 reaches it
+ * fine. `docs/postgres.md` "Supabase" says the same.
+ */
+const supabaseDirect = computed(() => /^db\.[a-z0-9]+\.supabase\.co$/.test(typedHost.value))
 </script>
 
 <template>
@@ -152,5 +175,10 @@ const id = (field: string) => `${props.idPrefix}-${field}`
         </Select>
       </div>
     </TabsContent>
+
+    <p v-if="supabaseDirect" class="text-xs text-amber-700 dark:text-amber-400">
+      Supabase direct connections are IPv6-only and may be unreachable from this server.
+      Paste the Session pooler string instead: in Supabase, open Connect, then Session pooler.
+    </p>
   </Tabs>
 </template>
