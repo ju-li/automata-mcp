@@ -72,6 +72,12 @@ export interface MessageParts {
 }
 
 const CONNECT_TIMEOUT_MS = 15_000
+/**
+ * Everything `openImap` waits for — TCP, TLS or STARTTLS, greeting, login and
+ * the folder LIST connect() issues — end to end. Generous: a real server does
+ * all of it in seconds, even with thousands of folders.
+ */
+const OPEN_DEADLINE_MS = 60_000
 /** What a body fetch may pull over the wire before it is cut. */
 const BODY_MAX_BYTES = 2 * 1024 * 1024
 /** How long a server-side body search may take across every folder. */
@@ -101,7 +107,11 @@ export function imapIdentity(target: Pick<ImapTarget, 'host' | 'user'>): string 
  * Throws the raw imapflow error; `describeImapError` turns it into something a
  * person or a model can act on.
  */
-export async function openImap(target: ImapTarget, label = 'Mail server'): Promise<ImapFlow> {
+export async function openImap(
+  target: ImapTarget,
+  label = 'Mail server',
+  options: { signal?: AbortSignal } = {},
+): Promise<ImapFlow> {
   const { address } = await assertPublicTarget(target.host, target.port, label)
 
   const client = new ImapFlow({
@@ -128,14 +138,43 @@ export async function openImap(target: ImapTarget, label = 'Mail server'): Promi
     console.error(`[imap] connection to ${target.host} failed (${error.code ?? 'error'})`)
   })
 
+  // The wall-clock bound on connect(), enforced by closing the client, which
+  // rejects connect() through imapflow's own teardown. Neither timeout above
+  // is one: `connectionTimeout` and `greetingTimeout` end at the greeting,
+  // and `socketTimeout` is an idle timer every received byte resets. So a
+  // server that logs in and then answers the LIST connect() issues with an
+  // untagged line a second, and never the tagged completion, held connect()
+  // open for ever (GHSA-rv5g-x6rm-cvh5) — and no caller could close a client
+  // it had not been handed yet. `signal` lets a caller with its own deadline,
+  // the sync's watchdog, cut it shorter.
+  let cutOff = false
+  const cut = () => {
+    cutOff = true
+    client.close()
+  }
+  const timer = setTimeout(cut, OPEN_DEADLINE_MS)
+  options.signal?.addEventListener('abort', cut, { once: true })
   try {
+    if (options.signal?.aborted) cut()
     await client.connect()
+    // close() settles every pending step, but should connect() still resolve
+    // on a client already closed, it must not be handed out as a live one.
+    if (cutOff) throw openTimedOut(target)
   }
   catch (error) {
     client.close()
-    throw error
+    throw cutOff ? openTimedOut(target) : error
+  }
+  finally {
+    clearTimeout(timer)
+    options.signal?.removeEventListener('abort', cut)
   }
   return client
+}
+
+/** Coded so `describeImapError` reads it as `timeout`. */
+function openTimedOut(target: ImapTarget): Error {
+  return Object.assign(new Error(`Opening ${target.host}:${target.port} did not finish in time`), { code: 'OPEN_TIMEOUT' })
 }
 
 /** Log out, falling back to dropping the socket. Never throws. */
