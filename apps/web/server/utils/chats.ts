@@ -6,7 +6,7 @@ import type { ChatActivityRow } from './evolution-db'
 import { canReadMessages, lastMessagePayloads, listChatActivity, listMessagesPage, senderOf } from './evolution-db'
 import type { LidLinks } from './whatsapp-identity'
 import { canonicalJid, lidLinks, linkedJidOf, phoneNumberBehind, phoneNumberOf } from './whatsapp-identity'
-import { GROUP_SCAN_FAILURE_BACKOFF_MS, GROUP_SCAN_TIMEOUT_MS, claimGroupScan, readStoredGroups, recordGroupScanFailure, replaceStoredGroups } from './whatsapp-groups'
+import { GROUP_SCAN_TIMEOUT_MS, claimGroupScan, readStoredGroups, recordGroupScanFailure, replaceStoredGroups } from './whatsapp-groups'
 
 /**
  * Reading conversations out of Evolution.
@@ -1082,7 +1082,8 @@ async function fetchContacts(instance: AppInstance, evolution: EvolutionClient):
  *
  * A failed scan is usually an expected offline state (no live socket while
  * disconnected), not a fault: the stored subjects keep being served and every
- * replica waits out `GROUP_SCAN_FAILURE_BACKOFF_MS`. It is logged, briefly,
+ * replica waits out a back-off that doubles with each failure in a row (1 h,
+ * 2 h, 4 h … a day; `groupScanBackoffMs`). It is logged, briefly,
  * since a scan that never succeeds is otherwise invisible — the names just
  * stay what they were. With nothing stored, groups are named from contacts and
  * then their bare id, with no `participantCount`.
@@ -1104,16 +1105,20 @@ function groupsFor(instance: AppInstance, evolution: EvolutionClient): Promise<M
     if (!await claimGroupScan(instance.id)) return readStoredGroups(instance.id)
 
     // `getParticipants` is required — Evolution answers 400 without it.
+    let failure: unknown
     const rows = await evolution<EvolutionGroupRow[]>(
       `/group/fetchAllGroups/${encodeURIComponent(instance.name)}?getParticipants=false`,
       { timeout: GROUP_SCAN_TIMEOUT_MS },
     ).catch((error: unknown) => {
-      console.warn(`[chats] group scan failed for connection ${instance.id}; next attempt in ${GROUP_SCAN_FAILURE_BACKOFF_MS / 60_000} min:`, error instanceof Error ? error.message : error)
+      failure = error
       return undefined
     })
 
     if (!Array.isArray(rows)) {
-      await recordGroupScanFailure(instance.id)
+      const backoffMs = await recordGroupScanFailure(instance.id)
+      const next = backoffMs === undefined ? 'retried when the lease lapses' : `next attempt in ${backoffMs / 60_000} min`
+      const reason = failure === undefined ? 'unexpected response' : failure instanceof Error ? failure.message : failure
+      console.warn(`[chats] group scan failed for connection ${instance.id} (timeout ${GROUP_SCAN_TIMEOUT_MS / 1000} s); ${next}:`, reason)
       // Keep serving what is stored; `undefined` keeps whatever the cache holds.
       return readStoredGroups(instance.id)
     }
