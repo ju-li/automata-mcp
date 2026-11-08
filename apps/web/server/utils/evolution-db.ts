@@ -873,9 +873,14 @@ export interface LidLinkRow {
  * a chat-scoped token's view depend on chats outside its scope — the same reason
  * a phone-number chat's rows are not read for the reverse link.
  *
- * One scan of the account (`instanceId` is the only index), grouped down to
- * distinct combinations, so the result is small — a few rows per person, never
- * per message. Cached by the caller; never on a per-message path.
+ * Grouped down to distinct combinations, so the result is small — a few rows
+ * per person, never per message. Cached by the caller; never on a per-message
+ * path. Without help this reads every row of the account (`instanceId` is
+ * Evolution's only index); `docs/whatsapp.md` recommends the partial index
+ * `message_lid_chat_idx`, whose predicate is this query's `LIKE '%@lid'`
+ * literal, so it reads only LID chats' rows (~6% on the largest account, #130).
+ * **Keep the pattern a literal and word for word the index's predicate** — as a
+ * bind parameter or reworded, the planner can no longer prove the index applies.
  */
 export async function readLidLinks(instance: AppInstance): Promise<LidLinkRow[]> {
   const { query } = await evolutionDbFor(instance)

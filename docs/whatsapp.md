@@ -108,6 +108,22 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
   ON "Message" ("instanceId", "messageTimestamp" DESC);
 ```
 
+On accounts with a large history, also add this partial index. It covers the
+query that links chats addressed by LID to their phone numbers
+([Chats addressed by LID](#chats-addressed-by-lid-lid)). That query runs about every
+30 minutes per connection. Without the index it reads every message in the
+account to find the few percent that are in LID chats:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_lid_chat_idx
+  ON "Message" ("instanceId")
+  WHERE key->>'remoteJid' LIKE '%@lid';
+```
+
+The `WHERE` clause has to match the app's query word for word, or Postgres
+won't use the index. It can't be an index-only scan, so Postgres still fetches
+the table rows for those messages, but only those.
+
 Worth knowing before you go looking for a bug:
 
 - Both cover whatever Evolution holds: the history imported at pairing plus
