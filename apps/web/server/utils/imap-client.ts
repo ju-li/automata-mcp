@@ -480,13 +480,14 @@ export function messagePartsOf(structure: MessageStructureObject | undefined): M
       out.htmlPart = part
       return
     }
+    const contentId = cleanText(node.id)
     out.attachments.push({
       part,
       mimeType: type,
       ...(filename && { filename }),
       ...(node.size !== undefined && { size: decodedSize(node.size, node.encoding) }),
       ...(disposition === 'inline' && { inline: true }),
-      ...(cleanText(node.id) && { contentId: cleanText(node.id)!.replace(/^<|>$/g, '') }),
+      ...(contentId && { contentId: contentId.replace(/^<|>$/g, '') }),
     })
   }
 
@@ -510,8 +511,14 @@ export function cleanText(value: string | undefined | null, max?: number): strin
   if (value === undefined || value === null) return undefined
   const cleaned = value.toWellFormed().replace(/\0/g, '').trim()
   if (max !== undefined && cleaned.length > max) {
-    const points = Array.from(cleaned)
-    if (points.length > max) return points.slice(0, max).join('').trimEnd() || undefined
+    // Walks only the kept prefix: a header literal can be megabytes long.
+    let end = 0
+    let count = 0
+    for (const point of cleaned) {
+      if (count === max) return cleaned.slice(0, end).trimEnd() || undefined
+      end += point.length
+      count++
+    }
   }
   return cleaned || undefined
 }

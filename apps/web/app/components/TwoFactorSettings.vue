@@ -74,7 +74,7 @@ async function confirmTotp() {
     catch (error) {
       // The pending secret is gone (expired, out of tries, or another browser's):
       // this QR code can never be confirmed, so put the Set up button back.
-      if ((error as { data?: { data?: { code?: string } } })?.data?.data?.code === 'totp_setup_expired') setup.value = undefined
+      if (errorDetails(error).code === 'totp_setup_expired') setup.value = undefined
       throw error
     }
   }, { success: 'Authenticator app added.', failure: 'Could not confirm the code' })

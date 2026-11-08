@@ -55,7 +55,7 @@ interface McpAuthBase {
  * the type says what the kind gate on every tool's `enabled` also says.
  *
  * Postgres carries no separate credential object: the DSN lives on the instance
- * row and `pgFor(instance)` is the only thing that reads it, so copying it here
+ * row and `withPg(instance, …)` is the only thing that reads it, so copying it here
  * would put a second live copy of a user's database password in request context
  * for no gain. IMAP follows the same rule for the mailbox password, which only
  * imap-client.ts reads.
@@ -312,11 +312,6 @@ export function useMcpAuth(): McpAuth {
 }
 
 /**
- * 401 with a `WWW-Authenticate` challenge, shaped as a JSON-RPC error so MCP
- * clients can surface something useful. Never return 200 on an auth failure —
- * a 200 with an error body reads as "the tool ran and said no".
- */
-/**
  * A body over MCP_BODY_LIMIT (413) or one that could not be read (400),
  * JSON-RPC shaped like every other refusal on this surface. `connection: close`
  * because the rest of an oversized body is never read.
@@ -329,6 +324,11 @@ export function mcpBodyRefused(status: 400 | 413): Response {
   )
 }
 
+/**
+ * 401 with a `WWW-Authenticate` challenge, shaped as a JSON-RPC error so MCP
+ * clients can surface something useful. Never return 200 on an auth failure —
+ * a 200 with an error body reads as "the tool ran and said no".
+ */
 export function mcpUnauthorized(reason = 'invalid_token'): Response {
   return new Response(
     JSON.stringify({
