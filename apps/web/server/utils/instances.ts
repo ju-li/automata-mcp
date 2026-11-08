@@ -45,7 +45,12 @@ export type InstanceStatus = {
   number?: string
   ownerJid?: string
   disconnectedAt?: string
-  stats: {
+  /**
+   * Absent when the counts could not be measured in time (a count that hit the
+   * statement timeout with nothing cached, or Evolution unreachable). Absent is
+   * never zero: the dashboard shows it as unavailable. See `cachedSqlCounts`.
+   */
+  stats?: {
     messages: number
     chats: number
     contacts: number
@@ -633,14 +638,17 @@ export async function getImapHealth(instance: AppInstance): Promise<ConnectionHe
  * Without a message database — a bring-your-own server with no database URL —
  * or when that SQL fails, `fetchInstances` is still asked, but cached per
  * connection (`cachedApiRow`). That is the only path on which the row can be
- * stale; see there.
+ * stale; see there. One SQL failure never takes that path: a count that is
+ * merely slow (statement timeout, or the account's slot busy) answers with the
+ * last counts or none — swapping one account's slow count for a scan of every
+ * account is the wrong trade (#156).
  */
 export async function getInstanceStatus(
   instance: AppInstance,
   options: { freshCounts?: boolean } = {},
 ): Promise<InstanceStatus> {
   const { rowChurn: _churn, ...status } = await readStatus(instance, { counts: true, freshCounts: options.freshCounts })
-  return { ...status, stats: status.stats ?? zeroStats() }
+  return status
 }
 
 export type InstanceHealth = Omit<InstanceStatus, 'stats'> & {
@@ -797,11 +805,11 @@ export async function pairingEvidence(instance: AppInstance): Promise<'paired' |
   }
 
   // Stored history outlives a logout. Without a message database there is
-  // nothing to count, and `paired_at` plus the reads above have to do.
+  // nothing to ask, and `paired_at` plus the reads above have to do. Whether a
+  // message exists, not how many: one index probe rather than a count (#156).
   if (canAskSql) {
     try {
-      const { messages } = await countInstanceRows(instance)
-      if (messages > 0) {
+      if (await hasInstanceMessages(instance)) {
         await storePaired(instance)
         return 'paired'
       }
@@ -900,7 +908,7 @@ export function forgetInstanceStatus(instanceId: string): void {
   holdRefreshedAt.delete(instanceId)
 }
 
-type InstanceStats = InstanceStatus['stats']
+type InstanceStats = NonNullable<InstanceStatus['stats']>
 
 async function readStatus(
   instance: AppInstance,
@@ -910,7 +918,7 @@ async function readStatus(
   const viaSql = canReadMessages(instance)
   const storedChurn: RowChurn = { since: instance.row_churn_since, seenAt: instance.row_churn_seen_at }
 
-  const [live, record, rowWrittenAt, sqlStats] = await Promise.all([
+  const [live, record, rowWrittenAt, sqlCounts] = await Promise.all([
     liveConnectionState(evolution, instance).catch(() => undefined),
     viaSql ? sqlInstanceRecord(instance) : undefined,
     viaSql ? sqlRowWrittenAt(instance) : undefined,
@@ -918,8 +926,11 @@ async function readStatus(
   ])
 
   let row: EvolutionInstanceRecord | undefined = record
-  let stats = sqlStats
-  if (!row || (options.counts && !stats)) {
+  let stats = sqlCounts?.stats
+  // No SQL counts at all (no message database, counts not asked for) or a
+  // failed count that `fetchInstances` may stand in for. A slow count may not.
+  const countsFromApi = options.counts && !stats && (sqlCounts?.fallback ?? true)
+  if (!row || countsFromApi) {
     const api = await cachedApiRow(instance, evolution, live, Boolean(options.freshCounts))
     row ??= api
     if (options.counts) stats ??= api && statsFromApiRow(api)
@@ -1008,19 +1019,34 @@ async function sqlRowWrittenAt(instance: AppInstance): Promise<string | undefine
 }
 
 /**
- * Per-account counts, cached for `COUNTS_TTL_MS`; `undefined` means "use the
- * fallback". Concurrent callers share one query, as `contactDirectory()` does.
+ * Per-account counts, cached for `COUNTS_TTL_MS`. Concurrent callers share one
+ * query, as `contactDirectory()` does. `fallback` says whether `readStatus` may
+ * ask `fetchInstances` for counts this could not give.
  *
  * A failed recount serves the previous value if there is one — counts that are
  * a few minutes old are still right enough for a dashboard, and falling back to
  * `fetchInstances` is the expensive thing this exists to avoid. Failures are not
  * cached, so the next read retries.
+ *
+ * **A slow count never falls back** (#156): the statement timeout, or this
+ * account's slot already busy (`sharedPoolFor`'s 429). `fetchInstances` counts
+ * every account's rows to answer for one, so a count too slow for one account
+ * would become a scan of all of them — on the first read after every deploy,
+ * when nothing is cached yet. It answers with the cached counts, or none, which
+ * the dashboard shows as unavailable. Fallback stays for what it exists for: a
+ * missing grant (42501) and a database that cannot be reached.
+ *
+ * A `fresh` read (the import screen) gets no stale counts on a slow count: a
+ * repeated old total reads to it as "the import stopped moving".
  */
-async function cachedSqlCounts(instance: AppInstance, fresh: boolean): Promise<InstanceStats | undefined> {
+async function cachedSqlCounts(
+  instance: AppInstance,
+  fresh: boolean,
+): Promise<{ stats?: InstanceStats, fallback: boolean }> {
   const cached = countsCache.get(instance.id)
   const maxAge = fresh ? FRESH_FLOOR_MS : COUNTS_TTL_MS
-  if (cached && Date.now() - cached.at < maxAge) return cached.stats
-  if (sqlDenied('counts', instance)) return undefined
+  if (cached && Date.now() - cached.at < maxAge) return { stats: cached.stats, fallback: false }
+  if (sqlDenied('counts', instance)) return { fallback: true }
 
   let counting = countsInFlight.get(instance.id)
   if (!counting) {
@@ -1034,12 +1060,29 @@ async function cachedSqlCounts(instance: AppInstance, fresh: boolean): Promise<I
   }
 
   try {
-    return await counting
+    return { stats: await counting, fallback: false }
   }
   catch (error) {
+    if (isSlowCount(error)) {
+      // Its own key, so a slow count's quiet window cannot hide a broken read's log.
+      noteSqlFallback('slow counts', instance, error, slowCountWording(instance))
+      return { stats: fresh ? undefined : cached?.stats, fallback: false }
+    }
     noteSqlFallback('counts', instance, error)
-    return cached?.stats
+    return { stats: cached?.stats, fallback: true }
   }
+}
+
+/** A count that ran out of time, or never got a turn — not a broken read. */
+function isSlowCount(error: unknown): boolean {
+  return isStatementTimeout(error) || (error as { statusCode?: unknown } | undefined)?.statusCode === 429
+}
+
+/** Said once per five minutes like the others; no grant is involved. */
+function slowCountWording(instance: AppInstance): SqlFallbackWording {
+  const failed = `[instances] counting messages for connection ${instance.id} was too slow; `
+    + 'serving the last counts (or none), not falling back to fetchInstances:'
+  return { denied: failed, failed }
 }
 
 /**
@@ -1621,13 +1664,9 @@ export async function connectionState(
   }
 }
 
-function zeroStats(): InstanceStats {
-  return { messages: 0, chats: 0, contacts: 0 }
-}
-
-/** Evolution could not be asked at all — see `connectionState`. */
+/** Evolution could not be asked at all — see `connectionState`. No counts: not measured is not zero. */
 function unknownStatus(): InstanceStatus {
-  return { state: 'unknown', stats: zeroStats() }
+  return { state: 'unknown' }
 }
 
 function normalizeState(state: string | undefined): ConnectionState {
