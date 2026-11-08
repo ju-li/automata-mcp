@@ -401,9 +401,25 @@ export function claimAuthAttempt(key: string): number {
 
 /** The attempt claimed at `at` succeeded: it no longer counts against the account. */
 export function forgiveAuthAttempt(key: string, at: number): void {
-  const recent = failures.get(key)
-  const index = recent?.indexOf(at) ?? -1
-  if (index < 0) return
-  recent!.splice(index, 1)
-  if (!recent!.length) failures.delete(key)
+  dropAttempt(failures, key, at)
+}
+
+/**
+ * Run `check` under an attempt claimed on `key` first, so a concurrent burst
+ * counts. The attempt stays counted only when `isWrong` says the answer was
+ * wrong; a right answer hands it back, and so does a throw — an outage (503) is
+ * not a wrong guess.
+ */
+export async function withAuthAttempt<T>(key: string, check: () => Promise<T>, isWrong: (result: T) => boolean): Promise<T> {
+  const claimedAt = claimAuthAttempt(key)
+  let result: T
+  try {
+    result = await check()
+  }
+  catch (cause) {
+    forgiveAuthAttempt(key, claimedAt)
+    throw cause
+  }
+  if (!isWrong(result)) forgiveAuthAttempt(key, claimedAt)
+  return result
 }

@@ -32,7 +32,7 @@ const { refresh } = useSession()
 
 interface Pending { purpose: 'signup' | 'email_change', email: string }
 interface LinkInfo extends Pending {
-  invite?: { orgName: string, role: 'admin' | 'member' }
+  invite?: { orgName: string, role: OrgRole }
   confirmableHere: boolean
 }
 

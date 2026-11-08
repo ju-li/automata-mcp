@@ -65,10 +65,11 @@ function resultTooLarge(what: string): Error {
  * One place, so the awkward cast around the toolkit-shaped response exists once
  * — both run paths were carrying their own copy of it.
  */
-async function planFacts(tx: TransactionSql, statement: string, signal?: AbortSignal): Promise<PlanFacts> {
-  // Cancellable too: planning alone can take seconds (a very wide join, a huge
-  // IN list), and the plan check is the first thing to touch user SQL.
-  const explained = await cancellable(unsafeSingle(tx, `EXPLAIN (FORMAT JSON, VERBOSE) ${statement}`), signal)
+async function planFacts(exec: Exec, statement: string): Promise<PlanFacts> {
+  // Cancellable too (through `exec`): planning alone can take seconds (a very
+  // wide join, a huge IN list), and the plan check is the first thing to touch
+  // user SQL.
+  const explained = await exec(`EXPLAIN (FORMAT JSON, VERBOSE) ${statement}`)
   return readPlan((explained as unknown as Array<Record<string, unknown>>)[0]?.['QUERY PLAN'])
 }
 
@@ -97,9 +98,11 @@ export const MAX_READ_TIMEOUT_MS = 120_000
  * cancelled query rejects with 57014 "canceling statement due to user request",
  * which `isStatementTimeout` deliberately does not read as a timeout.
  *
- * Wrap the statements that do the work — the plan, the FETCH, the write — not
- * the catalog lookups between them, which are short. An abort that lands
- * between statements is caught here before the next one is sent.
+ * Every statement of user SQL goes through it, by way of the `exec` that
+ * `withGuardedStatement` hands its body — the plan, the DECLARE (which plans
+ * again), the MOVE/FETCH, the write — not the catalog lookups between them,
+ * which are short. An abort that lands between statements is caught here
+ * before the next one is sent.
  */
 async function cancellable<T>(query: PromiseLike<T> & { cancel: () => void }, signal: AbortSignal | undefined): Promise<T> {
   if (!signal) return await query
@@ -116,6 +119,9 @@ async function cancellable<T>(query: PromiseLike<T> & { cancel: () => void }, si
     signal.removeEventListener('abort', onAbort)
   }
 }
+
+/** One statement of user SQL in the guarded transaction, cancelled if the request goes away. */
+type Exec = (text: string) => Promise<Awaited<ReturnType<typeof unsafeSingle>>>
 
 /** Nobody reads this answer; it exists so the transaction rolls back and the lease is released. */
 function clientGone() {
@@ -233,11 +239,12 @@ async function withGuardedStatement<T>(
     assertKind: (facts: PlanFacts) => void
     signal?: AbortSignal
   },
-  body: (tx: TransactionSql, startedAt: number) => Promise<T>,
+  body: (exec: Exec, startedAt: number) => Promise<T>,
 ): Promise<T> {
   const startedAt = Date.now()
 
   const guarded = async (tx: TransactionSql): Promise<T> => {
+    const exec: Exec = text => cancellable(unsafeSingle(tx, text), options.signal)
     await applySessionGuards(tx, scope, options.timeoutMs)
 
     // Before the EXPLAIN, not after: Postgres folds an IMMUTABLE function with
@@ -245,7 +252,7 @@ async function withGuardedStatement<T>(
     // run it and no longer names it. See `functionNamesInText`.
     await assertFunctionsSafe(tx, functionNamesInText(statement))
 
-    const facts = await planFacts(tx, statement, options.signal)
+    const facts = await planFacts(exec, statement)
 
     options.assertKind(facts)
     // Again from the plan, which catches what the text cannot — a function
@@ -253,7 +260,7 @@ async function withGuardedStatement<T>(
     await assertFunctionsSafe(tx, facts.functions)
     await assertRelationsInScope(tx, facts, scope)
 
-    return await body(tx, startedAt)
+    return await body(exec, startedAt)
   }
 
   // Leased, so the pool is not swept or evicted under a query that runs for
@@ -318,21 +325,21 @@ async function guardedRead(
     timeoutMs: options.timeoutMs,
     assertKind: assertNoWrites,
     signal: options.signal,
-  }, async (tx, startedAt) => {
+  }, async (exec, startedAt) => {
     // The statement-kind gate, enforced by Postgres's own grammar rather than by
     // parsing: DECLARE CURSOR refuses INSERT/UPDATE/DELETE/CREATE TABLE AS
     // outright, refuses SELECT ... INTO by name, and answers 0A000 for a
     // data-modifying WITH. Two of those — CTAS and SELECT INTO — plan to a bare
     // Result node with no target relation, so the relation check above cannot
     // see them at all.
-    await unsafeSingle(tx, declareCursor(statement))
+    await exec(declareCursor(statement))
 
     // Paging moves the same cursor, never wraps the statement in OFFSET: a wrap
     // would reopen everything DECLARE CURSOR closes above. Each page is its own
     // transaction and re-runs the query, so pages line up only under an ORDER BY
     // on a unique key, and MOVE still reads every row it skips.
     if (options.page > 1) {
-      await cancellable(unsafeSingle(tx, `MOVE FORWARD ${(options.page - 1) * options.maxRows} FROM _mcp`), options.signal)
+      await exec(`MOVE FORWARD ${(options.page - 1) * options.maxRows} FROM _mcp`)
     }
 
     // One row past the cap, so `hasMore` is "the page came back full" rather
@@ -347,7 +354,7 @@ async function guardedRead(
       const ask = Math.min(FETCH_BATCH_ROWS, want - raw.length)
       // The FETCH is where the query actually runs — DECLARE only plans it —
       // so it is what a client disconnect cancels.
-      const batch = await cancellable(unsafeSingle(tx, `FETCH FORWARD ${ask} FROM _mcp`), options.signal) as unknown as Array<Record<string, unknown>> & { columns?: Array<{ name: string }> }
+      const batch = await exec(`FETCH FORWARD ${ask} FROM _mcp`) as unknown as Array<Record<string, unknown>> & { columns?: Array<{ name: string }> }
       columns ??= batch.columns?.map(c => c.name)
       for (const row of batch) {
         bytes += approxRowBytes(row)
@@ -411,8 +418,8 @@ export async function explainReadQuery(
     timeoutMs: options.timeoutMs,
     assertKind: assertNoWrites,
     signal: options.signal,
-  }, async (tx, startedAt) => {
-    const explained = await cancellable(unsafeSingle(tx, `EXPLAIN (FORMAT TEXT, COSTS) ${declareCursor(statement)}`), options.signal)
+  }, async (exec, startedAt) => {
+    const explained = await exec(`EXPLAIN (FORMAT TEXT, COSTS) ${declareCursor(statement)}`)
     const lines = (explained as unknown as Array<Record<string, unknown>>)
       .map(row => row['QUERY PLAN'])
       .filter((line): line is string => typeof line === 'string')
@@ -480,9 +487,9 @@ export async function runWriteStatement(
     // mistake.
     assertKind: facts => assertIsModify(facts, options.allowWholeTable),
     signal: options.signal,
-  }, async (tx, startedAt) => {
+  }, async (exec, startedAt) => {
     // A cancelled write rejects, so the transaction rolls back: nothing changed.
-    const result = await cancellable(unsafeSingle(tx, statement), options.signal)
+    const result = await exec(statement)
     const rows = result as unknown as Array<Record<string, unknown>> & { count: number, command: string }
 
     // A hard cap, not a report. Throwing here rolls the transaction back, so a

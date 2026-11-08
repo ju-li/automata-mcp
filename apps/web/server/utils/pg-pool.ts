@@ -332,28 +332,30 @@ function poolSpec(key: string, dsn: string, options: KeyedPoolOptions): KeyedRes
 
 /**
  * A pool several connections share, as the message pools for this deployment's
- * own Evolution server and Telegram bridge are: one `Sql` plus `run`, which every
- * statement goes through.
+ * own Evolution server and Telegram bridge are. Callers get `query`, never the
+ * `Sql` itself, so every statement goes through the per-connection gate and a
+ * new query cannot skip it by using a handle already in scope.
  *
  * **Why.** Those pools hold `PER_POOL_MAX` connections for every tenant on the
  * deployment, and postgres.js queues a statement for a free one with no timeout
  * of its own. A slow statement is cheap to cause — a scan of a large account, a
  * search — so one connection with a few in flight held every slot, and every
- * other account's reads waited behind it (GHSA-fpmx-gmx5-84vc). `run` lets each
+ * other account's reads waited behind it (GHSA-fpmx-gmx5-84vc). `query` lets each
  * connection have `SHARED_POOL_SLOTS_PER_CONNECTION` statement in flight on the
  * shared pool; the rest of its statements wait *here*, in a per-connection queue
  * of at most `SHARED_POOL_QUEUE_PER_CONNECTION`, and past that are refused with
  * 429 rather than parked without bound.
  *
  * A pool of the connection's own (a user-supplied URL) gets a pass-through
- * `run`: nobody else's reads are behind it.
+ * `query`: nobody else's reads are behind it.
  *
- * `run` must wrap one statement and nothing that takes another slot — a callback
- * awaiting a second `run` for the same connection would wait on itself.
+ * `build` must return one statement and await nothing that takes another slot
+ * — a callback awaiting a second `query` for the same connection would wait on
+ * itself. Fragments (`sql\`...\``) built from its `sql` are fine: postgres.js
+ * runs nothing until the statement is awaited.
  */
 export interface SharedPool {
-  sql: Sql
-  run: <T>(statement: () => Promise<T>) => Promise<T>
+  query: <T>(build: (sql: Sql) => Promise<T>) => Promise<T>
 }
 
 const SHARED_POOL_SLOTS_PER_CONNECTION = 1
@@ -362,8 +364,8 @@ const SHARED_POOL_QUEUE_PER_CONNECTION = 8
 const connectionSlots = new Map<string, { active: number, waiting: Array<() => void> }>()
 
 export function sharedPoolFor(sql: Sql, shared: boolean, connectionKey: string): SharedPool {
-  if (!shared) return { sql, run: statement => statement() }
-  return { sql, run: statement => withConnectionSlot(connectionKey, statement) }
+  if (!shared) return { query: build => build(sql) }
+  return { query: build => withConnectionSlot(connectionKey, () => build(sql)) }
 }
 
 async function withConnectionSlot<T>(key: string, statement: () => Promise<T>): Promise<T> {

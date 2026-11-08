@@ -258,13 +258,13 @@ export async function listTelegramChats(
   instance: AppInstance,
   options: TelegramChatListOptions,
 ): Promise<{ chats: TelegramChatSummary[], hasMore: boolean, total?: number }> {
-  const { sql, run } = await telegramDbFor(instance)
+  const { query } = await telegramDbFor(instance)
   const sessionId = sessionIdOf(instance)
 
   const needle = options.q?.trim()
   const pattern = needle ? `%${escapeLike(needle)}%` : undefined
 
-  const rows = await guarded('list chats', () => run(() => sql<Array<ChatDbRow & { total: string }>>`
+  const rows = await guarded('list chats', () => query(sql => sql<Array<ChatDbRow & { total: string }>>`
     SELECT ${chatColumns(sql)}, COUNT(*) OVER () AS total
     FROM telegram.chats
     WHERE session_id = ${sessionId}
@@ -313,9 +313,9 @@ function telegramChatOrdering(sql: Sql, sort: TelegramChatSortKey = 'last', dir:
 /** One synced chat, or undefined. The caller has already checked scope. */
 export async function telegramChat(instance: AppInstance, chatId: string): Promise<TelegramChatSummary | undefined> {
   assertTelegramChatId(chatId)
-  const { sql, run } = await telegramDbFor(instance)
+  const { query } = await telegramDbFor(instance)
   const sessionId = sessionIdOf(instance)
-  const [row] = await guarded('read a chat', () => run(() => sql<ChatDbRow[]>`
+  const [row] = await guarded('read a chat', () => query(sql => sql<ChatDbRow[]>`
     SELECT ${chatColumns(sql)} FROM telegram.chats WHERE session_id = ${sessionId} AND chat_id = ${chatId}`))
   return row ? toChatSummary(row) : undefined
 }
@@ -418,7 +418,7 @@ export async function listTelegramMessagesPage(
   options: TelegramPageOptions,
 ): Promise<{ messages: TelegramMessage[], hasMore: boolean, total?: number, excluded: { deleted: number, service: number } }> {
   if (options.chatId !== undefined) assertTelegramChatId(options.chatId)
-  const { sql, run } = await telegramDbFor(instance)
+  const { query } = await telegramDbFor(instance)
   const sessionId = sessionIdOf(instance)
   const since = parseDateBound(options.since, 'since')
   const until = parseDateBound(options.until, 'until')
@@ -432,7 +432,7 @@ export async function listTelegramMessagesPage(
   // so the two describe the same window — the scope predicates included, because
   // a count taken over a wider set than the page is a number about someone
   // else's messages.
-  const window = sql`
+  const window = (sql: Sql) => sql`
     ${options.chatId === undefined ? sql`` : sql`AND m.chat_id = ${options.chatId}`}
     ${options.allowedChatIds ? sql`AND m.chat_id = ANY(${options.allowedChatIds}::bigint[])` : sql``}
     ${patterns === undefined ? sql`` : sql`AND m.text ILIKE ALL (${patterns}::text[])`}
@@ -442,12 +442,12 @@ export async function listTelegramMessagesPage(
 
   // The tiebreaker travels with the direction; reversing one half of the pair
   // puts a row sharing a timestamp on two pages or on neither.
-  const ordering = options.order === 'oldest'
+  const ordering = (sql: Sql) => options.order === 'oldest'
     ? sql`m.date ASC, m.message_id ASC`
     : sql`m.date DESC, m.message_id DESC`
 
   const [rows, counts] = await Promise.all([
-    guarded('read messages', () => run(() => sql<Array<MessageDbRow & { total: string }>>`
+    guarded('read messages', () => query(sql => sql<Array<MessageDbRow & { total: string }>>`
       SELECT m.chat_id::text AS chat_id, c.title AS chat_title,
              m.message_id::text AS message_id, m.sender_id::text AS sender_id, m.from_me, m.date, m.edit_date,
              m.text, m.media_type, m.reply_to_id::text AS reply_to_id, m.topic_id::text AS topic_id,
@@ -459,19 +459,19 @@ export async function listTelegramMessagesPage(
       LEFT JOIN telegram.users u ON u.session_id = m.session_id AND u.user_id = m.sender_id
       LEFT JOIN telegram.chats sc ON sc.session_id = m.session_id AND sc.chat_id = m.sender_id AND m.sender_id < 0
       WHERE m.session_id = ${sessionId}
-        ${window}
+        ${window(sql)}
         ${options.includeDeleted ? sql`` : sql`AND m.deleted_at IS NULL`}
         ${options.includeService ? sql`` : sql`AND m.service_action IS NULL`}
-      ORDER BY ${ordering}
+      ORDER BY ${ordering(sql)}
       LIMIT ${options.limit + 1} OFFSET ${(options.page - 1) * options.limit}`)),
     options.includeDeleted && options.includeService
       ? Promise.resolve([{ deleted: '0', service: '0' }])
-      : guarded('count excluded messages', () => run(() => sql<Array<{ deleted: string, service: string }>>`
+      : guarded('count excluded messages', () => query(sql => sql<Array<{ deleted: string, service: string }>>`
           SELECT count(*) FILTER (WHERE m.deleted_at IS NOT NULL) AS deleted,
                  count(*) FILTER (WHERE m.deleted_at IS NULL AND m.service_action IS NOT NULL) AS service
           FROM telegram.messages m
           WHERE m.session_id = ${sessionId}
-            ${window}`)),
+            ${window(sql)}`)),
   ])
 
   const total = Number(rows[0]?.total)
@@ -512,14 +512,14 @@ export async function searchTelegramMessages(
   options: TelegramSearchOptions,
 ): Promise<{ hits: TelegramSearchHit[], truncated: boolean }> {
   if (options.chatId) assertTelegramChatId(options.chatId)
-  const { sql, run } = await telegramDbFor(instance)
+  const { query } = await telegramDbFor(instance)
   const sessionId = sessionIdOf(instance)
   const since = parseDateBound(options.since, 'since')
   const until = parseDateBound(options.until, 'until')
   assertSearchTerms(options.terms)
   const patterns = options.terms.map(term => `%${term.replace(/[\\%_]/g, char => `\\${char}`)}%`)
 
-  const rows = await guarded('search messages', () => run(() => sql<Array<MessageDbRow & { chat_id: string, chat_title: string | null }>>`
+  const rows = await guarded('search messages', () => query(sql => sql<Array<MessageDbRow & { chat_id: string, chat_title: string | null }>>`
     SELECT m.chat_id::text AS chat_id, c.title AS chat_title,
            m.message_id::text AS message_id, m.sender_id::text AS sender_id, m.from_me, m.date, m.edit_date,
            m.text, u.first_name, u.last_name, u.username AS user_username, sc.title AS sender_chat_title

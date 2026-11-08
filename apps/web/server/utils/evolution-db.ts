@@ -120,14 +120,31 @@ function messageDbUrlFor(instance: AppInstance): { url: string, guard: boolean }
  */
 async function evolutionDbFor(instance: AppInstance): Promise<SharedPool> {
   const resolved = resolveMessageDb(instance)
-  const sql = await keyedPool(
+  const sql = await messagePool(instance, resolved)
+  // Shared by every account on our own server: one statement in flight per
+  // account, so no account's slow reads or searches can hold all three slots.
+  return sharedPoolFor(sql, !resolved.guard, `evo:${instance.id}`)
+}
+
+/**
+ * A failed message-database read, as thrown: a logged 503 — a handled
+ * createError is never logged by Nitro, so a 503 would otherwise reach the
+ * operator as a response with nothing behind it — except for an error that
+ * already carries a status, the per-connection slot's 429 above all, which is
+ * an answer and not a database fault.
+ */
+function readFailure(tag: string, statusMessage: string, error: unknown): unknown {
+  if ((error as { statusCode?: number })?.statusCode) return error
+  console.error(`${tag} Evolution database query failed:`, error)
+  return createError({ statusCode: 503, statusMessage, cause: error })
+}
+
+function messagePool(instance: AppInstance, resolved: { url: string, guard: boolean }): Promise<Sql> {
+  return keyedPool(
     resolved.guard ? `evo:${instance.id}` : 'evo:default',
     resolved.url,
     { guard: resolved.guard, max: 3, statementTimeoutMs: STATEMENT_TIMEOUT_MS, readOnly: true, jit: false },
   )
-  // Shared by every account on our own server: one statement in flight per
-  // account, so no account's slow reads or searches can hold all three slots.
-  return sharedPoolFor(sql, !resolved.guard, `evo:${instance.id}`)
 }
 
 /**
@@ -143,7 +160,7 @@ async function evolutionDbFor(instance: AppInstance): Promise<SharedPool> {
  */
 async function evolutionStatusDbFor(instance: AppInstance): Promise<Sql> {
   const resolved = resolveMessageDb(instance)
-  if (resolved.guard) return (await evolutionDbFor(instance)).sql
+  if (resolved.guard) return await messagePool(instance, resolved)
   return keyedPool('evo:default:status', resolved.url, {
     guard: false, max: 2, statementTimeoutMs: STATUS_STATEMENT_TIMEOUT_MS, readOnly: true, jit: false,
   })
@@ -347,10 +364,10 @@ export async function readInstanceRecord(instance: AppInstance): Promise<Evoluti
  * Raw driver errors, for the same reason as `readInstanceRecord`.
  */
 export async function countInstanceRows(instance: AppInstance): Promise<{ messages: number, chats: number, contacts: number }> {
-  const { sql, run } = await evolutionDbFor(instance)
+  const { query } = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
 
-  const [row] = await run(() => sql<Array<{ messages: number, chats: number, contacts: number }>>`
+  const [row] = await query(sql => sql<Array<{ messages: number, chats: number, contacts: number }>>`
     SELECT (SELECT count(*) FROM "Message" WHERE "instanceId" = ${instanceId})::int AS messages,
            (SELECT count(*) FROM "Chat"    WHERE "instanceId" = ${instanceId})::int AS chats,
            (SELECT count(*) FROM "Contact" WHERE "instanceId" = ${instanceId})::int AS contacts
@@ -432,7 +449,7 @@ export async function searchMessages(
   // account's Evolution API, and its 409/503 would otherwise mask the clearer
   // "add your database connection string" refusal for a connection that can
   // never read — and would pay for a round trip to learn nothing.
-  const { sql, run } = await evolutionDbFor(instance)
+  const { query } = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
 
   const patterns = options.terms.map(term => `%${escapeLike(term)}%`)
@@ -466,7 +483,7 @@ export async function searchMessages(
     // `jids` may name two JIDs — one person stored under a LID and a phone
     // number. `DISTINCT ON (key->>'id')` and everything outside the CTE are
     // unchanged by that: they already run over whatever the predicate admits.
-    rows = await run(() => sql<MessageRow[]>`
+    rows = await query(sql => sql<MessageRow[]>`
       WITH matched AS (
         SELECT DISTINCT ON (m.key->>'id')
                m.key, m."pushName", m."messageType", m."messageTimestamp", t.body,
@@ -511,14 +528,7 @@ export async function searchMessages(
     `)
   }
   catch (error) {
-    // The per-connection slot's 429 is an answer, not a database fault.
-    if ((error as { statusCode?: number })?.statusCode) throw error
-    console.error('[search] Evolution database query failed:', error)
-    throw createError({
-      statusCode: 503,
-      statusMessage: 'Message search is temporarily unavailable',
-      cause: error,
-    })
+    throw readFailure('[search]', 'Message search is temporarily unavailable', error)
   }
 
   const truncated = rows.length > options.limit
@@ -620,7 +630,7 @@ export async function listMessagesPage(
   // account's Evolution API, and its 409/503 would otherwise mask the clearer
   // "add your database connection string" refusal for a connection that can
   // never read — and would pay for a round trip to learn nothing.
-  const { sql, run } = await evolutionDbFor(instance)
+  const { query } = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
 
   const since = toUnixSeconds(options.since, 'since')
@@ -640,13 +650,13 @@ export async function listMessagesPage(
   // The tiebreaker travels with the direction. Evolution's own ordering has
   // none, and rows sharing a timestamp then land on two pages or on neither —
   // reversing one half of the pair would reintroduce exactly that.
-  const ordering = options.order === 'oldest'
+  const ordering = (sql: Sql) => options.order === 'oldest'
     ? sql`"messageTimestamp" ASC, key->>'id' ASC`
     : sql`"messageTimestamp" DESC, key->>'id' DESC`
 
   let rows: MessagePageRow[]
   try {
-    rows = await run(() => sql<MessagePageRow[]>`
+    rows = await query(sql => sql<MessagePageRow[]>`
       WITH deduped AS (
         SELECT DISTINCT ON (m.key->>'id')
                m.key, m."pushName", m."messageType", m."messageTimestamp", m.message,
@@ -665,21 +675,12 @@ export async function listMessagesPage(
       SELECT key, "pushName", "messageType", "messageTimestamp", message, mentioned,
              COUNT(*) OVER () AS total
       FROM deduped
-      ORDER BY ${ordering}
+      ORDER BY ${ordering(sql)}
       LIMIT ${take} OFFSET ${skip}
     `)
   }
   catch (error) {
-    // The per-connection slot's 429 is an answer, not a database fault.
-    if ((error as { statusCode?: number })?.statusCode) throw error
-    // A handled createError is never logged by Nitro, so a 503 would otherwise
-    // reach the operator as a response with nothing at all behind it.
-    console.error('[read] Evolution database query failed:', error)
-    throw createError({
-      statusCode: 503,
-      statusMessage: 'Reading messages is temporarily unavailable',
-      cause: error,
-    })
+    throw readFailure('[read]', 'Reading messages is temporarily unavailable', error)
   }
 
   // The window function counts the deduped set, so this is the number of distinct
@@ -782,7 +783,7 @@ export async function listChatActivity(
   options: ChatActivityOptions,
 ): Promise<{ rows: ChatActivityRow[], total: number }> {
   // Database first, for the same reason as `listMessagesPage`.
-  const { sql, run } = await evolutionDbFor(instance)
+  const { query } = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
 
   const pns = [...(options.links?.keys() ?? [])]
@@ -790,7 +791,7 @@ export async function listChatActivity(
 
   let rows: Array<ChatActivityRow & { total: string | number }>
   try {
-    rows = await run(() => sql`
+    rows = await query(sql => sql`
       WITH msg AS MATERIALIZED (
         SELECT m.key->>'remoteJid' AS jid,
                m."messageTimestamp" AS ts,
@@ -828,14 +829,7 @@ export async function listChatActivity(
     `)
   }
   catch (error) {
-    // The per-connection slot's 429 is an answer, not a database fault.
-    if ((error as { statusCode?: number })?.statusCode) throw error
-    console.error('[chats] Evolution database query failed:', error)
-    throw createError({
-      statusCode: 503,
-      statusMessage: 'Listing conversations is temporarily unavailable',
-      cause: error,
-    })
+    throw readFailure('[chats]', 'Listing conversations is temporarily unavailable', error)
   }
 
   // Rides on the returned rows, like `listMessagesPage`'s count: a page past the
@@ -884,10 +878,10 @@ export interface LidLinkRow {
  * per message. Cached by the caller; never on a per-message path.
  */
 export async function readLidLinks(instance: AppInstance): Promise<LidLinkRow[]> {
-  const { sql, run } = await evolutionDbFor(instance)
+  const { query } = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
 
-  return await run(() => sql<LidLinkRow[]>`
+  return await query(sql => sql<LidLinkRow[]>`
     SELECT m.key->>'remoteJid' AS jid, m.key->>'remoteJidAlt' AS alt
     FROM "Message" m
     WHERE m."instanceId" = ${instanceId}
@@ -907,10 +901,10 @@ export async function readLidLinks(instance: AppInstance): Promise<LidLinkRow[]>
 export async function lastMessagePayloads(instance: AppInstance, rowIds: string[]): Promise<Map<string, unknown>> {
   if (!rowIds.length) return new Map()
 
-  const { sql, run } = await evolutionDbFor(instance)
+  const { query } = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
 
-  const rows = await run(() => sql<Array<{ id: string, message: unknown }>>`
+  const rows = await query(sql => sql<Array<{ id: string, message: unknown }>>`
     SELECT id, message FROM "Message"
     WHERE "instanceId" = ${instanceId} AND id = ANY(${rowIds}::text[])
   `)
@@ -949,10 +943,10 @@ export interface LidLocalPartOptions {
  * Raw driver errors: the caller decides what an unreadable answer means.
  */
 export async function lidLocalParts(instance: AppInstance, options: LidLocalPartOptions = {}): Promise<Set<string>> {
-  const { sql, run } = await evolutionDbFor(instance)
+  const { query } = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
 
-  const rows = await run(() => sql<Array<{ lid: string }>>`
+  const rows = await query(sql => sql<Array<{ lid: string }>>`
     SELECT DISTINCT split_part(split_part(ids.jid, '@', 1), ':', 1) AS lid
     FROM "Message" m
     CROSS JOIN LATERAL (

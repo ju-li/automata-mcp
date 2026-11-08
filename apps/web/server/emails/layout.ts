@@ -159,28 +159,26 @@ export function heading(text: string): Block {
   }
 }
 
-/** The paragraph under the headline (`lead`, 17px). */
-export function lead(...parts: Inline[]): Block {
+function paragraph(size: number, textColor: string, parts: Inline[]): Block {
   return {
-    html: `<p style="margin:0;${font(17, 1.6, 400, `color:${color.text}`)}">${inlineHtml(parts)}</p>`,
+    html: `<p style="margin:0;${font(size, 1.6, 400, `color:${textColor}`)}">${inlineHtml(parts)}</p>`,
     text: inlineText(parts),
   }
+}
+
+/** The paragraph under the headline (`lead`, 17px). */
+export function lead(...parts: Inline[]): Block {
+  return paragraph(17, color.text, parts)
 }
 
 /** Body copy (16px). */
 export function body(...parts: Inline[]): Block {
-  return {
-    html: `<p style="margin:0;${font(16, 1.6, 400, `color:${color.text}`)}">${inlineHtml(parts)}</p>`,
-    text: inlineText(parts),
-  }
+  return paragraph(16, color.text, parts)
 }
 
 /** Secondary copy (15px), for the "didn't do this?" lines and helper paragraphs. */
 export function secondary(...parts: Inline[]): Block {
-  return {
-    html: `<p style="margin:0;${font(15, 1.6, 400, `color:${color.textSecondary}`)}">${inlineHtml(parts)}</p>`,
-    text: inlineText(parts),
-  }
+  return paragraph(15, color.textSecondary, parts)
 }
 
 /** Meta line (14px, muted): expiry and the like. */
@@ -243,14 +241,17 @@ export function divider(): Block {
   }
 }
 
+function creamPanel(padding: string, inner: string): string {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate"><tr>`
+    + `<td style="background:${color.cream};border-radius:12px;padding:${padding}">${inner}</td></tr></table>`
+}
+
 /** A cream panel with a bold line and a body line. */
 export function callout(title: string, text: string): Block {
   return {
-    html: `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate"><tr>`
-      + `<td style="background:${color.cream};border-radius:12px;padding:18px 20px">`
-      + `<div style="${font(16, 1.5, 600, `color:${color.ink}`)}">${escapeHtml(title)}</div>`
-      + `<div style="padding-top:6px;${font(15, 1.6, 400, `color:${color.text}`)}">${escapeHtml(text)}</div>`
-      + `</td></tr></table>`,
+    html: creamPanel('18px 20px',
+      `<div style="${font(16, 1.5, 600, `color:${color.ink}`)}">${escapeHtml(title)}</div>`
+      + `<div style="padding-top:6px;${font(15, 1.6, 400, `color:${color.text}`)}">${escapeHtml(text)}</div>`),
     text: `${title}\n${text}`,
   }
 }
@@ -258,16 +259,13 @@ export function callout(title: string, text: string): Block {
 /** A cream panel of label/value rows separated by hairlines (Current/New, From/To/When). */
 export function rows(entries: ReadonlyArray<readonly [label: string, value: string]>): Block {
   const html = entries.map(([label, value], i) => {
-    const rule = i === 0 ? '' : `<tr><td colspan="2" style="padding:10px 0"><div style="height:1px;line-height:1px;font-size:1px;background:${color.line}">&nbsp;</div></td></tr>`
+    const rule = i === 0 ? '' : `<tr><td colspan="2" style="padding:10px 0">${divider().html}</td></tr>`
     return rule
       + `<tr><td valign="top" style="${font(15, 1.5, 400, `color:${color.textMuted};padding-right:16px;white-space:nowrap`)}">${escapeHtml(label)}</td>`
       + `<td valign="top" align="right" style="${font(15, 1.5, 600, `color:${color.ink};text-align:right;word-break:break-all`)}">${escapeHtml(value)}</td></tr>`
   }).join('')
   return {
-    html: `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate"><tr>`
-      + `<td style="background:${color.cream};border-radius:12px;padding:16px 20px">`
-      + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${html}</table>`
-      + `</td></tr></table>`,
+    html: creamPanel('16px 20px', `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">${html}</table>`),
     text: entries.map(([label, value]) => `${label}: ${value}`).join('\n'),
   }
 }
@@ -275,14 +273,12 @@ export function rows(entries: ReadonlyArray<readonly [label: string, value: stri
 /** A cream panel with a title and description on the left and a neutral chip on the right. */
 export function chipCard(title: string, text: string, chip: string): Block {
   return {
-    html: `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate"><tr>`
-      + `<td style="background:${color.cream};border-radius:12px;padding:16px 20px">`
-      + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>`
+    html: creamPanel('16px 20px', `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>`
       + `<td valign="middle"><div style="${font(15, 1.5, 600, `color:${color.ink}`)}">${escapeHtml(title)}</div>`
       + `<div style="padding-top:4px;${font(14, 1.5, 400, `color:${color.textSecondary}`)}">${escapeHtml(text)}</div></td>`
       + `<td valign="middle" align="right" style="padding-left:16px;white-space:nowrap">`
       + `<span style="display:inline-block;${font(13, 1.4, 600, `color:${color.ink};background:${color.chipNeutral};padding:5px 10px;border-radius:999px`)}">${escapeHtml(chip)}</span></td>`
-      + `</tr></table></td></tr></table>`,
+      + `</tr></table>`),
     text: `${title}\n${text}`,
   }
 }

@@ -78,11 +78,10 @@ export async function endSession(event: H3Event): Promise<void> {
  * session someone else opened with the old password does not outlive it.
  */
 export async function endOtherSessions(event: H3Event, userId: string): Promise<void> {
-  const token = getCookie(event, SESSION_COOKIE)
   const sql = await appDb()
   await sql`
     DELETE FROM app.sessions
-    WHERE user_id = ${userId} AND token_hash <> ${token ? hashSessionToken(token) : ''}
+    WHERE user_id = ${userId} AND token_hash <> ${currentSessionHash(event) ?? ''}
   `
 }
 

@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto'
 import type { H3Event } from 'h3'
 import { assertNever } from '#shared/connection'
-import type { AppInvitation, AppUser, Db } from './app-db'
+import type { AppInvitation, AppUser, Db, OrgRole } from './app-db'
 import {
   alreadyRegisteredEmail, emailChangedNoticeEmail, emailChangeVerificationEmail,
   invitedSignupVerificationEmail, signupVerificationEmail,
@@ -142,7 +142,8 @@ function mintSecrets(id: string) {
  * code alone.
  */
 function verificationUrl(linkToken: string): string | undefined {
-  const origin = String(useRuntimeConfig().public.appUrl ?? '').replace(/\/+$/, '')
+  // The same reading of the setting as the mail's logo and Sign in button.
+  const origin = emailBrand().appUrl
   return origin ? `${origin}/verify-email?token=${linkToken}` : undefined
 }
 
@@ -231,11 +232,11 @@ function recordVerificationMail(event: H3Event, email: string): void {
 // ── mail ───────────────────────────────────────────────────────────────────
 
 /** The organization and role an invited signup would join, for the mail and the Confirm screen. */
-export interface InviteContext { orgName: string, role: 'admin' | 'member' }
+export interface InviteContext { orgName: string, role: OrgRole }
 
 async function inviteContext(db: Db, inviteId: string | undefined): Promise<InviteContext | undefined> {
   if (!inviteId) return undefined
-  const [row] = await db<{ org_name: string, role: 'admin' | 'member' }[]>`
+  const [row] = await db<{ org_name: string, role: OrgRole }[]>`
     SELECT o.name AS org_name, i.role
     FROM app.invitations i JOIN app.organizations o ON o.id = i.org
     WHERE i.id = ${inviteId}
@@ -305,7 +306,7 @@ async function mailVerification(
     email: row.email,
   }, emailBrand())
   recordVerificationMail(event, row.email)
-  return sendAppEmail({ to: row.email, subject: mail.subject, html: mail.html, text: mail.text })
+  return sendAppEmail({ to: row.email, ...mail })
 }
 
 /** The address an account signs in with now, named in the address-change mail. */
@@ -669,7 +670,7 @@ async function complete(
   if (previousEmail) {
     // Best effort: tells the owner of the old address, in case it was not them.
     const notice = emailChangedNoticeEmail({ previousEmail, newEmail: row.email, changedAt: new Date() }, emailBrand())
-    void sendAppEmail({ to: previousEmail, subject: notice.subject, html: notice.html, text: notice.text })
+    void sendAppEmail({ to: previousEmail, ...notice })
   }
 
   const next = signedIn && row.plan === 'pro' && !row.invite_id && hostedMode() ? 'checkout' as const : undefined

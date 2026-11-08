@@ -20,11 +20,9 @@ const body = z.object({ code: z.string().trim().min(1).max(20) })
 export default defineEventHandler(async (event) => {
   const user = await requireSessionUser(event)
   const { code } = await parseBody(event, body)
-  const throttleKey = `totp-setup:${user.id}`
-  const claimedAt = claimAuthAttempt(throttleKey)
   const sql = await appDb()
 
-  const result = await sql.begin(async (tx) => {
+  const result = await withAuthAttempt(`totp-setup:${user.id}`, () => sql.begin(async (tx) => {
     await lockUserFactors(tx, user.id)
     const attempt = await claimTotpSetupAttempt(tx, user.id, currentSessionHash(event))
     if (attempt === undefined) return { refused: 'expired' as const }
@@ -38,7 +36,7 @@ export default defineEventHandler(async (event) => {
     await tx`UPDATE app.totp_credentials SET confirmed_at = now(), setup_session = NULL WHERE user_id = ${user.id}`
 
     return { hadFactor, recoveryCodes: await afterFactorAdded(tx, user.id, hadFactor) }
-  })
+  }), result => 'refused' in result)
 
   if ('refused' in result) {
     if (result.refused === 'wrong') {
@@ -53,7 +51,6 @@ export default defineEventHandler(async (event) => {
       data: { code: 'totp_setup_expired' },
     })
   }
-  forgiveAuthAttempt(throttleKey, claimedAt)
   if (!result.hadFactor) await endOtherSessions(event, user.id)
   return { recoveryCodes: result.recoveryCodes }
 })

@@ -486,7 +486,7 @@ export async function updatePostgresDsn(instance: AppInstance, dsn: string): Pro
   const updated = await updateRow<AppInstance>('instances', instance.id, fields)
 
   // Drop the pool so the change takes effect now rather than at the next
-  // fingerprint check. Belt and braces — `pgFor` would notice on its own.
+  // fingerprint check. Belt and braces — `withPg` would notice on its own.
   await closeSqlPool(instance)
 
   return updated

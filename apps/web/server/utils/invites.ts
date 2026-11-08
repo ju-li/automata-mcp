@@ -266,7 +266,7 @@ export async function sendInviteEmail(
     expiresInMs: INVITE_TTL_MS,
   }, emailBrand())
 
-  return sendAppEmail({ to: invite.email, subject: mail.subject, html: mail.html, text: mail.text })
+  return sendAppEmail({ to: invite.email, ...mail })
 }
 
 /**

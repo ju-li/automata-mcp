@@ -105,13 +105,20 @@ export function claimPasswordAttempt(event: H3Event, email: string): number {
  * pruned or evicted is simply absent.
  */
 export function releasePasswordAttempt(event: H3Event, email: string, at: number): void {
-  for (const key of keysFor(event, email)) {
-    const times = failures.get(key)
-    const index = times?.indexOf(at) ?? -1
-    if (index < 0) continue
-    times!.splice(index, 1)
-    if (!times!.length) failures.delete(key)
-  }
+  for (const key of keysFor(event, email)) dropAttempt(failures, key, at)
+}
+
+/**
+ * Remove one attempt timestamped `at` from `key` in a throttle's map — the
+ * hand-back every claim-before-check throttle shares. Entries with equal
+ * timestamps are interchangeable; one already pruned is simply absent.
+ */
+export function dropAttempt(attempts: Map<string, number[]>, key: string, at: number): void {
+  const times = attempts.get(key)
+  const index = times?.indexOf(at) ?? -1
+  if (index < 0) return
+  times!.splice(index, 1)
+  if (!times!.length) attempts.delete(key)
 }
 
 export function clearLoginFailures(email: string): void {
