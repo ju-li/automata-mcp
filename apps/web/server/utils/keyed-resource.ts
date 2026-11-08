@@ -34,6 +34,13 @@ import { createHash } from 'node:crypto'
  *     the LRU cap and rotation all skip a handle with work running. The cost is
  *     that `MAX_POOLS` can be exceeded by the number of handles busy at once,
  *     which is bounded by concurrent requests, rather than ended mid-query.
+ *   - **One build per key and credential in flight.** Two acquires arriving
+ *     at a cold key (both reads of one `Promise.all`, or every request after a
+ *     deploy) await the same build. Each building its own and the second
+ *     replacing the first retired a handle the first caller was about to use —
+ *     ended at once, since a `keyedResource` caller holds no lease — so its
+ *     query failed with `CONNECTION_ENDED` (#158). Only a build for a
+ *     *different* credential replaces the stored handle: that is a rotation.
  *   - **Eviction runs on acquire, not on a timer.** An interval outlives
  *     nothing useful in a worker the platform stops and starts, and sweeping on
  *     the path that already runs is deterministic and needs no lifecycle hook.
@@ -71,9 +78,15 @@ interface Entry {
 }
 
 const entries = new Map<string, Entry>()
+/** Builds in flight, keyed on `key` + credential hash. See the header. */
+const building = new Map<string, Promise<Entry>>()
 
 export interface KeyedResourceSpec<T> {
-  /** Open the handle. Called only when there is not already a live one. */
+  /**
+   * Open the handle. Called only when there is not already a live one, and
+   * not while another acquire for the same key and credential is building —
+   * that caller's build is awaited instead.
+   */
   build: () => Promise<T>
   /** Close it. `postgres` wants `end({ timeout })`; another driver will differ. */
   destroy: (value: T) => Promise<void>
@@ -169,29 +182,57 @@ async function acquire<T>(
   // A fresh build is guarded by `build` itself — `pg-pool.ts` resolves and pins
   // the address there, because the approved address is an input to the driver
   // options and cannot be applied after the fact.
-  const value = await spec.build()
+  const entry = await buildOnce(key, secretHash, spec)
 
-  // Whatever is in the map now — `existing`, or one a concurrent acquire built
-  // while we awaited — is replaced by this one.
-  const previous = entries.get(key)
-  if (previous) {
-    // The credential was rotated. Drain the old handle in the background, or,
-    // when work is still running on it, once the last lease is released.
-    entries.delete(key)
-    retire(previous)
-  }
-
-  const entry: Entry = {
-    value,
-    destroy: spec.destroy as (value: unknown) => Promise<void>,
-    secretHash,
-    guardedAt: Date.now(),
-    lastUsed: Date.now(),
-    active: lease ? 1 : 0,
-    retired: false,
-  }
-  entries.set(key, entry)
+  // Every acquire waiting on that build resumes here with no await between
+  // this check and the lease. Between the build storing the entry and this
+  // caller resuming, a rotation or the LRU cap may have taken it out of the
+  // map; take the current one rather than use a handle that is being ended.
+  if (entries.get(key) !== entry) return await acquire(key, secret, spec, lease)
+  entry.lastUsed = Date.now()
+  if (lease) entry.active += 1
   return entry
+}
+
+/**
+ * Build the handle for `key` with this credential, or join the build already
+ * running for it, and store it in the map.
+ *
+ * The first caller's `spec` builds; a joining caller's is not used. Same key
+ * and same credential means the same driver and the same target, which is what
+ * the key namespacing exists to guarantee.
+ */
+function buildOnce<T>(key: string, secretHash: string, spec: KeyedResourceSpec<T>): Promise<Entry> {
+  const id = `${key}\0${secretHash}`
+  const pending = building.get(id)
+  if (pending) return pending
+
+  const build = (async () => {
+    const value = await spec.build()
+    const entry: Entry = {
+      value,
+      destroy: spec.destroy as (value: unknown) => Promise<void>,
+      secretHash,
+      guardedAt: Date.now(),
+      lastUsed: Date.now(),
+      active: 0,
+      retired: false,
+    }
+    // Same-credential builds are joined above, so whatever is stored now was
+    // opened with a different credential: a rotation. Drain the old handle in
+    // the background, or, when work is still running on it, once the last
+    // lease is released.
+    const previous = entries.get(key)
+    if (previous) {
+      entries.delete(key)
+      retire(previous)
+    }
+    entries.set(key, entry)
+    return entry
+  })().finally(() => building.delete(id))
+
+  building.set(id, build)
+  return build
 }
 
 /** End an entry already removed from the map — now, or when its last lease is released. */

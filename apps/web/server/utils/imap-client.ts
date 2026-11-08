@@ -302,8 +302,6 @@ export function imapErrorMessage(code: string): string {
 
 // ── live connection, shared per connection row ────────────────────────────
 
-const building = new Map<string, Promise<ImapFlow>>()
-
 function liveKey(instance: AppInstance) {
   return `imap:${instance.id}`
 }
@@ -313,8 +311,8 @@ function liveKey(instance: AppInstance) {
  * for one mailbox. The sync never uses it, so a long backfill cannot hold the
  * mailbox a tool call is waiting on.
  *
- * Builds are de-duplicated: two calls arriving at a cold cache would otherwise
- * open two logins, and the one `keyedResource` did not keep would leak.
+ * Two calls arriving at a cold cache share one login: `keyedResource` runs
+ * one build per key and credential and has every other caller await it.
  */
 export async function imapFor(instance: AppInstance): Promise<ImapFlow> {
   const target = requireTarget(instance)
@@ -322,14 +320,7 @@ export async function imapFor(instance: AppInstance): Promise<ImapFlow> {
   const secret = [target.host, target.port, target.security, target.user, target.password].join('\0')
 
   const acquire = () => keyedResource<ImapFlow>(key, secret, {
-    build: () => {
-      let pending = building.get(key)
-      if (!pending) {
-        pending = openImap(target).finally(() => building.delete(key))
-        building.set(key, pending)
-      }
-      return pending
-    },
+    build: () => openImap(target),
     destroy: closeImap,
     reguard: async () => {
       await assertPublicTarget(target.host, target.port, 'Mail server')
