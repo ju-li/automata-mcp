@@ -236,6 +236,10 @@ Anything else is read as `required`. The link is built from
 cannot redirect it; without that URL the mail carries the code alone. Existing
 accounts are not asked to verify.
 
+The account emails are HTML with a plain-text part; their header logo is served
+by the web app and linked through `NUXT_PUBLIC_APP_URL` too. See
+[Account emails](alerts.md#account-emails).
+
 ## ⚠️ WhatsApp pairing burns a real phone number
 
 Scanning the QR binds a real WhatsApp account to an instance. WhatsApp rate-limits
