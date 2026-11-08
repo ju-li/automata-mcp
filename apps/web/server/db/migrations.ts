@@ -717,7 +717,22 @@ export const APP_MIGRATIONS: AppMigration[] = [
     `,
   },
   {
-    name: '0019_password_resets',
+    name: '0019_whatsapp_group_scan_failures',
+    sql: /* sql */ `
+      -- Consecutive failed group scans since the last success. The back-off
+      -- after a failure doubles with each one (1 h, 2 h, 4 h ... capped at a
+      -- day), so an account whose scan never finishes stops costing
+      -- WhatsApp a full scan every hour. A success resets it. Rows whose last event was a failure start
+      -- at one, so they keep today's one-hour wait.
+      ALTER TABLE app.whatsapp_group_scans
+        ADD COLUMN failures integer NOT NULL DEFAULT 0 CHECK (failures >= 0);
+      UPDATE app.whatsapp_group_scans
+        SET failures = 1
+        WHERE failed_at IS NOT NULL AND (scanned_at IS NULL OR failed_at > scanned_at);
+    `,
+  },
+  {
+    name: '0020_password_resets',
     sql: /* sql */ `
       -- A password reset waiting to be used: mailed to the account's address,
       -- either because someone asked on the "Forgot password?" page

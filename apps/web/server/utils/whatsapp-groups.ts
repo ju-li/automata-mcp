@@ -18,14 +18,21 @@
  *   - a scan runs at most once per `GROUP_SCAN_INTERVAL_MS` per account, across
  *     every replica, and only by the one that claims the lease
  *     (`claimGroupScan`);
- *   - a failed scan holds every replica off for `GROUP_SCAN_FAILURE_BACKOFF_MS`;
+ *   - a failed scan holds every replica off for a back-off that doubles with
+ *     each consecutive failure (`groupScanBackoffMs`: 1 h, 2 h, 4 h … capped at
+ *     a day) and resets on success, so an account whose scan can never finish
+ *     stops costing WhatsApp a full scan every hour (#131);
+ *   - the request waits as long as Node's fetch can (`GROUP_SCAN_TIMEOUT_MS`):
+ *     Evolution carries on after we give up, so a timeout that is too short
+ *     wastes the whole scan's WhatsApp queries rather than saving them;
  *   - in between, everyone names groups from the stored rows.
  *
  * Staleness rule, stated once here and relied on by `chats.ts`:
  *
  *   1. A successful scan replaces the account's rows exactly
  *      (`replaceStoredGroups`): a group missing from it is deleted, since the
- *      account left it. A failed scan writes nothing but `failed_at`.
+ *      account left it. A failed scan writes nothing but `failed_at` and the
+ *      failure count.
  *   2. A group joined or renamed since the last scan keeps its old subject, or
  *      falls back to the contact name and then the bare id, for up to the scan
  *      interval.
@@ -42,14 +49,42 @@
 
 /** How often an account's groups are fetched from WhatsApp, at most. */
 export const GROUP_SCAN_INTERVAL_MS = 6 * 60 * 60_000
-/** How long every replica waits after a failed scan. */
+/** How long every replica waits after the first failed scan in a row; doubles with each further one. */
 export const GROUP_SCAN_FAILURE_BACKOFF_MS = 60 * 60_000
-/** The `fetchAllGroups` request timeout. Evolution keeps going after it; WhatsApp is queried either way. */
-export const GROUP_SCAN_TIMEOUT_MS = 120_000
+/** The longest wait after failures, however many. */
+export const GROUP_SCAN_MAX_FAILURE_BACKOFF_MS = 24 * 60 * 60_000
+/**
+ * The `fetchAllGroups` request timeout: as long as a request can wait here.
+ * Evolution answers only once every group's picture is fetched, so no header
+ * arrives before the whole scan is done, and Node's fetch (undici's default
+ * dispatcher, `headersTimeout`) abandons a request with no headers after 300 s
+ * whatever timeout we pass. Going past it needs an undici `Agent`, and undici
+ * is not a direct dependency.
+ *
+ * It was 120 s. A 289-group account finished inside that once, then timed out
+ * six times in a row (Evolution logging `rate-overlimit` on group metadata
+ * throughout), and a 207-group account never finished (#131). Evolution keeps
+ * going after we give up — WhatsApp is queried either way — so the longer wait
+ * costs a held socket, not queries. An account that still cannot finish is
+ * held off by the growing back-off instead.
+ */
+export const GROUP_SCAN_TIMEOUT_MS = 290_000
 /** Longer than the timeout, so a scan still running is never claimed twice. */
 const GROUP_SCAN_LEASE_MS = GROUP_SCAN_TIMEOUT_MS + 60_000
+/** Failures past this many no longer lengthen the back-off; keeps the arithmetic finite. */
+const GROUP_SCAN_FAILURE_EXPONENT_CAP = 10
 /** Stored rows older than this are not used to name anything. */
 export const GROUP_MAX_AGE_MS = 30 * 24 * 60 * 60_000
+
+/**
+ * How long every replica waits after `failures` consecutive failed scans:
+ * 1 h after the first, then 2 h, 4 h … up to `GROUP_SCAN_MAX_FAILURE_BACKOFF_MS`.
+ * `claimGroupScan` applies the same rule in SQL; this copy is for logging.
+ */
+export function groupScanBackoffMs(failures: number): number {
+  const doublings = Math.min(Math.max(failures - 1, 0), GROUP_SCAN_FAILURE_EXPONENT_CAP)
+  return Math.min(GROUP_SCAN_FAILURE_BACKOFF_MS * 2 ** doublings, GROUP_SCAN_MAX_FAILURE_BACKOFF_MS)
+}
 
 export interface StoredGroup {
   subject?: string
@@ -90,6 +125,9 @@ export async function readStoredGroups(instanceId: string): Promise<Map<string, 
  * A conditional UPDATE, so of any number of replicas reading at once exactly one
  * wins, and no database connection is held across the scan. A failure to ask
  * answers `false`: when we cannot coordinate, we do not query WhatsApp.
+ *
+ * The back-off condition is `groupScanBackoffMs` in SQL, so it is decided on
+ * the row every replica shares.
  */
 export async function claimGroupScan(instanceId: string): Promise<boolean> {
   try {
@@ -101,7 +139,12 @@ export async function claimGroupScan(instanceId: string): Promise<boolean> {
       WHERE instance_id = ${instanceId}
         AND (lease_until IS NULL OR lease_until < now())
         AND (scanned_at IS NULL OR scanned_at < now() - make_interval(secs => ${GROUP_SCAN_INTERVAL_MS / 1000}))
-        AND (failed_at IS NULL OR failed_at < now() - make_interval(secs => ${GROUP_SCAN_FAILURE_BACKOFF_MS / 1000}))
+        AND (
+          failed_at IS NULL OR failures = 0
+          OR failed_at < now() - make_interval(secs => LEAST(
+            ${GROUP_SCAN_FAILURE_BACKOFF_MS / 1000}::float8
+              * power(2, LEAST(GREATEST(failures - 1, 0), ${GROUP_SCAN_FAILURE_EXPONENT_CAP})),
+            ${GROUP_SCAN_MAX_FAILURE_BACKOFF_MS / 1000}::float8)))
       RETURNING 1`
     return claimed.length > 0
   }
@@ -111,23 +154,33 @@ export async function claimGroupScan(instanceId: string): Promise<boolean> {
   }
 }
 
-/** Record a failed scan: every replica now waits out the back-off. Releases the lease. */
-export async function recordGroupScanFailure(instanceId: string): Promise<void> {
+/**
+ * Record a failed scan: one more failure in a row, and every replica now waits
+ * out the back-off it sets. Releases the lease.
+ *
+ * Answers that back-off for the log, or `undefined` when the write failed — in
+ * which case the lease simply runs out and the next claim retries.
+ */
+export async function recordGroupScanFailure(instanceId: string): Promise<number | undefined> {
   try {
     const sql = await appDb()
-    await sql`
+    const rows = await sql<Array<{ failures: number }>>`
       UPDATE app.whatsapp_group_scans
-      SET failed_at = now(), lease_until = NULL
-      WHERE instance_id = ${instanceId}`
+      SET failed_at = now(), failures = failures + 1, lease_until = NULL
+      WHERE instance_id = ${instanceId}
+      RETURNING failures`
+    return rows[0] ? groupScanBackoffMs(rows[0].failures) : undefined
   }
   catch (error) {
     console.warn(`[groups] could not record a failed group scan for connection ${instanceId}:`, error instanceof Error ? error.message : error)
+    return undefined
   }
 }
 
 /**
  * Make the stored rows exactly `groups` — upsert every one, delete the rest —
- * and record the scan as done, releasing the lease.
+ * and record the scan as done, resetting the failure count and releasing the
+ * lease.
  *
  * One transaction, so a reader never sees a half-replaced list. An empty map
  * deletes every row — an account really can be in no groups.
@@ -154,7 +207,7 @@ export async function replaceStoredGroups(instanceId: string, groups: Map<string
 
       await tx`
         UPDATE app.whatsapp_group_scans
-        SET scanned_at = now(), lease_until = NULL
+        SET scanned_at = now(), failures = 0, lease_until = NULL
         WHERE instance_id = ${instanceId}`
 
       if (!rows.length) return
