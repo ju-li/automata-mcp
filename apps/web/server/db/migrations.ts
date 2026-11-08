@@ -716,4 +716,34 @@ export const APP_MIGRATIONS: AppMigration[] = [
       DELETE FROM app.totp_credentials WHERE confirmed_at IS NULL;
     `,
   },
+  {
+    name: '0019_password_resets',
+    sql: /* sql */ `
+      -- A password reset waiting to be used: mailed to the account's address,
+      -- either because someone asked on the "Forgot password?" page
+      -- (requested_by 'self') or because an admin of the account's
+      -- organization pressed the button on the Team page ('admin'). One per
+      -- account: asking again replaces it.
+      --
+      -- link_hash is the SHA-256 of the token in the mailed link; code_hash of
+      -- the row id and the six-digit code. attempts counts wrong codes,
+      -- claimed before each is checked; the fifth deletes the row. email is
+      -- the address the mail went to: the reset is spent only while the
+      -- account still signs in with it, so a mail sitting in an address the
+      -- account has since moved away from is dead. Written only by
+      -- server/utils/password-reset.ts.
+      CREATE TABLE app.password_resets (
+        id           text PRIMARY KEY,
+        user_id      text NOT NULL UNIQUE REFERENCES app.users (id) ON DELETE CASCADE,
+        email        text NOT NULL,
+        link_hash    text NOT NULL UNIQUE CHECK (length(link_hash) = 64),
+        code_hash    text NOT NULL CHECK (length(code_hash) = 64),
+        attempts     integer NOT NULL DEFAULT 0,
+        requested_by text NOT NULL CHECK (requested_by IN ('self', 'admin')),
+        expires_at   timestamptz NOT NULL,
+        created      timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX password_resets_expires_idx ON app.password_resets (expires_at);
+    `,
+  },
 ]

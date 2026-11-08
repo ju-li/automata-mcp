@@ -15,8 +15,9 @@ import type { EmailBrand } from '../emails/layout'
  * server offers it, which is what port 587 wants.
  *
  * Account emails (verification, already registered, email-change notice,
- * invitation) are HTML with a plain-text alternative, written by the templates
- * in `server/emails/`. Connection alerts are still plain text.
+ * invitation, password reset, password-changed notice) are HTML with a
+ * plain-text alternative, written by the templates in `server/emails/`.
+ * Connection alerts are still plain text.
  */
 
 export interface AppEmail {

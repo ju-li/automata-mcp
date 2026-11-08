@@ -14,7 +14,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   alreadyRegisteredEmail, emailChangedNoticeEmail, emailChangeVerificationEmail,
-  invitationEmail, invitedSignupVerificationEmail, signupVerificationEmail,
+  invitationEmail, invitedSignupVerificationEmail, passwordChangedNoticeEmail,
+  passwordResetEmail, signupVerificationEmail,
 } from '../server/emails/account.ts'
 import { COMPANY_ADDRESS, HOSTED_CONTACT_URL, maskEmail } from '../server/emails/layout.ts'
 
@@ -28,8 +29,10 @@ const noAppUrl = { hosted: false }
 
 const VERIFY_TTL = 30 * 60 * 1000
 const INVITE_TTL = 14 * 24 * 60 * 60 * 1000
+const RESET_TTL = 30 * 60 * 1000
 const changedAt = new Date('2026-11-07T22:02:00Z')
 const link = brand => `${brand.appUrl}/verify-email?token=SAMPLE-link-token`
+const resetLink = brand => `${brand.appUrl}/reset-password?token=SAMPLE-link-token`
 
 /** Every email, with the sample values the canvas uses. */
 const cases = {
@@ -43,6 +46,12 @@ const cases = {
   '4-email-changed-notice-self-hosted': emailChangedNoticeEmail({ previousEmail: 'old@example.com', newEmail: 'new@example.com', changedAt }, selfHosted),
   '5-invitation': invitationEmail({ inviterName: 'Jane Doe', orgName: 'Acme', role: 'member', email: 'invitee@example.com', url: `${hosted.appUrl}/invite/waorg_SAMPLE`, expiresInMs: INVITE_TTL }, hosted),
   '5-invitation-admin-self-hosted': invitationEmail({ inviterName: 'Jane Doe', orgName: 'Acme', role: 'admin', email: 'invitee@example.com', url: `${selfHosted.appUrl}/invite/waorg_SAMPLE`, expiresInMs: INVITE_TTL }, selfHosted),
+  '6a-password-reset': passwordResetEmail({ code: '123456', url: resetLink(hosted), expiresInMs: RESET_TTL }, hosted),
+  '6a-password-reset-no-app-url': passwordResetEmail({ code: '123456', expiresInMs: RESET_TTL }, noAppUrl),
+  '6b-password-reset-by-admin': passwordResetEmail({ code: '123456', url: resetLink(hosted), expiresInMs: RESET_TTL, requestedBy: { orgName: 'Acme' } }, hosted),
+  '6b-password-reset-by-admin-self-hosted': passwordResetEmail({ code: '123456', url: resetLink(selfHosted), expiresInMs: RESET_TTL, requestedBy: { orgName: 'Acme' } }, selfHosted),
+  '7-password-changed-notice': passwordChangedNoticeEmail({ email: 'person@example.com', changedAt, how: 'reset' }, hosted),
+  '7-password-changed-notice-self-hosted': passwordChangedNoticeEmail({ email: 'person@example.com', changedAt, how: 'profile' }, selfHosted),
 }
 
 function snapshotText(mail) {
@@ -100,7 +109,8 @@ for (const [name, mail] of Object.entries(cases)) {
     const html = visibleText(mail.html).toLowerCase()
     for (const paragraph of mail.text.split('\n\n')) {
       for (const line of paragraph.split('\n')) {
-        const want = line.replace(/^\s+/, '').replace(/^(.*): (https?:\/\/\S+)$/, '$1').trim()
+        // A button is `Label: url`; a link inside a sentence is `text <url>`.
+        const want = line.replace(/^\s+/, '').replace(/^(.*): (https?:\/\/\S+)$/, '$1').replace(/ <https?:\/\/[^>\s]+>/g, '').trim()
         if (!want || want === '---' || want === '--') continue
         // `Current: old@example.com` is two cells in the HTML.
         for (const piece of want.split(/: (?=\S+@|\d{1,2} \w{3} \d{4})/)) {
@@ -162,4 +172,38 @@ test('expiry wording comes from the TTL', () => {
   assert.ok(cases['1a-signup-verification'].text.includes('expire in 30 minutes'))
   assert.ok(cases['3-email-change-verification'].text.includes('expire in 30 minutes. Until you confirm'))
   assert.ok(cases['5-invitation'].text.includes('It expires in 14 days.'))
+  assert.ok(cases['6a-password-reset'].text.includes('expire in 30 minutes and work once'))
+})
+
+test('already registered: "Forgot your password?" links to the reset page, only with an app URL', () => {
+  const mail = cases['2-already-registered']
+  assert.ok(mail.html.includes('href="https://mcp.getautomata.app/forgot-password"'))
+  assert.ok(mail.text.includes('Forgot your password? Reset it here <https://mcp.getautomata.app/forgot-password>.'))
+  assert.ok(!cases['2-already-registered-no-app-url'].text.includes('Forgot your password?'))
+})
+
+test('password reset: link from the app URL only, code always; admin mail names the org, never the admin', () => {
+  assert.ok(cases['6a-password-reset'].html.includes('href="https://mcp.getautomata.app/reset-password?token=SAMPLE-link-token"'))
+  for (const name of ['6a-password-reset', '6a-password-reset-no-app-url', '6b-password-reset-by-admin']) {
+    assert.ok(cases[name].text.includes('    123456'), name)
+  }
+  const bare = cases['6a-password-reset-no-app-url']
+  assert.ok(!bare.html.includes('href='))
+  assert.ok(bare.text.includes('under “Forgot password?”, with this email address'))
+  const byAdmin = cases['6b-password-reset-by-admin']
+  assert.ok(byAdmin.subject.includes('Acme'))
+  assert.ok(byAdmin.text.includes('An admin of the organization “Acme”'))
+  assert.ok(byAdmin.text.includes('can’t choose your password'))
+  const hostile = passwordResetEmail({ code: '123456', expiresInMs: RESET_TTL, requestedBy: { orgName: '<b>Acme</b>\r\nBcc: x@example.com' } }, hosted)
+  assert.ok(!/[\r\n]/.test(hostile.subject), hostile.subject)
+  assert.ok(!hostile.html.includes('<b>'))
+})
+
+test('password-changed notice: contact link in hosted mode only, says tokens keep working', () => {
+  assert.ok(cases['7-password-changed-notice'].html.includes(HOSTED_CONTACT_URL))
+  assert.ok(!cases['7-password-changed-notice-self-hosted'].html.includes('getautomata.app'))
+  assert.ok(cases['7-password-changed-notice-self-hosted'].text.includes('Contact an admin of your organization'))
+  assert.ok(cases['7-password-changed-notice'].text.includes('Every browser signed in to the account was signed out.'))
+  assert.ok(cases['7-password-changed-notice-self-hosted'].text.includes('Every other browser'))
+  assert.ok(cases['7-password-changed-notice'].text.includes('Connector tokens keep working'))
 })

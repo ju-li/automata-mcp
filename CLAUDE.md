@@ -67,7 +67,8 @@ Nuxt overrides `runtimeConfig` only from `NUXT_`-prefixed vars, so some values d
 
 ```
 apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context = repo root).
-  app/pages/                 index, login, signup, verify-email, no-organization, team,
+  app/pages/                 index, login, signup, verify-email, forgot-password,
+                             reset-password, no-organization, team,
                              profile, billing, invite/[code], instances/{index,new,[id]}
   app/components/            app components + ui/ (shadcn-vue, bare names)
   app/composables/           useSession (user + org + role), useOrg, useConnectionState,
@@ -89,6 +90,7 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              pg-run, pg-catalog, chats, alerts, mailer,
                              mcp-kind-tool, mcp-clients, tool-calls, telegram, telegram-db,
                              telegram-instances, imap-client, imap-sync, imap-db, unpaired-reaper, lid-guard,
+                             email-verification, password-reset,
                              mail-format, whatsapp-groups, mfa, totp, webauthn, entitlements,
                              hosted-events, cloud, …
   server/emails/             account-email templates (layout.ts + account.ts). Not auto-imported;
@@ -188,6 +190,21 @@ Rules easy to undo:
 - Mail send failing deletes row and answers 503 — pending signup nobody can finish worse than error.
 
 Existing accounts never asked to verify; mode `off` keeps old password-only email change.
+
+## Password reset
+
+`server/utils/password-reset.ts` = one file minting, mailing, spending. "Forgot password?" on `/login` → `/forgot-password` (address, then code + new password); mail link → `/reset-password?token=`; admin's "Send password reset" on Team page → `POST /api/org/members/:id/password-reset`. Row in `app.password_resets`, one per account (new replaces old), link + six-digit code, 30 min. Needs SMTP — none = 503 + log, page says so, Team button hidden (`/api/org` `passwordReset`); operator's fallback = DB recipe in `docs/self-hosting.md`.
+
+Rules easy to undo:
+
+- **A reset never signs in.** Ends at "now sign in" → password, then factor; `startSession` never reached from here. Also why the code isn't bound to a cookie: admin-started reset has no waiting browser, and binding protects nothing when nobody is signed in. Signing in from a reset = 2FA bypass, plus verification's forwarded-link trick (stranger's account, victim's click).
+- **No enumeration.** Request answer identical either way; unknown address gets **no mail**; account read awaited (outage = 503, says nothing), row write + mail run after the answer (`event.waitUntil`), so neither timing nor mail failure tells. Throttles counted for unknown addresses too. Every code failure = same 400 `reset_invalid`.
+- **Spent by `DELETE … RETURNING` in the tx that sets the password**, joined to `app.users` on `email = row.email` — row dies when the account's address changes, by either path, without either path knowing about resets. Same tx deletes **every** session of the account (this browser's too) and its `login` `mfa_challenges`.
+- **Wrong codes claimed on row before compare** (`UPDATE … attempts + 1 … RETURNING`), fifth deletes row; plus `assertResetCodeAllowed` per address + per IP (10/15 min) and per address 30/day, checked before any read. The daily cap is the real bound: new row = 5 new guesses.
+- **Link from `NUXT_PUBLIC_APP_URL` only; spent only by POST**; `link-info` (POST) names the account, never spends.
+- **Mail throttle IP + address**, never address alone (squatting rule); per-IP hourly cap. Admin path: per target 5 min, per admin 10/hour.
+- **Admin starts the mail, nothing else.** No request body; recipient = member's stored address; admin never sees link/code/password; mail names org, never admin. 404 for other org's user (`requireOrgMember`). No `hosted_events` row — no type for it.
+- **Tokens untouched**, like DSN change. Password-changed notice (`notifyPasswordChanged`) after reset and after profile change, says so.
 
 ## Two-factor sign-in
 
@@ -465,7 +482,7 @@ Sweep in-process, so **multiple replicas mail multiple times**. `nitro.scheduled
 
 `sendAppEmail()` never throws, answers whether mail went out; with `NUXT_SMTP_HOST` unset answers false, warns once. Callers decide what "not sent" means — alert stays queued, invitation link stays on screen.
 
-**Account emails are HTML + plain text, from `server/emails/`; alerts stay plain text.** Six templates in `account.ts` (signup verification, invited signup verification, already registered, email-change verification, email-changed notice, invitation), each a list of blocks handed to `renderEmail()` in `layout.ts`, which writes both parts from the same blocks — wording can't drift between them. Callers (`verificationMail()` in `email-verification.ts`, `sendInviteEmail()`) decide *which* mail and pass values; templates decide only how it reads. Copy = the "Account emails" boards on the Claude Design canvas. Rules easy to undo:
+**Account emails are HTML + plain text, from `server/emails/`; alerts stay plain text.** Eight templates in `account.ts` (signup verification, invited signup verification, already registered, email-change verification, email-changed notice, invitation, password reset — self or admin-requested — and password-changed notice), each a list of blocks handed to `renderEmail()` in `layout.ts`, which writes both parts from the same blocks — wording can't drift between them. Callers (`verificationMail()` in `email-verification.ts`, `sendInviteEmail()`, `password-reset.ts`) decide *which* mail and pass values; templates decide only how it reads. Copy = the "Account emails" boards on the Claude Design canvas. Rules easy to undo:
 
 - **Every interpolated value through `escapeHtml()`; subjects and preview through `singleLine()`.** Org and inviter names are user-typed and reach someone else's inbox. `test/emails.test.mjs` pins it with a hostile org name.
 - **Email-safe only:** 600px table, inline styles, no `<style>`/`<link>`/SVG/flex/grid. Lime (`#baf85a`) only as button label on ink — the test counts it.

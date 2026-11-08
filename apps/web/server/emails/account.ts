@@ -7,7 +7,8 @@ import type { EmailBrand, RenderedEmail } from './layout.ts'
 
 /**
  * The account emails: signup verification (self and invited), already
- * registered, email-change verification, email-changed notice, invitation.
+ * registered, email-change verification, email-changed notice, invitation,
+ * password reset (self and admin-requested), password-changed notice.
  * Copy comes from the "Account emails" boards on the Claude Design canvas;
  * the differences from it, and why, are listed in the PR that added them.
  *
@@ -92,6 +93,7 @@ export function alreadyRegisteredEmail(brand: EmailBrand): RenderedEmail {
       heading('You already have an account.'),
       lead('Someone just tried to sign up for Automata with this email address. It already has an account, so we didn’t create a new one.'),
       brand.appUrl && button('Sign in', `${brand.appUrl}/login`),
+      brand.appUrl && secondary({ strong: 'Forgot your password?' }, ' ', { link: 'Reset it here', href: `${brand.appUrl}/forgot-password` }, '.'),
       secondary({ strong: 'Signing up from an invitation?' }, ' Sign in with this address, then open the invitation link again to accept it.'),
       divider(),
       secondary('Wasn’t you? You can safely ignore this email. Nothing on your account has changed.'),
@@ -208,6 +210,102 @@ export function invitationEmail(p: {
       ),
       divider(),
       secondary('Not expecting this? You can ignore it. Nothing happens unless you accept.'),
+    ],
+  }, brand)
+}
+
+// ── 6 · password reset (self, or requested by an admin) ────────────────────
+
+export function passwordResetEmail(p: {
+  code: string
+  /** Absent when `NUXT_PUBLIC_APP_URL` is unset: the mail carries the code alone. */
+  url?: string
+  /** The TTL the row was written with. */
+  expiresInMs: number
+  /**
+   * Set when an admin of the account's organization sent it from the Team
+   * page. Names the organization, never the admin: an unexpected reset must
+   * be recognisable as one, and the button is all the admin did.
+   */
+  requestedBy?: { orgName: string }
+}, brand: EmailBrand): RenderedEmail {
+  const expiry = meta(`The code and link expire in ${durationWords(p.expiresInMs)} and work once. Your current password keeps working until you choose a new one.`)
+  // The link works in any browser; the code needs the reset page and the address.
+  const codeIntro = p.url
+    ? body('Or enter this code on the password reset page:')
+    : body('Enter this code on the Automata sign-in page, under “Forgot password?”, with this email address:')
+
+  if (p.requestedBy) {
+    const org = nameOr(p.requestedBy.orgName, 'your organization')
+    return renderEmail({
+      subject: `An admin of ${org} sent you a password reset`,
+      preview: `Your code is ${p.code}. Only you can choose the new password.`,
+      reason: `You’re getting this because an admin of ${org} on Automata asked to send a password reset to this address.`,
+      blocks: [
+        eyebrow(`Requested by ${org}`),
+        heading('Choose a new password.'),
+        lead(`An admin of the organization “${org}” asked Automata to send you a password reset. They can’t see this code or link, and they can’t choose your password. Only you can, from this email.`),
+        p.url && button('Choose a new password', p.url),
+        codeIntro,
+        code(p.code),
+        expiry,
+        divider(),
+        secondary({ strong: 'Not expecting this?' }, ` Ignore this email and your password stays the same. If you didn’t ask anyone at ${org} for a reset, let them know.`),
+      ],
+    }, brand)
+  }
+
+  return renderEmail({
+    subject: 'Reset your Automata password',
+    preview: `Your code is ${p.code}. Didn’t ask for it? Ignore this email.`,
+    reason: 'You’re getting this because someone asked to reset the password of the Automata account at this address.',
+    blocks: [
+      heading('Reset your password.'),
+      lead('Someone asked to reset the password of the Automata account at this address. If that was you, choose a new one:'),
+      p.url && button('Choose a new password', p.url),
+      codeIntro,
+      code(p.code),
+      expiry,
+      divider(),
+      secondary({ strong: 'Didn’t ask for this?' }, ' Don’t use the code. Ignore this email and your password stays the same.'),
+    ],
+  }, brand)
+}
+
+// ── 7 · password-changed notice ────────────────────────────────────────────
+
+export function passwordChangedNoticeEmail(p: {
+  email: string
+  changedAt: Date
+  /** `reset`: from a mailed reset, every session ended. `profile`: signed in, other sessions ended. */
+  how: 'reset' | 'profile'
+}, brand: EmailBrand): RenderedEmail {
+  const what = p.how === 'reset'
+    ? 'The password of your Automata account was reset with a code or link sent to this address. Every browser signed in to the account was signed out.'
+    : 'The password of your Automata account was changed from its profile page. Every other browser signed in to the account was signed out.'
+  // Support means us only on our own deployment, as in the email-changed notice.
+  const help = brand.hosted
+    ? [
+        body({ strong: 'Didn’t make this change?' }, ' Someone may have access to your email or your account. Contact us right away and we’ll help you get it back.'),
+        button('Contact us', HOSTED_CONTACT_URL),
+      ]
+    : [
+        body({ strong: 'Didn’t make this change?' }, ' Someone may have access to your email or your account. Contact an admin of your organization right away.'),
+      ]
+  return renderEmail({
+    subject: 'Your Automata password was changed',
+    preview: brand.hosted
+      ? 'If this wasn’t you, contact us right away.'
+      : 'If this wasn’t you, contact an admin of your organization right away.',
+    reason: 'You’re getting this security notice because the password of the Automata account at this address changed.',
+    blocks: [
+      eyebrow('Security notice'),
+      heading('Your password was changed.'),
+      lead(what),
+      rows([['Account', p.email], ['When', formatDateTime(p.changedAt)]]),
+      body('If you made this change, there’s nothing to do. Connector tokens keep working: a password change doesn’t revoke them. Revoke one from its connection’s page if you think it has leaked.'),
+      divider(),
+      ...help,
     ],
   }, brand)
 }
