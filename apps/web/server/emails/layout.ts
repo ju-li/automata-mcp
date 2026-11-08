@@ -118,17 +118,27 @@ export function maskEmail(email: string): string {
 
 // ── inline rich text ───────────────────────────────────────────────────────
 
-/** A run of text, optionally bold (ink). Plain strings are ordinary body text. */
-export type Inline = string | { strong: string }
+/**
+ * A run of text: plain body text, bold (ink), or a link inside a sentence (ink,
+ * semibold, underlined — the boards' "Reset it here"). The plain-text part
+ * writes a link as `text <url>`, so the URL survives a client that shows no HTML.
+ */
+export type Inline = string | { strong: string } | { link: string, href: string }
 
 function inlineHtml(parts: readonly Inline[]): string {
-  return parts.map(part => typeof part === 'string'
-    ? escapeHtml(part)
-    : `<strong style="color:${color.ink};font-weight:600">${escapeHtml(part.strong)}</strong>`).join('')
+  return parts.map((part) => {
+    if (typeof part === 'string') return escapeHtml(part)
+    if ('strong' in part) return `<strong style="color:${color.ink};font-weight:600">${escapeHtml(part.strong)}</strong>`
+    return `<a href="${escapeHtml(part.href)}" style="color:${color.ink};font-weight:600;text-decoration:underline">${escapeHtml(part.link)}</a>`
+  }).join('')
 }
 
 function inlineText(parts: readonly Inline[]): string {
-  return parts.map(part => typeof part === 'string' ? part : part.strong).join('')
+  return parts.map((part) => {
+    if (typeof part === 'string') return part
+    if ('strong' in part) return part.strong
+    return `${part.link} <${part.href}>`
+  }).join('')
 }
 
 // ── blocks ─────────────────────────────────────────────────────────────────

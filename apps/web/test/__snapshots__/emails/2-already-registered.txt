@@ -7,6 +7,8 @@ Someone just tried to sign up for Automata with this email address. It already h
 
 Sign in: https://mcp.getautomata.app/login
 
+Forgot your password? Reset it here <https://mcp.getautomata.app/forgot-password>.
+
 Signing up from an invitation? Sign in with this address, then open the invitation link again to accept it.
 
 ---

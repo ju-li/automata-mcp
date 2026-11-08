@@ -61,9 +61,11 @@ A passkey is bound to a domain. The app takes that domain from
 
 ## Someone lost every factor
 
-There is no self-service reset and no admin reset. An operator with database
-access can turn 2FA off for one account; they can then sign in with their
-password and enrol again:
+There is no self-service reset and no admin reset for a second factor. A
+password reset doesn't help either: it changes the password only, and signing
+in afterwards still asks for the factor. An operator with database access can
+turn 2FA off for one account; they can then sign in with their password and
+enrol again:
 
 ```sql
 BEGIN;
