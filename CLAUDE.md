@@ -50,11 +50,12 @@ pnpm cloud:dev        # the hosted-only cloud service, http://localhost:8096
 pnpm cloud:typecheck  # the cloud service; not covered by `pnpm typecheck` either
 pnpm dev              # Nuxt on the host, http://localhost:3000
 pnpm typecheck        # nuxt typecheck across app + server
+pnpm test:emails      # account-email snapshots + rules (node --test; UPDATE_SNAPSHOTS=1 to accept)
 pnpm build            # production build -> apps/web/.output/
 pnpm services:down / :logs / :ps
 ```
 
-Nuxt deliberately **not** in compose (HMR); no `predev` hook — bring services up yourself. No lint config, **no test framework**; `pnpm typecheck` + `pnpm bridge:typecheck` + `pnpm cloud:typecheck` only automated checks.
+Nuxt deliberately **not** in compose (HMR); no `predev` hook — bring services up yourself. No lint config, **no test framework**; `pnpm typecheck` + `pnpm bridge:typecheck` + `pnpm cloud:typecheck` + `pnpm test:emails` (Node's built-in runner over the email templates, nothing else) only automated checks.
 
 ## Environment
 
@@ -90,6 +91,9 @@ apps/web/                    Nuxt 4 app. srcDir = app/. Own Dockerfile (context 
                              telegram-instances, imap-client, imap-sync, imap-db, unpaired-reaper, lid-guard,
                              mail-format, whatsapp-groups, mfa, totp, webauthn, entitlements,
                              hosted-events, cloud, …
+  server/emails/             account-email templates (layout.ts + account.ts). Not auto-imported;
+                             no Nuxt imports, so test/emails.test.mjs loads them into plain Node
+  public/email/              automata-email-logo.png, the emails' header image
   shared/connection.ts       InstanceKind, assertNever — imported as #shared
 apps/telegram-bridge/        Telegram MTProto service (teleproto). Own Dockerfile,
                              `telegram` schema of the shared Postgres. See "Telegram bridge".
@@ -175,6 +179,7 @@ Rules easy to undo:
 - **Link built from `NUXT_PUBLIC_APP_URL` only**, never request origin — `Host` is requester's choice, link pointing there hands them token. Unset → mail carries code only. (`inviteUrl` does fall back to request origin; harmless there since link shown to admin who made it.)
 - **Link spent only by POST** (`/api/auth/verify/link`, Confirm button on `/verify-email`), never on GET/page load — mail scanners open links.
 - **Link proves address, signs in only browser holding that row's `automata_verify` cookie** (`pending_hash` returned by spend, compared in `complete()`). Any other browser: account created, answer `signedIn: false`, page sends to `/login`; its own unrelated verify cookie left alone. Else stranger signs up with own mailbox, forwards link, victim pressing Confirm is signed into stranger's org — every connection they set up lands there. Confirm screen names address first via `link-info` (POST, never spends).
+- **Invited signup and email change finish only where started** (`mustFinishWhereStarted`): link without row's cookie (change: or session as `user_id`) = 403 `verification_other_browser`, thrown inside spend tx so row survives, kept out of permanent-refusal DELETE. Else leaked invite code + invitee's click = account under leaker's password in org; change confirmed anywhere = address handed to asker. Mail and Confirm page name org + role. Self-signup stays unbound.
 - **Code bound to `automata_verify` cookie** (path `/api/auth/verify`, so `/verify-email` page fetches pending row client-side only — SSR request never carries it). Five wrong codes delete row; resend rotates code + link but resets **neither** attempts nor expiry.
 - **Signup answer identical whether address registered.** Registered address gets "you already have an account" mail instead of code — no enumeration through signup form.
 - **Wrong codes also capped per address, across all rows and clients** (`assertVerifyCodeAllowed` in `login-throttle.ts`, 10 per 15 min). Per-row five resets with every new signup for the address, so per-row alone = unbounded guessing. Locks **code only** — never put it on link path, link is owner's way out — and checked before any write so locked address can't burn owner's row. Never replace with per-address mail cap: that withholds mail itself.
@@ -459,6 +464,17 @@ Telegram webhook (`api/webhook/telegram.post.ts`) resolves row by `instance_id` 
 Sweep in-process, so **multiple replicas mail multiple times**. `nitro.scheduledTasks` needs `nitro.experimental.tasks`; both in `nuxt.config.ts`.
 
 `sendAppEmail()` never throws, answers whether mail went out; with `NUXT_SMTP_HOST` unset answers false, warns once. Callers decide what "not sent" means — alert stays queued, invitation link stays on screen.
+
+**Account emails are HTML + plain text, from `server/emails/`; alerts stay plain text.** Six templates in `account.ts` (signup verification, invited signup verification, already registered, email-change verification, email-changed notice, invitation), each a list of blocks handed to `renderEmail()` in `layout.ts`, which writes both parts from the same blocks — wording can't drift between them. Callers (`verificationMail()` in `email-verification.ts`, `sendInviteEmail()`) decide *which* mail and pass values; templates decide only how it reads. Copy = the "Account emails" boards on the Claude Design canvas. Rules easy to undo:
+
+- **Every interpolated value through `escapeHtml()`; subjects and preview through `singleLine()`.** Org and inviter names are user-typed and reach someone else's inbox. `test/emails.test.mjs` pins it with a hostile org name.
+- **Email-safe only:** 600px table, inline styles, no `<style>`/`<link>`/SVG/flex/grid. Lime (`#baf85a`) only as button label on ink — the test counts it.
+- **Company address and "Contact us" in hosted mode only** (`emailBrand()` in `mailer.ts` → `hostedMode()`). A self-hosted install's users aren't ours; there the changed-address notice says "contact an admin of your organization", as it always did.
+- **Logo + Sign in button need `NUXT_PUBLIC_APP_URL`** (absolute URL to `public/email/automata-email-logo.png`); unset → wordmark as text, no button, no links. Never build them from the request, same reason as the verification link.
+- **Expiry wording from the TTL constant** (`VERIFICATION_TTL_MS`, `INVITE_TTL_MS` via `durationWords()`), never typed into copy.
+- **Changed-address notice masks the new address** (`maskEmail`): goes to the *old* mailbox, which may no longer be the owner's.
+- **From stays `NUXT_MAIL_FROM_NAME`, never the inviter's name** — anyone who signs up can invite any address; a stranger-chosen name in From on our domain is a phishing kit.
+- Copy change = `UPDATE_SNAPSHOTS=1 pnpm test:emails`, review the `.html` snapshot diff (opens as a page).
 
 ## Unpaired WhatsApp connections are reaped
 
