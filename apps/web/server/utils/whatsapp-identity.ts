@@ -52,13 +52,15 @@ const PHONE = /^\d+@s\.whatsapp\.net$/
 const NO_LINKS: LidLinks = { pnOf: new Map(), lidOf: new Map(), unlinkedLids: 0, available: false }
 
 /**
- * Five minutes: links appear only when live traffic carries one, and a chat that
- * shows up merged a few minutes late costs nothing. Every surface — listing,
- * reading, searching, the picker — reads through this one cache, so within a
- * snapshot they all agree on who is linked.
+ * Thirty minutes. The read is a scan of the account's LID-chat rows (#130), and
+ * what it finds changes rarely: links appear only when live traffic carries one
+ * (history never does, #116), and a chat that shows up merged half an hour late
+ * costs nothing. Every surface — listing, reading, searching, the picker — reads
+ * through this one cache, so within a snapshot they all agree on who is linked.
+ * A failed read is retried after a minute, not half an hour.
  */
 const resolveLinks = staleWhileFailing<LidLinks>({
-  ttlMs: 5 * 60_000,
+  ttlMs: 30 * 60_000,
   retryTtlMs: 60_000,
   empty: NO_LINKS,
 })

@@ -8,6 +8,13 @@ import type { H3Event } from 'h3'
  * failures count. A blocked attempt is refused before the account read and the
  * hash comparison, so it costs nothing.
  *
+ * An attempt is counted when it is claimed (`claimPasswordAttempt`), in the same
+ * synchronous step as the check, and handed back (`releasePasswordAttempt`) once
+ * it turns out not to be a wrong password — a success, or an outage, which is
+ * not counted. Checking first and recording after `checkPassword` let a burst
+ * arriving together all pass the check before any of them was recorded: the
+ * cap held for serial guesses only. Same shape as `claimAuthAttempt` in mfa.ts.
+ *
  * Both keys, because each alone leaves a hole: per-address only leaves guessing
  * spread over many addresses unbounded; per-email only lets one address spray
  * every account. The per-email key has a known price — a stranger who knows an
@@ -53,38 +60,65 @@ export function clientIp(event: H3Event): string {
   return last ?? getRequestIP(event) ?? 'unknown'
 }
 
+/** The 429 every throttle here answers, with `Retry-After` for the time left. */
+function throwThrottled(event: H3Event, retryInMs: number, message: string): never {
+  setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil(retryInMs / 1000)))
+  throw createError({ statusCode: 429, statusMessage: message })
+}
+
 function keysFor(event: H3Event, email: string): string[] {
   return [`email:${normaliseEmail(email)}`, `ip:${clientIp(event)}`]
 }
 
-/** Throws 429 if either this email or this address has failed too often. */
-export function assertLoginAllowed(event: H3Event, email: string): void {
+/**
+ * Checks both keys and, when neither is at the cap, counts this attempt against
+ * both — with no `await` between the two, so concurrent attempts see each
+ * other. Throws 429 otherwise. Returns the claim's timestamp, which the caller
+ * passes to `releasePasswordAttempt` unless the password turned out wrong.
+ */
+export function claimPasswordAttempt(event: H3Event, email: string): number {
   const now = Date.now()
   prune(now)
 
+  const keys = keysFor(event, email)
   let retryAt = 0
-  for (const key of keysFor(event, email)) {
+  for (const key of keys) {
     const times = failures.get(key) ?? []
     if (times.length >= LOGIN_FAILURE_LIMIT) {
       retryAt = Math.max(retryAt, times[times.length - LOGIN_FAILURE_LIMIT]! + LOGIN_WINDOW_MS)
     }
   }
-  if (!retryAt) return
+  if (retryAt) {
+    // One message for both keys: which limit hit would say whether the address
+    // has an account behind it.
+    throwThrottled(event, retryAt - now, 'Too many failed sign-in attempts. Try again in a few minutes.')
+  }
 
-  // One message for both keys: which limit hit would say whether the address
-  // has an account behind it.
-  setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil((retryAt - now) / 1000)))
-  throw createError({
-    statusCode: 429,
-    statusMessage: 'Too many failed sign-in attempts. Try again in a few minutes.',
-  })
+  for (const key of keys) failures.set(key, [...(failures.get(key) ?? []), now])
+  return now
 }
 
-export function recordLoginFailure(event: H3Event, email: string): void {
-  const now = Date.now()
-  for (const key of keysFor(event, email)) {
-    failures.set(key, [...(failures.get(key) ?? []), now])
-  }
+/**
+ * Hands back the attempt claimed at `at`: it was not a wrong password. Removes
+ * one entry with that timestamp from each key — entries with equal timestamps
+ * are interchangeable, so which one goes does not matter. A claim already
+ * pruned or evicted is simply absent.
+ */
+export function releasePasswordAttempt(event: H3Event, email: string, at: number): void {
+  for (const key of keysFor(event, email)) dropAttempt(failures, key, at)
+}
+
+/**
+ * Remove one attempt timestamped `at` from `key` in a throttle's map — the
+ * hand-back every claim-before-check throttle shares. Entries with equal
+ * timestamps are interchangeable; one already pruned is simply absent.
+ */
+export function dropAttempt(attempts: Map<string, number[]>, key: string, at: number): void {
+  const times = attempts.get(key)
+  const index = times?.indexOf(at) ?? -1
+  if (index < 0) return
+  times!.splice(index, 1)
+  if (!times!.length) attempts.delete(key)
 }
 
 export function clearLoginFailures(email: string): void {
@@ -104,11 +138,7 @@ export function assertSignupCodeAllowed(event: H3Event): void {
   if (times.length < LOGIN_FAILURE_LIMIT) return
 
   const retryAt = times[times.length - LOGIN_FAILURE_LIMIT]! + LOGIN_WINDOW_MS
-  setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil((retryAt - now) / 1000)))
-  throw createError({
-    statusCode: 429,
-    statusMessage: 'Too many wrong signup codes. Try again in a few minutes.',
-  })
+  throwThrottled(event, retryAt - now, 'Too many wrong signup codes. Try again in a few minutes.')
 }
 
 export function recordSignupCodeFailure(event: H3Event): void {
@@ -139,14 +169,69 @@ export function assertVerifyCodeAllowed(event: H3Event, email: string): void {
   if (times.length < LOGIN_FAILURE_LIMIT) return
 
   const retryAt = times[times.length - LOGIN_FAILURE_LIMIT]! + LOGIN_WINDOW_MS
-  setResponseHeader(event, 'Retry-After', Math.max(1, Math.ceil((retryAt - now) / 1000)))
-  throw createError({
-    statusCode: 429,
-    statusMessage: 'Too many wrong codes for this address. Use the link in the email, or try again in a few minutes.',
-  })
+  throwThrottled(event, retryAt - now, 'Too many wrong codes for this address. Use the link in the email, or try again in a few minutes.')
 }
 
 export function recordVerifyCodeFailure(email: string): void {
   const key = verifyCodeKey(email)
   failures.set(key, [...(failures.get(key) ?? []), Date.now()])
+}
+
+/**
+ * Wrong password-reset codes, capped per address and per client, across every
+ * reset row. A right code is an account, so this is tighter than the signup
+ * code: ten per fifteen minutes on each key, as everywhere here, and also
+ * thirty per day per address. Each row allows five guesses, but asking again
+ * mints a new row with five more, and only the mail throttle limits that — so
+ * the per-row cap alone bounds nothing. At thirty guesses a day a six-digit code
+ * holds for decades rather than months.
+ *
+ * Keyed on the address whether or not it has an account, and counted for codes
+ * that matched no row, so the answer never says which addresses are real. The
+ * price is the per-email login key's: a stranger can keep code entry for an
+ * address locked. Only the code — the mailed link is not throttled here, so the
+ * owner still resets with it. Checked before any row is touched.
+ */
+const RESET_DAY_MS = 24 * 60 * 60_000
+const RESET_DAILY_LIMIT = 30
+const resetDaily = new Map<string, number[]>()
+
+function resetCodeKeys(event: H3Event, email: string): string[] {
+  return [`reset-code:${normaliseEmail(email)}`, `reset-code-ip:${clientIp(event)}`]
+}
+
+export function assertResetCodeAllowed(event: H3Event, email: string): void {
+  const now = Date.now()
+  prune(now)
+  for (const [key, times] of resetDaily) {
+    const recent = times.filter(at => now - at < RESET_DAY_MS)
+    if (recent.length) resetDaily.set(key, recent)
+    else resetDaily.delete(key)
+  }
+  for (const key of resetDaily.keys()) {
+    if (resetDaily.size <= MAX_TRACKED_KEYS) break
+    resetDaily.delete(key)
+  }
+
+  let retryAt = 0
+  for (const key of resetCodeKeys(event, email)) {
+    const times = failures.get(key) ?? []
+    if (times.length >= LOGIN_FAILURE_LIMIT) {
+      retryAt = Math.max(retryAt, times[times.length - LOGIN_FAILURE_LIMIT]! + LOGIN_WINDOW_MS)
+    }
+  }
+  const daily = resetDaily.get(normaliseEmail(email)) ?? []
+  if (daily.length >= RESET_DAILY_LIMIT) {
+    retryAt = Math.max(retryAt, daily[daily.length - RESET_DAILY_LIMIT]! + RESET_DAY_MS)
+  }
+  if (retryAt) {
+    throwThrottled(event, retryAt - now, 'Too many wrong codes. Use the link in the email, or try again later.')
+  }
+}
+
+export function recordResetCodeFailure(event: H3Event, email: string): void {
+  const now = Date.now()
+  for (const key of resetCodeKeys(event, email)) failures.set(key, [...(failures.get(key) ?? []), now])
+  const address = normaliseEmail(email)
+  resetDaily.set(address, [...(resetDaily.get(address) ?? []), now])
 }

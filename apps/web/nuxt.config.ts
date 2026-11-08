@@ -5,7 +5,10 @@ import { WHATSAPP_INSTRUCTIONS } from './server/utils/mcp-instructions'
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
   devtools: { enabled: true },
-  css: ['~/assets/css/tailwind.css'],
+  // vue-sonner 2 no longer injects its own stylesheet. Without it every toast
+  // renders as unstyled text after the page content — below the fold, so
+  // error toasts were created and never seen.
+  css: ['vue-sonner/style.css', '~/assets/css/tailwind.css'],
 
   app: {
     head: {

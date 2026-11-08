@@ -699,4 +699,66 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN connect_hold_until timestamptz;
     `,
   },
+  {
+    name: '0018_totp_setup_bound',
+    sql: /* sql */ `
+      -- An unconfirmed authenticator secret is the password check at
+      -- totp/setup carried forward to totp/confirm, which asks only for a
+      -- session. So it is bound and bounded like a sign-in challenge: only
+      -- the session that ran setup may confirm it (setup_session; a session
+      -- ending clears it, and NULL never matches), within a short window
+      -- from created, and attempts counts wrong codes, claimed before each
+      -- is checked; the fifth deletes the secret. Rows left from before this
+      -- carry no session and could never be confirmed, so they go now.
+      ALTER TABLE app.totp_credentials
+        ADD COLUMN attempts integer NOT NULL DEFAULT 0,
+        ADD COLUMN setup_session text REFERENCES app.sessions (id) ON DELETE SET NULL;
+      DELETE FROM app.totp_credentials WHERE confirmed_at IS NULL;
+    `,
+  },
+  {
+    name: '0019_whatsapp_group_scan_failures',
+    sql: /* sql */ `
+      -- Consecutive failed group scans since the last success. The back-off
+      -- after a failure doubles with each one (1 h, 2 h, 4 h ... capped at a
+      -- day), so an account whose scan never finishes stops costing
+      -- WhatsApp a full scan every hour. A success resets it. Rows whose last event was a failure start
+      -- at one, so they keep today's one-hour wait.
+      ALTER TABLE app.whatsapp_group_scans
+        ADD COLUMN failures integer NOT NULL DEFAULT 0 CHECK (failures >= 0);
+      UPDATE app.whatsapp_group_scans
+        SET failures = 1
+        WHERE failed_at IS NOT NULL AND (scanned_at IS NULL OR failed_at > scanned_at);
+    `,
+  },
+  {
+    name: '0020_password_resets',
+    sql: /* sql */ `
+      -- A password reset waiting to be used: mailed to the account's address,
+      -- either because someone asked on the "Forgot password?" page
+      -- (requested_by 'self') or because an admin of the account's
+      -- organization pressed the button on the Team page ('admin'). One per
+      -- account: asking again replaces it.
+      --
+      -- link_hash is the SHA-256 of the token in the mailed link; code_hash of
+      -- the row id and the six-digit code. attempts counts wrong codes,
+      -- claimed before each is checked; the fifth deletes the row. email is
+      -- the address the mail went to: the reset is spent only while the
+      -- account still signs in with it, so a mail sitting in an address the
+      -- account has since moved away from is dead. Written only by
+      -- server/utils/password-reset.ts.
+      CREATE TABLE app.password_resets (
+        id           text PRIMARY KEY,
+        user_id      text NOT NULL UNIQUE REFERENCES app.users (id) ON DELETE CASCADE,
+        email        text NOT NULL,
+        link_hash    text NOT NULL UNIQUE CHECK (length(link_hash) = 64),
+        code_hash    text NOT NULL CHECK (length(code_hash) = 64),
+        attempts     integer NOT NULL DEFAULT 0,
+        requested_by text NOT NULL CHECK (requested_by IN ('self', 'admin')),
+        expires_at   timestamptz NOT NULL,
+        created      timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX password_resets_expires_idx ON app.password_resets (expires_at);
+    `,
+  },
 ]

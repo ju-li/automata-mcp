@@ -203,10 +203,14 @@ export async function provisionWhatsappInstance(
 ): Promise<AppInstance> {
   const { label, server } = input
 
-  // Guarded before the first request rather than only inside the client, so a
+  // Refused on the hosted service before the address is even resolved; then
+  // guarded before the first request rather than only inside the client, so a
   // bad URL fails the create with a message about the URL instead of surfacing
   // as a failed Evolution call.
-  if (server) await assertPublicUrl(server.baseUrl, 'Evolution server URL')
+  if (server) {
+    assertOwnServersAllowed('Evolution server', actor.org.id)
+    await assertPublicUrl(server.baseUrl, 'Evolution server URL')
+  }
 
   // Proved before anything is provisioned, so a bad database URL costs nothing
   // — no Evolution instance to tear down, no row to clean up. `requireTable`
@@ -220,8 +224,8 @@ export async function provisionWhatsappInstance(
     throw createError({
       statusCode: 422,
       statusMessage: 'No Evolution server is available. Set NUXT_EVOLUTION_URL and '
-        + 'NUXT_EVOLUTION_ADMIN_KEY to provide a default, or supply your own server '
-        + 'URL and admin key.',
+        + 'NUXT_EVOLUTION_ADMIN_KEY to provide a default'
+        + (ownServersAllowed() ? ', or supply your own server URL and admin key.' : '.'),
     })
   }
 
@@ -482,7 +486,7 @@ export async function updatePostgresDsn(instance: AppInstance, dsn: string): Pro
   const updated = await updateRow<AppInstance>('instances', instance.id, fields)
 
   // Drop the pool so the change takes effect now rather than at the next
-  // fingerprint check. Belt and braces — `pgFor` would notice on its own.
+  // fingerprint check. Belt and braces — `withPg` would notice on its own.
   await closeSqlPool(instance)
 
   return updated
