@@ -89,7 +89,7 @@ comes back.
 | `list-emails` | Email | read | Headers newest first from one folder or all in scope, 1–100 per page (default 25); filters for date, unread, flagged, attachments |
 | `search-emails` | Email | read | `from`, `to`, `subject` against synced headers and `text` through the mail server's own search; filters for date, unread, attachments; 1–100 per page (default 25) |
 | `read-email` | Email | read | One email's headers, body as plain text (fetched live, never stored) and attachment list; `maxChars` 500–100 000 (default 20 000), continued with `offset` |
-| `get-email-attachment` | Email | read | One attachment, fetched live: images as images, text as text (clipped at 100 000 chars, reported as `truncatedAtChars`), other files embedded; 10 MB cap by default |
+| `get-email-attachment` | Email | read | One attachment, fetched live: images as images, text as text, other files embedded — always the whole file; 10 MB cap by default |
 | `create-email-draft` | Email | **write** | Saves an unsent plain-text draft in the Drafts folder, optionally threaded as a reply; never sends |
 | `get-database-info` | Postgres | read | Server version, database, connecting role, and what this token is scoped to |
 | `list-tables` | Postgres | read | Tables in scope, filterable by schema and name, paged (1–500, default 100) |
