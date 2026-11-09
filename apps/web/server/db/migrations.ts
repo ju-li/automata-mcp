@@ -789,4 +789,28 @@ export const APP_MIGRATIONS: AppMigration[] = [
       -- failed_at and failures = runs that got none, in a row.
     `,
   },
+  {
+    name: '0022_recent_history_only',
+    sql: /* sql */ `
+      -- Whether this organization may ask WhatsApp for an account's full
+      -- history at pairing (Baileys' requireFullSync) for connections on the
+      -- deployment's own Evolution server. A capability, not a plan: the cloud
+      -- service sets it for Free, since a full import is most of the disk an
+      -- account costs. false is no restriction — every self-hosted
+      -- organization. Full history is opt-in for everyone ("Import full
+      -- history" on the create form); this only locks that choice.
+      --
+      -- Read at create, by the dashboard's "Import full history" and before
+      -- every pairing (whatsappHistoryLimited in instances.ts). It deletes
+      -- nothing: history already imported stays.
+      --
+      -- IF NOT EXISTS: this shipped to preview databases as 0012 before main
+      -- took that number, and those must not fail on the renamed copy.
+      ALTER TABLE app.organizations
+        ADD COLUMN IF NOT EXISTS recent_history_only boolean NOT NULL DEFAULT false;
+
+      ALTER TABLE app.entitlement_defaults
+        ADD COLUMN IF NOT EXISTS recent_history_only boolean NOT NULL DEFAULT false;
+    `,
+  },
 ]

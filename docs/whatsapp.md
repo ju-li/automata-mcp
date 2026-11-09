@@ -339,11 +339,13 @@ scanned:
 | | Where | Effect if wrong |
 |---|---|---|
 | `DATABASE_SAVE_DATA_HISTORIC=true` | evolution service env | Evolution receives the burst and drops it |
-| `syncFullHistory: true` | sent at `POST /instance/create`, in `server/utils/instances.ts` | Only recent messages arrive, and groups are skipped |
+| `syncFullHistory: true` | sent at `POST /instance/create` when **Import full history** is ticked on the create form, in `server/utils/instances.ts` | Only the recent slice arrives (`type: 3` below) |
 | A fresh device link | scanning the QR | Reconnecting an existing session sends no history |
 
-New accounts get all three automatically. An account paired before this was
-turned on cannot be backfilled in place — **Import full history** on the
+The first and third are automatic. The second is the owner's choice: **Import
+full history** on the create form is **off by default for everyone**, Pro and
+self-hosted included, so a new account imports the recent slice unless asked
+for more. An account paired without it cannot be backfilled in place — **Import full history** on the
 connection's dashboard sets the flag, signs the device out and puts the QR back
 up; the import rides in on the re-scan. Nothing already stored is lost. The
 re-import can write a second copy of a message Evolution already holds (see
@@ -375,6 +377,50 @@ Caveats worth knowing before you rely on it:
   group chats appear in `list-chats` and in the token scope picker.
 - **Reads get slower as it grows.** Evolution indexes its `Message` table on
   `instanceId` only; `remoteJid` lives inside a JSONB column with no index.
+
+### Recent history only
+
+With **Import full history** unticked — the default — a connection is created
+with `syncFullHistory: false`. On the hosted offering a Free organization cannot
+tick it (`app.organizations.recent_history_only`, written by the cloud service;
+see [Plans and billing](billing.md)). Baileys then sends
+`requireFullSync: false`, and WhatsApp hands over only what it gives any linked
+browser — the `type: 3` sync above. Evolution still stores it, since it
+persists every history sync type under `DATABASE_SAVE_DATA_HISTORIC`. How far
+back that reaches is WhatsApp's choice, not a setting here.
+
+Group chats still sync live and in that slice: with `syncFullHistory` off,
+Evolution's group filter falls back to `groupsIgnore`, which instances are
+created with off.
+
+The Free limit is enforced in three places, all in
+`server/utils/instances.ts`:
+
+- **Create**: the box is locked on the form (`/api/auth/me` carries
+  `recentHistoryOnly`), and `provisionWhatsappInstance` answers 402
+  `plan_limit` to `fullHistory: true` before anything is provisioned.
+- **Import full history** answers 402 `plan_limit`; the dashboard hides it and
+  points admins at Billing instead.
+- **Pairing**: before the QR poll's `connect`, a connection still carrying
+  `syncFullHistory: true` (created while the organization was on Pro) has it
+  turned off, at most once a minute per connection. Never the other way:
+  upgrading turns nothing on, since full history costs a QR scan and that is the
+  owner's call.
+
+It never applies to a bring-your-own Evolution server, and it deletes nothing
+already imported. Self-hosted deployments never set it.
+
+Older messages are not fetched later either: reads and searches only query
+Evolution's database, and nothing can ask WhatsApp for history after pairing.
+So the MCP tools say when the history is partial. `read-messages`,
+`search-messages` and `get-connection-status` carry `recentHistoryOnly: true`
+when the connection's Evolution settings have `syncFullHistory` off — the
+setting its pairing actually used, not the current plan, so an organization that
+upgraded but has not re-imported still reads as partial. `read-messages` adds a
+`note` once it reaches the oldest stored message, and `search-messages` adds one
+on every response. Self-hosted accounts paired before full-history sync existed
+report it too, accurately. Read through `recentHistoryOnly()` in
+`server/utils/instances.ts`, cached five minutes per connection.
 
 ## Bring your own Evolution server
 
