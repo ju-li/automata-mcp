@@ -813,4 +813,16 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN IF NOT EXISTS recent_history_only boolean NOT NULL DEFAULT false;
     `,
   },
+  {
+    name: '0023_whatsapp_group_gone',
+    sql: /* sql */ `
+      -- When WhatsApp last told a lookup that the account is not in this group
+      -- (forbidden / item-not-found / not-authorized: left, removed, or the
+      -- group deleted). Such a group is not looked up again for 30 days, and
+      -- the refusal does not count toward the account's lookup back-off
+      -- (#178). Cleared by the next lookup that answers. NULL for every
+      -- existing row: none has been seen gone yet.
+      ALTER TABLE app.whatsapp_groups ADD COLUMN gone_at timestamptz;
+    `,
+  },
 ]
