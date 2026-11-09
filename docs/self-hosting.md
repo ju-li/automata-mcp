@@ -320,7 +320,7 @@ has.
 | `invitations` | SHA-256 of the invitation code, address, role, expiry |
 | `mcp_tokens` | SHA-256 of the connector token, holder, scope, expiry, `last_used_at` |
 | `mcp_token_clients`, `mcp_tool_calls` | which MCP clients used each token, and the Telemetry tool-call history (kept 30 days) |
-| `whatsapp_groups`, `whatsapp_group_scans` | last-known WhatsApp group names and sizes, and when each account's groups were last fetched (at most every six hours) — see [WhatsApp](whatsapp.md) |
+| `whatsapp_groups`, `whatsapp_group_scans` | WhatsApp group names and sizes from slow, one-group-at-a-time lookups, and when each account last ran them — see [WhatsApp](whatsapp.md) |
 | `totp_credentials`, `webauthn_credentials`, `recovery_codes`, `mfa_challenges` | second sign-in factors — see [Two-factor authentication](two-factor.md) |
 | `email_verifications` | signups and address changes waiting to be confirmed — see [Email verification](#email-verification) |
 | `mail_sync_state`, `mail_folders`, `mail_messages` | synced IMAP headers, never bodies — see [Email (IMAP) connections](imap.md) |
