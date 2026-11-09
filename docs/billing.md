@@ -25,17 +25,18 @@ Self-hosted deployments never run the cloud service.
 | Connector tokens | 1 | unlimited |
 | Users | 1 | 5 included, $10/user/month after |
 | Requests | unlimited | unlimited |
-| WhatsApp history at pairing | recent only | full |
+| WhatsApp history at pairing | recent only | recent, or full if chosen |
 
-**WhatsApp history.** A full history import is most of the disk an account
-costs, so a Free organization's WhatsApp connections ask WhatsApp for the
-recent history only: what it hands any linked browser, rather than everything
-the phone holds. Live messages from then on are all kept. It applies only to
-connections on the deployment's own Evolution server, never to a bring-your-own
-one, and it deletes nothing: history already imported stays when an
-organization moves to Free, and moving to Pro imports nothing by itself. An
-admin who upgrades presses **Import full history** on the connection, which
-costs a QR scan. See [WhatsApp history](whatsapp.md#recent-history-only-hosted-free).
+**WhatsApp history.** Every new WhatsApp connection imports the recent history
+by default: what WhatsApp hands any linked browser, rather than everything the
+phone holds. Live messages from then on are all kept. **Import full history**
+on the create form asks for everything instead. A full import is most of the
+disk an account costs, so on Free that box is locked with an Upgrade link, and
+the server refuses it (402 `plan_limit`). The lock applies only to connections on
+the deployment's own Evolution server, never to a bring-your-own one, and it
+deletes nothing: history already imported stays when an organization moves to
+Free, and moving to Pro imports nothing by itself. An admin who upgrades presses
+**Import full history** on the connection's dashboard, which costs a QR scan. See [WhatsApp history](whatsapp.md#recent-history-only-hosted-free).
 
 The numbers are set in three places:
 

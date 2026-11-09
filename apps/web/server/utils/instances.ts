@@ -175,6 +175,13 @@ export interface WhatsappProvisionInput {
    * to Evolution's database and this app would not know which one.
    */
   server?: { baseUrl: string, adminKey: string, dbUrl?: string }
+  /**
+   * Ask WhatsApp for the account's full history at pairing, rather than the
+   * recent slice it hands any linked device. The owner's choice on the create
+   * form, off by default — a full import is most of the disk an account costs.
+   * Refused (402) on our server for an organization limited to recent history.
+   */
+  fullHistory?: boolean
 }
 
 export async function provisionWhatsappInstance(
@@ -182,6 +189,14 @@ export async function provisionWhatsappInstance(
   input: WhatsappProvisionInput = {},
 ): Promise<AppInstance> {
   const { label, server } = input
+  const fullHistory = input.fullHistory === true
+
+  // First, before any setup check or remote call: a plan refusal is the answer
+  // whatever else is wrong. A user's own server is their disk, so the plan's
+  // history limit never applies there.
+  if (fullHistory && !server && await orgRecentHistoryOnly(await appDb(), actor.org.id)) {
+    throw fullHistoryLimitError()
+  }
 
   // Guarded before the first request rather than only inside the client, so a
   // bad URL fails the create with a message about the URL instead of surfacing
@@ -208,9 +223,6 @@ export async function provisionWhatsappInstance(
   const admin = createEvolutionClient(creds)
   const name = generateInstanceName()
 
-  // Read before anything is provisioned, like the checks above. A user's own
-  // server is their disk, so the plan's history limit never applies there.
-  const fullHistory = server ? true : !await orgRecentHistoryOnly(await appDb(), actor.org.id)
 
   const created = await admin<{ instance?: { instanceId?: string }, hash?: string | { apikey?: string } }>(
     '/instance/create',
@@ -228,10 +240,11 @@ export async function provisionWhatsappInstance(
         // `shouldIgnoreJid` stops filtering `@g.us` when this is on, so group
         // chats sync too, regardless of `groupsIgnore`.
         //
-        // Off for an organization limited to recent history: Baileys then sends
-        // `requireFullSync: false`, and WhatsApp hands over only the recent
-        // slice it gives any linked browser — still imported, since Evolution
-        // persists every history sync type under SAVE_DATA.HISTORIC.
+        // Off unless the owner ticked "Import full history" when creating it:
+        // Baileys then sends `requireFullSync: false`, and WhatsApp hands over
+        // only the recent slice it gives any linked browser — still imported,
+        // since Evolution persists every history sync type under
+        // SAVE_DATA.HISTORIC.
         syncFullHistory: fullHistory,
       },
     },
@@ -1087,8 +1100,10 @@ export async function deleteInstance(instance: AppInstance): Promise<void> {
  * server. A bring-your-own server stores history on the user's disk, which is
  * what the limit is about, so it never applies there.
  *
- * The one place the rule lives — provisioning, the full-history import and
- * pairing all ask here.
+ * The one place the rule lives for an existing connection — the full-history
+ * import and pairing ask here. Creating one asks the same question before the
+ * row exists, in `provisionWhatsappInstance`: no `server` there is exactly
+ * `onDeploymentServer` here.
  */
 export async function whatsappHistoryLimited(instance: AppInstance): Promise<boolean> {
   if (!onDeploymentServer(instance)) return false
