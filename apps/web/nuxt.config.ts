@@ -5,7 +5,10 @@ import { WHATSAPP_INSTRUCTIONS } from './server/utils/mcp-instructions'
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
   devtools: { enabled: true },
-  css: ['~/assets/css/tailwind.css'],
+  // vue-sonner 2 no longer injects its own stylesheet. Without it every toast
+  // renders as unstyled text after the page content — below the fold, so
+  // error toasts were created and never seen.
+  css: ['vue-sonner/style.css', '~/assets/css/tailwind.css'],
 
   app: {
     head: {
@@ -55,6 +58,11 @@ export default defineNuxtConfig({
       '0 * * * *': ['alerts:register-webhooks'],
       // Mailbox headers. Safe on several replicas: each mailbox is leased.
       '*/2 * * * *': ['imap:sync'],
+      // Recorded tool calls past their 30 days. Idempotent, so replicas are fine.
+      '23 4 * * *': ['mcp:prune-tool-calls'],
+      // WhatsApp connections never paired within an hour. Leased per row, so
+      // replicas are fine. See server/utils/unpaired-reaper.ts.
+      '*/10 * * * *': ['instances:reap-unpaired'],
     },
   },
 
@@ -87,6 +95,11 @@ export default defineNuxtConfig({
     smtpTls: 'false',
     mailFrom: '',
     mailFromName: 'Automata MCP',
+    // Where a WhatsApp reconnect loop on the deployment's own Evolution server
+    // is reported, since only whoever runs that service can end it. Optional:
+    // empty sends no operator mail. On the hosted offering, setting it is what
+    // lets the customer-facing wording say the fix is on us. See alerts.ts.
+    opsAlertEmail: '',
 
     // The *default* Evolution server, used by any WhatsApp connection that did
     // not bring its own. Optional: with these unset the app still runs, and the

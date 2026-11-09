@@ -2,6 +2,8 @@ import type { H3Event } from 'h3'
 import type { AppInstance } from './app-db'
 import type { McpAuth } from './mcp-auth'
 import type { InstanceKind } from '#shared/connection'
+import type { LidLinks } from './whatsapp-identity'
+import { canonicalJid, lidLinks, linkedJidOf, phoneNumberOf } from './whatsapp-identity'
 
 /**
  * Connector token scope: which chats a token may touch, and which tools it may
@@ -211,21 +213,110 @@ export function assertChatAllowed(scope: McpScope, jid: string): void {
   })
 }
 
+/** The listing fields `filterChatsToScope` reads and may rewrite. */
+interface ScopeableChat {
+  jid: string
+  /** Every stored JID this row covers, when more than one (a linked person). */
+  jids?: string[]
+  number?: string
+  phoneNumber?: string
+  /** Derived from the newest message across every folded JID — dropped on a cut. */
+  lastMessageAt?: string
+  lastMessagePreview?: string
+}
+
 /**
  * Filter a chat listing down to scope.
  *
  * Silent, unlike the assertions above — filtering is the honest answer to "what
  * can I see". Refusing the whole listing because one row is out of scope would
  * make a scoped token useless for browsing.
+ *
+ * **A linked person's row is cut, never widened.** Scope is literal JIDs, so a
+ * row folding a LID and a phone-number JID together (`whatsapp-identity.ts`) is
+ * visible when either is in scope, and then shows only the halves that are:
+ * `jid` falls back to the allowed one, and `linkedOutOfScope` counts the rest —
+ * a count, never the JID, as `referencedByOutOfScope` does for tables. A token
+ * holding only the phone-number half keeps that chat's own `number`; one holding
+ * only the LID keeps `phoneNumber`, whose evidence lives on the LID chat's rows.
+ *
+ * **A cut row carries no message content.** `lastMessagePreview` and
+ * `lastMessageAt` are computed in SQL over every folded JID, before scope is
+ * known, so on a cut row they may describe the newest message of the half the
+ * token cannot read — its full text, caption or filename. Both are dropped
+ * rather than recomputed: the listing query has only the merged last row, and a
+ * missing preview is honest where a wrong-half one is a leak. `read-messages`
+ * on the kept `jid` is the way to see the in-scope half's messages.
  */
-export function filterChatsToScope<T extends { jid: string }>(scope: McpScope, chats: T[]): T[] {
+export function filterChatsToScope<T extends ScopeableChat>(
+  scope: McpScope,
+  chats: T[],
+): Array<T & { linkedOutOfScope?: number }> {
   if (scope.allChats) return chats
   const allowed = new Set(scope.chatJids)
-  return chats.filter(chat => allowed.has(chat.jid))
+
+  return chats.flatMap((chat) => {
+    const members = chat.jids ?? [chat.jid]
+    const reachable = members.filter(jid => allowed.has(jid))
+    if (!reachable.length) return []
+    if (reachable.length === members.length) return [chat]
+
+    const jid = reachable.includes(chat.jid) ? chat.jid : reachable[0]!
+    // Possibly the dropped half's newest message: never carried across a cut.
+    const { lastMessageAt: _at, lastMessagePreview: _preview, ...rest } = chat
+    return [{
+      ...rest as T,
+      jid,
+      jids: reachable.length > 1 ? reachable : undefined,
+      number: phoneNumberOf(jid),
+      phoneNumber: jid.endsWith('@lid') ? chat.phoneNumber : undefined,
+      linkedOutOfScope: members.length - reachable.length,
+    }]
+  })
+}
+
+/** One conversation to read, as far as this token may read it. */
+export interface ChatExpansion {
+  /** JIDs to read, all in scope, the requested one included. Never empty. */
+  jids: [string, ...string[]]
+  /** Linked JIDs of the same person this token is not scoped to. */
+  outOfScope: number
 }
 
 /**
- * Turn a phone number into the JID Evolution would use for it.
+ * The JIDs a read of `jid` should cover: the chat itself, plus the same
+ * person's other JID when they are linked (`whatsapp-identity.ts`) **and** the
+ * token is scoped to it.
+ *
+ * Asserts the requested chat first, unchanged, so nothing here can let a token
+ * reach a chat by naming its partner. The partner is then only *added* when it
+ * passes the same literal check — a link says two ids are one person, never
+ * that a token may read both. Cut halves are counted for the caller to report.
+ */
+export function expandChat(scope: McpScope, links: LidLinks, jid: string): ChatExpansion {
+  assertChatAllowed(scope, jid)
+
+  const other = linkedJidOf(links, jid)
+  if (!other) return { jids: [jid], outOfScope: 0 }
+  if (!isChatAllowed(scope, other)) return { jids: [jid], outOfScope: 1 }
+
+  const lid = jid.endsWith('@lid') ? jid : other
+  return { jids: [lid, lid === jid ? other : jid], outOfScope: 0 }
+}
+
+/**
+ * The id to label a hit or a row with: the person's canonical id (the LID) when
+ * this token may see it, else the stored JID itself. Never names a JID outside
+ * scope.
+ */
+export function displayJidInScope(scope: McpScope, links: LidLinks, jid: string): string {
+  const canonical = canonicalJid(links, jid)
+  return canonical === jid || isChatAllowed(scope, canonical) ? canonical : jid
+}
+
+/**
+ * Turn a phone number (or a JID, passed through by Evolution) into the JID
+ * Evolution would use for it.
  *
  * **Never normalise JIDs locally.** Evolution's `createJid` carries
  * country-specific rules — Brazil's ninth digit, Mexico and Argentina prefixes —
@@ -259,11 +350,29 @@ export async function resolveNumberToJid(
 }
 
 /**
- * Scope check for a send, which addresses a chat by phone number rather than JID.
+ * Scope check for a send, which addresses a chat by phone number or by JID.
  *
  * Resolves through Evolution and compares exact JIDs. **Fails closed** — if the
  * lookup throws (instance offline, Evolution unreachable) the send is refused,
  * because an unverifiable recipient is exactly the case scope exists to stop.
+ *
+ * A JID goes through the same lookup rather than being compared as typed, so
+ * there is one path and Evolution's `createJid()` stays the only normaliser.
+ * For a LID (`…@lid`), 2.3.7's `whatsappNumber()` answers with the LID itself
+ * (Baileys is not asked) — *unless* the server keeps its optional on-WhatsApp
+ * cache (`DATABASE_SAVE_IS_ON_WHATSAPP`, off in our compose files) and that
+ * cache has linked the LID to a phone number, in which case it answers the
+ * phone-number JID. A token scoped to the LID chat is then refused a send to
+ * it, while one scoped to the phone-number chat may send to the LID, which that
+ * cache says is the same person (#119).
+ *
+ * **That refusal stays.** The send would go to the phone-number JID, and a
+ * token reaches only JIDs an admin ticked; widening here because the two are
+ * one person would be the implicit scope this module never grants. What
+ * changes is the wording: the generic "not scoped to <jid>" named the very
+ * chat the token *is* scoped to, which reads as a bug. When the requested JID
+ * is in scope and Evolution rewrote it, the refusal says so and says the fix —
+ * the picker shows a linked person as one row, and ticking it includes both.
  */
 export async function assertNumberAllowed(
   instance: AppInstance,
@@ -284,6 +393,23 @@ export async function assertNumberAllowed(
       statusCode: 503,
       message: 'Could not verify the recipient against this token\'s allowed chats, so the message was not sent. The WhatsApp account may be disconnected.',
       cause: error,
+    })
+  }
+
+  if (!isChatAllowed(scope, resolved.jid) && resolved.jid !== number && isChatAllowed(scope, number)) {
+    const links = await lidLinks(instance)
+    const linked = linkedJidOf(links, number) === resolved.jid
+    console.warn(`[scope] send on connection ${instance.id} refused: Evolution resolved an in-scope chat to an id outside scope`)
+    throw createError({
+      statusCode: 403,
+      // The other id is not named: it is outside this token's scope, and for a
+      // LID-scoped token it would be the phone number it was never granted.
+      message: `Nothing was sent. This connector token is scoped to ${number}, but the WhatsApp server `
+        + `resolves that chat to the same person's other id (their ${resolved.jid.endsWith('@lid') ? 'privacy alias' : 'phone number'}), `
+        + 'which this token is not scoped to. Ask the account owner to include both of this person\'s chats '
+        + (linked
+          ? '(they appear as one row in the token\'s chat list; ticking it includes both).'
+          : 'in the token\'s allowed chats.'),
     })
   }
 

@@ -67,14 +67,14 @@ const secondary = computed(() => {
               <ScrollOnHover :text="secondary" />
             </CardDescription>
           </div>
-          <ConnectionBadge :state="instance.state" :kind="instance.kind" :lost="instance.sessionLost" />
+          <ConnectionBadge :state="instance.state" :kind="instance.kind" :lost="instance.sessionLost" :flapping="instance.flapping" />
         </div>
       </CardHeader>
       <CardContent>
         <p v-if="layout === 'target'" class="truncate text-sm text-muted-foreground">
           {{ instance.detail || (instance.kind === 'imap' ? 'IMAP mailbox' : 'PostgreSQL') }}
         </p>
-        <p v-else class="text-sm text-muted-foreground tabular-nums">
+        <p v-else-if="instance.stats" class="text-sm text-muted-foreground tabular-nums">
           {{ instance.stats?.messages ?? 0 }} messages · {{ instance.stats?.chats ?? 0 }} chats
         </p>
       </CardContent>

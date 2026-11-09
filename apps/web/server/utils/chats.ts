@@ -4,7 +4,10 @@ import type { MentionDirectory } from './mentions'
 import { applyMentions, authorName, contactsToDirectory, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
 import type { ChatActivityRow } from './evolution-db'
 import { canReadMessages, lastMessagePayloads, listChatActivity, listMessagesPage, senderOf } from './evolution-db'
-import { GROUP_SCAN_FAILURE_BACKOFF_MS, GROUP_SCAN_TIMEOUT_MS, claimGroupScan, readStoredGroups, recordGroupScanFailure, replaceStoredGroups } from './whatsapp-groups'
+import type { LidLinks } from './whatsapp-identity'
+import { canonicalJid, lidLinks, linkedJidOf, phoneNumberBehind, phoneNumberOf } from './whatsapp-identity'
+import type { GroupInfo } from './whatsapp-groups'
+import { groupNamesFor } from './whatsapp-groups'
 
 /**
  * Reading conversations out of Evolution.
@@ -14,12 +17,42 @@ import { GROUP_SCAN_FAILURE_BACKOFF_MS, GROUP_SCAN_TIMEOUT_MS, claimGroupScan, r
  */
 
 export interface ChatSummary {
+  /**
+   * The conversation's id, to read or reply by. For a person stored under both
+   * a LID and a phone-number JID (`whatsapp-identity.ts`), the LID.
+   */
   jid: string
+  /**
+   * Every JID this row covers, present only when that is more than one: a
+   * person WhatsApp stored under a LID and a phone number, folded into one row.
+   * `read-messages` on `jid` reads all of them.
+   */
+  jids?: string[]
   name: string
   isGroup: boolean
-  /** Bare phone number of a 1:1 chat. Groups do not have one. */
+  /**
+   * Bare phone number of a 1:1 chat addressed by phone number. Groups and LID
+   * chats (`…@lid`) do not have one — a LID's digits are not a phone number.
+   */
   number?: string
-  /** Members in a group, and only when the group lookup actually ran. */
+  /**
+   * The phone number behind a LID chat, bare digits — **present only when
+   * WhatsApp has revealed it**, and absence means nothing more than that.
+   *
+   * Read from `key.remoteJidAlt` on this LID chat's own live messages, and only
+   * when the link is one-to-one (`whatsapp-identity.ts`). History import never
+   * carries it, a connection with no message database cannot read it, and
+   * nothing else is consulted — never a contact name, never `pushName`, never
+   * the LID's own digits. Kept apart from `number`, which names how the chat is
+   * *addressed*: replying still goes to the LID `jid`, and a token scoped to
+   * this chat is scoped to the LID, not to this number.
+   */
+  phoneNumber?: string
+  /**
+   * Members in a group, as of the last time WhatsApp was asked about it
+   * (`whatsapp-groups.ts`: within about a week, longer while disconnected).
+   * Absent when it never was — not zero.
+   */
   participantCount?: number
   profilePicUrl?: string
   updatedAt?: string
@@ -159,10 +192,14 @@ interface ChatListing {
 async function chatListing(instance: AppInstance, window: { limit: number, offset: number }): Promise<ChatListing> {
   if (!canReadMessages(instance)) return walkFindChats(instance, window)
 
+  // Before the listing, so the fold happens in SQL and pages count people.
+  // Never throws: a failed read serves the last good links, or none.
+  const links = await lidLinks(instance)
+
   let rows: ChatActivityRow[]
   let total: number
   try {
-    ({ rows, total } = await listChatActivity(instance, window))
+    ({ rows, total } = await listChatActivity(instance, { ...window, links: links.lidOf }))
   }
   catch (error) {
     // Also covers resolving the Evolution instance id, which can fail before
@@ -173,6 +210,7 @@ async function chatListing(instance: AppInstance, window: { limit: number, offse
 
   const chats = await nameChats(instance, rows.map(row => ({
     jid: row.jid,
+    jids: row.jids,
     lastMessageAt: isoFromEpochSeconds(row.lastTimestamp),
     lastRowId: row.lastRowId ?? undefined,
   })))
@@ -250,6 +288,8 @@ async function walkFindChats(instance: AppInstance, window: { limit: number, off
 /** What a listing knows about a chat before it is named. */
 interface ChatDraft {
   jid: string
+  /** Every stored JID folded into this row. Only the SQL path folds. */
+  jids?: string[]
   /** A name the listing itself carried. Only the fallback walk has one. */
   chatName?: string
   profilePicUrl?: string
@@ -269,38 +309,84 @@ interface ChatDraft {
 async function nameChats(instance: AppInstance, drafts: ChatDraft[]): Promise<ListedChat[]> {
   if (!drafts.length) return []
 
-  const evolution = evolutionClientForInstance(instance)
-
-  // Only touch the group cache when it can change an answer. The refresh is
-  // never awaited — see `groupsFor`; a cold cache waits only on the app DB.
-  const needsGroups = drafts.some(draft => draft.jid.endsWith('@g.us') && !draft.chatName)
-
-  const groups = needsGroups ? await groupsFor(instance, evolution) : emptyGroups
-  const contacts = await contactDirectory(instance, evolution)
+  // Only touch the group cache when it can change an answer.
+  const groupJids = drafts.filter(draft => draft.jid.endsWith('@g.us') && !draft.chatName).map(draft => draft.jid)
+  const { groups, contacts, links } = await nameSources(instance, groupJids)
 
   return drafts.map((draft) => {
-    const localPart = draft.jid.split('@')[0]!
     const isGroup = draft.jid.endsWith('@g.us')
-    const contact = contacts.get(draft.jid)
+    const person = isGroup ? undefined : personOf(contacts, links, draft.jid)
+    const contact = isGroup ? contacts.get(draft.jid) : person?.contact
     const group = groups.get(draft.jid)
 
     const name = isGroup
-      ? group?.subject ?? draft.chatName ?? contact?.name ?? localPart
-      : contact?.name ?? draft.chatName ?? localPart
+      ? group?.subject ?? draft.chatName ?? contact?.name ?? jidLabel(draft.jid)
+      : contact?.name ?? draft.chatName ?? person!.fallback
+
+    // The canonical id first, then whatever else was folded in.
+    const others = (draft.jids ?? []).filter(jid => jid !== draft.jid)
 
     return {
       jid: draft.jid,
+      ...(others.length > 0 && { jids: [draft.jid, ...others] }),
       name,
       isGroup,
-      number: isGroup ? undefined : localPart,
+      number: phoneNumberOf(draft.jid),
+      // The number behind a LID, only as WhatsApp itself revealed it on this
+      // account's messages (`whatsapp-identity.ts`). Keyed on the LID, so a
+      // phone-number chat never gets one here.
+      phoneNumber: phoneNumberBehind(links, draft.jid),
       participantCount: group?.size,
-      profilePicUrl: draft.profilePicUrl ?? contact?.profilePicUrl ?? group?.pictureUrl,
+      profilePicUrl: draft.profilePicUrl ?? contact?.profilePicUrl,
       updatedAt: draft.updatedAt,
       lastMessageAt: draft.lastMessageAt,
       lastMessagePreview: draft.lastMessagePreview,
       lastRowId: draft.lastRowId,
     }
   })
+}
+
+/** A chat's bare id as a last-resort label: its local part, or the whole JID. */
+function jidLabel(jid: string): string {
+  return jid.split('@')[0] || jid
+}
+
+/**
+ * The three caches a chat label is built from, loaded together. Group names
+ * never wait on WhatsApp — see `groupNamesFor`; a cold cache waits only on two
+ * database reads — and are skipped when no group needs a name. `groupJids` are
+ * the groups about to be labelled.
+ */
+async function nameSources(instance: AppInstance, groupJids: readonly string[]) {
+  const evolution = evolutionClientForInstance(instance)
+  const [groups, contacts, links] = await Promise.all([
+    groupJids.length ? groupNamesFor(instance, evolution, groupJids) : emptyGroups,
+    contactDirectory(instance, evolution),
+    lidLinks(instance),
+  ])
+  return { groups, contacts, links }
+}
+
+/**
+ * Who a 1:1 chat is with, across both of their JIDs.
+ *
+ * The saved contact of the LID first, then of the phone-number JID — phone
+ * contacts are far more common, and a person moved to LID addressing usually
+ * has only that one. Resolved from the *canonical* id, so both halves of a
+ * linked person get the same name wherever they are labelled. The fallback is
+ * the phone number's digits when known (true, and what the owner recognises),
+ * else the bare local part, as before.
+ */
+function personOf(
+  contacts: Map<string, ContactInfo>,
+  links: LidLinks,
+  jid: string,
+): { contact?: ContactInfo, fallback: string } {
+  const canonical = canonicalJid(links, jid)
+  const other = linkedJidOf(links, canonical)
+  const own = contacts.get(canonical)
+  const contact = own?.name ? own : (other && contacts.get(other)) || own
+  return { contact, fallback: jidLabel(other ?? canonical) }
 }
 
 /**
@@ -373,7 +459,7 @@ export async function chatLabels(instance: AppInstance, jids: string[]): Promise
 export type ChatSortKey = 'name' | 'number' | 'type' | 'last'
 
 export interface ChatTableQuery {
-  /** Matched against name, JID and number. Case-insensitive, substring. */
+  /** Matched against name, JID, number and a LID chat's revealed number. Case-insensitive, substring. */
   q?: string
   sort?: ChatSortKey
   dir?: 'asc' | 'desc'
@@ -433,7 +519,8 @@ export async function listChatsPage(instance: AppInstance, query: ChatTableQuery
     ? listing.chats.filter(chat =>
         chat.name.toLowerCase().includes(needle)
         || chat.jid.toLowerCase().includes(needle)
-        || (chat.number?.toLowerCase().includes(needle) ?? false),
+        || (chat.number?.toLowerCase().includes(needle) ?? false)
+        || (chat.phoneNumber?.includes(needle) ?? false),
       )
     : listing.chats
 
@@ -474,7 +561,8 @@ function chatComparator(sort: ChatSortKey, dir: 'asc' | 'desc'): (a: ChatSummary
     case 'name':
       return (a, b) => sign * byName(a, b)
     case 'number':
-      return (a, b) => missingLast(a.number, b.number, (x, y) => x.localeCompare(y, undefined, { numeric: true }), sign) || byName(a, b)
+      // Sorted by what the column shows, which for a LID chat is the revealed number.
+      return (a, b) => missingLast(a.number ?? a.phoneNumber, b.number ?? b.phoneNumber, (x, y) => x.localeCompare(y, undefined, { numeric: true }), sign) || byName(a, b)
     case 'type':
       return (a, b) => sign * (Number(a.isGroup) - Number(b.isGroup)) || byName(a, b)
     case 'last':
@@ -567,13 +655,13 @@ export interface MessagePage {
  */
 export async function listMessages(
   instance: AppInstance,
-  remoteJid: string,
+  chat: readonly [string, ...string[]],
   query: MessageQuery = {},
 ): Promise<MessagePage> {
   const { limit = 50, page = 1, since, until, includeReactions = true } = query
 
   const { records, hasMore, total } = await listMessagesPage(instance, {
-    jid: remoteJid,
+    jids: chat,
     limit,
     page,
     since,
@@ -613,7 +701,7 @@ export async function listMessages(
         : mentionedJidsOf(nestedContextInfo(content.payload)),
     }))
 
-  const directory = await nameDirectory(instance, remoteJid, drafts)
+  const directory = await nameDirectory(instance, chat[0], drafts)
 
   return {
     messages: drafts.map(draft => ({
@@ -757,30 +845,26 @@ async function accountNames(
   instance: AppInstance,
   chatJids: string[],
 ): Promise<{ chatName: (jid: string) => string, directory?: MentionDirectory }> {
-  const localPart = (jid: string) => jid.split('@')[0] || jid
-
   try {
-    const evolution = evolutionClientForInstance(instance)
-    const needsGroups = chatJids.some(jid => jid.endsWith('@g.us'))
-
-    const groups = needsGroups ? await groupsFor(instance, evolution) : emptyGroups
-    const contacts = await contactDirectory(instance, evolution)
+    const groupJids = [...new Set(chatJids.filter(jid => jid.endsWith('@g.us')))]
+    const { groups, contacts, links } = await nameSources(instance, groupJids)
 
     return {
       directory: contactsToDirectory(contacts),
       // Same precedence as `listChats`: a group's subject is authoritative, a
-      // person's saved contact name is what they expect to read.
+      // person's saved contact name is what they expect to read — and the same
+      // name for both JIDs of a linked person, so one conversation is never
+      // labelled as two.
       chatName: (jid) => {
-        const contact = contacts.get(jid)
-        return jid.endsWith('@g.us')
-          ? groups.get(jid)?.subject ?? contact?.name ?? localPart(jid)
-          : contact?.name ?? localPart(jid)
+        if (jid.endsWith('@g.us')) return groups.get(jid)?.subject ?? contacts.get(jid)?.name ?? jidLabel(jid)
+        const person = personOf(contacts, links, jid)
+        return person.contact?.name ?? person.fallback
       },
     }
   }
   catch (error) {
     console.error('[messages] could not resolve names:', error)
-    return { chatName: localPart }
+    return { chatName: jidLabel }
   }
 }
 
@@ -912,14 +996,10 @@ export async function listContacts(
   const contacts = await contactDirectory(instance, evolution)
 
   const rows: ContactSummary[] = [...contacts].map(([jid, info]) => {
-    const localPart = jid.split('@')[0] || jid
     return {
       jid,
-      name: info.name ?? localPart,
-      // Only a real phone-number JID carries a number. A LID is a per-user
-      // identity with no country code to read off it, and presenting one as a
-      // phone number is the misattribution `mentions.ts` exists to prevent.
-      number: jid.endsWith('@s.whatsapp.net') ? localPart : undefined,
+      name: info.name ?? jidLabel(jid),
+      number: phoneNumberOf(jid),
       isGroup: jid.endsWith('@g.us'),
       profilePicUrl: info.profilePicUrl,
     }
@@ -983,84 +1063,8 @@ async function fetchContacts(instance: AppInstance, evolution: EvolutionClient):
   return byJid
 }
 
-/**
- * Group subjects and sizes, keyed by group JID — whatever the cache holds now.
- *
- * **Fetching them from WhatsApp is expensive, so no request waits for it and it
- * is rare.** Evolution answers `fetchAllGroups` from Baileys rather than its
- * database, and one call costs about two WhatsApp queries per group — a
- * `groupMetadata` each, set off by the `groups.update` the fetch emits, and a
- * profile picture each, sequentially. `getParticipants=false` skips neither and
- * no endpoint returns subjects without them. Run every few minutes, WhatsApp
- * answered with `rate-overlimit`; on a fifty-group account it also outlasted
- * any timeout a request could afford. So the scan runs at most once per
- * `GROUP_SCAN_INTERVAL_MS` per account, by whichever replica claims it, and
- * everything else reads `app.whatsapp_groups` — `whatsapp-groups.ts` states the
- * schedule and the staleness rule.
- *
- * The in-memory cache (`staleWhileRevalidate`) only saves the table read. A
- * cold process awaits one indexed app-database read as its `seed`, never
- * Evolution, so the first listing after a deploy, on another replica, or for a
- * disconnected account still has subjects and `participantCount`. After
- * `GROUP_TTL_MS` an entry is re-read in the background, which picks up a scan
- * another replica ran; the read that finds a scan due runs it, in the
- * background too.
- *
- * A failed scan is usually an expected offline state (no live socket while
- * disconnected), not a fault: the stored subjects keep being served and every
- * replica waits out `GROUP_SCAN_FAILURE_BACKOFF_MS`. It is logged, briefly,
- * since a scan that never succeeds is otherwise invisible — the names just
- * stay what they were. With nothing stored, groups are named from contacts and
- * then their bare id, with no `participantCount`.
- */
-const GROUP_TTL_MS = 5 * 60_000
+/** Shared, so keep it immutable. */
 const emptyGroups: Map<string, GroupInfo> = new Map()
-
-const groupCache = staleWhileRevalidate<Map<string, GroupInfo>>({
-  ttlMs: GROUP_TTL_MS,
-  // `undefined` here means "nothing stored and no scan to run" — another cheap
-  // table read later, not a WhatsApp retry. Those are governed by the table.
-  retryTtlMs: GROUP_TTL_MS,
-  empty: emptyGroups,
-  seed: instanceId => readStoredGroups(instanceId),
-})
-
-function groupsFor(instance: AppInstance, evolution: EvolutionClient): Promise<Map<string, GroupInfo>> {
-  return groupCache(instance.id, async () => {
-    if (!await claimGroupScan(instance.id)) return readStoredGroups(instance.id)
-
-    // `getParticipants` is required — Evolution answers 400 without it.
-    const rows = await evolution<EvolutionGroupRow[]>(
-      `/group/fetchAllGroups/${encodeURIComponent(instance.name)}?getParticipants=false`,
-      { timeout: GROUP_SCAN_TIMEOUT_MS },
-    ).catch((error: unknown) => {
-      console.warn(`[chats] group scan failed for connection ${instance.id}; next attempt in ${GROUP_SCAN_FAILURE_BACKOFF_MS / 60_000} min:`, error instanceof Error ? error.message : error)
-      return undefined
-    })
-
-    if (!Array.isArray(rows)) {
-      await recordGroupScanFailure(instance.id)
-      // Keep serving what is stored; `undefined` keeps whatever the cache holds.
-      return readStoredGroups(instance.id)
-    }
-
-    const byJid = new Map<string, GroupInfo>()
-    for (const row of rows) {
-      if (typeof row?.id !== 'string') continue
-      byJid.set(row.id, {
-        subject: row.subject?.trim() || undefined,
-        size: typeof row.size === 'number' ? row.size : undefined,
-        pictureUrl: row.pictureUrl ?? undefined,
-      })
-    }
-
-    // Records the scan and releases the lease. An empty map is a real answer —
-    // an account can be in no groups — and is stored as such.
-    await replaceStoredGroups(instance.id, byJid)
-
-    return byJid
-  })
-}
 
 // ── internals ──────────────────────────────────────────────────────────────
 
@@ -1071,10 +1075,11 @@ function groupsFor(instance: AppInstance, evolution: EvolutionClient): Promise<M
  * `pushName` is **not** the sender's push name, despite the key. Evolution 2.3.7
  * builds this row with a raw query that aliases two different columns as
  * `pushName` — a CASE over the contact and message names, and then `Chat.name` —
- * and the second silently wins when the row is deserialised. `Chat.name` is only
- * written from an inbound 1:1 message, and never for a group, so it is empty for
- * most rows. That upstream bug is why names are enriched above rather than read
- * from here.
+ * and the second silently wins when the row is deserialised. `Chat.name` is
+ * written when the row is inserted (a group's subject at that moment, never
+ * updated on a rename — see `whatsapp-groups.ts`) and afterwards only from an
+ * inbound 1:1 message's push name, so it is empty or stale for many rows. That
+ * upstream bug is why names are enriched above rather than read from here.
  */
 interface EvolutionChatRow {
   remoteJid?: string
@@ -1090,22 +1095,9 @@ interface EvolutionContactRow {
   profilePicUrl?: string
 }
 
-interface EvolutionGroupRow {
-  id?: string
-  subject?: string
-  size?: number
-  pictureUrl?: string
-}
-
 interface ContactInfo {
   name?: string
   profilePicUrl?: string
-}
-
-interface GroupInfo {
-  subject?: string
-  size?: number
-  pictureUrl?: string
 }
 
 /** `ProtocolMessage.Type.MESSAGE_EDIT` — the only subtype carrying readable content. */

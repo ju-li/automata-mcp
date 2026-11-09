@@ -21,6 +21,16 @@ import { applyPlanEntitlements, recordPlanChanges, writeEntitlementDefaults } fr
 const OUTBOX_INTERVAL_MS = 15_000
 const RECONCILE_INTERVAL_MS = 60 * 60 * 1000
 
+// Defence in depth: every request path catches its own rejections; one that
+// slips through is logged and the process keeps serving. Exiting would stop
+// the Stripe webhook, the outbox consumers and the Billing page for one failed
+// operation, and every write here is idempotent and re-driven by reconcile.
+// Failures that must restart the process (startWork) exit explicitly; thrown
+// (uncaught) exceptions stay fatal.
+process.on('unhandledRejection', (error) => {
+  console.error(`[cloud] unhandled rejection: ${describeError(error)}`)
+})
+
 let config: CloudConfig
 try {
   config = loadConfig()
@@ -90,27 +100,22 @@ async function startWork(): Promise<void> {
   state.appReady = true
   console.info('[cloud] ready')
 
-  let consuming = false
-  timers.push(setInterval(() => {
-    if (consuming) return
-    consuming = true
-    consumeBillingEvents(sql, billing)
-      .catch(error => console.error(`[outbox] pass failed: ${describeError(error)}`))
-      .finally(() => { consuming = false })
-  }, OUTBOX_INTERVAL_MS))
-
-  // A separate guard and cursor: a slow or paused Brevo never holds up seats
-  // and cancellations, and the reverse.
-  let syncingCrm = false
-  if (crm.configured) {
+  /** Run `pass` every interval, skipping a tick while the previous pass is still going. */
+  const everyOutboxTick = (label: string, pass: () => Promise<unknown>) => {
+    let running = false
     timers.push(setInterval(() => {
-      if (syncingCrm) return
-      syncingCrm = true
-      consumeCrmEvents(sql, crm)
-        .catch(error => console.error(`[crm] pass failed: ${describeError(error)}`))
-        .finally(() => { syncingCrm = false })
+      if (running) return
+      running = true
+      pass()
+        .catch(error => console.error(`[${label}] pass failed: ${describeError(error)}`))
+        .finally(() => { running = false })
     }, OUTBOX_INTERVAL_MS))
   }
+
+  everyOutboxTick('outbox', () => consumeBillingEvents(sql, billing))
+  // A separate guard and cursor: a slow or paused Brevo never holds up seats
+  // and cancellations, and the reverse.
+  if (crm.configured) everyOutboxTick('crm', () => consumeCrmEvents(sql, crm))
 
   // The backstop for a lost webhook and a seat sync that failed: re-read every
   // billed organization. Idempotent, so several replicas may run it.

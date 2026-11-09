@@ -18,11 +18,15 @@ const body = z.object({
  * value that silently outranked it would be very hard to explain later. A 422
  * saying so beats accepting the write and ignoring it.
  *
+ * **Refused on the hosted service** (`ownServersAllowed`), which has no own
+ * servers to point one at.
+ *
  * Every connector token keeps working, deliberately: a token names the
  * connection, not the credential — the same rule `dsn.patch.ts` follows.
  */
 export default defineEventHandler(async (event) => {
   const { instance } = await requireManagedInstanceOfKind(event, getRouterParam(event, 'id'), 'whatsapp')
+  assertOwnServersAllowed('Evolution server', instance.org) // after the role check: a member still gets 403
   const { dbUrl: raw } = await parseBody(event, body)
   const dbUrl = raw.trim()
 

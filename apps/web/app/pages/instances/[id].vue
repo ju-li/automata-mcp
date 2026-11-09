@@ -14,6 +14,9 @@ const id = computed(() => route.params.id as string)
 const { data, error } = await useFetch<{ instance: PublicInstanceRow, canManage: boolean }>(
   () => `/api/instances/${id.value}/summary`,
 )
+// The template explains a missing connection itself (the unpaired reaper's
+// one-hour rule included); a toast on top would say it twice.
+handlesErrorItself(error)
 
 const kind = computed(() => data.value?.instance.kind)
 
@@ -26,7 +29,11 @@ const canManage = computed(() => data.value?.canManage === true)
 
 <template>
   <div>
-    <p v-if="error" class="text-sm text-muted-foreground">
+    <p v-if="error?.statusCode === 404" class="text-sm text-muted-foreground">
+      This connection no longer exists, or you don't have access to it. WhatsApp connections that
+      aren't paired within an hour of being created are removed automatically.
+    </p>
+    <p v-else-if="error" class="text-sm text-muted-foreground">
       This connection could not be loaded. It may have been removed.
     </p>
 

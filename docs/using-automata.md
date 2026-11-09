@@ -8,6 +8,9 @@
 3. **WhatsApp:** continue to the QR code and scan it — WhatsApp → Settings →
    Linked devices → Link a device. To use an Evolution server other than this
    app's, tick **Use my own Evolution API server** first (see [Bring your own Evolution server](whatsapp.md#bring-your-own-evolution-server)).
+   That option exists only on self-hosted deployments.
+   A WhatsApp connection not paired within an hour is deleted with its tokens;
+   the pairing screen counts down (see [Connections never paired are removed after an hour](whatsapp.md#connections-never-paired-are-removed-after-an-hour)).
    **Telegram:** on the connection's page press **Show QR code** and scan it —
    Telegram → Settings → Devices → Link Desktop Device. An account with two-step
    verification is then asked for its password, which goes to Telegram and is
@@ -71,11 +74,11 @@ comes back.
 
 | Tool | Kind | | What it does |
 |---|---|---|---|
-| `get-connection-status` | WhatsApp | read | Whether the account is paired and connected (`open`) |
-| `list-chats` | WhatsApp | read | Conversations in scope, most recently active first, with the `jid` other tools take; says `hasMore` when it returned one page of several |
+| `get-connection-status` | WhatsApp | read | Whether the account is paired and connected (`open`); `flapping` when it reads `open` but keeps reconnecting — shown as **Unstable** on the dashboard, fixed by restarting the Evolution service, not by Reconnect |
+| `list-chats` | WhatsApp | read | Conversations in scope, most recently active first, with the `jid` other tools take; says `hasMore` when it returned one page of several. No read/unread status — WhatsApp's read state isn't available to it |
 | `read-messages` | WhatsApp | read | One chat, newest first, 1–200 per page (default 50), optional `since` / `until`; reports `hasMore`, `nextPage`, `covered` and `totalMatching` |
 | `search-messages` | WhatsApp | read | Messages containing every word of `query`, across chats in scope or one `jid`; optional date range and `fromMe`; up to 100 matches (default 20) |
-| `send-text-message` | WhatsApp | **write** | Send text to a number in international format |
+| `send-text-message` | WhatsApp | **write** | Send text to a number in international format; a refusal (e.g. a number not on WhatsApp) comes back with WhatsApp's reason |
 | `get-telegram-status` | Telegram | read | Whether the account is linked and online, who it is signed in as, and how far sync has got |
 | `list-telegram-chats` | Telegram | read | Synced chats in scope — private, groups, supergroups, channels — most recently active first, with the `chatId` other tools take; 1–200 per page (default 100) |
 | `read-telegram-messages` | Telegram | read | One chat, newest first, with the same paging envelope as `read-messages`; optional forum `topicId`; says when older history was never synced |
@@ -91,7 +94,7 @@ comes back.
 | `get-database-info` | Postgres | read | Server version, database, connecting role, and what this token is scoped to |
 | `list-tables` | Postgres | read | Tables in scope, filterable by schema and name, paged (1–500, default 100) |
 | `describe-table` | Postgres | read | Columns, keys, constraints, indexes and comments for one table |
-| `run-query` | Postgres | read | One `SELECT` / `WITH` / `VALUES` / `TABLE` in a read-only transaction; pages of `maxRows` rows (≤ 1000, default 200) walked with `page`; cells clipped at 2000 chars unless `fullValues`; 10 s timeout by default, 30 s max |
+| `run-query` | Postgres | read | One `SELECT` / `WITH` / `VALUES` / `TABLE` in a read-only transaction; pages of `maxRows` rows (≤ 1000, default 200) walked with `page`; cells clipped at 2000 chars unless `fullValues`; 10 s timeout by default, 120 s max, and the query is cancelled on the database if the client disconnects first; `explain: true` returns the query plan instead, without running it |
 | `run-statement` | Postgres | **write, destructive** | One `INSERT` / `UPDATE` / `DELETE` / `MERGE`; rolled back whole if it would change more than `maxRows` (default 100, no ceiling); no `WHERE` refused without `allowWholeTable`; 15 s timeout by default, 60 s max |
 
 `read-messages` and `search-messages` leave reactions out unless called with
@@ -180,6 +183,21 @@ The token is shown exactly once — only its SHA-256 hash is stored. Lost tokens
 are replaced, not recovered. Revoking one takes effect immediately, and revoking
 stays available while an account is disconnected or a database is unreachable.
 
+**Which clients use a token.** Under each token's name the list shows the MCP
+clients that have connected with it, as they name themselves when a session
+starts, for example `claude-ai 0.1.0 · Cursor 1.7`. Click the line for each
+client's version, protocol version, user agent, when it was first seen, its last
+session and how many sessions it has started. "Last session" is when a client
+last connected; **Last used** is still the last tool call. The newest 20 clients
+are kept per token. A member sees this for their own tokens, an admin for all of
+them.
+
+A client whose name first appears more than a day after the token's first client
+gets a **New client** label for two weeks. If you don't recognise it, issue the
+token a new secret. It's a hint only: a client can call itself anything, so a
+token without the label isn't proven safe, and nothing about access depends on
+these names.
+
 Inspect the endpoint by hand with:
 
 ```bash
@@ -189,3 +207,29 @@ pnpm dlx @modelcontextprotocol/inspector
 Point it at `http://localhost:3000/mcp/<token>`, or at `http://localhost:3000/mcp`
 with an `Authorization: Bearer <token>` header. On a deployment, the same paths
 under its `NUXT_PUBLIC_APP_URL`.
+
+## Telemetry
+
+Every connector tool takes an optional `reason` argument: one sentence from
+Claude saying why it is making the call, for example *"User asked to find
+invoices from a vendor received last week and total them."* MCP never sends the
+user's prompt to the server, so this is the closest an organization can get to
+knowing what its connectors are used for. It is still Claude's own account,
+written by the model, and not the prompt.
+
+When an organization's telemetry is on, each tool call is stored for **30
+days** with the tool's name, whether it worked, the reason (clipped to 300
+characters, or none if Claude gave none) and the client's user agent. Click a token's **Last
+used** date to see them, newest first. A member sees the calls of their own
+tokens, an admin those of every token in the organization.
+
+- **Who decides.** An admin turns telemetry on or off under **Team**. It is off
+  by default. On the hosted service's Free plan it is always on and can't be
+  turned off; on Pro it is off by default and the admin's choice.
+- **What it's not.** A reason can mention what someone asked about, and a
+  prompt-injected message can make Claude write anything there. So reasons are
+  kept only in this app's database, shown as plain text, never written to logs,
+  analytics or account events, never returned to Claude over MCP, and never used
+  for access, limits or billing.
+- **Turning it off** stops collection. What was already stored is deleted
+  when its 30 days are up.

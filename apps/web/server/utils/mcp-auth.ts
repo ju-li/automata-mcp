@@ -40,6 +40,11 @@ interface McpAuthBase {
    * applies from the next request. Undefined = off.
    */
   sendDisclaimer?: string
+  /**
+   * Whether this organization records tool calls — its own switch, or required
+   * by its plan. Read on the same query, so it costs nothing. See tool-calls.ts.
+   */
+  recordToolCalls: boolean
 }
 
 /**
@@ -50,7 +55,7 @@ interface McpAuthBase {
  * the type says what the kind gate on every tool's `enabled` also says.
  *
  * Postgres carries no separate credential object: the DSN lives on the instance
- * row and `pgFor(instance)` is the only thing that reads it, so copying it here
+ * row and `withPg(instance, …)` is the only thing that reads it, so copying it here
  * would put a second live copy of a user's database password in request context
  * for no gain. IMAP follows the same rule for the mailbox password, which only
  * imap-client.ts reads.
@@ -76,6 +81,8 @@ interface McpTokenFacts extends Pick<AppMcpToken,
   member_org?: string
   max_connections?: number
   max_tokens?: number
+  record_tool_calls?: boolean
+  tool_calls_required?: boolean
   assigned: boolean
 }
 
@@ -157,6 +164,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
              u.email AS user_email, u.name AS user_name,
              m.role AS member_role, m.org AS member_org,
              o.max_connections, o.max_tokens,
+             o.record_tool_calls, o.tool_calls_required,
              EXISTS (
                SELECT 1 FROM app.instance_assignments a
                WHERE a.user_id = t.assigned_to AND a.instance = t.instance
@@ -236,6 +244,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     scope: scopeFromRecord(record),
     sendDisclaimer: record.send_disclaimer || undefined,
     limits: { max_connections: record.max_connections, max_tokens: record.max_tokens },
+    recordToolCalls: Boolean(record.tool_calls_required || record.record_tool_calls),
   }
 
   let auth: McpAuth
@@ -300,6 +309,19 @@ export function useMcpAuth(): McpAuth {
     throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
   }
   return auth
+}
+
+/**
+ * A body over MCP_BODY_LIMIT (413) or one that could not be read (400),
+ * JSON-RPC shaped like every other refusal on this surface. `connection: close`
+ * because the rest of an oversized body is never read.
+ */
+export function mcpBodyRefused(status: 400 | 413): Response {
+  const message = status === 413 ? `Request body is larger than ${MCP_BODY_LIMIT} bytes` : 'Request body could not be read'
+  return new Response(
+    JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32600, message } }),
+    { status, headers: { 'content-type': 'application/json', 'connection': 'close' } },
+  )
 }
 
 /**

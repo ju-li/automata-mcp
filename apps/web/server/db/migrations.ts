@@ -518,24 +518,299 @@ export const APP_MIGRATIONS: AppMigration[] = [
     `,
   },
   {
-    name: '0012_recent_history_only',
+    name: '0012_mcp_token_clients',
     sql: /* sql */ `
-      -- Whether this organization's WhatsApp connections on the deployment's
-      -- own Evolution server import only the recent history WhatsApp sends any
-      -- linked device, rather than asking for the full history at pairing
-      -- (Baileys' requireFullSync). A capability, not a plan: the cloud service
-      -- sets it for Free, since a full import is most of the disk an account
-      -- costs. false is no restriction — every self-hosted organization.
+      -- Which MCP clients have started a session with each connector token:
+      -- the clientInfo and protocolVersion of every accepted initialize. One
+      -- row per client per token, since one bearer token can be pasted into
+      -- several clients at once and a single column would show only the last.
       --
-      -- Read when a connection is created and before every pairing (see
-      -- whatsappHistoryLimited in instances.ts). It deletes nothing: history
-      -- already imported stays, and clearing it does not import anything until
-      -- the account is re-paired with "Import full history".
+      -- Every value is what the client chose to send. It is a support and
+      -- leak hint, never identity: nothing may authorize on it. The lengths
+      -- match the clipping in server/utils/mcp-clients.ts, which also keeps
+      -- each token to its newest rows, so a holder sending a fresh name on
+      -- every initialize cannot grow this without bound.
+      --
+      -- last_seen is the last session started, not the last tool call; that
+      -- stays app.mcp_tokens.last_used_at. Rows cascade with the token.
+      CREATE TABLE app.mcp_token_clients (
+        token_id         text NOT NULL REFERENCES app.mcp_tokens (id) ON DELETE CASCADE,
+        client_name      text NOT NULL CHECK (length(client_name) <= 100),
+        client_version   text NOT NULL CHECK (length(client_version) <= 100),
+        protocol_version text CHECK (length(protocol_version) <= 100),
+        user_agent       text CHECK (length(user_agent) <= 200),
+        first_seen       timestamptz NOT NULL DEFAULT now(),
+        last_seen        timestamptz NOT NULL DEFAULT now(),
+        sessions         integer NOT NULL DEFAULT 1 CHECK (sessions > 0),
+        PRIMARY KEY (token_id, client_name, client_version)
+      );
+      CREATE INDEX mcp_token_clients_recent_idx
+        ON app.mcp_token_clients (token_id, last_seen DESC);
+    `,
+  },
+  {
+    name: '0013_mcp_tool_calls',
+    sql: /* sql */ `
+      -- One row per MCP tool call, while the organization records them: which
+      -- tool, whether it succeeded, the request's User-Agent, and the optional
+      -- reason the model gave for the call. See server/utils/tool-calls.ts.
+      --
+      -- reason is model-written free text and can quote what the user asked
+      -- about, so it is treated like a tool argument: kept here only, for 30
+      -- days (the mcp:prune-tool-calls task), never copied into hosted_events.
+      -- Self-reported throughout — nothing may authorize, bill or rate-limit on
+      -- it. Lengths match the clipping in tool-calls.ts. Rows cascade with the
+      -- token and the connection; neither cascade deletes anything upstream.
+      CREATE TABLE app.mcp_tool_calls (
+        id         bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        token_id   text NOT NULL REFERENCES app.mcp_tokens (id) ON DELETE CASCADE,
+        instance   text NOT NULL REFERENCES app.instances (id) ON DELETE CASCADE,
+        tool       text NOT NULL CHECK (length(tool) <= 100),
+        ok         boolean NOT NULL,
+        reason     text CHECK (length(reason) <= 300),
+        user_agent text CHECK (length(user_agent) <= 200),
+        at         timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX mcp_tool_calls_token_idx ON app.mcp_tool_calls (token_id, at DESC, id DESC);
+      CREATE INDEX mcp_tool_calls_instance_idx ON app.mcp_tool_calls (instance);
+      CREATE INDEX mcp_tool_calls_at_idx ON app.mcp_tool_calls (at);
+
+      -- Whether calls are recorded. record_tool_calls is the organization's own
+      -- choice, off by default. tool_calls_required is written only by the
+      -- cloud service (on for Free on the hosted deployment) and, while true,
+      -- overrides the choice and refuses changes to it. Self-hosted
+      -- organizations never have it set. Like max_*, it outlives hosted mode:
+      -- unsetting NUXT_CLOUD_URL leaves it as it was.
       ALTER TABLE app.organizations
-        ADD COLUMN recent_history_only boolean NOT NULL DEFAULT false;
+        ADD COLUMN record_tool_calls   boolean NOT NULL DEFAULT false,
+        ADD COLUMN tool_calls_required boolean NOT NULL DEFAULT false;
+      ALTER TABLE app.entitlement_defaults
+        ADD COLUMN tool_calls_required boolean NOT NULL DEFAULT false;
+    `,
+  },
+  {
+    name: '0014_instance_row_churn',
+    sql: /* sql */ `
+      -- A WhatsApp socket that keeps reopening: Evolution 2.3.7 retries a
+      -- 440 (conflict: replaced) close at once, and two sockets on one set of
+      -- credentials replace each other indefinitely while the column reads
+      -- 'open'. Every open writes Evolution's "Instance" row, so an 'open' row
+      -- written within the last two minutes, observed continuously for ten,
+      -- is that loop. These hold the observation, written only by
+      -- server/utils/alerts.ts: row_churn_since is the first evaluation that
+      -- saw a recent write, row_churn_seen_at the latest. Both empty means no
+      -- churn seen. Stored rather than in memory so replicas and restarts
+      -- agree on how long it has lasted.
+      ALTER TABLE app.instances
+        ADD COLUMN row_churn_since   timestamptz,
+        ADD COLUMN row_churn_seen_at timestamptz;
+    `,
+  },
+  {
+    name: '0015_instance_paired_at',
+    sql: /* sql */ `
+      -- WhatsApp only: when this app first saw the account linked (a live
+      -- read answering 'open', or Evolution's row carrying an ownerJid).
+      -- Written once and never cleared, so a logout later does not make a
+      -- connection that was paired look like one nobody finished setting up.
+      -- A connection with this still NULL an hour after it was created is
+      -- deleted by the instances:reap-unpaired task, through deleteInstance().
+      --
+      -- reap_lease_until is that task's claim on a row, a conditional UPDATE
+      -- like whatsapp_group_scans, so two replicas never both ask Evolution
+      -- to delete one instance. NULL is free.
+      ALTER TABLE app.instances
+        ADD COLUMN paired_at        timestamptz,
+        ADD COLUMN reap_lease_until timestamptz;
+
+      -- Backfill: existing connections that were ever paired must not be
+      -- reaped. now(), not the real moment, which nobody recorded. The task
+      -- re-checks live before deleting anything, so what this misses is
+      -- caught there; what it must never do is miss in the other direction.
+      --
+      -- Only the alert sweep writes down_since, and only for a paired
+      -- connection; churn is seen only on an 'open' row; a group scan
+      -- succeeds only over a live socket.
+      UPDATE app.instances i
+      SET paired_at = now()
+      WHERE i.kind = 'whatsapp'
+        AND (i.down_since IS NOT NULL
+          OR i.alerted_at IS NOT NULL
+          OR i.row_churn_since IS NOT NULL
+          OR EXISTS (SELECT 1 FROM app.whatsapp_group_scans s
+                     WHERE s.instance_id = i.id AND s.scanned_at IS NOT NULL));
+
+      -- In the default deployment Evolution writes into this same database, so
+      -- its own records say which accounts were linked: an ownerJid, or any
+      -- stored message. Guarded three ways, because none of it is ours: the
+      -- tables may not exist (a separate Evolution database), this role may
+      -- not read them, and Evolution may change them. Any failure skips the
+      -- backfill rather than failing the migration — and with it the boot.
+      DO $$
+      BEGIN
+        IF to_regclass('public."Instance"') IS NOT NULL
+           AND has_table_privilege('public."Instance"', 'SELECT') THEN
+          UPDATE app.instances i
+          SET paired_at = now()
+          WHERE i.kind = 'whatsapp' AND i.paired_at IS NULL AND i.instance_id <> ''
+            AND EXISTS (SELECT 1 FROM public."Instance" e
+                        WHERE e.id = i.instance_id AND e."ownerJid" IS NOT NULL);
+        END IF;
+        IF to_regclass('public."Message"') IS NOT NULL
+           AND has_table_privilege('public."Message"', 'SELECT') THEN
+          UPDATE app.instances i
+          SET paired_at = now()
+          WHERE i.kind = 'whatsapp' AND i.paired_at IS NULL AND i.instance_id <> ''
+            AND EXISTS (SELECT 1 FROM public."Message" m WHERE m."instanceId" = i.instance_id);
+        END IF;
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'paired_at backfill from Evolution''s tables skipped: %', SQLERRM;
+      END
+      $$;
+    `,
+  },
+  {
+    name: '0016_instance_ops_alerted_at',
+    sql: /* sql */ `
+      -- WhatsApp only: the deployment's operator (NUXT_OPS_ALERT_EMAIL) has
+      -- been mailed about this connection's current reconnect loop. Set by a
+      -- conditional UPDATE before the mail goes out, so two replicas cannot
+      -- both send it, and put back if the send fails; cleared once the loop
+      -- has ended and the operator has been told so. Written only by
+      -- server/utils/alerts.ts. NULL means no loop reported.
+      ALTER TABLE app.instances
+        ADD COLUMN ops_alerted_at timestamptz;
+    `,
+  },
+  {
+    name: '0017_instance_connect_hold',
+    sql: /* sql */ `
+      -- WhatsApp only: until when this app must not ask Evolution to connect
+      -- this account (GET /instance/connect in state 'close'). Evolution
+      -- 2.3.7 builds a new socket for that call and never ends the one it
+      -- replaces, so a call landing while Evolution is reconnecting by itself
+      -- (the restart WhatsApp asks for right after a QR scan) leaves two
+      -- sockets on one set of credentials replacing each other until the
+      -- service restarts (ju-li/automata-mcp#122). Pushed forward whenever
+      -- the pairing poll sees the socket connecting or open, and claimed by a
+      -- conditional UPDATE before every connect, so replicas and browser tabs
+      -- share it. NULL means no hold. Written only by instances.ts.
+      ALTER TABLE app.instances
+        ADD COLUMN connect_hold_until timestamptz;
+    `,
+  },
+  {
+    name: '0018_totp_setup_bound',
+    sql: /* sql */ `
+      -- An unconfirmed authenticator secret is the password check at
+      -- totp/setup carried forward to totp/confirm, which asks only for a
+      -- session. So it is bound and bounded like a sign-in challenge: only
+      -- the session that ran setup may confirm it (setup_session; a session
+      -- ending clears it, and NULL never matches), within a short window
+      -- from created, and attempts counts wrong codes, claimed before each
+      -- is checked; the fifth deletes the secret. Rows left from before this
+      -- carry no session and could never be confirmed, so they go now.
+      ALTER TABLE app.totp_credentials
+        ADD COLUMN attempts integer NOT NULL DEFAULT 0,
+        ADD COLUMN setup_session text REFERENCES app.sessions (id) ON DELETE SET NULL;
+      DELETE FROM app.totp_credentials WHERE confirmed_at IS NULL;
+    `,
+  },
+  {
+    name: '0019_whatsapp_group_scan_failures',
+    sql: /* sql */ `
+      -- Consecutive failed group scans since the last success. The back-off
+      -- after a failure doubles with each one (1 h, 2 h, 4 h ... capped at a
+      -- day), so an account whose scan never finishes stops costing
+      -- WhatsApp a full scan every hour. A success resets it. Rows whose last event was a failure start
+      -- at one, so they keep today's one-hour wait.
+      ALTER TABLE app.whatsapp_group_scans
+        ADD COLUMN failures integer NOT NULL DEFAULT 0 CHECK (failures >= 0);
+      UPDATE app.whatsapp_group_scans
+        SET failures = 1
+        WHERE failed_at IS NOT NULL AND (scanned_at IS NULL OR failed_at > scanned_at);
+    `,
+  },
+  {
+    name: '0020_password_resets',
+    sql: /* sql */ `
+      -- A password reset waiting to be used: mailed to the account's address,
+      -- either because someone asked on the "Forgot password?" page
+      -- (requested_by 'self') or because an admin of the account's
+      -- organization pressed the button on the Team page ('admin'). One per
+      -- account: asking again replaces it.
+      --
+      -- link_hash is the SHA-256 of the token in the mailed link; code_hash of
+      -- the row id and the six-digit code. attempts counts wrong codes,
+      -- claimed before each is checked; the fifth deletes the row. email is
+      -- the address the mail went to: the reset is spent only while the
+      -- account still signs in with it, so a mail sitting in an address the
+      -- account has since moved away from is dead. Written only by
+      -- server/utils/password-reset.ts.
+      CREATE TABLE app.password_resets (
+        id           text PRIMARY KEY,
+        user_id      text NOT NULL UNIQUE REFERENCES app.users (id) ON DELETE CASCADE,
+        email        text NOT NULL,
+        link_hash    text NOT NULL UNIQUE CHECK (length(link_hash) = 64),
+        code_hash    text NOT NULL CHECK (length(code_hash) = 64),
+        attempts     integer NOT NULL DEFAULT 0,
+        requested_by text NOT NULL CHECK (requested_by IN ('self', 'admin')),
+        expires_at   timestamptz NOT NULL,
+        created      timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX password_resets_expires_idx ON app.password_resets (expires_at);
+    `,
+  },
+  {
+    name: '0021_whatsapp_group_lookups',
+    sql: /* sql */ `
+      -- Group names no longer come from fetchAllGroups (a groupMetadata per
+      -- group, all at once: rate-overlimit bursts on large accounts, #175).
+      -- They come from Evolution's "Chat".name, and app.whatsapp_groups now
+      -- holds the answers of slow, one-group-at-a-time lookups instead of the
+      -- account's whole list. A row per group looked up:
+      --
+      --   fetched_at  the last lookup that answered; subject and size are
+      --               from it. NULL when every lookup of the group failed.
+      --   checked_at  the last lookup, answered or not, which paces the next.
+      --
+      -- Existing rows are scan answers, so both dates start as fetched_at.
+      ALTER TABLE app.whatsapp_groups
+        ALTER COLUMN fetched_at DROP NOT NULL,
+        ALTER COLUMN fetched_at DROP DEFAULT,
+        ADD COLUMN checked_at timestamptz;
+      UPDATE app.whatsapp_groups SET checked_at = fetched_at;
+      ALTER TABLE app.whatsapp_groups
+        ALTER COLUMN checked_at SET NOT NULL,
+        ALTER COLUMN checked_at SET DEFAULT now();
+
+      -- app.whatsapp_group_scans keeps its shape and becomes the per-account
+      -- lease for lookup runs: scanned_at = the last run that got an answer,
+      -- failed_at and failures = runs that got none, in a row.
+    `,
+  },
+  {
+    name: '0022_recent_history_only',
+    sql: /* sql */ `
+      -- Whether this organization may ask WhatsApp for an account's full
+      -- history at pairing (Baileys' requireFullSync) for connections on the
+      -- deployment's own Evolution server. A capability, not a plan: the cloud
+      -- service sets it for Free, since a full import is most of the disk an
+      -- account costs. false is no restriction — every self-hosted
+      -- organization. Full history is opt-in for everyone ("Import full
+      -- history" on the create form); this only locks that choice.
+      --
+      -- Read at create, by the dashboard's "Import full history" and before
+      -- every pairing (whatsappHistoryLimited in instances.ts). It deletes
+      -- nothing: history already imported stays.
+      --
+      -- IF NOT EXISTS: this shipped to preview databases as 0012 before main
+      -- took that number, and those must not fail on the renamed copy.
+      ALTER TABLE app.organizations
+        ADD COLUMN IF NOT EXISTS recent_history_only boolean NOT NULL DEFAULT false;
 
       ALTER TABLE app.entitlement_defaults
-        ADD COLUMN recent_history_only boolean NOT NULL DEFAULT false;
+        ADD COLUMN IF NOT EXISTS recent_history_only boolean NOT NULL DEFAULT false;
     `,
   },
 ]

@@ -35,7 +35,9 @@ interface BillingResponse {
 
 const route = useRoute()
 const { refresh: refreshSession } = useSession()
-const { data, refresh, status: fetchStatus } = await useFetch<BillingResponse>('/api/billing')
+const { data, refresh, status: fetchStatus, error: fetchError } = await useFetch<BillingResponse>('/api/billing')
+// Said in the page itself ("Could not load billing").
+handlesErrorItself(fetchError)
 
 const checkoutBusy = ref(false)
 const { busy: portalBusy, run: runPortal } = useApiAction()
@@ -217,6 +219,7 @@ const meters = computed(() => {
             <li>{{ data.includedSeats }} users included, $10/user/month after</li>
             <li>Full WhatsApp history imported when you link an account</li>
             <li>Unlimited requests</li>
+            <li>Telemetry optional, off by default</li>
           </ul>
         </CardContent>
       </Card>

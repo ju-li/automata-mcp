@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { CheckIcon, MailIcon, PencilIcon, XIcon } from '@lucide/vue'
+import { CheckIcon, KeyRoundIcon, MailIcon, PencilIcon, XIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
 
 /**
@@ -21,6 +21,23 @@ const renaming = ref(false)
 const draftName = ref('')
 const { busy: renameBusy, run: runRename } = useApiAction()
 const { busy: memberBusy, run: runMember } = useApiAction()
+const { busy: toolCallsBusy, run: runToolCalls } = useApiAction()
+
+/**
+ * Turn tool-call recording on or off. The server refuses turning it off while
+ * the organization's plan requires it (402 `plan_limit`, which the action
+ * helper words with a link to Billing), so the disabled checkbox is
+ * presentation only.
+ */
+async function setRecording(on: boolean) {
+  await runToolCalls(async () => {
+    await $fetch('/api/org', { method: 'PATCH', body: { recordToolCalls: on } })
+    await refresh()
+  }, {
+    success: on ? 'Telemetry is on.' : 'Telemetry is off.',
+    failure: 'Could not change telemetry',
+  })
+}
 
 function startRename() {
   draftName.value = data.value?.org.name ?? ''
@@ -123,6 +140,17 @@ async function remove(member: OrgMemberRow) {
   }, { failure: 'Could not remove that member' })
 }
 
+/**
+ * Email a member a password reset. The admin starts the mail and nothing else:
+ * the link and code go only to the member's own address, and the member chooses
+ * the password. See server/utils/password-reset.ts.
+ */
+async function sendPasswordReset(member: OrgMemberRow) {
+  await runMember(async () => {
+    await $fetch(`/api/org/members/${member.userId}/password-reset`, { method: 'POST' })
+  }, { success: `Password reset emailed to ${member.email}.`, failure: 'Could not send the password reset' })
+}
+
 async function revokeInvite(invite: OrgInviteRow) {
   await runMember(async () => {
     await $fetch(`/api/org/invites/${invite.id}`, { method: 'DELETE' })
@@ -212,6 +240,40 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
       </CardContent>
     </Card>
 
+    <!-- Shown to members too: their calls are recorded as well, and whether
+         they are is theirs to know. -->
+    <Card v-if="data?.toolCalls">
+      <CardHeader>
+        <CardTitle>Telemetry</CardTitle>
+        <CardDescription>
+          <a href="https://www.getautomata.app/docs/telemetry" target="_blank" rel="noopener noreferrer" class="underline underline-offset-4 hover:text-foreground">Learn more</a>
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div class="flex items-start gap-3">
+          <Checkbox
+            id="record-tool-calls"
+            :model-value="data.toolCalls.recording"
+            :disabled="!isAdmin || data.toolCalls.required || toolCallsBusy"
+            class="mt-0.5"
+            @update:model-value="setRecording($event === true)"
+          />
+          <div class="space-y-1">
+            <Label for="record-tool-calls" class="font-normal">Collect telemetry</Label>
+            <p v-if="data.toolCalls.required" class="text-xs text-muted-foreground">
+              Always on with your plan.
+              <NuxtLink v-if="isAdmin" to="/billing" class="underline underline-offset-4">
+                See plans
+              </NuxtLink>
+            </p>
+            <p v-else-if="!isAdmin" class="text-xs text-muted-foreground">
+              Only an admin can change this.
+            </p>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+
     <Card>
       <CardHeader>
         <CardTitle>People</CardTitle>
@@ -264,6 +326,35 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
                   >
                     {{ member.role === 'admin' ? 'Make member' : 'Make admin' }}
                   </Button>
+
+                  <!-- Your own password is the profile page's; this is for a
+                       colleague who is locked out. Hidden where there is no
+                       mail to send it with. -->
+                  <AlertDialog v-if="data?.passwordReset && member.userId !== user?.id">
+                    <AlertDialogTrigger as-child>
+                      <Button size="sm" variant="outline" :disabled="memberBusy">
+                        <KeyRoundIcon class="size-4" />
+                        Send password reset
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Email {{ member.email }} a password reset?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          They get a link and a code to choose a new password, valid for
+                          30 minutes. You won’t see either, and you can’t set the password
+                          yourself. Their current password keeps working until they use it.
+                          The email says an admin of {{ data?.org.name }} sent it.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction @click="sendPasswordReset(member)">
+                          Send
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
 
                   <AlertDialog>
                     <AlertDialogTrigger as-child>

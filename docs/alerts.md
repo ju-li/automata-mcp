@@ -53,6 +53,39 @@ What it will and will not send:
 - The mail says which fix applies: a dropped session asks for **Reconnect**, an
   unlinked account asks for a QR scan. Sending someone to scan a code they did
   not need to costs a real phone.
+- A WhatsApp **reconnect loop** counts as an outage too, even though nearly every
+  live read finds it `open`. Two sockets on one set of credentials keep
+  replacing each other (`conflict: replaced`), and neither the webhook nor the
+  live state shows it. The sweep reads when Evolution last wrote the account's
+  `"Instance"` row, which happens on every socket open. Ten minutes of fresh
+  writes on an `open` row marks the connection unstable, and the 10-minute grace
+  above runs from there, so the mail goes out 20–25 minutes into the loop. It
+  says restarting the Evolution service is the fix, since Reconnect cannot help,
+  and the web log gets a line saying the same. See [whatsapp.md](whatsapp.md)
+  "Stuck reconnecting".
+
+### Telling the operator about a reconnect loop
+
+A reconnect loop is the one outage nobody in the organization can fix: only
+whoever runs the Evolution service can restart it. Set `NUXT_OPS_ALERT_EMAIL`
+on the web service and that address is mailed as soon as a connection on the
+deployment's own Evolution server is marked unstable (no grace period), and once
+more when the loop has ended. The mail names the connection id, the Evolution
+instance name and the organization id, and nothing the organization typed. A
+connection on a server the organization supplied is not reported: that server
+is theirs to restart. Unset, no operator mail is sent.
+
+Like the organization's mail, it is sent at most once per loop, across replicas,
+and a failed send is retried on the next sweep rather than lost.
+
+**On the hosted offering** (`NUXT_CLOUD_URL` set), the address also changes
+what customers read. With it set (and SMTP configured), the outage mail, the
+dashboard and `get-connection-status` (`operatorAlerted: true`) say the loop is
+on our side, that we have been alerted, and that there is nothing for them to
+do — for admins and members alike. Without it they keep the self-hosted wording
+("whoever runs this deployment has to restart its Evolution service"), since
+promising that somebody has been told is only true if somebody was. Set it on
+every hosted deployment.
 
 **Telegram** follows the same rules, with four failures told apart:
 
@@ -97,3 +130,26 @@ Then read what was sent at <http://localhost:8025>. A failed send is logged by
 `[mailer]` with what to check. The sweep can be triggered
 by hand in development with `curl -X POST
 http://localhost:3000/_nitro/tasks/alerts:sweep`.
+
+## Account emails
+
+The same SMTP settings send the account emails: signup verification (with or
+without an invitation), "you already have an account", the code for an address
+change, the notice to the old address once it changes, invitations, password
+resets (asked for by the account's owner or sent by an admin), and the notice
+that a password was changed. Unlike
+the alerts, which are plain text, these are HTML with a plain-text alternative,
+written by the templates in `apps/web/server/emails/`.
+
+- The header logo is `/email/automata-email-logo.png` on the web app, linked
+  through `NUXT_PUBLIC_APP_URL`. Without that URL the header shows the name as
+  text, and the mails carry the code but no links.
+- The footer says why the mail was sent. On the hosted service it also carries
+  the company's postal address, and the address-change and password-changed
+  notices offer "Contact us"; a self-hosted deployment sends neither, and tells the reader to contact
+  an admin of their organization instead.
+- The sender is `NUXT_MAIL_FROM` / `NUXT_MAIL_FROM_NAME` for every mail,
+  invitations included.
+
+`apps/web/test/__snapshots__/emails/` holds a rendered copy of each; open the
+`.html` files in a browser to see them.

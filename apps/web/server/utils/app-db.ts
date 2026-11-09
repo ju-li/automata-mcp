@@ -354,6 +354,33 @@ export interface AppInstance {
    */
   down_since?: string
   alerted_at?: string
+  /**
+   * WhatsApp only: how long Evolution has been reopening this account's socket
+   * over and over. Written only by server/utils/alerts.ts, read through
+   * `rowChurn()` in instances.ts.
+   */
+  row_churn_since?: string
+  row_churn_seen_at?: string
+  /**
+   * WhatsApp only: the deployment's operator has been mailed about the current
+   * reconnect loop (`NUXT_OPS_ALERT_EMAIL`). Written only by
+   * server/utils/alerts.ts; empty means no loop reported to them.
+   */
+  ops_alerted_at?: string
+  /**
+   * WhatsApp only: when this app first saw the account linked. Never cleared —
+   * a logout does not make a paired connection an unfinished one. Written by
+   * `notePaired` in instances.ts; a connection still without it an hour after
+   * `created` is deleted by `reapUnpairedConnections`.
+   */
+  paired_at?: string
+  /** That task's claim on this row, so two replicas never both delete it. */
+  reap_lease_until?: string
+  /**
+   * WhatsApp only: until when nothing may ask Evolution to connect this
+   * account — see `claimConnect` in instances.ts, its only writer.
+   */
+  connect_hold_until?: string
 }
 
 export interface AppMcpToken {
@@ -382,4 +409,31 @@ export interface AppMcpToken {
   tool_names: unknown
   /** Appended to every message the send tools send with this token. Absent = off. */
   send_disclaimer?: string
+}
+
+/** One recorded MCP tool call. See tool-calls.ts. */
+export interface AppMcpToolCall {
+  id: string
+  token_id: string
+  instance: string
+  tool: string
+  ok: boolean
+  reason?: string
+  user_agent?: string
+  at: string
+}
+
+/**
+ * One MCP client that started a session with a token, as it described itself
+ * in `initialize`. Client-chosen text throughout. See server/utils/mcp-clients.ts.
+ */
+export interface AppMcpTokenClient {
+  token_id: string
+  client_name: string
+  client_version: string
+  protocol_version?: string
+  user_agent?: string
+  first_seen: string
+  last_seen: string
+  sessions: number
 }

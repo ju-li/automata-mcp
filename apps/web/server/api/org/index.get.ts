@@ -6,14 +6,27 @@
  * rather than a dead end. Pending invitations are admin-only: an unaccepted
  * invitation names an email address that has not yet agreed to be associated
  * with this organization.
+ *
+ * `toolCalls` goes to everyone: a member's calls are recorded too, and whether
+ * they are is theirs to know.
+ *
+ * `passwordReset` tells an admin whether the Team page's "Send password reset"
+ * can work here: it needs mail.
  */
 export default defineEventHandler(async (event) => {
   const actor = await requireMembership(event)
+  const [members, invites, toolCalls] = await Promise.all([
+    listOrgMembers(actor.org.id),
+    actor.role === 'admin' ? listPendingInvites(actor.org.id) : undefined,
+    loadToolCallSetting(actor.org.id),
+  ])
 
   return {
     org: { id: actor.org.id, name: actor.org.name },
     role: actor.role,
-    members: await listOrgMembers(actor.org.id),
-    invites: actor.role === 'admin' ? await listPendingInvites(actor.org.id) : undefined,
+    members,
+    invites,
+    toolCalls,
+    passwordReset: actor.role === 'admin' ? passwordResetAvailable() : undefined,
   }
 })

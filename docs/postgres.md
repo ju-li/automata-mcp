@@ -38,6 +38,10 @@ What the checks do enforce, on every statement:
 - **Only tables in scope.** Read off `EXPLAIN (FORMAT JSON, VERBOSE)` — never
   `EXPLAIN ANALYZE`, which would execute it — inside the same transaction as the
   statement, so a view cannot be repointed between the check and the run.
+  System catalogs stay readable (they describe schema), except the few that
+  hold data: a token scoped to specific tables cannot read column statistics
+  (`pg_stats`, `pg_stats_ext`), large objects, user mappings or
+  `pg_stat_activity`'s query text.
 - **No functions that reach outside the query.** Calls are resolved against
   `pg_proc` from both the statement text and the plan. Anything outside
   `pg_catalog`, anything `SECURITY DEFINER`, and a denylist of builtins such as
@@ -50,6 +54,11 @@ What the checks do enforce, on every statement:
 - **Bounded writes.** A statement that would change more rows than its `maxRows`
   is rolled back whole, and an `UPDATE` or `DELETE` with no `WHERE` needs
   `allowWholeTable: true`.
+- **Plans, never `ANALYZE`.** `run-query` with `explain: true` returns the plan
+  it would run instead of the rows, after the same checks. The model sends a
+  query, not `EXPLAIN` text; the server adds its own `EXPLAIN` options, so
+  nothing is executed and the server's settings are not disclosed. A plan names
+  only tables that passed the scope check.
 
 **Outbound host guard.** A connection string is an address a user chose, so by
 default this server refuses one that resolves to a private or loopback address:
@@ -64,5 +73,26 @@ Telegram bridge database (`NUXT_TELEGRAM_DATABASE_URL`) is always refused.
 
 The guard runs whenever a connection is opened, not only when it is saved, so
 turning the setting off stops existing connections to private addresses. The
-approved address is pinned, so the driver cannot resolve the name to somewhere
-else afterwards — except for an IPv6 address, which is checked but not pinned.
+approved address — IPv4 or IPv6 — is pinned, so the driver cannot resolve the name
+to somewhere else afterwards. A connection string must name exactly one host, so
+one listing several (`host1,host2`) is refused, and an `@` or `#` in the user
+name or password must be percent-encoded (`%40`, `%23`).
+
+**Supabase: use the Session pooler connection string.** In the Supabase
+dashboard, open **Connect** and copy the **Session pooler** string, which looks
+like `postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres`.
+Don't use the direct one (`db.<ref>.supabase.co`). Supabase's direct hosts resolve
+only to IPv6, and a deployment with no outbound IPv6 can't reach them: Railway
+has none, so there the connection fails with `ENETUNREACH`. The create form
+warns when you paste a direct host, and the error names the pooler, but neither
+refuses it, since a server with IPv6 connects fine.
+
+- **Session pooler, not Transaction pooler** (port 6543). Session mode gives each
+  connection its own server session, the way a direct connection does, which is
+  what `run-query`'s cursors and per-transaction settings are written against.
+  The Transaction pooler hasn't been tested with this app.
+- **The pooler's user name carries the project ref.** It's `postgres.<ref>`, not
+  `postgres`. A role of your own, like `claude_reader` above, is written
+  `claude_reader.<ref>` the same way.
+- **Or keep the direct host** by buying Supabase's IPv4 add-on, which gives it
+  an IPv4 address.

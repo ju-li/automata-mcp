@@ -15,14 +15,18 @@ const body = z.object({
  */
 export default defineEventHandler(async (event) => {
   const { email, password } = await parseBody(event, body)
-  assertLoginAllowed(event, email)
+  // Counted now, before the await: checking here and recording after
+  // checkPassword let a concurrent burst all pass the check. Handed back below
+  // unless the password was wrong.
+  const attempt = claimPasswordAttempt(event, email)
 
-  // A database outage throws out of checkPassword as 503 and is not counted.
-  const user = await checkPassword(email, password)
-  if (!user) {
-    recordLoginFailure(event, email)
-    throw authFailed()
-  }
+  const user = await checkPassword(email, password).catch((cause: unknown) => {
+    // A database outage throws out of checkPassword as 503 and is not counted.
+    releasePasswordAttempt(event, email, attempt)
+    throw cause
+  })
+  if (!user) throw authFailed()
+  releasePasswordAttempt(event, email, attempt)
   clearLoginFailures(email)
 
   let factors: UserFactors

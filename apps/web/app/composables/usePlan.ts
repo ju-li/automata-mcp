@@ -1,5 +1,3 @@
-import { toast } from 'vue-sonner'
-
 /**
  * The organization's plan, as `/api/auth/me` reported it.
  *
@@ -31,25 +29,32 @@ export function isPlanLimitError(error: unknown): boolean {
 }
 
 /**
- * Toast a failed request, offering the Billing page when the plan was the
- * reason. Admins only get the link: a member cannot upgrade, and a button they
- * cannot use is worse than none. `isAdmin` is read by the caller during setup —
- * this runs in a `catch`, after an `await`, where composables are unsafe.
+ * Toast a failed request with its details (`showErrorToast`), offering the
+ * Billing page when the plan was the reason. Admins only get the link: a member
+ * cannot upgrade, and a button they cannot use is worse than none. `isAdmin` is
+ * read by the caller during setup — this runs in a `catch`, after an `await`,
+ * where composables are unsafe.
+ *
+ * `fallback` is the toast's title — what was being attempted — and the
+ * server's own diagnosis sits under it, so both are always shown.
+ * `preferServerMessage: false` is for a server message that is worse than the
+ * fallback ("Not found" for "Could not remove the account"): it is then left
+ * out, and the status line under the title still says what happened.
  */
 export function toastApiError(
   error: unknown,
   fallback: string,
   options: { preferServerMessage?: boolean, isAdmin?: boolean } = {},
 ): void {
-  const message = options.preferServerMessage === false && !isPlanLimitError(error)
-    ? fallback
-    : apiErrorMessage(error, fallback)
-
-  if (isPlanLimitError(error) && options.isAdmin) {
-    toast.error(message, { action: { label: 'See plans', onClick: () => navigateTo('/billing') } })
+  if (isPlanLimitError(error)) {
+    // The plan-limit message is the whole story, and names the way out.
+    showErrorToast(error, {
+      title: apiErrorMessage(error, fallback),
+      ...(options.isAdmin && { action: { label: 'See plans', onClick: () => navigateTo('/billing') } }),
+    })
     return
   }
-  toast.error(message)
+  showErrorToast(error, { title: fallback, hideServerMessage: options.preferServerMessage === false })
 }
 
 /** Send the browser to Stripe Checkout for Pro. Answers false when it could not. */
@@ -60,7 +65,7 @@ export async function startCheckout(): Promise<boolean> {
     return true
   }
   catch (error) {
-    toast.error(apiErrorMessage(error, 'Could not start checkout'))
+    showErrorToast(error, { title: 'Could not start checkout' })
     return false
   }
 }

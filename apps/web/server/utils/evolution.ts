@@ -78,6 +78,12 @@ export function createEvolutionClient(creds: EvolutionCredentials) {
      * wider exposure of the two, and it is the one that is pinned.
      */
     async onRequest({ options }) {
+      // A hard deadline on every request, body included, and on ours as well
+      // as user-supplied ones: ofetch's own `timeout` is cleared once headers
+      // arrive, so a server trickling its body would otherwise hold the caller
+      // for ever (GHSA-g2cf-mx92-xc53). A caller's `timeout` becomes this
+      // end-to-end deadline. See deadline.ts.
+      applyRequestDeadline(options)
       if (!creds.userSupplied) return
       await assertPublicUrl(creds.baseUrl, 'Evolution server URL')
       // Refuse a redirect off the approved host rather than following it.
@@ -218,7 +224,12 @@ export function relayEvolutionSendError(error: unknown, number: string, instance
       console.error(`[evolution] send on connection ${instanceId} refused: recipient is not a WhatsApp account`)
       throw createError({
         statusCode: 422,
-        message: `"${number}" is not a WhatsApp account, so nothing was sent. Pass the number in international format with the country code, digits only — no "+", spaces or dashes (e.g. 5511999999999).`,
+        message: number.includes('@')
+          ? `"${number}" is not a WhatsApp account, so nothing was sent. Pass a chat's jid exactly as list-chats or read-messages return it.`
+          // Bare digits: either a mistyped number or a LID with its suffix
+          // stripped. The second is worth naming — retrying with the digits
+          // reformatted would only try another stranger's number.
+          : `"${number}" is not a WhatsApp account, so nothing was sent. Pass the number in international format with the country code, digits only — no "+", spaces or dashes (e.g. 5511999999999). If these digits came from a jid ending in @lid, they are not a phone number: pass the full jid instead.`,
       })
     }
 

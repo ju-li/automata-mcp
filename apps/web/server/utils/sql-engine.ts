@@ -3,7 +3,7 @@ import type { InstanceKind } from '#shared/connection'
 import type { AppInstance } from './app-db'
 import type { McpScope } from './mcp-scope'
 import type { ListTablesOptions, PgTable, PgTablePage, PgTableDescription } from './pg-catalog'
-import type { ReadQueryOptions, ReadQueryResult, WriteStatementOptions, WriteStatementResult } from './pg-run'
+import type { ExplainQueryOptions, ExplainQueryResult, ReadQueryOptions, ReadQueryResult, WriteStatementOptions, WriteStatementResult } from './pg-run'
 
 /**
  * The one place that decides which SQL engine a connection speaks.
@@ -83,8 +83,8 @@ export type SqlTable = PgTable
 export type SqlTablePage = PgTablePage
 export type SqlTableDescription = PgTableDescription
 
-// `ListTablesOptions`, `ReadQueryOptions`, `ReadQueryResult`,
-// `WriteStatementOptions` and `WriteStatementResult` are deliberately NOT re-exported under the same
+// `ListTablesOptions`, `ReadQueryOptions`, `ReadQueryResult`, `ExplainQueryOptions`,
+// `ExplainQueryResult`, `WriteStatementOptions` and `WriteStatementResult` are deliberately NOT re-exported under the same
 // names. Nuxt auto-imports server utils by export name, so a second module
 // exporting a name it already has makes the resolution order decide which one
 // a call site gets — it warns, picks one, and nothing in the source says
@@ -146,6 +146,26 @@ export async function runSqlRead(
   }
 }
 
+/**
+ * The plan `runSqlRead` would run, without running it. A second engine owes
+ * the same promise — the plan it would actually execute, through the same
+ * guards — or should refuse; the plan text itself is the engine's own.
+ */
+export async function explainSqlRead(
+  instance: Pick<AppInstance, 'id' | 'kind' | 'dsn'>,
+  scope: McpScope,
+  statement: string,
+  options: ExplainQueryOptions,
+): Promise<ExplainQueryResult> {
+  const kind = requireSqlKind(instance)
+  switch (kind) {
+    case 'postgres':
+      return explainReadQuery(instance, scope, statement, options)
+    default:
+      return assertNever(kind, 'SQL kind')
+  }
+}
+
 export async function runSqlWrite(
   instance: Pick<AppInstance, 'id' | 'kind' | 'dsn'>,
   scope: McpScope,
@@ -174,7 +194,7 @@ export async function sqlIdentity(
   const kind = requireSqlKind(instance)
   switch (kind) {
     case 'postgres': {
-      const identity = await pgIdentity(await pgFor(instance))
+      const identity = await withPg(instance, pgIdentity)
       if (!identity) return undefined
       return {
         server: `PostgreSQL ${identity.serverVersion}`,

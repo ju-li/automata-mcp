@@ -96,6 +96,9 @@ minutes for that state — but it buys nothing.
 
 ## Bring your own bridge
 
+**Self-hosted only**, like a bring-your-own Evolution server: the hosted
+service refuses it and doesn't offer the option.
+
 Like Evolution, a user can tick **Use my own Telegram bridge** and give its URL,
 admin key and, optionally, a database URL for reading its chats. The URL passes
 the same outbound host guard as a user's Evolution server, this deployment's

@@ -22,6 +22,11 @@ export interface PublicInstanceRow {
   ownServer?: boolean
   /** WhatsApp only: whether the read tools can answer for this connection. */
   canReadMessages?: boolean
+  /**
+   * WhatsApp only, while never paired: when the connection is deleted
+   * automatically if nobody pairs it. Absent once paired.
+   */
+  unpairedRemovalAt?: string
 }
 
 /**
@@ -39,6 +44,10 @@ export interface InstanceListRow {
   state: ConnectionState
   /** WhatsApp only: was connected, and Evolution's live socket no longer is. */
   sessionLost?: boolean
+  /** WhatsApp only: Evolution keeps reopening the socket. See `rowChurn` on the server. */
+  flapping?: boolean
+  /** With `flapping`: the deployment's operator is alerted and will restart Evolution. */
+  operatorAlerted?: boolean
   target?: string
   detail?: string
   profileName?: string
@@ -81,8 +90,12 @@ export function describeKind(kind: InstanceKind): string {
  * `statusMessage` is the generic. Five call sites had drifted into three
  * different orderings of these two keys, so the same failure read differently
  * depending on which component you were looking at.
+ *
+ * Reading the message is showing it: the caller renders it inline, so the
+ * error is marked handled and the global error toast stays off it.
  */
 export function apiErrorMessage(error: unknown, fallback: string): string {
+  markErrorHandled(error)
   const data = (error as { data?: { message?: string, statusMessage?: string } })?.data
   return data?.message || data?.statusMessage || fallback
 }

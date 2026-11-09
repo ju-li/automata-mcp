@@ -1,8 +1,8 @@
 import { isIP } from 'node:net'
 import { ImapFlow } from 'imapflow'
 import type { ImapFlowError, MessageStructureObject } from 'imapflow'
-import { convert as htmlToText } from 'html-to-text'
 import type { AppInstance } from './app-db'
+import { htmlToText } from './html-text'
 
 /**
  * Everything that speaks IMAP to a user's mail server: opening a connection,
@@ -72,8 +72,29 @@ export interface MessageParts {
 }
 
 const CONNECT_TIMEOUT_MS = 15_000
+/**
+ * Everything `openImap` waits for — TCP, TLS or STARTTLS, greeting, login and
+ * the folder LIST connect() issues — end to end. Generous: a real server does
+ * all of it in seconds, even with thousands of folders.
+ */
+const OPEN_DEADLINE_MS = 60_000
 /** What a body fetch may pull over the wire before it is cut. */
 const BODY_MAX_BYTES = 2 * 1024 * 1024
+/**
+ * The longest single response line the server may send. Every SEARCH answer is
+ * one line, and imapflow turns it into one object per number, about 125 bytes
+ * of heap per byte on the wire. Its own default is 1 GiB, so a mail server a
+ * tenant named could exhaust the heap of the process every tenant shares with
+ * one answer (GHSA-mqp8-94pq-4pwx). 1 MiB holds about 95,000 UIDs, and the
+ * sync asks in UID windows small enough to stay under it (imap-sync.ts).
+ */
+const MAX_LINE_BYTES = 1024 * 1024
+
+/** The largest attachment `get-email-attachment` returns. Operator setting. */
+export function attachmentMaxBytes(): number {
+  const value = Number(useRuntimeConfig().imapAttachmentMaxBytes)
+  return Number.isFinite(value) && value > 0 ? value : 10 * 1024 * 1024
+}
 /** How long a server-side body search may take across every folder. */
 const SEARCH_BUDGET_MS = 25_000
 const SEARCH_MAX_FOLDERS = 20
@@ -101,8 +122,20 @@ export function imapIdentity(target: Pick<ImapTarget, 'host' | 'user'>): string 
  * Throws the raw imapflow error; `describeImapError` turns it into something a
  * person or a model can act on.
  */
-export async function openImap(target: ImapTarget, label = 'Mail server'): Promise<ImapFlow> {
+export async function openImap(
+  target: ImapTarget,
+  label = 'Mail server',
+  options: { signal?: AbortSignal } = {},
+): Promise<ImapFlow> {
   const { address } = await assertPublicTarget(target.host, target.port, label)
+
+  // A literal is buffered whole before any caller-side cap applies, and the
+  // download caps (BODY_MAX_BYTES, the attachment cap) cut only what reaches
+  // the caller. Downloads ask in 64 KiB pieces, so this only has to clear the
+  // largest single part a server that ignores partial fetches might send: the
+  // attachment cap (+1, how readAttachment notices an oversized part) or the
+  // body cap. Read per call: useRuntimeConfig needs the Nitro runtime.
+  const maxLiteral = Math.max(attachmentMaxBytes() + 1, BODY_MAX_BYTES) + 64 * 1024
 
   const client = new ImapFlow({
     host: address,
@@ -123,19 +156,53 @@ export async function openImap(target: ImapTarget, label = 'Mail server'): Promi
     connectionTimeout: CONNECT_TIMEOUT_MS,
     greetingTimeout: CONNECT_TIMEOUT_MS,
     socketTimeout: 120_000,
+    // Past these imapflow fails the stream (LineTooLarge, LiteralTooLarge,
+    // ResponseTooLarge) instead of buffering and parsing what the server sent.
+    maxLineLength: MAX_LINE_BYTES,
+    maxLiteralSize: maxLiteral,
+    maxResponseSize: maxLiteral + MAX_LINE_BYTES,
   })
   client.on('error', (error: ImapFlowError) => {
     console.error(`[imap] connection to ${target.host} failed (${error.code ?? 'error'})`)
   })
 
+  // The wall-clock bound on connect(), enforced by closing the client, which
+  // rejects connect() through imapflow's own teardown. Neither timeout above
+  // is one: `connectionTimeout` and `greetingTimeout` end at the greeting,
+  // and `socketTimeout` is an idle timer every received byte resets. So a
+  // server that logs in and then answers the LIST connect() issues with an
+  // untagged line a second, and never the tagged completion, held connect()
+  // open for ever (GHSA-rv5g-x6rm-cvh5) — and no caller could close a client
+  // it had not been handed yet. `signal` lets a caller with its own deadline,
+  // the sync's watchdog, cut it shorter.
+  let cutOff = false
+  const cut = () => {
+    cutOff = true
+    client.close()
+  }
+  const timer = setTimeout(cut, OPEN_DEADLINE_MS)
+  options.signal?.addEventListener('abort', cut, { once: true })
   try {
+    if (options.signal?.aborted) cut()
     await client.connect()
+    // close() settles every pending step, but should connect() still resolve
+    // on a client already closed, it must not be handed out as a live one.
+    if (cutOff) throw openTimedOut(target)
   }
   catch (error) {
     client.close()
-    throw error
+    throw cutOff ? openTimedOut(target) : error
+  }
+  finally {
+    clearTimeout(timer)
+    options.signal?.removeEventListener('abort', cut)
   }
   return client
+}
+
+/** Coded so `describeImapError` reads it as `timeout`. */
+function openTimedOut(target: ImapTarget): Error {
+  return Object.assign(new Error(`Opening ${target.host}:${target.port} did not finish in time`), { code: 'OPEN_TIMEOUT' })
 }
 
 /** Log out, falling back to dropping the socket. Never throws. */
@@ -182,6 +249,14 @@ export interface DescribedImapError {
 
 export function describeImapError(cause: unknown): DescribedImapError {
   const error = (cause ?? {}) as ImapFlowError
+  // A failed write to the app database (postgres.js's PostgresError, whose
+  // `code` is a SQLSTATE like 21000) is ours, not the mail server's. Passed
+  // through as `error.code` it read as "Could not reach the mail server
+  // (21000)" and sent the user checking a server that was answering fine.
+  const pg = cause as { name?: string, severity_local?: unknown } | undefined
+  if (pg?.name === 'PostgresError' || typeof pg?.severity_local === 'string') {
+    return { code: 'internal', auth: false, message: imapErrorMessage('internal') }
+  }
   const code = error.authenticationFailed
     ? 'auth'
     : error.tlsFailed || /CERT|SSL|TLS/i.test(error.code ?? '')
@@ -190,7 +265,9 @@ export function describeImapError(cause: unknown): DescribedImapError {
         ? 'timeout'
         : error.code === 'ENOTFOUND' || error.code === 'EAI_AGAIN'
           ? 'dns'
-          : error.code ?? 'connection failed'
+          : error.code === 'LineTooLarge' || error.code === 'LiteralTooLarge' || error.code === 'ResponseTooLarge'
+            ? 'too_large'
+            : error.code ?? 'connection failed'
   return { code, auth: code === 'auth', message: imapErrorMessage(code) }
 }
 
@@ -211,16 +288,19 @@ export function imapErrorMessage(code: string): string {
       return 'The mail server did not answer in time.'
     case 'dns':
       return 'The mail server\'s host name does not resolve.'
+    case 'internal':
+      return 'The mail server answered, but storing what it sent failed on our side. '
+        + 'The server log has the cause; the sync retries every two minutes.'
     case 'host_refused':
       return 'The mail server\'s address is not one this deployment may connect to.'
+    case 'too_large':
+      return 'The mail server sent a reply larger than this connector accepts, and the connection was closed.'
     default:
       return `Could not reach the mail server (${code}).`
   }
 }
 
 // ── live connection, shared per connection row ────────────────────────────
-
-const building = new Map<string, Promise<ImapFlow>>()
 
 function liveKey(instance: AppInstance) {
   return `imap:${instance.id}`
@@ -231,8 +311,8 @@ function liveKey(instance: AppInstance) {
  * for one mailbox. The sync never uses it, so a long backfill cannot hold the
  * mailbox a tool call is waiting on.
  *
- * Builds are de-duplicated: two calls arriving at a cold cache would otherwise
- * open two logins, and the one `keyedResource` did not keep would leak.
+ * Two calls arriving at a cold cache share one login: `keyedResource` runs
+ * one build per key and credential and has every other caller await it.
  */
 export async function imapFor(instance: AppInstance): Promise<ImapFlow> {
   const target = requireTarget(instance)
@@ -240,14 +320,7 @@ export async function imapFor(instance: AppInstance): Promise<ImapFlow> {
   const secret = [target.host, target.port, target.security, target.user, target.password].join('\0')
 
   const acquire = () => keyedResource<ImapFlow>(key, secret, {
-    build: () => {
-      let pending = building.get(key)
-      if (!pending) {
-        pending = openImap(target).finally(() => building.delete(key))
-        building.set(key, pending)
-      }
-      return pending
-    },
+    build: () => openImap(target),
     destroy: closeImap,
     reguard: async () => {
       await assertPublicTarget(target.host, target.port, 'Mail server')
@@ -378,7 +451,7 @@ export function messagePartsOf(structure: MessageStructureObject | undefined): M
   if (!structure) return out
 
   const visit = (node: MessageStructureObject, root: boolean) => {
-    const type = (node.type || 'application/octet-stream').toLowerCase()
+    const type = cleanText(node.type)?.toLowerCase() ?? 'application/octet-stream'
     if (type.startsWith('multipart/') && node.childNodes?.length) {
       for (const child of node.childNodes) visit(child, false)
       return
@@ -398,13 +471,14 @@ export function messagePartsOf(structure: MessageStructureObject | undefined): M
       out.htmlPart = part
       return
     }
+    const contentId = cleanText(node.id)
     out.attachments.push({
       part,
       mimeType: type,
       ...(filename && { filename }),
       ...(node.size !== undefined && { size: decodedSize(node.size, node.encoding) }),
       ...(disposition === 'inline' && { inline: true }),
-      ...(node.id && { contentId: node.id.replace(/^<|>$/g, '') }),
+      ...(contentId && { contentId: contentId.replace(/^<|>$/g, '') }),
     })
   }
 
@@ -416,10 +490,27 @@ function decodedSize(encoded: number, encoding: string | undefined): number {
   return encoding?.toLowerCase() === 'base64' ? Math.floor(encoded * 3 / 4) : encoded
 }
 
-/** What the database can hold: no NUL bytes, which Postgres `text` refuses. */
-export function cleanText(value: string | undefined | null): string | undefined {
+/**
+ * What the database can hold, from text an outside sender chose: no NUL bytes,
+ * which Postgres `text` refuses, and no unpaired UTF-16 surrogate, which
+ * `jsonb` refuses (22P02) — a UTF-16 encoded word or RFC 2231 parameter can
+ * decode to one, and one such value fails the whole batch insert it rides in.
+ * `max` clips by code point, never by UTF-16 unit, so the cut cannot split a
+ * pair and make the surrogate itself (GHSA-89q9-r9vm-6vp2).
+ */
+export function cleanText(value: string | undefined | null, max?: number): string | undefined {
   if (value === undefined || value === null) return undefined
-  const cleaned = value.replace(/\0/g, '').trim()
+  const cleaned = value.toWellFormed().replace(/\0/g, '').trim()
+  if (max !== undefined && cleaned.length > max) {
+    // Walks only the kept prefix: a header literal can be megabytes long.
+    let end = 0
+    let count = 0
+    for (const point of cleaned) {
+      if (count === max) return cleaned.slice(0, end).trimEnd() || undefined
+      end += point.length
+      count++
+    }
+  }
   return cleaned || undefined
 }
 
@@ -452,9 +543,8 @@ export async function fetchMessageBody(instance: AppInstance, ref: StoredMessage
     }
     const { buffer, cut } = await collect(download.content, BODY_MAX_BYTES)
     const raw = buffer.toString('utf8')
-    const text = source === 'html'
-      ? htmlToText(raw, { wordwrap: false, selectors: [{ selector: 'img', format: 'skip' }] })
-      : raw
+    // Synchronous on the shared event loop: html-text.ts keeps it linear.
+    const text = source === 'html' ? htmlToText(raw) : raw
     return { text: text.replace(/\0/g, '').replace(/\r\n/g, '\n'), source, cutAtSource: cut }
   })
 }

@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { Loader2Icon } from '@lucide/vue'
-import { useIntervalFn } from '@vueuse/core'
+import { Loader2Icon, TriangleAlertIcon } from '@lucide/vue'
+import { useIntervalFn, useNow } from '@vueuse/core'
 import { toast } from 'vue-sonner'
 
 /**
@@ -24,10 +24,15 @@ interface StatusResponse {
   state: ConnectionState
   /** Was connected, and Evolution's live socket no longer is. */
   sessionLost?: boolean
+  /** Evolution keeps reopening the socket; reads `open` most of the time. */
+  flapping?: boolean
+  /** With `flapping`: the deployment's operator is alerted and will restart Evolution. */
+  operatorAlerted?: boolean
   profileName?: string
   profilePicUrl?: string
   number?: string
-  stats: { messages: number, chats: number, contacts: number }
+  /** Absent when the counts could not be measured in time — unknown, not zero. */
+  stats?: { messages: number, chats: number, contacts: number }
   /**
    * The plan imports only the recent history WhatsApp sends any linked device,
    * and refuses a full-history import. Decided by the server.
@@ -115,7 +120,36 @@ const mode = computed<Mode>(() => {
   return 'pairing'
 })
 
-const display = computed(() => describeState(state.value, 'whatsapp', { lost: mode.value === 'lost' }))
+const flapping = computed(() => data.value?.flapping === true)
+const operatorAlerted = computed(() => flapping.value && data.value?.operatorAlerted === true)
+
+const display = computed(() => describeState(state.value, 'whatsapp', {
+  lost: mode.value === 'lost',
+  flapping: flapping.value,
+  operatorAlerted: operatorAlerted.value,
+}))
+
+/**
+ * Reconnect is offered only from `close`: that is the one state with a safe call
+ * behind it, and the server refuses the others (`reconnectInstance`). From
+ * `connecting` or `unknown` the notice says what does help instead.
+ */
+const canReconnect = computed(() => state.value === 'close')
+const evolutionServer = computed(() => (data.value?.instance.ownServer ? 'your Evolution server' : 'the Evolution server'))
+
+/**
+ * A connection nobody has ever paired is deleted an hour after it was created
+ * (server/utils/unpaired-reaper.ts). Said on the pairing screen with the time
+ * left, so it is not a surprise later. The server decides whether it applies —
+ * a re-pair after a logout carries no deadline.
+ */
+const now = useNow({ interval: 30_000 })
+const removalMinutes = computed(() => {
+  const at = data.value?.instance.unpairedRemovalAt
+  if (!at) return undefined
+  const left = Date.parse(at) - now.value.getTime()
+  return Number.isNaN(left) ? undefined : Math.max(0, Math.ceil(left / 60_000))
+})
 
 const qr = ref<QrResponse['qr'] | null>(null)
 const pairingTimedOut = ref(false)
@@ -130,8 +164,10 @@ const needsDbUrl = computed(() =>
 )
 
 // ── pairing ────────────────────────────────────────────────────────────────
-// Polling the QR endpoint is what drives pairing: Evolution starts the
-// connection the first time it is asked for a QR on a disconnected instance.
+// Polling the QR endpoint is what drives pairing: the server starts the
+// connection the first time it is asked for a QR on a disconnected instance,
+// and again only once `close` has outlasted its connect hold — never in the
+// moment after a scan, when Evolution is reconnecting by itself (#122).
 const PAIRING_TIMEOUT_MS = 5 * 60 * 1000
 
 const { pause: pauseQrPoll, resume: resumeQrPoll } = useIntervalFn(async () => {
@@ -161,8 +197,11 @@ const { pause: pauseQrPoll, resume: resumeQrPoll } = useIntervalFn(async () => {
     }
     polledState.value = result.state
     // Keep the previous QR while Evolution generates the next one, so the image
-    // does not flicker between polls.
+    // does not flicker between polls. But `close` means the code on screen is
+    // spent — just scanned, with Evolution restarting the link, or expired and
+    // waiting out the server's connect hold — so it must not stay scannable.
     if (result.qr?.base64) qr.value = result.qr
+    else if (result.state === 'close') qr.value = null
   }
   catch {
     // Transient. The next tick retries; a hard failure surfaces on the status poll.
@@ -357,6 +396,7 @@ const importHistory = () => backToPairing(
       :state="state"
       kind="whatsapp"
       :lost="mode === 'lost'"
+      :flapping="flapping"
       @renamed="refresh()"
     >
       <!--
@@ -418,6 +458,24 @@ const importHistory = () => backToPairing(
           Or enter code <code class="font-mono font-medium">{{ qr.pairingCode }}</code> on your phone.
         </p>
 
+        <p v-if="removalMinutes !== undefined && removalMinutes > 0" class="max-w-sm text-center text-xs text-muted-foreground">
+          A connection that isn't paired within an hour of being created is removed automatically.
+          {{ removalMinutes === 1 ? '1 minute' : `${removalMinutes} minutes` }} left.
+        </p>
+        <!-- Past the deadline: deletion is imminent and cannot be undone, so it
+             reads as a warning rather than as helper text. -->
+        <div
+          v-else-if="removalMinutes === 0"
+          role="alert"
+          class="flex max-w-sm items-start gap-2 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive"
+        >
+          <TriangleAlertIcon class="mt-0.5 size-4 shrink-0" />
+          <p>
+            This connection wasn't paired within an hour and is about to be removed automatically.
+            You can create a new one.
+          </p>
+        </div>
+
         <div v-if="pairingTimedOut" class="text-center">
           <p class="text-sm text-muted-foreground">
             The code expired.
@@ -435,22 +493,68 @@ const importHistory = () => backToPairing(
         A dropped session keeps its profile and counts below: the phone is still
         linked, and everything stored up to the drop is still readable.
       -->
+      <!--
+        A reconnect loop, which reads `open` on most polls. Reconnect has no
+        socket to act on, so nobody gets a button — only who can end it.
+        Takes the place of the lost-session notice when both are true: a poll
+        that lands between two sockets sees a dropped session, and offering
+        Reconnect then is the wrong fix.
+      -->
+      <NoticeCard v-if="flapping" title="Evolution keeps reconnecting this account" tone="error">
+        <template #description>
+          <p class="mt-1 text-sm text-muted-foreground">
+            Its connection to WhatsApp is being replaced over and over, so messages
+            may be missing here and sends may fail.
+            <!--
+              Hosted offering: only we can restart Evolution, and we have been
+              mailed. Same words for admins and members — neither can act.
+            -->
+            <template v-if="operatorAlerted">
+              This is on our side: we have been alerted and will restart the
+              service. Nothing needs scanning, the phone stays linked, and there
+              is nothing you need to do.
+            </template>
+            <template v-else-if="canManage">
+              Reconnect cannot end this. Restarting {{ evolutionServer }} does, with
+              no new QR scan. Repeated logins can get a number flagged by WhatsApp,
+              so do it soon.
+            </template>
+            <template v-else>
+              Nothing needs scanning. Whoever runs {{ evolutionServer }} has to
+              restart it — an admin of your organization can see to that.
+            </template>
+          </p>
+        </template>
+      </NoticeCard>
+
       <SessionLostNotice
-        v-if="mode === 'lost'"
+        v-else-if="mode === 'lost'"
         service="WhatsApp"
         :can-manage="canManage"
         :reconnecting="reconnecting"
         :stalled="reconnectStalled"
         :busy="reconnectBusy"
+        :can-reconnect="canReconnect"
         @reconnect="reconnect"
       >
         <template #hint>
           The phone is still linked, so reconnecting normally needs no new QR code.
         </template>
         <template #stalled>
-          Evolution did not bring the connection back. Its session for this account
-          may be stuck — restarting {{ data?.instance.ownServer ? 'your Evolution server' : 'the Evolution server' }}
-          usually reconnects it without a new scan.
+          <template v-if="canReconnect">
+            Evolution did not bring the connection back. Its session for this account
+            may be stuck — restarting {{ evolutionServer }} usually reconnects it
+            without a new scan.
+          </template>
+          <template v-else-if="state === 'connecting'">
+            Evolution is still trying to connect this account. If it does not settle
+            within a minute or two, restarting {{ evolutionServer }} reconnects it
+            without a new scan.
+          </template>
+          <template v-else>
+            Evolution has no live connection for this account. Restarting
+            {{ evolutionServer }} reconnects it without a new scan.
+          </template>
         </template>
       </SessionLostNotice>
 
@@ -458,7 +562,7 @@ const importHistory = () => backToPairing(
         :id="id"
         kind="whatsapp"
         :profile="{ name: data?.profileName || 'WhatsApp', detail: data?.number || '—', picUrl: data?.profilePicUrl }"
-        :stats="data?.stats ?? { messages: 0, chats: 0, contacts: 0 }"
+        :stats="data?.stats"
         :can-read-messages="data?.instance.canReadMessages !== false"
       />
 

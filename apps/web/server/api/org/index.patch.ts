@@ -1,16 +1,28 @@
 import { z } from 'zod'
 import type { AppOrganization } from '~~/server/utils/app-db'
+import type { ToolCallSetting } from '~~/server/utils/tool-calls'
 
 const body = z.object({
-  name: z.string().trim().min(1, 'Give the organization a name').max(100),
-})
+  name: z.string().trim().min(1, 'Give the organization a name').max(100).optional(),
+  /** Record every MCP tool call and its reason. See server/utils/tool-calls.ts. */
+  recordToolCalls: z.boolean().optional(),
+}).refine(value => value.name !== undefined || value.recordToolCalls !== undefined, 'Nothing to change')
 
-/** Rename the organization. Admin-only; nothing else about it is editable. */
+/**
+ * Rename the organization, or turn tool-call recording on or off. Admin-only.
+ * Recording cannot be turned off while the organization's plan requires it
+ * (402 `plan_limit`, from `setToolCallRecording`).
+ */
 export default defineEventHandler(async (event) => {
   const actor = await requireOrgAdmin(event)
-  const { name } = await parseBody(event, body)
+  const { name, recordToolCalls } = await parseBody(event, body)
 
-  const org = await updateRow<AppOrganization>('organizations', actor.org.id, { name })
+  let toolCalls: ToolCallSetting | undefined
+  if (recordToolCalls !== undefined) toolCalls = await setToolCallRecording(actor.org.id, recordToolCalls)
 
-  return { org: { id: org.id, name: org.name } }
+  const org = name !== undefined
+    ? await updateRow<AppOrganization>('organizations', actor.org.id, { name })
+    : actor.org
+
+  return { org: { id: org.id, name: org.name }, toolCalls }
 })

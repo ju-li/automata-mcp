@@ -42,7 +42,9 @@ export default defineKindTool({
     + 'is not searchable at all: its text is unknown to this connector, so a '
     + 'search finding nothing is not proof a message does not exist. Use this '
     + 'instead of paging read-messages when you are looking for something by '
-    + 'what it says.',
+    + 'what it says. One person can be stored under two ids — a `@lid` and their '
+    + 'phone number; when this connector has linked them, a `jid` filter covers '
+    + 'both (listed in `jids`) and every hit is labelled with one id per person.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -50,7 +52,10 @@ export default defineKindTool({
     openWorldHint: true,
   },
   inputSchema: {
-    query: z.string().min(2).describe('Words to look for. All of them must appear in the message.'),
+    query: z.string().min(2).max(MAX_SEARCH_QUERY_LENGTH).describe(
+      `Words to look for. All of them must appear in the message. At most ${MAX_SEARCH_TERMS} words `
+      + `of at most ${MAX_SEARCH_TERM_LENGTH} characters each.`,
+    ),
     jid: z.string().optional().describe('Restrict to one chat, using a `jid` from list-chats. Omit to search every chat.'),
     since: z.string().optional().describe('Only messages at or after this date, e.g. 2024-03-01 or 2024-03-01T12:00:00Z'),
     until: z.string().optional().describe('Only messages at or before this date'),
@@ -65,26 +70,33 @@ export default defineKindTool({
   handler: async ({ query, jid, since, until, fromMe, limit, includeReactions }) => {
     const { instance, scope } = useMcpAuth()
 
-    const terms = query.split(/\s+/).filter(Boolean)
+    const terms = splitSearchTerms(query, 'query')
     if (!terms.length) {
       throw createError({ statusCode: 400, message: '`query` needs at least one word to search for.' })
     }
 
-    if (jid) assertChatAllowed(scope, jid)
+    // A named chat is asserted exactly as before, then widened to the same
+    // person's other JID only when the token is scoped to that one too.
+    const links = await lidLinks(instance)
+    const chat = jid ? expandChat(scope, links, jid) : undefined
 
     const historyCheck = recentHistoryOnly(instance)
-    const { hits, truncated } = await searchMessages(instance, {
+    const { hits: stored, truncated } = await searchMessages(instance, {
       terms,
-      jid,
-      // A named chat is already checked above. Otherwise a scoped token gets its
-      // allowlist pushed into the query, so out-of-scope messages are never read.
-      allowedJids: jid || scope.allChats ? undefined : scope.chatJids,
+      jids: chat?.jids,
+      // Otherwise a scoped token gets its allowlist pushed into the query, so
+      // out-of-scope messages are never read.
+      allowedJids: chat || scope.allChats ? undefined : scope.chatJids,
       since,
       until,
       fromMe,
       includeReactions,
       limit,
     })
+
+    // Label each hit with its person's canonical id where this token may see it,
+    // so one conversation stored under two JIDs is never reported as two chats.
+    const hits = stored.map(hit => ({ ...hit, jid: displayJidInScope(scope, links, hit.jid) }))
 
     const [names, directory, partialHistory] = await Promise.all([
       chatNames(instance, hits),
@@ -108,6 +120,9 @@ export default defineKindTool({
       count: hits.length,
       // Say so rather than presenting a capped page as the whole answer.
       truncated,
+      // What a named chat covered, as `read-messages` reports it.
+      ...(chat && chat.jids.length > 1 && { jids: chat.jids }),
+      ...(chat && chat.outOfScope > 0 && { linkedOutOfScope: chat.outOfScope }),
       // Same principle: a whole message class this search never looked at.
       ...(!includeReactions && { reactionsExcluded: true }),
       // And one more: messages from before the account was linked that were
