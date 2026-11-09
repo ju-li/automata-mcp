@@ -25,7 +25,8 @@ import { mentionedJidsOf } from './mentions'
  *
  *   1. The role is read-only. SELECT on "Message" is what reading and searching
  *      need; status reads add a column-level grant on "Instance" and "instanceId"
- *      on "Chat"/"Contact", and fall back without them (docs/whatsapp.md).
+ *      on "Chat"/"Contact", group names "remoteJid" and "name" on "Chat", and
+ *      both fall back without them (docs/whatsapp.md).
  *      Nothing here writes, and nothing here runs DDL — the schema belongs to
  *      Evolution's Prisma migrations.
  *   2. Every query carries `"instanceId" = <this account>`. `searchMessages`
@@ -905,6 +906,37 @@ export async function readLidLinks(instance: AppInstance): Promise<LidLinkRow[]>
       AND m.key->>'remoteJid' LIKE '%@lid'
     GROUP BY 1, 2
   `)
+}
+
+/**
+ * `"Chat".name` for every group chat of this account, keyed by group JID —
+ * `undefined` where Evolution stored no usable name. For `whatsapp-groups.ts`,
+ * which states how stale this column can be and why (written once, never on a
+ * rename).
+ *
+ * `"Chat"` carries `@@index([instanceId])` and one row per conversation, so this
+ * is a small indexed read, never a scan of `"Message"`. Three named columns —
+ * the optional grant in docs/whatsapp.md is column by column.
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`: a missing
+ * grant (42501) is told apart from an outage by the caller.
+ */
+export async function readGroupChatNames(instance: AppInstance): Promise<Map<string, string | undefined>> {
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const rows = await query(sql => sql<Array<{ remoteJid: string, name: string | null }>>`
+    SELECT "remoteJid", name
+    FROM "Chat"
+    WHERE "instanceId" = ${instanceId}
+      AND "remoteJid" LIKE '%@g.us'
+  `)
+
+  return new Map(rows.map((row) => {
+    const name = row.name?.trim()
+    // A group named after its own id is no name at all.
+    return [row.remoteJid, name && name !== row.remoteJid.split('@')[0] ? name : undefined]
+  }))
 }
 
 /**

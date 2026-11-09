@@ -761,4 +761,32 @@ export const APP_MIGRATIONS: AppMigration[] = [
       CREATE INDEX password_resets_expires_idx ON app.password_resets (expires_at);
     `,
   },
+  {
+    name: '0021_whatsapp_group_lookups',
+    sql: /* sql */ `
+      -- Group names no longer come from fetchAllGroups (a groupMetadata per
+      -- group, all at once: rate-overlimit bursts on large accounts, #175).
+      -- They come from Evolution's "Chat".name, and app.whatsapp_groups now
+      -- holds the answers of slow, one-group-at-a-time lookups instead of the
+      -- account's whole list. A row per group looked up:
+      --
+      --   fetched_at  the last lookup that answered; subject and size are
+      --               from it. NULL when every lookup of the group failed.
+      --   checked_at  the last lookup, answered or not, which paces the next.
+      --
+      -- Existing rows are scan answers, so both dates start as fetched_at.
+      ALTER TABLE app.whatsapp_groups
+        ALTER COLUMN fetched_at DROP NOT NULL,
+        ALTER COLUMN fetched_at DROP DEFAULT,
+        ADD COLUMN checked_at timestamptz;
+      UPDATE app.whatsapp_groups SET checked_at = fetched_at;
+      ALTER TABLE app.whatsapp_groups
+        ALTER COLUMN checked_at SET NOT NULL,
+        ALTER COLUMN checked_at SET DEFAULT now();
+
+      -- app.whatsapp_group_scans keeps its shape and becomes the per-account
+      -- lease for lookup runs: scanned_at = the last run that got an answer,
+      -- failed_at and failures = runs that got none, in a row.
+    `,
+  },
 ]

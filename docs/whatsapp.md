@@ -57,7 +57,7 @@ from a compromised web service — that process already holds `NUXT_DATABASE_URL
 the database's owner — but it does contain a bug in the app's own message queries
 to reading `"Message"`, where under the owner such a bug would reach every stored
 credential in the `app` schema. If you want that, the grants below serve reading,
-searching and connection status:
+searching, connection status and group names:
 
 ```sql
 CREATE ROLE wamcp_search LOGIN PASSWORD 'change-me';
@@ -68,6 +68,8 @@ GRANT SELECT ON "Message" TO wamcp_search;
 GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "updatedAt")
   ON "Instance" TO wamcp_search;
 GRANT SELECT ("instanceId") ON "Chat", "Contact" TO wamcp_search;
+-- Group names, read from Evolution's own chat rows.
+GRANT SELECT ("remoteJid", "name") ON "Chat" TO wamcp_search;
 ```
 
 The `"Instance"` grant is column by column on purpose: the same row holds
@@ -126,13 +128,20 @@ Worth knowing before you go looking for a bug:
   not keep the one signal that says a chat was read on the phone, and an unread
   count derived from message statuses was tried and found wrong (651 "unread" on
   an account with no unread badges).
-- **Group names can lag by up to six hours.** Fetching an account's groups from
-  WhatsApp costs about two WhatsApp queries per group and drew `rate-overlimit`
-  answers when it ran every few minutes, so it runs at most once every six hours
-  per account (an hour after a failed attempt), in the background, and the
-  result is kept in `app.whatsapp_groups`. A group joined or renamed since the
-  last scan shows its old name, or the contact name or bare id, until the next
-  one. Chats and their last messages are read live; only group names lag.
+- **Group names can lag behind a rename by up to a week.** Asking WhatsApp for
+  all of an account's groups at once costs two WhatsApp queries per group, fired
+  together, and drew `rate-overlimit` answers on large accounts however rarely
+  it ran — so it is never done. Group names come from Evolution's own chat rows
+  (`"Chat".name`), which cost WhatsApp nothing but are written once, when the
+  chat first arrives, and never updated on a rename. Groups with no name there,
+  and every group once a week, are looked up one at a time — at most four per
+  account every 15 minutes, five seconds apart — and the answers kept in
+  `app.whatsapp_groups`. So a renamed group shows its old name until its next
+  lookup, a group with no stored name shows the contact name or bare id until
+  its first one, and a group's member count appears only once it has been
+  looked up. Without the `"Chat"` grant above, names come from the lookups
+  alone, and a warning says so in the log. Chats and their last messages are
+  read live; only group names lag.
 - The scope editor lists the tools of the connection's own kind, and lists both
   read tools whether or not the database URL is set. It deliberately does not
   hide a tool with an unmet prerequisite: both read tools need that URL, so
@@ -157,6 +166,7 @@ Worth knowing before you go looking for a bug:
   GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "updatedAt")
     ON "Instance" TO evo_reader;
   GRANT SELECT ("instanceId") ON "Chat", "Contact" TO evo_reader;
+  GRANT SELECT ("remoteJid", "name") ON "Chat" TO evo_reader;
   ```
 
   It is checked before it is stored — including that `"Message"` is actually
