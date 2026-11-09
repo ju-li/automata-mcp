@@ -41,24 +41,50 @@ import { canReadMessages, readGroupChatNames } from './evolution-db'
  *   - groups with no name from (1) or (2) — joined after pairing, or with no
  *     `"Chat"` row at all — each retried at most every `GROUP_UNNAMED_RETRY_MS`;
  *   - then every other group whose last lookup is older than
- *     `GROUP_REFRESH_AGE_MS`, never-looked-up first, which is what catches
- *     renames and keeps `participantCount` roughly right.
+ *     `GROUP_REFRESH_AGE_MS`, which is what catches renames and keeps
+ *     `participantCount` roughly right — groups a lookup has answered before
+ *     first, oldest lookup first, and only then named groups no lookup ever
+ *     answered. Those are mostly groups the account has left (#178):
+ *     `"Chat"` keeps a named row for every group the account was ever in, and
+ *     the groups it is still in were answered by the old full scans.
+ *
+ * Groups the account is no longer in are not looked up for
+ * `GROUP_GONE_RETRY_MS` (`gone_at`), once WhatsApp has said so.
  *
  * At the rates below an account costs WhatsApp at most a few dozen queries an
  * hour, spaced out, and a few hundred groups refresh over a working day each
  * week.
  *
- * A run in which every lookup failed is an account that cannot answer (no live
- * socket) far more often than a run of groups it left, so every replica then
- * waits out a back-off that doubles with each such run in a row (1 h, 2 h, 4 h …
- * a day; `groupLookupBackoffMs`) and resets on the next run that got anything.
+ * **Why a lookup failed decides who pays for it** (`classifyLookupFailure`).
+ * Evolution 2.3.7's `findGroup` catches every `groupMetadata` error alike and
+ * answers 404 `{ response: { message: ['Error fetching group', String(error)] } }`,
+ * so the second entry is the only thing that tells them apart: Baileys turns
+ * WhatsApp's `<error text=…>` into `Error: <text>`, and its own socket failures
+ * read `Error: Connection Closed` / `Error: Timed Out`.
+ *
+ *   - `forbidden`, `item-not-found`, `not-authorized` — the account is not in
+ *     that group (left, removed, group deleted). WhatsApp answered, so the
+ *     account is fine: the **group** is marked gone, and the run counts as one
+ *     that got an answer. Logged at info, it is expected.
+ *   - `rate-overlimit` — WhatsApp is throttling the number. The run stops at
+ *     once, sends nothing more, and backs the account off even if earlier
+ *     lookups answered.
+ *   - anything else (dead socket, timeout, no body, a text never seen) — the
+ *     account may not be able to answer; a run where nothing answered backs
+ *     off, as before. Unknown text fails safe on this side, and its text is
+ *     logged (it is WhatsApp's error condition, never personal data) so a
+ *     new one can be classified.
+ *
+ * The back-off: every replica waits it out, it doubles with each such run in a
+ * row (1 h, 2 h, 4 h … a day; `groupLookupBackoffMs`) and resets on the next
+ * run that got an answer.
  *
  * Staleness, stated once and relied on by `chats.ts`:
  *
  *   - a renamed group shows its old subject until its next lookup — up to
  *     `GROUP_REFRESH_AGE_MS`, longer while the account is disconnected;
- *   - a group the account left keeps whatever name it had; its lookups fail,
- *     so after `GROUP_MAX_AGE_MS` only `"Chat".name` names it;
+ *   - a group the account left keeps whatever name it had; its lookups are
+ *     refused, so after `GROUP_MAX_AGE_MS` only `"Chat".name` names it;
  *   - logging out clears nothing — a subject belongs to the group, not to the
  *     account.
  *
@@ -96,6 +122,8 @@ export const GROUP_LOOKUP_MAX_FAILURE_BACKOFF_MS = 24 * 60 * 60_000
 const GROUP_LOOKUP_FAILURE_EXPONENT_CAP = 10
 /** A stored lookup older than this no longer names anything. */
 export const GROUP_MAX_AGE_MS = 30 * 24 * 60 * 60_000
+/** A group WhatsApp said the account is not in is asked about again after this long — in case it rejoined. */
+export const GROUP_GONE_RETRY_MS = 30 * 24 * 60 * 60_000
 /** Groups remembered per account as asked for and unnamed (`noteUnnamed`). */
 const MAX_NOTED_UNNAMED = 500
 /** What Evolution's `groupJidSchema` accepts; anything else is never looked up. */
@@ -181,6 +209,8 @@ interface StoredGroup extends GroupInfo {
   fetchedAt?: string
   /** The last lookup, successful or not. */
   checkedAt: string
+  /** When WhatsApp last said the account is not in this group; cleared by an answer. */
+  goneAt?: string
 }
 
 interface GroupSources {
@@ -257,8 +287,8 @@ async function readChatNames(instance: AppInstance): Promise<Map<string, string 
 async function readStoredGroups(instanceId: string): Promise<Map<string, StoredGroup> | undefined> {
   try {
     const sql = await appDb()
-    const rows = await sql<Array<{ jid: string, subject?: string, size?: number, fetched_at?: string, checked_at: string }>>`
-      SELECT jid, subject, size, fetched_at, checked_at
+    const rows = await sql<Array<{ jid: string, subject?: string, size?: number, fetched_at?: string, checked_at: string, gone_at?: string }>>`
+      SELECT jid, subject, size, fetched_at, checked_at, gone_at
       FROM app.whatsapp_groups
       WHERE instance_id = ${instanceId}`
 
@@ -267,6 +297,7 @@ async function readStoredGroups(instanceId: string): Promise<Map<string, StoredG
       size: row.size,
       fetchedAt: row.fetched_at,
       checkedAt: row.checked_at,
+      goneAt: row.gone_at,
     }]))
   }
   catch (error) {
@@ -289,40 +320,110 @@ async function refreshGroups(instance: AppInstance, evolution: EvolutionClient):
   if (!due.length || !await claimGroupLookups(instance.id)) return sources.merged
 
   const merged = new Map(sources.merged)
+  const noted = unnamedByAccount.get(instance.id)
   let succeeded = 0
-  let lastFailure: unknown
+  let gone = 0
+  let tried = 0
+  let throttled: LookupFailure | undefined
+  let lastFailure: LookupFailure | undefined
 
   for (const [index, jid] of due.entries()) {
     if (index > 0) await delay(GROUP_LOOKUP_DELAY_MS)
-    const found = await lookUpGroup(instance, evolution, jid).catch((error: unknown) => {
-      lastFailure = error
-      return undefined
-    })
-    await storeLookup(instance.id, jid, found)
-    if (!found) continue
-    succeeded++
-    unnamedByAccount.get(instance.id)?.delete(jid)
-    merged.set(jid, { subject: found.subject ?? merged.get(jid)?.subject, size: found.size })
+    tried++
+    let found: GroupInfo | undefined
+    let failure: LookupFailure | undefined
+    try {
+      found = await lookUpGroup(instance, evolution, jid)
+      if (!found) failure = { kind: 'other', reason: 'an answer about another group' }
+    }
+    catch (error) {
+      failure = classifyLookupFailure(error)
+    }
+
+    if (found) {
+      await storeLookup(instance.id, jid, found)
+      succeeded++
+      noted?.delete(jid)
+      merged.set(jid, { subject: found.subject ?? merged.get(jid)?.subject, size: found.size })
+      continue
+    }
+
+    if (failure?.kind === 'gone') {
+      await storeGone(instance.id, jid)
+      gone++
+      noted?.delete(jid)
+      continue
+    }
+
+    await storeLookup(instance.id, jid, undefined)
+    lastFailure = failure
+    if (failure?.kind === 'throttled') {
+      // Every further query now only adds to what WhatsApp is counting.
+      throttled = failure
+      break
+    }
   }
 
-  if (succeeded > 0) {
+  if (gone > 0) {
+    console.info(`[groups] ${gone} of ${tried} group lookups for connection ${instance.id} named groups the account is no longer in; `
+      + `those are not looked up again for ${GROUP_GONE_RETRY_MS / 86_400_000} days`)
+  }
+
+  if (!throttled && succeeded + gone > 0) {
     await recordGroupLookupRun(instance.id)
   }
   else {
     const backoffMs = await recordGroupLookupFailure(instance.id)
     const next = backoffMs === undefined ? 'retried when the lease lapses' : `next run in ${backoffMs / 60_000} min`
-    const reason = lastFailure instanceof Error ? lastFailure.message : lastFailure ?? 'unexpected response'
-    console.warn(`[groups] every group lookup failed for connection ${instance.id} (${due.length} tried); ${next}:`, reason)
+    const reason = lastFailure?.reason ?? 'unexpected response'
+    if (throttled) {
+      console.warn(`[groups] WhatsApp is rate-limiting group lookups for connection ${instance.id}; run stopped after ${tried} of ${due.length}, ${next}:`, reason)
+    }
+    else {
+      console.warn(`[groups] every group lookup failed for connection ${instance.id} (${tried} tried); ${next}:`, reason)
+    }
   }
 
   return merged
+}
+
+/** Why one lookup failed, as far as it decides who pays for it — see the header. */
+export interface LookupFailure {
+  kind: 'gone' | 'throttled' | 'other'
+  /** For the log: WhatsApp's error text when Evolution relayed it, else the request error. */
+  reason: string
+}
+
+/** WhatsApp's answers meaning "the account is not in this group" — standard XMPP error conditions. */
+const NOT_A_MEMBER = /^(?:Error: )?(?:forbidden|item-not-found|not-authorized)$/i
+const RATE_LIMITED = /rate-overlimit/i
+
+/**
+ * Sort a failed `findGroupInfos` by what failed. Only a 404 carrying one of
+ * the exact texts in `NOT_A_MEMBER` is a group the account is not in — anything
+ * looser would let an unrecognised failure skip the account's back-off.
+ */
+export function classifyLookupFailure(error: unknown): LookupFailure {
+  const raw = (error as { data?: { response?: { message?: unknown } } } | undefined)?.data?.response?.message
+  const entries = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]
+  const texts = entries.filter((e): e is string => typeof e === 'string').map(e => e.trim())
+  // Entry 0 is Evolution's own 'Error fetching group'; the cause follows it.
+  const cause = texts.length > 1 ? texts.slice(1).join('; ') : undefined
+  const reason = (cause ?? (error instanceof Error ? error.message : String(error ?? 'no answer'))).slice(0, 200)
+
+  if (cause && RATE_LIMITED.test(cause)) return { kind: 'throttled', reason }
+  if (httpStatusOf(error) === 404 && texts.slice(1).some(text => NOT_A_MEMBER.test(text))) return { kind: 'gone', reason }
+  return { kind: 'other', reason }
 }
 
 /**
  * Which groups this run asks about, best first, at most `GROUP_LOOKUPS_PER_RUN`.
  *
  * Unnamed groups first — those a caller asked to label before the rest — then
- * named ones due a refresh, never-looked-up first and then oldest lookup first.
+ * named ones due a refresh: oldest lookup first among groups a lookup has
+ * answered, then groups no lookup ever answered or one said the account left
+ * (mostly dead, #178). Groups seen gone within `GROUP_GONE_RETRY_MS` are not
+ * candidates at all, even when a caller asks for them.
  */
 function dueLookups(sources: GroupSources, noted: ReadonlySet<string>): string[] {
   const now = Date.now()
@@ -331,12 +432,15 @@ function dueLookups(sources: GroupSources, noted: ReadonlySet<string>): string[]
   const candidates: Array<{ jid: string, rank: number, checkedAt: number }> = []
   for (const jid of known) {
     if (!GROUP_JID.test(jid)) continue
-    const checked = sources.stored.get(jid)?.checkedAt
-    const checkedAt = checked ? Date.parse(checked) : Number.NEGATIVE_INFINITY
+    const stored = sources.stored.get(jid)
+    if (stored?.goneAt && now - Date.parse(stored.goneAt) < GROUP_GONE_RETRY_MS) continue
+    const checkedAt = stored?.checkedAt ? Date.parse(stored.checkedAt) : Number.NEGATIVE_INFINITY
     const named = Boolean(sources.merged.get(jid)?.subject)
     const age = now - checkedAt
     if (named ? age < GROUP_REFRESH_AGE_MS : age < GROUP_UNNAMED_RETRY_MS) continue
-    candidates.push({ jid, rank: named ? 2 : noted.has(jid) ? 0 : 1, checkedAt })
+    const answeredBefore = Boolean(stored?.fetchedAt) && !stored?.goneAt
+    const rank = !named ? (noted.has(jid) ? 0 : 1) : answeredBefore ? 2 : 3
+    candidates.push({ jid, rank, checkedAt })
   }
 
   return candidates
@@ -388,7 +492,7 @@ async function storeLookup(instanceId: string, jid: string, found: GroupInfo | u
         VALUES (${instanceId}, ${jid}, ${found.subject ?? null}, ${found.size ?? null}, now(), now())
         ON CONFLICT (instance_id, jid) DO UPDATE
           SET subject = EXCLUDED.subject, size = EXCLUDED.size,
-              fetched_at = now(), checked_at = now()`
+              fetched_at = now(), checked_at = now(), gone_at = NULL`
     }
     else {
       await sql`
@@ -396,6 +500,23 @@ async function storeLookup(instanceId: string, jid: string, found: GroupInfo | u
         VALUES (${instanceId}, ${jid}, now())
         ON CONFLICT (instance_id, jid) DO UPDATE SET checked_at = now()`
     }
+  }
+  catch (error) {
+    console.warn(`[groups] could not store a group lookup for connection ${instanceId}:`, error instanceof Error ? error.message : error)
+  }
+}
+
+/**
+ * Record that WhatsApp said the account is not in this group. Subject, size and
+ * `fetched_at` stay — a left group keeps its last name until that ages out.
+ */
+async function storeGone(instanceId: string, jid: string): Promise<void> {
+  try {
+    const sql = await appDb()
+    await sql`
+      INSERT INTO app.whatsapp_groups (instance_id, jid, checked_at, gone_at)
+      VALUES (${instanceId}, ${jid}, now(), now())
+      ON CONFLICT (instance_id, jid) DO UPDATE SET checked_at = now(), gone_at = now()`
   }
   catch (error) {
     console.warn(`[groups] could not store a group lookup for connection ${instanceId}:`, error instanceof Error ? error.message : error)
@@ -440,7 +561,10 @@ async function claimGroupLookups(instanceId: string): Promise<boolean> {
   }
 }
 
-/** A run that got at least one answer: reset the failure count, release the lease. */
+/**
+ * A run that got at least one answer — a group, or WhatsApp saying the account
+ * is not in one: reset the failure count, release the lease.
+ */
 async function recordGroupLookupRun(instanceId: string): Promise<void> {
   try {
     const sql = await appDb()
@@ -455,7 +579,7 @@ async function recordGroupLookupRun(instanceId: string): Promise<void> {
 }
 
 /**
- * A run where every lookup failed: one more failure in a row, and every replica
+ * A run where nothing answered, or WhatsApp rate-limited it: one more failure in a row, and every replica
  * now waits out the back-off it sets. Releases the lease. Answers that back-off
  * for the log, or `undefined` when the write failed — the lease then runs out.
  */

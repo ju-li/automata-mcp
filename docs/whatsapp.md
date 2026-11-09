@@ -142,6 +142,14 @@ Worth knowing before you go looking for a bug:
   looked up. Without the `"Chat"` grant above, names come from the lookups
   alone, and a warning says so in the log. Chats and their last messages are
   read live; only group names lag.
+
+  Groups the account has left keep a chat row, so they get looked up too, and
+  WhatsApp refuses: such a group is marked gone, keeps its last name, and is
+  not asked about again for 30 days. The log says so at info level — that is
+  expected, not a fault. Only lookups that nothing answered, or that WhatsApp
+  answered with `rate-overlimit`, back the account's lookups off (1 h, doubling
+  to a day); those log `[groups] every group lookup failed` or `[groups]
+  WhatsApp is rate-limiting group lookups` with WhatsApp's error text.
 - The scope editor lists the tools of the connection's own kind, and lists both
   read tools whether or not the database URL is set. It deliberately does not
   hide a tool with an unmet prerequisite: both read tools need that URL, so
