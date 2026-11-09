@@ -379,6 +379,23 @@ export async function countInstanceRows(instance: AppInstance): Promise<{ messag
   }
 }
 
+/**
+ * Whether this account has any stored message — the unpaired reaper's question
+ * (`pairingEvidence`), which needs a yes or no, not `countInstanceRows`' three
+ * counts. One probe of `@@index([instanceId])` however large the account (#156).
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`.
+ */
+export async function hasInstanceMessages(instance: AppInstance): Promise<boolean> {
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const [row] = await query(sql => sql<Array<{ found: boolean }>>`
+    SELECT EXISTS (SELECT 1 FROM "Message" WHERE "instanceId" = ${instanceId}) AS found
+  `)
+  return row?.found === true
+}
+
 export interface MessageSearchOptions {
   /** Every term must appear in the message body. Already split, not yet escaped. */
   terms: string[]

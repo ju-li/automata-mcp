@@ -31,7 +31,8 @@ interface StatusResponse {
   profileName?: string
   profilePicUrl?: string
   number?: string
-  stats: { messages: number, chats: number, contacts: number }
+  /** Absent when the counts could not be measured in time — unknown, not zero. */
+  stats?: { messages: number, chats: number, contacts: number }
 }
 
 interface QrResponse {
@@ -553,7 +554,7 @@ const importHistory = () => backToPairing(
         :id="id"
         kind="whatsapp"
         :profile="{ name: data?.profileName || 'WhatsApp', detail: data?.number || '—', picUrl: data?.profilePicUrl }"
-        :stats="data?.stats ?? { messages: 0, chats: 0, contacts: 0 }"
+        :stats="data?.stats"
         :can-read-messages="data?.instance.canReadMessages !== false"
       />
 
