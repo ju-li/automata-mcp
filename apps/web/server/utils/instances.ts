@@ -748,9 +748,11 @@ async function storePaired(instance: AppInstance): Promise<void> {
  * reaper deletes it. Records `paired_at` when the answer is yes.
  *
  *   paired    Evolution's live state is `open`, its row carries an `ownerJid`,
- *             or its database holds messages for the account. The last one is
- *             what protects a connection paired before `paired_at` existed and
- *             logged out since: no `ownerJid`, but its history is still there.
+ *             or its database holds messages for the account. `ownerJid`
+ *             survives a logout: 2.3.7 writes it only when the socket opens and
+ *             never clears it (logout's `cleaningUp` sets `connectionStatus`
+ *             alone). The messages check is a second line for a row that lost
+ *             it some other way.
  *   unpaired  Evolution answered, and none of the above. Includes Evolution
  *             no longer knowing the instance at all (404).
  *   unknown   Something could not be asked. Never deleted on.

@@ -11,7 +11,7 @@ connections alone is **Postgres** and **web**.
 | **Redis** *(WhatsApp only)* | Railway template | — | managed |
 | **evolution** *(WhatsApp only)* | image `evoapicloud/evolution-api:v2.3.7` | 8080 | `/evolution/instances` |
 | **telegram-bridge** *(Telegram only)* | image `ghcr.io/ju-li/automata-mcp-telegram-bridge:1`, or this repo, root directory `/`, Dockerfile path `/apps/telegram-bridge/Dockerfile` | 8095 | — |
-| **web** | image `ghcr.io/ju-li/automata-mcp-web:1`, or this repo, root directory `/`, Dockerfile path `apps/web/Dockerfile` | 3000 | — |
+| **web** | image `ghcr.io/ju-li/automata-mcp-web:1`, or this repo, root directory `/`, Dockerfile path `apps/web/Dockerfile` | Railway's `PORT` (8080 unless you set it) | — |
 
 The published images are the simpler route and the one a Railway template uses —
 see [Releases](releases.md). Building from the repo is for running unreleased code.
@@ -130,7 +130,8 @@ NUXT_DATABASE_URL=${{Postgres.DATABASE_URL}}
 NUXT_PUBLIC_APP_URL=https://<web-domain>
 
 # Mail. Optional — with NUXT_SMTP_HOST empty, alerts and invitation emails are
-# computed and not delivered.
+# computed and not delivered, email verification is off and "Forgot password?"
+# is unavailable (see self-hosting.md#password-reset).
 NUXT_SMTP_HOST=<smtp host>
 NUXT_SMTP_PORT=587
 NUXT_SMTP_USERNAME=<username>
@@ -138,6 +139,7 @@ NUXT_SMTP_PASSWORD=<password>
 NUXT_SMTP_TLS=false          # false = STARTTLS on 587; true = implicit TLS on 465
 NUXT_MAIL_FROM=<a from address the provider will accept>
 NUXT_MAIL_FROM_NAME=Automata MCP
+NUXT_OPS_ALERT_EMAIL=<your address>   # optional; reconnect loops on this Evolution (alerts.md)
 
 # Checked on both Evolution's and the Telegram bridge's webhooks
 NUXT_WEBHOOK_SECRET=<openssl rand -hex 32>
@@ -200,7 +202,7 @@ Nothing to do. The web service creates its schema in Postgres on first boot —
 look for `[app-db] applied migrations` in its logs.
 
 Then open the web service's domain and sign up. The first account becomes
-the admin; invite everyone else from the Team page.
+the admin; invite everyone else from the Organization page.
 
 ## Notes
 

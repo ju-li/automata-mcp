@@ -84,7 +84,10 @@ count only that account's rows, caching the counts for five minutes (the history
 import screen after pairing asks for them fresh; the alert sweep reads no counts
 at all). A role created before these grants existed still works: status falls
 back to `fetchInstances`, cached per connection for five minutes, and the web
-log says a grant is missing. Without this URL at all — a bring-your-own server
+log says a grant is missing. A count that is only *slow* — it hit the statement
+timeout, or the account already has a read running — never falls back, since
+`fetchInstances` would scan every account to answer for one: the dashboard shows
+the last counts, or a dash, and the log says the count was too slow. Without this URL at all — a bring-your-own server
 with no database URL — that cached fallback is the only path.
 
 `"updatedAt"` is what tells a reconnect loop from a healthy connection (see
@@ -113,8 +116,16 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
 Worth knowing before you go looking for a bug:
 
 - Both cover whatever Evolution holds: the history imported at pairing plus
-  everything since. An account paired before full-history sync was turned on has
-  only what arrived after — see [Importing existing history](#importing-existing-history).
+  everything since. An account created without **Import full history** (the
+  default) holds only the recent slice WhatsApp hands any new device, and one
+  paired before history import existed has only what arrived after — see
+  [Recent history only](#recent-history-only) and
+  [Importing existing history](#importing-existing-history).
+- Searches take at most 10 words of at most 100 characters each (500 characters
+  in all). On this deployment's own message database each connection runs one
+  read at a time with up to 8 more queued; past that a read answers 429 and asks
+  the caller to wait. Status reads use a separate pool, so a busy account's
+  searches never delay its status or the alert sweep.
 - Reads are deduplicated by message id, so `totalMatching` counts distinct
   messages and can be quoted as an answer. It will often be smaller than the row
   count Evolution's own API reports for the same range. The two are not
@@ -182,8 +193,8 @@ Worth knowing before you go looking for a bug:
   indistinguishable from an account with no messages.
 
 On Railway, Evolution's Postgres is its own service — use its private URL, and
-note the port there is whatever that service actually listens on (see "Pin the
-ports").
+note the port there is whatever that service actually listens on (see [Pin the
+ports](deploy-railway.md#pin-the-ports)).
 
 ## Chats addressed by LID (`…@lid`)
 
@@ -309,18 +320,16 @@ what it deletes:
   does not clear it, so a connection that was paired and later signed out is
   never removed. Rows that existed before this was added were backfilled from
   alert history and, where Evolution shares the app's database, from Evolution's
-  `ownerJid` and stored messages. One case neither the backfill nor the live
-  check below can see: a connection signed out *before* upgrading, on a server
-  whose database the app has no URL for, that never raised an alert. It looks
-  exactly like one nobody paired, and the first run after the upgrade removes
-  it. To keep one, add its database URL (**Enable reading**) or pair it again
-  first.
+  `ownerJid` and stored messages. A connection signed out before upgrading is
+  still recognised: Evolution keeps the account's `ownerJid` through a logout,
+  and the live check below reads it (through Evolution's API when the app has
+  no URL for that server's database).
 - **Re-checked live just before deleting.** If Evolution now reports the account
   `open` or linked, or its database holds messages for it, the connection is
   marked paired and kept. If the check can't reach Evolution or its database,
-  the connection is kept and checked again on the next run. A dedicated role
-  without the `"Chat"`/`"Contact"` grants above counts as can't-reach, so no
-  connection read through such a role is removed until the grants are added.
+  the connection is kept and checked again on the next run. A role that cannot
+  read `"Message"` counts as can't-reach; without the `"Instance"` grant the
+  check asks Evolution's API instead.
 - **Deleted the same way as the Delete button**: the instance is first removed
   from Evolution, then the row. If this deployment has no admin key for the
   connection's server, the connection is kept, because deleting the row would

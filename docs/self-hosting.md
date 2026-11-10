@@ -85,9 +85,11 @@ ignored. `PORT` is the one extra; it has no line there.
 |---|---|
 | `NUXT_PUBLIC_APP_URL` | the public address (above) |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Telegram — from <https://my.telegram.org>, both or neither. Without them the app tells an admin what to set. See [Telegram connections](telegram.md). |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS`, `MAIL_FROM`, `MAIL_FROM_NAME` | [connection alerts](alerts.md) and invitation emails |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS`, `MAIL_FROM`, `MAIL_FROM_NAME` | [connection alerts](alerts.md), invitation, email-verification and password-reset emails. Without `SMTP_HOST`, verification is off (unless `EMAIL_VERIFICATION=required`) and passwords cannot be reset from the app |
+| `OPS_ALERT_EMAIL` | where reconnect loops on this container's Evolution are reported — see [Telling the operator about a reconnect loop](alerts.md#telling-the-operator-about-a-reconnect-loop); needs SMTP |
 | `ALLOW_PRIVATE_TARGETS` | `true` lets connections reach private and loopback addresses — see below |
 | `SIGNUP`, `SIGNUP_CODE` | who can create an account — see [Who can sign up](#who-can-sign-up) |
+| `EMAIL_VERIFICATION` | `auto` / `required` / `off` — see [Email verification](#email-verification) |
 | `PORT` | the web app's port inside the container (default 3000) |
 
 `ALLOW_PRIVATE_TARGETS=true` (or `NUXT_ALLOW_PRIVATE_TARGETS=true`) reaches
@@ -143,8 +145,11 @@ Telegram also needs your own `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from
 admin what to set. See [Telegram connections](telegram.md).
 
 Mail is optional: with `SMTP_HOST` empty, [connection alerts](alerts.md) and
-invitation emails are not delivered; an invitation link is still shown on
-screen when it is created.
+invitation emails are not delivered (an invitation link is still shown on
+screen when it is created), email verification stays off, and passwords cannot
+be reset from the app — see [Password reset](#password-reset). Set
+`OPS_ALERT_EMAIL` to have reconnect loops on your Evolution server reported to
+you — see [Telling the operator about a reconnect loop](alerts.md#telling-the-operator-about-a-reconnect-loop).
 
 `ALLOW_PRIVATE_TARGETS=true` lets connections reach private and loopback
 addresses, such as a database on your LAN. It is off by default; read the
@@ -196,7 +201,7 @@ can sign up without an invitation:
 
 Invitation links work in every mode. Neither variable is required: a new
 install with both unset lets you sign up first, and you invite everyone else
-from the Team page.
+from the Organization page.
 
 Until that first signup, a fresh install on a public address belongs to
 whoever opens it first. If that window matters, set `SIGNUP_CODE` before you
@@ -264,12 +269,17 @@ docker compose exec web node -e "const c=require('node:crypto');const s=c.random
 ```
 
 In the single container, run the same with `docker exec <container> /opt/node22/bin/node -e …`.
-Then store it and end the account's sessions:
+Then open `psql` — `docker compose exec postgres psql -U automata -d automata`
+with Compose (your `POSTGRES_USER` / `POSTGRES_DB` if you changed them), or
+`docker exec -it -u postgres <container> psql -h /run/postgresql -d automata`
+in the single container — and store it, ending the account's sessions and
+pending sign-ins. Write the address in lower case; that is how it is stored.
 
 ```sql
 BEGIN;
 UPDATE app.users SET password_hash = '<the printed scrypt$… string>', updated = now() WHERE email = 'person@example.com';
 DELETE FROM app.sessions WHERE user_id = (SELECT id FROM app.users WHERE email = 'person@example.com');
+DELETE FROM app.mfa_challenges WHERE purpose = 'login' AND user_id = (SELECT id FROM app.users WHERE email = 'person@example.com');
 COMMIT;
 ```
 
@@ -323,6 +333,7 @@ has.
 | `whatsapp_groups`, `whatsapp_group_scans` | WhatsApp group names and sizes from slow, one-group-at-a-time lookups, and when each account last ran them — see [WhatsApp](whatsapp.md) |
 | `totp_credentials`, `webauthn_credentials`, `recovery_codes`, `mfa_challenges` | second sign-in factors — see [Two-factor authentication](two-factor.md) |
 | `email_verifications` | signups and address changes waiting to be confirmed — see [Email verification](#email-verification) |
+| `password_resets` | password resets waiting to be used — SHA-256 of the link and of the code, attempts, expiry (30 minutes); one per account — see [Password reset](#password-reset) |
 | `mail_sync_state`, `mail_folders`, `mail_messages` | synced IMAP headers, never bodies — see [Email (IMAP) connections](imap.md) |
 | `hosted_events`, `entitlement_defaults` | the hosted offering only; empty on a self-hosted deployment — see [billing.md](billing.md) |
 

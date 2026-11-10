@@ -8,7 +8,9 @@
 3. **WhatsApp:** continue to the QR code and scan it — WhatsApp → Settings →
    Linked devices → Link a device. To use an Evolution server other than this
    app's, tick **Use my own Evolution API server** first (see [Bring your own Evolution server](whatsapp.md#bring-your-own-evolution-server)).
-   That option exists only on self-hosted deployments.
+   That option exists only on self-hosted deployments. Tick **Import full
+   history** to import everything the phone holds; it is off by default, and on
+   the hosted Free plan only recent history is imported.
    A WhatsApp connection not paired within an hour is deleted with its tokens;
    the pairing screen counts down (see [Connections never paired are removed after an hour](whatsapp.md#connections-never-paired-are-removed-after-an-hour)).
    **Telegram:** on the connection's page press **Show QR code** and scan it —
@@ -22,7 +24,7 @@
    **Email:** enter the IMAP server and an app password. It is proved by logging
    in before anything is saved, and headers start syncing at once (see
    [Email (IMAP) connections](imap.md)).
-4. On the connection's dashboard, create a **New connector token**: a name, an
+4. On the connection's dashboard, press **New token**: a name, an
    expiry (30 days, 90 days — the default — 1 year, or never) and a scope.
 5. Add it to Claude. The **How to connect** dialog has the steps for Claude.ai
    (Settings → Connectors → Add custom connector), Claude Code
@@ -45,9 +47,9 @@ Connections belong to an **organization**, not to a person. Signing up creates
 one and makes you its admin; you join someone else's only by accepting an
 invitation, and an account belongs to exactly one organization.
 
-- **Admins** manage the organization (**Team** page): invite people, change
+- **Admins** manage the organization (**Organization** page): invite people, change
   roles, remove members, create and delete connections, assign them, and mint
-  or edit tokens for anyone.
+  or edit tokens for anyone who can reach the connection.
 - **Members** use the connections assigned to them. They see only their own
   tokens there, and may revoke a token or rotate its secret but never widen its
   scope. Reconnecting, re-pairing and deleting are management, so a member is
@@ -58,7 +60,14 @@ with that address, so a forwarded link is useless to anyone else. The link is
 shown once when it is created and can also be emailed (see [Connection alerts](alerts.md)
 for SMTP). Accepting moves you out of your current organization, which is
 refused while that organization still owns connections or while you are its
-only admin with other members left.
+only admin with other members left. With email verification on, an invited
+signup must be confirmed in the same browser it was started in.
+
+**Forgot your password?** **Forgot password?** on the sign-in page mails a link
+and a code, valid for 30 minutes (needs SMTP). An admin can send the same mail to
+a member from the **Organization** page and never sees the link, code or new
+password. A reset never signs you in: it ends every session of the account, and
+two-factor is still asked for at the next sign-in. Connector tokens keep working.
 
 Anything that takes away someone's access to a connection — unassigning it,
 demoting an admin, removing a member — revokes the tokens they held on it, and
@@ -75,10 +84,10 @@ comes back.
 | Tool | Kind | | What it does |
 |---|---|---|---|
 | `get-connection-status` | WhatsApp | read | Whether the account is paired and connected (`open`); `flapping` when it reads `open` but keeps reconnecting — shown as **Unstable** on the dashboard, fixed by restarting the Evolution service, not by Reconnect |
-| `list-chats` | WhatsApp | read | Conversations in scope, most recently active first, with the `jid` other tools take; says `hasMore` when it returned one page of several. No read/unread status — WhatsApp's read state isn't available to it |
-| `read-messages` | WhatsApp | read | One chat, newest first, 1–200 per page (default 50), optional `since` / `until`; reports `hasMore`, `nextPage`, `covered` and `totalMatching` |
+| `list-chats` | WhatsApp | read | Conversations in scope, most recently active first, with the `jid` other tools take; one person stored under both a LID and a phone number is one row listing both in `jids`, and a LID chat carries `phoneNumber` when WhatsApp has revealed it; says `hasMore` when it returned one page of several. No read/unread status — WhatsApp's read state isn't available to it |
+| `read-messages` | WhatsApp | read | One chat, newest first, 1–200 per page (default 50), optional `since` / `until`; reports `hasMore`, `nextPage`, `covered` and `totalMatching`; `recentHistoryOnly: true` when the account's import was partial |
 | `search-messages` | WhatsApp | read | Messages containing every word of `query`, across chats in scope or one `jid`; optional date range and `fromMe`; up to 100 matches (default 20) |
-| `send-text-message` | WhatsApp | **write** | Send text to a number in international format; a refusal (e.g. a number not on WhatsApp) comes back with WhatsApp's reason |
+| `send-text-message` | WhatsApp | **write** | Send text to a chat's full `jid` exactly as `list-chats` / `read-messages` return it (including `…@lid` chats), or to a phone number in international format for someone with no chat yet; bare LID digits are refused; a refusal (e.g. a number not on WhatsApp) comes back with WhatsApp's reason |
 | `get-telegram-status` | Telegram | read | Whether the account is linked and online, who it is signed in as, and how far sync has got |
 | `list-telegram-chats` | Telegram | read | Synced chats in scope — private, groups, supergroups, channels — most recently active first, with the `chatId` other tools take; 1–200 per page (default 100) |
 | `read-telegram-messages` | Telegram | read | One chat, newest first, with the same paging envelope as `read-messages`; optional forum `topicId`; says when older history was never synced |
@@ -104,7 +113,10 @@ Limits and options worth knowing:
 
 - `search-messages` and `search-telegram-messages` need a `query` of at least
   two characters, as does the `text` of `search-emails`. Both message searches
-  return up to 100 matches (default 20).
+  return up to 100 matches (default 20), and take at most 10 words of at most
+  100 characters each (500 characters in all).
+- `run-query` holds at most 8 MiB of results; a larger answer is refused (413)
+  rather than cut, so select narrower columns or fewer rows.
 - `read-telegram-messages` leaves deleted and service messages (joins, pins,
   title changes) out unless called with `includeDeleted: true` or
   `includeService: true`, and counts what it left out as `deletedExcluded` and
@@ -147,9 +159,12 @@ the connection's dashboard. Which axes appear depends on the kind:
   allows its partitions. What this does and does not protect against is in
   [Database connections](postgres.md).
 
-The chat picker lists conversations Evolution has recorded — the history imported
-at pairing, plus everything since. An account paired before full-history sync was
-switched on shows only the latter until it is re-imported. Either way a number
+The chat picker lists conversations Evolution has recorded — whatever history was
+imported at pairing (the recent part by default, everything the phone holds if
+**Import full history** was ticked), plus everything since. Importing full history
+later costs a new QR scan (**Import full history** on the dashboard). A person
+stored under both a LID and a phone number is one row; ticking it allows both, and
+a token holding only one of the two shows it partly ticked. A number
 that has never messaged you can be added directly; it is checked against WhatsApp
 before it is accepted.
 
@@ -223,7 +238,7 @@ characters, or none if Claude gave none) and the client's user agent. Click a to
 used** date to see them, newest first. A member sees the calls of their own
 tokens, an admin those of every token in the organization.
 
-- **Who decides.** An admin turns telemetry on or off under **Team**. It is off
+- **Who decides.** An admin turns telemetry on or off under **Organization**. It is off
   by default. On the hosted service's Free plan it is always on and can't be
   turned off; on Pro it is off by default and the admin's choice.
 - **What it's not.** A reason can mention what someone asked about, and a

@@ -70,7 +70,9 @@ type ConnectionHealth = {
  * **What "paired" means differs by kind, and both answers are deliberate.**
  *
  * WhatsApp: `ownerJid`. A fresh instance and a logout both leave Evolution in
- * `close`, and `ownerJid` is the only thing that tells them apart. It is also
+ * `close`, and `ownerJid` is the only thing that tells them apart: 2.3.7 writes
+ * it when the socket opens and never clears it — logout's `cleaningUp` sets
+ * `connectionStatus` alone. It is also
  * absent when Evolution cannot be reached, so an Evolution outage is invisible
  * here — which is today's behaviour, and nothing can say more without a stored
  * "was linked" fact.
