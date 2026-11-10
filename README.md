@@ -1,3 +1,23 @@
+<p align="center">
+  <a href="https://getautomata.app">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
+      <img src="docs/images/logo-light.svg" alt="Automata" width="300">
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://getautomata.app">Website</a> ·
+  <a href="https://mcp.getautomata.app/signup">Sign up</a> ·
+  <a href="https://www.getautomata.app/docs">Documentation</a> ·
+  <a href="https://www.getautomata.app/contact">Contact</a>
+</p>
+
+<p align="center">
+  <a href="https://railway.com/deploy/automata-or-whatsapp-telegram-sql-mcp?referralCode=HxrUPo&utm_medium=integration&utm_source=template&utm_campaign=generic"><img src="https://railway.com/button.svg" alt="Deploy on Railway"></a>
+</p>
+
 # Automata
 
 Automata is a free, open-source MCP server that connects AI clients such as Claude, ChatGPT and Cursor to your WhatsApp, Telegram, email and PostgreSQL, with permissions enforced chat by chat, folder by folder and table by table.
@@ -9,13 +29,9 @@ It is for individuals and teams who want an AI assistant to read, search and
 (only if allowed) reply in their messages, mail or database. It is MIT-licensed:
 use the hosted version or run it yourself.
 
-[Website](https://www.getautomata.app) ·
-[Sign up (hosted)](https://mcp.getautomata.app/signup) ·
-[Documentation](https://www.getautomata.app/docs) ·
 [MCP tools reference](https://www.getautomata.app/docs/reference/mcp-tools) ·
-[llms.txt](https://www.getautomata.app/llms.txt) ·
-[llms-full.txt](https://www.getautomata.app/llms-full.txt) ·
-[Contact](https://www.getautomata.app/contact)
+plain-text docs for AI tools: [llms.txt](https://www.getautomata.app/llms.txt),
+[llms-full.txt](https://www.getautomata.app/llms-full.txt)
 
 ## What you can connect
 
