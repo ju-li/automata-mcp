@@ -48,7 +48,6 @@ interface QrResponse {
 const id = computed(() => props.id)
 
 /** Only with the hosted offering is there a Billing page to point at. */
-const { billing } = usePlan()
 
 /**
  * Set while the history import runs. The server caches counts for a few minutes,
@@ -573,12 +572,9 @@ const importHistory = () => backToPairing(
         Your plan imports recent history only: when a device is linked, WhatsApp
         hands over the recent part of your conversations, and everything since is
         kept. Older messages are not imported.
-        <template v-if="canManage && billing">
-          <NuxtLink to="/billing" class="underline underline-offset-2">
-            Upgrade
-          </NuxtLink>
+        <UpgradeLink v-if="canManage">
           to import an account's full history.
-        </template>
+        </UpgradeLink>
       </p>
       <p v-else class="text-xs text-muted-foreground">
         WhatsApp hands over its history only at the moment a device is linked, so

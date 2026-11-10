@@ -38,7 +38,7 @@ interface StatusResponse {
   stats?: { messages: number, chats: number }
   /** `historyDays`: how far back this account's older history is fetched, from the bridge. */
   sync?: { backfilling: boolean, pendingBackfill: number, dialogsSyncedAt?: string, pausedUntil?: string, historyDays?: number }
-  /** Linking now fetches only recent history (`telegramHistoryLimited`). Policy, not the linked account's fact. */
+  /** Linking now fetches only recent history (`historyLimited`). Policy, not the linked account's fact. */
   historyLimitedByPlan?: boolean
 }
 
@@ -53,8 +53,6 @@ interface PairingView {
 }
 
 const id = computed(() => props.id)
-const { billing } = usePlan()
-const RECENT_HISTORY_DAYS = TELEGRAM_RECENT_HISTORY_DAYS
 
 const { data, refresh } = await useFetch<StatusResponse>(() => `/api/instances/${id.value}`)
 
@@ -269,14 +267,11 @@ const count = new Intl.NumberFormat()
           {{ busy ? 'Starting…' : 'Show QR code' }}
         </Button>
         <p v-if="data?.historyLimitedByPlan" class="text-xs text-muted-foreground">
-          Your plan syncs the last {{ RECENT_HISTORY_DAYS }} days of history when an
+          Your plan syncs the last {{ TELEGRAM_RECENT_HISTORY_DAYS }} days of history when an
           account is linked; everything that arrives after that is kept.
-          <template v-if="billing">
-            <NuxtLink to="/billing" class="underline underline-offset-2">
-              Upgrade
-            </NuxtLink>
+          <UpgradeLink>
             before linking to sync further back.
-          </template>
+          </UpgradeLink>
         </p>
         <p class="text-xs text-muted-foreground">
           This app signs in as an unofficial Telegram client, which Telegram watches

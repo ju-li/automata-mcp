@@ -50,7 +50,7 @@ export async function newOrganizationLimits(db: Db): Promise<OrgLimits & { plan_
   if (!hostedMode()) return {}
   // tool_calls_required and recent_history_only are not numbers, but they are
   // the same kind of fact: the cloud service decides them per plan, this app
-  // only obeys them (tool-calls.ts, whatsappHistoryLimited in instances.ts).
+  // only obeys them (tool-calls.ts, historyLimited in instances.ts).
   const [defaults] = await db<(OrgLimits & { plan_label?: string, tool_calls_required?: boolean })[]>`
     SELECT max_connections, max_tokens, max_members, plan_label, tool_calls_required, recent_history_only
     FROM app.entitlement_defaults WHERE id = 'new_organization'
@@ -76,15 +76,12 @@ export async function loadOrgLimits(db: Db, orgId: string): Promise<OrgLimits | 
 }
 
 /**
- * Whether the organization may ask WhatsApp for an account's full history at
- * pairing. Only the flag — which connections it applies to (those on the
- * deployment's own server) is `whatsappHistoryLimited` in instances.ts.
+ * Whether the organization imports only recent history at pairing. Only the
+ * flag — which connections it applies to (those on the deployment's own
+ * backend) is `historyLimited` in instances.ts.
  */
 export async function orgRecentHistoryOnly(db: Db, orgId: string): Promise<boolean> {
-  const [row] = await db<{ recent_history_only: boolean }[]>`
-    SELECT recent_history_only FROM app.organizations WHERE id = ${orgId}
-  `
-  return row?.recent_history_only === true
+  return (await loadOrgLimits(db, orgId))?.recent_history_only === true
 }
 
 /**

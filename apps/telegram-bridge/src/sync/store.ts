@@ -3,6 +3,9 @@ import type { Sql } from '../db.ts'
 import type { ChatRow, ChatType, MessageRow, Reaction, UserRow } from './convert.ts'
 import { stubType } from './convert.ts'
 
+/** A channel `getChannelDifference` can catch up, as `chats` stores it. */
+export type TrackedChannel = { chat_id: string, access_hash: string, channel_pts: number }
+
 /**
  * Every write sync makes, scoped to one session.
  *
@@ -319,11 +322,6 @@ export class SyncStore {
       WHERE session_id = ${this.sessionId} AND chat_id = ${chatId} AND message_id = ${messageId}`
   }
 
-  async markMigrated(fromChatId: string, toChatId: string): Promise<void> {
-    await this.ensureChats([fromChatId])
-    await this.migratedQuery(this.sql, fromChatId, toChatId)
-  }
-
   private migratedQuery(db: Db, fromChatId: string, toChatId: string) {
     return db`
       UPDATE chats SET migrated_to = ${toChatId}, updated_at = now()
@@ -400,21 +398,26 @@ export class SyncStore {
     await this.recordBackfill(chatId, { cursor: null, added: 0, oldest: null, stopped: reason })
   }
 
-  async channelsForCatchUp(): Promise<{ chat_id: string, access_hash: string, channel_pts: number }[]> {
-    return await this.sql<{ chat_id: string, access_hash: string, channel_pts: number }[]>`
+  /** Every channel that can be caught up, most recently active first. */
+  async channelsForCatchUp(): Promise<TrackedChannel[]> {
+    return await this.sql<TrackedChannel[]>`
       SELECT chat_id, access_hash, channel_pts FROM chats
-      WHERE session_id = ${this.sessionId} AND chat_id <= -1000000000000
-        AND channel_pts IS NOT NULL AND access_hash IS NOT NULL AND migrated_to IS NULL
+      WHERE ${this.catchUpEligible()}
       ORDER BY last_message_at DESC NULLS LAST`
   }
 
-  /** One channel, if it can be caught up: the same conditions as `channelsForCatchUp`. */
-  async channelForCatchUp(chatId: string): Promise<{ chat_id: string, access_hash: string, channel_pts: number } | undefined> {
-    const [row] = await this.sql<{ chat_id: string, access_hash: string, channel_pts: number }[]>`
+  /** One channel, if it can be caught up. */
+  async channelForCatchUp(chatId: string): Promise<TrackedChannel | undefined> {
+    const [row] = await this.sql<TrackedChannel[]>`
       SELECT chat_id, access_hash, channel_pts FROM chats
-      WHERE session_id = ${this.sessionId} AND chat_id = ${chatId} AND chat_id <= -1000000000000
-        AND channel_pts IS NOT NULL AND access_hash IS NOT NULL AND migrated_to IS NULL`
+      WHERE ${this.catchUpEligible()} AND chat_id = ${chatId}`
     return row
+  }
+
+  /** The one rule for which chats `getChannelDifference` can catch up. */
+  private catchUpEligible() {
+    return this.sql`session_id = ${this.sessionId} AND chat_id <= -1000000000000
+        AND channel_pts IS NOT NULL AND access_hash IS NOT NULL AND migrated_to IS NULL`
   }
 
   async markDialogsSynced(): Promise<void> {

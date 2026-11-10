@@ -5,7 +5,7 @@ import {
   channelChatId, chatRow, chatsOf, entityMap, inputChannelFor, inputPeerFor, long, markedId,
   type MessageRow, messageRow, migrationOf, reactionList, shortMessageRow, type UserRow, userRow, usersOf,
 } from './convert.ts'
-import { type BackfillChat, type BackfillStop, type ChatOp, SyncStore } from './store.ts'
+import { type BackfillChat, type BackfillStop, type ChatOp, SyncStore, type TrackedChannel } from './store.ts'
 
 /**
  * Keeping one session's chats in Postgres.
@@ -129,7 +129,6 @@ interface CatchUpRun {
   again: boolean
 }
 
-type TrackedChannel = { chat_id: string, access_hash: string, channel_pts: number }
 
 export class SessionSync {
   private readonly client: TelegramClient
@@ -904,7 +903,7 @@ function isMessageUpdate(update: unknown): update is MessageUpdate {
 
 /**
  * Whether an update may share a batch: a message upsert that is not a group
- * migration (whose `markMigrated` stays on the one-at-a-time path), or an update
+ * migration (which stays on the one-at-a-time path), or an update
  * `apply` reads only for its entities. Never throws: `drain` must not, and an
  * update this cannot read goes to `applyOne`, which logs it.
  */
@@ -983,6 +982,6 @@ function ptsOf(update: unknown): number {
   return 0
 }
 
-function heapMb(): number {
+export function heapMb(): number {
   return Math.round(process.memoryUsage().heapUsed / 1_048_576)
 }

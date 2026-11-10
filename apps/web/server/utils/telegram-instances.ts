@@ -18,22 +18,6 @@ export interface TelegramProvisionInput {
 }
 
 /**
- * Whether this Telegram connection fetches only the last
- * `TELEGRAM_RECENT_HISTORY_DAYS` of history when it is linked: its organization
- * is limited to recent history **and** it is on the deployment's own bridge. A
- * bring-your-own bridge stores history on the user's disk, so the limit never
- * applies there — the same rule as `whatsappHistoryLimited`.
- *
- * Decided when pairing starts (`startTelegramPairing`), which is when the
- * bridge stores the cap: upgrading or lapsing changes nothing for an account
- * already linked until it is linked again, as with WhatsApp.
- */
-export async function telegramHistoryLimited(instance: AppInstance): Promise<boolean> {
-  if (!onDeploymentBridge(instance)) return false
-  return await orgRecentHistoryOnly(await appDb(), instance.org)
-}
-
-/**
  * Start linking by QR, with the history cap this connection's plan calls for.
  *
  * Fails closed: a limited connection is never paired by a bridge that cannot
@@ -44,7 +28,11 @@ export async function telegramHistoryLimited(instance: AppInstance): Promise<boo
  */
 export async function startTelegramPairing(instance: AppInstance): Promise<BridgeSessionState> {
   const bridge = telegramBridgeForInstance(instance)
-  if (!(await telegramHistoryLimited(instance))) return await bridge.pair(null)
+  // A limited connection fetches only the last `TELEGRAM_RECENT_HISTORY_DAYS`
+  // (`historyLimited`). Decided here, when the bridge stores the cap: upgrading
+  // or lapsing changes nothing for an account already linked until it is
+  // linked again, as with WhatsApp.
+  if (!(await historyLimited(instance))) return await bridge.pair(null)
 
   const before = await bridge.state()
   if (typeof before.sync?.backfillDays !== 'number') {

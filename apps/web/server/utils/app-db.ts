@@ -227,7 +227,7 @@ export interface OrgLimits {
   /**
    * WhatsApp connections on the deployment's own Evolution server import only
    * the recent history WhatsApp sends any linked device, never the full one.
-   * `false` (the column default) is no restriction. See `whatsappHistoryLimited`.
+   * `false` (the column default) is no restriction. See `historyLimited`.
    */
   recent_history_only?: boolean
 }

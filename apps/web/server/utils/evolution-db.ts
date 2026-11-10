@@ -2,7 +2,7 @@ import type { Sql } from 'postgres'
 import postgres from 'postgres'
 import type { AppInstance } from './app-db'
 import type { SharedPool } from './pg-pool'
-import { mentionedJidsOf } from './mentions'
+import { meaningfulName, mentionedJidsOf } from './mentions'
 
 /**
  * Read-only access to Evolution's own Postgres — every message this app reads.
@@ -932,11 +932,8 @@ export async function readGroupChatNames(instance: AppInstance): Promise<Map<str
       AND "remoteJid" LIKE '%@g.us'
   `)
 
-  return new Map(rows.map((row) => {
-    const name = row.name?.trim()
-    // A group named after its own id is no name at all.
-    return [row.remoteJid, name && name !== row.remoteJid.split('@')[0] ? name : undefined]
-  }))
+  // A group named after its own id is no name at all.
+  return new Map(rows.map(row => [row.remoteJid, meaningfulName(row.name, row.remoteJid.split('@')[0]!)]))
 }
 
 /**
