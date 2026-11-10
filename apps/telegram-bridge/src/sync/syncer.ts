@@ -27,6 +27,22 @@ import { type BackfillChat, type BackfillStop, type ChatOp, SyncStore } from './
  *
  * What cannot be recovered is recorded, not hidden: a forward fill or channel
  * difference that could not reach back far enough sets `chats.gap_since`.
+ *
+ * **The live queue is bounded for channel updates, and only for them (#188).**
+ * One account in 112 busy supergroups received updates faster than they were
+ * written, and the queue held each one (with its entities) until the process ran
+ * out of heap. Past MAX_PENDING queued updates, or once the oldest has waited
+ * MAX_PENDING_AGE_MS, a channel update is not queued: its channel is marked
+ * *dirty* and every later update for it is skipped too, until a channel
+ * difference from the stored `channel_pts` has fetched what was skipped. Skipping
+ * all of them matters: `setChannelPts(…, false)` moves pts forward with GREATEST,
+ * so applying one later update would carry the stored pts past the skipped ones
+ * and lose them without a trace. Catch-up runs beside the queue, not in it, one
+ * channel at a time, and only for a channel with nothing of its own still queued.
+ *
+ * Common-sequence updates (private chats, basic groups) are never skipped:
+ * teleproto's update state, which is what gets persisted, advances when an update
+ * is received, not when it is applied, so a dropped one could not be fetched again.
  */
 
 export interface BackfillOptions {
@@ -39,6 +55,21 @@ export interface BackfillOptions {
 export interface SyncStatus {
   backfilling: boolean
   pausedUntil?: string
+  /** The live queue: what is received and not yet written. Absent with no client. */
+  queue?: QueueLoad
+}
+
+export interface QueueLoad {
+  /** Updates received and not yet applied. */
+  pending: number
+  /** When the oldest of them was received. */
+  oldestAt?: string
+  /** Channel updates are being skipped, to be recovered by catch-up. */
+  shedding: boolean
+  /** Channels whose skipped updates still have to be fetched again. */
+  dirtyChannels: number
+  /** Channel updates skipped since this session's sync started. */
+  skipped: number
 }
 
 const PAGE = 100
@@ -47,6 +78,24 @@ const RECONCILE_DIALOGS = 100
 const MAX_FORWARD_PAGES = 50
 const CHANNEL_CATCHUP_DELAY_MS = 250
 const MAX_CHANNEL_DIFFERENCE_ROUNDS = 50
+/** Past this many queued updates, channel updates are skipped and recovered by catch-up. */
+const MAX_PENDING = 5_000
+/** …or once the oldest queued update has waited this long. */
+const MAX_PENDING_AGE_MS = 2 * 60_000
+/** Skipping stops again once the queue is down to this, so it does not flap at the limit. */
+const RESUME_PENDING = 1_000
+/**
+ * Updates for the channel being caught up that arrive while it is: the difference
+ * may or may not include them, so they are kept and applied after it if newer.
+ * More than this and the channel is simply caught up again.
+ */
+const MAX_HELD = 500
+/** A channel whose catch-up failed is tried again after this… */
+const CATCHUP_RETRY_MS = 60_000
+/** …this many times in a row (flood waits not counted), then given up with a gap recorded. */
+const MAX_CATCHUP_FAILURES = 5
+/** How often a session with a backlog says so. */
+const LOAD_REPORT_MS = 60_000
 /** A flood wait longer than this is logged: it means this account is syncing too hard. */
 const LONG_FLOOD_S = 300
 /**
@@ -61,6 +110,24 @@ const INACCESSIBLE = new Set(['CHANNEL_PRIVATE', 'CHANNEL_INVALID', 'PEER_ID_INV
 
 type EntityMap = Map<string, unknown>
 
+interface Queued {
+  update: unknown
+  /** When it was received, in ms. */
+  at: number
+  /** The marked id of the channel it belongs to, for a channel update. */
+  channel?: string
+}
+
+interface CatchUpRun {
+  chatId: string
+  /** This channel's updates received while its difference was being fetched. */
+  held: unknown[]
+  /** More arrived than could be held, or Telegram said too long again: run again. */
+  again: boolean
+}
+
+type TrackedChannel = { chat_id: string, access_hash: string, channel_pts: number }
+
 export class SessionSync {
   private readonly client: TelegramClient
   private readonly store: SyncStore
@@ -69,8 +136,22 @@ export class SessionSync {
   private readonly meId: string | null
   private readonly rawEvent = new events.Raw({})
   private readonly onUpdate = (update: unknown) => { this.enqueue(update) }
-  private readonly pending: unknown[] = []
+  /** The live queue, from `head`; applied entries are cleared so their memory goes. */
+  private queue: (Queued | undefined)[] = []
+  private head = 0
   private draining = false
+  /** Queued updates per channel: a channel is caught up only when it has none. */
+  private readonly queuedPerChannel = new Map<string, number>()
+  private shedding = false
+  /** Channels to catch up, in order; `true` once any update of theirs was skipped. */
+  private readonly dirty = new Map<string, boolean>()
+  private readonly retryAt = new Map<string, number>()
+  private readonly failures = new Map<string, number>()
+  private catchingUp: CatchUpRun | undefined
+  private catchUpRun: Promise<void> | undefined
+  private skipped = 0
+  private skippedSinceReport = 0
+  private loadTimer: NodeJS.Timeout | undefined
   private stopped = false
   private syncingDialogs = false
   private backfillRunning = false
@@ -89,12 +170,22 @@ export class SessionSync {
   /** Before connecting, so nothing teleproto dispatches during catch-up is missed. */
   attach(): void {
     this.client.addEventHandler(this.onUpdate, this.rawEvent)
+    this.loadTimer = setInterval(() => { this.reportLoad() }, LOAD_REPORT_MS)
+    this.loadTimer.unref()
   }
 
   /** After connecting and confirming the session. Never throws; failures are logged and retried by reconcile. */
   async start(): Promise<void> {
     await this.guard('catch-up', () => this.client.catchUp())
-    await this.guard('channel catch-up', () => this.catchUpChannels())
+    // Every tracked channel goes through the catch-up worker, so a live update for
+    // a channel not yet caught up is skipped (the difference brings it) rather
+    // than moving its pts past what the difference has still to fetch.
+    await this.guard('channel catch-up', async () => {
+      for (const channel of await this.store.channelsForCatchUp()) {
+        if (!this.dirty.has(channel.chat_id)) this.dirty.set(channel.chat_id, false)
+      }
+      await this.runCatchUps()
+    })
     await this.guard('dialog sync', async () => {
       await this.syncDialogs()
       if (!this.stopped) await this.store.markDialogsSynced()
@@ -108,13 +199,31 @@ export class SessionSync {
   stop(): void {
     this.stopped = true
     clearInterval(this.reconcileTimer)
+    clearInterval(this.loadTimer)
     this.client.removeEventHandler(this.onUpdate, this.rawEvent)
+    // Nothing more is applied; let what was waiting be collected.
+    this.queue = []
+    this.head = 0
+    this.queuedPerChannel.clear()
+    if (this.catchingUp) this.catchingUp.held = []
   }
 
   status(): SyncStatus {
     return {
       backfilling: this.backfilling,
       pausedUntil: this.pausedUntil > Date.now() ? new Date(this.pausedUntil).toISOString() : undefined,
+      queue: this.load(),
+    }
+  }
+
+  load(): QueueLoad {
+    const oldest = this.queue[this.head]
+    return {
+      pending: this.pendingCount(),
+      oldestAt: oldest ? new Date(oldest.at).toISOString() : undefined,
+      shedding: this.shedding,
+      dirtyChannels: this.dirty.size,
+      skipped: this.skipped,
     }
   }
 
@@ -141,8 +250,86 @@ export class SessionSync {
   // ── live ───────────────────────────────────────────────────────────────────
 
   private enqueue(update: unknown): void {
-    this.pending.push(update)
-    if (!this.draining) void this.drain()
+    if (this.stopped) return
+    const channel = channelOf(update)
+    if (channel !== undefined) {
+      const run = this.catchingUp
+      if (run?.chatId === channel) {
+        if (update instanceof Api.UpdateChannelTooLong || run.held.length >= MAX_HELD) run.again = true
+        else run.held.push(update)
+        return
+      }
+      if (update instanceof Api.UpdateChannelTooLong) {
+        // Telegram has more for this channel than it will push: fetch it.
+        this.markDirty(channel, false)
+        return
+      }
+      if (this.dirty.has(channel) || this.overloaded()) {
+        this.markDirty(channel, true)
+        this.skipped++
+        this.skippedSinceReport++
+        return
+      }
+    }
+    this.push({ update, at: Date.now(), channel })
+  }
+
+  private push(item: Queued): void {
+    this.queue.push(item)
+    if (item.channel !== undefined) {
+      this.queuedPerChannel.set(item.channel, (this.queuedPerChannel.get(item.channel) ?? 0) + 1)
+    }
+    void this.drain()
+  }
+
+  private pendingCount(): number {
+    return this.queue.length - this.head
+  }
+
+  /** Whether channel updates are being skipped, re-decided from the queue as it is now. */
+  private overloaded(): boolean {
+    const pending = this.pendingCount()
+    const age = pending > 0 ? Date.now() - this.queue[this.head]!.at : 0
+    if (!this.shedding && (pending >= MAX_PENDING || age >= MAX_PENDING_AGE_MS)) {
+      this.shedding = true
+      console.warn(
+        `[sync] ${this.sessionId}: ${pending} updates pending, oldest ${Math.round(age / 1000)}s; `
+        + `skipping channel updates until the queue drains, to fetch them again by catch-up (heap ${heapMb()} MB)`,
+      )
+    }
+    else if (this.shedding && pending <= RESUME_PENDING && age < MAX_PENDING_AGE_MS / 2) {
+      this.shedding = false
+      console.info(
+        `[sync] ${this.sessionId}: queue down to ${pending}; queueing channel updates again, `
+        + `${this.dirty.size} channels to catch up`,
+      )
+      this.wakeCatchUps()
+    }
+    return this.shedding
+  }
+
+  private markDirty(chatId: string, skipped: boolean): void {
+    const run = this.catchingUp
+    if (run?.chatId === chatId) {
+      run.again = true
+      return
+    }
+    const already = this.dirty.get(chatId)
+    if (already === undefined) this.dirty.set(chatId, skipped)
+    else if (skipped && !already) this.dirty.set(chatId, true)
+    this.wakeCatchUps()
+  }
+
+  private reportLoad(): void {
+    const load = this.load()
+    if (load.pending === 0 && load.dirtyChannels === 0 && this.skippedSinceReport === 0) return
+    const age = load.oldestAt ? Math.round((Date.now() - Date.parse(load.oldestAt)) / 1000) : 0
+    console.info(
+      `[sync] ${this.sessionId}: ${load.pending} updates pending (oldest ${age}s), `
+      + `${load.dirtyChannels} channels to catch up, ${this.skippedSinceReport} channel updates skipped `
+      + `in the last minute${load.shedding ? ' (skipping)' : ''}; heap ${heapMb()} MB`,
+    )
+    this.skippedSinceReport = 0
   }
 
   /**
@@ -160,21 +347,49 @@ export class SessionSync {
    * row costs one update, not the batch.
    */
   private async drain(): Promise<void> {
+    if (this.draining) return
     this.draining = true
     try {
-      while (this.pending.length > 0) {
-        if (this.stopped) {
-          this.pending.length = 0
-          return
-        }
+      while (this.pendingCount() > 0 && !this.stopped) {
         let run = 0
-        while (run < this.pending.length && run < MAX_BATCH && batchable(this.pending[run])) run++
-        if (run > 0) await this.applyBatch(this.pending.splice(0, run))
-        else await this.applyOne(this.pending.shift())
+        while (run < this.pendingCount() && run < MAX_BATCH && batchable(this.queue[this.head + run]!.update)) run++
+        const items = this.take(Math.max(run, 1))
+        if (run > 0) await this.applyBatch(items.map(item => item.update))
+        else await this.applyOne(items[0]!.update)
+        this.release(items)
+        this.overloaded()
       }
     }
     finally {
       this.draining = false
+    }
+    this.wakeCatchUps()
+  }
+
+  /** The next `count` queued items, cleared from the queue so their memory can go once applied. */
+  private take(count: number): Queued[] {
+    const items = this.queue.slice(this.head, this.head + count) as Queued[]
+    this.queue.fill(undefined, this.head, this.head + count)
+    this.head += count
+    if (this.head >= 1024 && this.head * 2 >= this.queue.length) {
+      this.queue = this.queue.slice(this.head)
+      this.head = 0
+    }
+    return items
+  }
+
+  /** Applied (or failed): no longer queued for their channels. */
+  private release(items: Queued[]): void {
+    for (const item of items) {
+      if (item.channel === undefined) continue
+      const left = (this.queuedPerChannel.get(item.channel) ?? 1) - 1
+      if (left > 0) this.queuedPerChannel.set(item.channel, left)
+      else {
+        this.queuedPerChannel.delete(item.channel)
+        // A dirty channel waits for its queued updates; under steady load the
+        // queue may never empty, so its last one starts the worker.
+        if (this.dirty.has(item.channel)) this.wakeCatchUps()
+      }
     }
   }
 
@@ -267,9 +482,10 @@ export class SessionSync {
       await this.store.setReactions(markedId(update.peer), update.msgId, reactionList(update.reactions))
     }
     else if (update instanceof Api.UpdateChannelTooLong) {
-      const chat = await this.store.chat(channelChatId(update.channelId))
-      const [tracked] = (await this.store.channelsForCatchUp()).filter(row => row.chat_id === chat?.chat_id)
-      if (tracked) await this.guard('channel catch-up', () => this.catchUpChannel(tracked))
+      // Only from a channel difference's other updates; live ones never reach the
+      // queue. Fetched by the catch-up worker, never here, so the queue does not
+      // wait on Telegram.
+      this.markDirty(channelChatId(update.channelId), false)
     }
   }
 
@@ -281,15 +497,139 @@ export class SessionSync {
 
   // ── catch-up ───────────────────────────────────────────────────────────────
 
-  private async catchUpChannels(): Promise<void> {
-    for (const channel of await this.store.channelsForCatchUp()) {
-      if (this.stopped) return
-      await this.guard(`catch-up of ${channel.chat_id}`, () => this.catchUpChannel(channel))
-      await sleep(CHANNEL_CATCHUP_DELAY_MS)
+  /** Starts the catch-up worker if there is work and it is not running. */
+  private wakeCatchUps(): void {
+    if (this.dirty.size > 0 && !this.stopped) void this.runCatchUps()
+  }
+
+  /**
+   * The catch-up worker: dirty channels one at a time, CHANNEL_CATCHUP_DELAY_MS
+   * apart. Waits out flood pauses; stands aside while channel updates are being
+   * skipped (the queue wakes it again) and for a channel with updates still queued
+   * (those must be applied first, or its stored pts is not where the skipping
+   * began). The promise of the run in progress, so `start()` can wait for it.
+   */
+  private runCatchUps(): Promise<void> {
+    if (this.catchUpRun) return this.catchUpRun
+    // Cleared from `.finally`, which runs after this assignment: a run that
+    // returns at once would otherwise clear it first and then be stored for good.
+    const run = this.catchUps().finally(() => {
+      if (this.catchUpRun === run) this.catchUpRun = undefined
+    })
+    this.catchUpRun = run
+    return run
+  }
+
+  private async catchUps(): Promise<void> {
+    try {
+      while (!this.stopped && this.dirty.size > 0) {
+        const wait = this.pausedUntil - Date.now()
+        if (wait > 0) {
+          await sleep(Math.min(wait, 60_000))
+          continue
+        }
+        if (this.shedding) return
+        // Disconnected: every difference would fail and count toward giving up
+        // with a gap. Wait, as backfill does; a rebuilt client gets a new syncer.
+        if (!this.client.connected) {
+          await sleep(DISCONNECTED_WAIT_MS)
+          continue
+        }
+        const next = this.nextDirty()
+        if (next === undefined) return
+        if (typeof next === 'number') {
+          await sleep(next)
+          continue
+        }
+        await this.catchUpDirty(next)
+        await sleep(CHANNEL_CATCHUP_DELAY_MS)
+      }
+    }
+    catch (error) {
+      console.error(`[sync] ${this.sessionId}: channel catch-up stopped: ${describeError(error)}`)
     }
   }
 
-  private async catchUpChannel(channel: { chat_id: string, access_hash: string, channel_pts: number }): Promise<void> {
+  /**
+   * The next channel to catch up; or how long until one is due for a retry; or
+   * nothing, when every dirty channel still has updates queued (the queue wakes
+   * the worker once it drains).
+   */
+  private nextDirty(): string | number | undefined {
+    const now = Date.now()
+    let soonest: number | undefined
+    for (const chatId of this.dirty.keys()) {
+      if (this.queuedPerChannel.has(chatId)) continue
+      const retry = this.retryAt.get(chatId)
+      if (retry !== undefined && retry > now) {
+        soonest = Math.min(soonest ?? Infinity, retry - now)
+        continue
+      }
+      return chatId
+    }
+    return soonest === undefined ? undefined : Math.min(soonest, 60_000)
+  }
+
+  private async catchUpDirty(chatId: string): Promise<void> {
+    const skipped = this.dirty.get(chatId) ?? false
+    const run: CatchUpRun = { chatId, held: [], again: false }
+    this.catchingUp = run
+    let outcome: number | null | 'untracked' | 'unfinished' | 'failed'
+    try {
+      const channel = await this.store.channelForCatchUp(chatId)
+      outcome = channel ? await this.catchUpChannel(channel) : 'untracked'
+    }
+    catch (error) {
+      if (!this.stopped) console.error(`[sync] ${this.sessionId}: catch-up of ${chatId} failed: ${describeError(error)}`)
+      outcome = 'failed'
+      if (isFlood(error)) this.pause(error)
+      else this.failures.set(chatId, (this.failures.get(chatId) ?? 0) + 1)
+    }
+    finally {
+      this.catchingUp = undefined
+    }
+    if (this.stopped) return
+    // Anything this run let go of is fetched again by the next, or lost.
+    const lost = skipped || run.again || run.held.length > 0
+    const finish = async (gap: boolean, pts: number | null) => {
+      this.dirty.delete(chatId)
+      this.retryAt.delete(chatId)
+      this.failures.delete(chatId)
+      if (gap) await this.store.setGap(chatId)
+      const now = Date.now()
+      for (const update of run.held) {
+        // At or below the pts the difference reached, it is already applied.
+        if (pts === null || ptsOf(update) > pts) this.push({ update, at: now, channel: chatId })
+      }
+    }
+
+    if (outcome === 'untracked') {
+      // No pts or access hash to fetch a difference with: what was skipped is
+      // gone. Say so on the chat, and let its live updates through again.
+      return await finish(skipped || run.again, null)
+    }
+    if (outcome === 'failed' && (this.failures.get(chatId) ?? 0) >= MAX_CATCHUP_FAILURES) {
+      console.error(`[sync] ${this.sessionId}: giving up catching up ${chatId}; recording a gap`)
+      run.held = []
+      return await finish(lost, null)
+    }
+    if (outcome === 'failed' || outcome === 'unfinished' || run.again) {
+      // Again, from wherever the stored pts now is; to the back of the line.
+      this.dirty.delete(chatId)
+      this.dirty.set(chatId, lost)
+      if (outcome === 'failed') this.retryAt.set(chatId, Date.now() + CATCHUP_RETRY_MS)
+      return
+    }
+    // Caught up to `outcome`, or no longer tracked (left, banned, pts expired).
+    await finish(outcome === null && skipped, outcome)
+  }
+
+  /**
+   * Fetches this channel's difference from its stored pts until Telegram says it
+   * is final. Answers the pts it reached; `null` when the channel is no longer
+   * tracked; 'unfinished' when it stopped early (round cap, or stopping).
+   */
+  private async catchUpChannel(channel: TrackedChannel): Promise<number | null | 'unfinished'> {
     const input = inputChannelFor(channel.chat_id, channel.access_hash)
     let pts = channel.channel_pts
 
@@ -310,14 +650,14 @@ export class SessionSync {
           // Left, banned, or a pts Telegram no longer recognises: stop tracking
           // it here; the next dialog sync sets a fresh pts if the chat is back.
           await this.store.setChannelPts(channel.chat_id, null, true)
-          return
+          return null
         }
         throw error
       }
 
       if (diff instanceof Api.updates.ChannelDifferenceEmpty) {
         await this.store.setChannelPts(channel.chat_id, diff.pts, true)
-        return
+        return diff.pts
       }
 
       const entities = entityMap(diff.users, diff.chats)
@@ -330,11 +670,11 @@ export class SessionSync {
         const storedMax = await this.store.maxMessageId(channel.chat_id)
         await this.saveMessages(diff.messages, entities)
         await this.store.setGap(channel.chat_id)
-        if (diff.dialog instanceof Api.Dialog && diff.dialog.pts !== undefined) {
-          await this.store.setChannelPts(channel.chat_id, diff.dialog.pts, true)
-        }
+        const latest = diff.dialog instanceof Api.Dialog && diff.dialog.pts !== undefined ? diff.dialog.pts : null
+        if (latest !== null) await this.store.setChannelPts(channel.chat_id, latest, true)
         if (storedMax !== null) await this.fillForward(channel.chat_id, storedMax)
-        return
+        // Without a pts to stand on, asking again would only answer too long again.
+        return latest
       }
 
       await this.saveMessages(diff.newMessages, entities)
@@ -343,8 +683,9 @@ export class SessionSync {
       }
       pts = diff.pts
       await this.store.setChannelPts(channel.chat_id, pts, true)
-      if (diff.final) return
+      if (diff.final) return pts
     }
+    return 'unfinished'
   }
 
   // ── dialogs ────────────────────────────────────────────────────────────────
@@ -594,4 +935,36 @@ function isFlood(error: unknown): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms).unref())
+}
+
+/**
+ * The marked id of the channel a channel-sequence update belongs to; undefined
+ * for everything else, which is never skipped. These four are what a channel
+ * difference replays, so they are the only ones that can be dropped and fetched
+ * again.
+ */
+function channelOf(update: unknown): string | undefined {
+  if (update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateEditChannelMessage) {
+    const peer = 'peerId' in update.message ? update.message.peerId : undefined
+    return peer instanceof Api.PeerChannel ? channelChatId(peer.channelId) : undefined
+  }
+  if (update instanceof Api.UpdateDeleteChannelMessages || update instanceof Api.UpdateChannelTooLong) {
+    return channelChatId(update.channelId)
+  }
+  return undefined
+}
+
+/** The channel pts an update brings its channel to; 0 when it carries none. */
+function ptsOf(update: unknown): number {
+  if (
+    update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateEditChannelMessage
+    || update instanceof Api.UpdateDeleteChannelMessages
+  ) {
+    return update.pts
+  }
+  return 0
+}
+
+function heapMb(): number {
+  return Math.round(process.memoryUsage().heapUsed / 1_048_576)
 }

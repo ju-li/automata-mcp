@@ -92,6 +92,18 @@ channels unless `TELEGRAM_BACKFILL_BROADCAST=true`. An unofficial client that
 hammers history is how an account gets restricted. The read tools say when a
 chat's history stops at what was synced rather than at its first message.
 
+**A very busy account is caught up rather than queued.** Live updates are
+written in the order they arrive. When they come in faster than they are written
+— more than 5,000 waiting, or the oldest waiting two minutes — the bridge stops
+holding channel and supergroup updates in memory and fetches them from Telegram
+again once it has caught up, one channel at a time. Nothing is lost by this;
+where Telegram itself will not go back far enough, the chat is marked as having a
+gap, as after any other outage. Private chats and basic groups are never skipped.
+While a session has a backlog the bridge logs it once a minute (with its heap
+size), and `GET /health` reports the totals under `sync`: `pending`,
+`maxPending`, `oldestPendingSeconds`, `sheddingSessions`, `dirtyChannels`,
+`heapUsedMb`. A backlog that never drains means the database cannot keep up.
+
 **Secret chats are never visible.** They exist only on the devices that took
 part in them and cannot be synced by any client.
 

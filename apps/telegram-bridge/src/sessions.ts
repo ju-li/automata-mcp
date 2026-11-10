@@ -61,6 +61,20 @@ export interface SessionState {
   }
 }
 
+export interface BridgeLoad {
+  /** Live updates received and not yet applied, across sessions. */
+  pending: number
+  /** The most any one session has waiting. */
+  maxPending: number
+  /** How long the oldest of them has waited. */
+  oldestPendingSeconds: number
+  /** Sessions skipping channel updates, to be fetched again by catch-up. */
+  sheddingSessions: number
+  /** Channels whose skipped updates are still to be fetched. */
+  dirtyChannels: number
+  heapUsedMb: number
+}
+
 interface SessionCounts {
   chats: number
   messages: number
@@ -208,6 +222,36 @@ export class SessionManager {
       await this.dispose(rt)
     }
     await this.locks.close()
+  }
+
+  /**
+   * The live sync queues of every session this process runs, for `/health`:
+   * totals and the worst session, never ids, since the route is public. Which
+   * session it is shows in the bridge's log, once a minute while it has a backlog.
+   */
+  load(): BridgeLoad {
+    let pending = 0
+    let maxPending = 0
+    let oldest: number | undefined
+    let dirtyChannels = 0
+    let shedding = 0
+    for (const rt of this.runtimes.values()) {
+      const load = rt.sync?.load()
+      if (!load) continue
+      pending += load.pending
+      maxPending = Math.max(maxPending, load.pending)
+      dirtyChannels += load.dirtyChannels
+      if (load.shedding) shedding++
+      if (load.oldestAt) oldest = Math.min(oldest ?? Infinity, Date.parse(load.oldestAt))
+    }
+    return {
+      pending,
+      maxPending,
+      oldestPendingSeconds: oldest === undefined ? 0 : Math.round((Date.now() - oldest) / 1000),
+      sheddingSessions: shedding,
+      dirtyChannels,
+      heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1_048_576),
+    }
   }
 
   // ── requests ───────────────────────────────────────────────────────────────

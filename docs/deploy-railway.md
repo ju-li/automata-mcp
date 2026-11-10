@@ -123,6 +123,11 @@ The database URL is the same one Evolution uses; the bridge keeps to its own
 `RAILWAY_DEPLOYMENT_OVERLAP_SECONDS` unset (it defaults to 0)** — see [One bridge process at a time](telegram.md#one-bridge-process-at-a-time). Losing `TELEGRAM_SESSION_ENCRYPTION_KEY` unlinks every
 account, so keep a copy somewhere other than Railway.
 
+If the service has a memory limit, set `NODE_OPTIONS=--max-old-space-size=<MB>`
+to about three quarters of it, so Node stops with a heap error in the log rather
+than the container being killed without one. The bridge bounds its own backlog
+(see [What syncs](telegram.md#what-syncs)); this is the back-stop.
+
 **web** — internal addresses for the backends, public URLs for anything a user sees:
 
 ```
