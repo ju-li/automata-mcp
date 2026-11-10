@@ -64,6 +64,19 @@ the bridge (it re-grants `SELECT` at every start: on `messages` whole, on `chats
 and `users` column by column so access hashes and phone numbers stay out, and
 never on `sessions`), and use that role in `NUXT_TELEGRAM_DATABASE_URL`.
 
+The bridge migrates its schema at start, in one transaction. Migration `0003`
+adds an index on `telegram.messages` and holds a write lock on that table while it
+builds, so sync writes wait for it. With millions of messages, build it by hand
+beforehand without the lock and the migration skips it:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS messages_live_by_session
+  ON telegram.messages (session_id) WHERE deleted_at IS NULL;
+```
+
+If that build fails, it leaves an invalid index under the same name. Drop that
+index and build it again before you deploy.
+
 ## What syncs
 
 Private chats, bots, groups, supergroups (including forum topics) and channels —
@@ -92,6 +105,18 @@ operator's setting, never lifted above it. The hosted Free plan uses this for
 it applies to the account linked then; `GET /sessions/:id/state` reports the
 limit in force as `sync.backfillDays`, which the dashboard and
 `get-telegram-status` (`sync.historyDays`) show.
+
+**A very busy account is caught up rather than queued.** Live updates are
+written in the order they arrive. When they come in faster than they are written
+— more than 5,000 waiting, or the oldest waiting two minutes — the bridge stops
+holding channel and supergroup updates in memory and fetches them from Telegram
+again once it has caught up, one channel at a time. Nothing is lost by this;
+where Telegram itself will not go back far enough, the chat is marked as having a
+gap, as after any other outage. Private chats and basic groups are never skipped.
+While a session has a backlog the bridge logs it once a minute (with its heap
+size), and `GET /health` reports the totals under `sync`: `pending`,
+`maxPending`, `oldestPendingSeconds`, `sheddingSessions`, `dirtyChannels`,
+`heapUsedMb`. A backlog that never drains means the database cannot keep up.
 
 **Secret chats are never visible.** They exist only on the devices that took
 part in them and cannot be synced by any client.

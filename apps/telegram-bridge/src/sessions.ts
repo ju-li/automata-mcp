@@ -67,6 +67,27 @@ export interface SessionState {
   }
 }
 
+export interface BridgeLoad {
+  /** Live updates received and not yet applied, across sessions. */
+  pending: number
+  /** The most any one session has waiting. */
+  maxPending: number
+  /** How long the oldest of them has waited. */
+  oldestPendingSeconds: number
+  /** Sessions skipping channel updates, to be fetched again by catch-up. */
+  sheddingSessions: number
+  /** Channels whose skipped updates are still to be fetched. */
+  dirtyChannels: number
+  heapUsedMb: number
+}
+
+interface SessionCounts {
+  chats: number
+  messages: number
+  /** Chats whose older history is still to be fetched. */
+  pending: number
+}
+
 export interface PairingQr {
   /** `tg://login?token=…` — what the QR code encodes. As sensitive as the image. */
   url: string
@@ -97,6 +118,16 @@ interface Runtime {
   lastError?: string
   /** Signature of the last state sent to the webhook, to send each change once. */
   lastPublished?: string
+  /** When the running client was first seen not answering. Cleared once it answers, and on dispose. */
+  downSince?: number
+  /** Connects in a row that failed since a probe last answered. Drives the back-off. */
+  failures: number
+  /** No new client is built before this (epoch ms). Unset: the next heartbeat may connect. */
+  retryAt?: number
+  /** A client being built. A second caller waits on it rather than building another. */
+  connecting?: Promise<void>
+  /** The heartbeat dropped a dead client; the next successful connect is logged. */
+  rebuilding: boolean
 }
 
 interface SessionRow {
@@ -129,6 +160,22 @@ const PAIRING_WINDOW_MS = 5 * 60_000
 const HEARTBEAT_MS = 30_000
 const PROBE_TIMEOUT_MS = 20_000
 const DISPOSE_TIMEOUT_MS = 10_000
+/**
+ * How long `state` reuses a session's chat, message and backfill counts (#183).
+ * The message count reads the session's whole live-message index; the dashboard
+ * polls every 15 s and the pairing screen every 2 s, neither for a number that
+ * must be to the second.
+ */
+const COUNTS_TTL_MS = 30_000
+/**
+ * A running client that has not answered for this long is dropped and built
+ * again. Longer than teleproto's own retry budget (`connectionRetries: 5`, about
+ * 50 s), so its reconnect gets the first go.
+ */
+const STALLED_AFTER_MS = 2 * 60_000
+/** Back-off between failed connects of one session: 30 s, 1 min, 2 min … */
+const RETRY_BASE_MS = 30_000
+const RETRY_CAP_MS = 10 * 60_000
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -156,6 +203,8 @@ export class SessionManager {
   private readonly config: BridgeConfig
   private readonly locks: SessionLocks
   private readonly runtimes = new Map<string, Runtime>()
+  /** Per-session counts for `state`, shared while in flight. See COUNTS_TTL_MS. */
+  private readonly counts = new Map<string, { at: number, value: Promise<SessionCounts> }>()
   private heartbeat: NodeJS.Timeout | undefined
   private ticking = false
   private stopping = false
@@ -182,6 +231,36 @@ export class SessionManager {
     await this.locks.close()
   }
 
+  /**
+   * The live sync queues of every session this process runs, for `/health`:
+   * totals and the worst session, never ids, since the route is public. Which
+   * session it is shows in the bridge's log, once a minute while it has a backlog.
+   */
+  load(): BridgeLoad {
+    let pending = 0
+    let maxPending = 0
+    let oldest: number | undefined
+    let dirtyChannels = 0
+    let shedding = 0
+    for (const rt of this.runtimes.values()) {
+      const load = rt.sync?.load()
+      if (!load) continue
+      pending += load.pending
+      maxPending = Math.max(maxPending, load.pending)
+      dirtyChannels += load.dirtyChannels
+      if (load.shedding) shedding++
+      if (load.oldestAt) oldest = Math.min(oldest ?? Infinity, Date.parse(load.oldestAt))
+    }
+    return {
+      pending,
+      maxPending,
+      oldestPendingSeconds: oldest === undefined ? 0 : Math.round((Date.now() - oldest) / 1000),
+      sheddingSessions: shedding,
+      dirtyChannels,
+      heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1_048_576),
+    }
+  }
+
   // ── requests ───────────────────────────────────────────────────────────────
 
   async create(name: string): Promise<{ id: string, name: string, apiKey: string }> {
@@ -206,17 +285,18 @@ export class SessionManager {
     return row !== undefined && digestsEqual(row.api_key_hash, hashKey(presented))
   }
 
-  async state(id: string): Promise<SessionState> {
+  /**
+   * The session's state. Its counts may be up to COUNTS_TTL_MS old unless
+   * `freshCounts` is set; everything else is read now.
+   */
+  async state(id: string, options: { freshCounts?: boolean } = {}): Promise<SessionState> {
     const row = await this.row(id)
-    const [counts] = await this.sql<{ chats: string, messages: string, pending: string }[]>`
-      SELECT (SELECT count(*) FROM chats WHERE session_id = ${id}) AS chats,
-             (SELECT count(*) FROM messages WHERE session_id = ${id} AND deleted_at IS NULL) AS messages,
-             (SELECT count(*) FROM chats WHERE session_id = ${id} AND backfill_stopped IS NULL) AS pending`
+    const counts = await this.sessionCounts(id, options.freshCounts === true)
     const rt = this.runtime(id)
     return describe(rt, row, this.config.telegram !== undefined, {
-      chats: Number(counts?.chats ?? 0),
-      messages: Number(counts?.messages ?? 0),
-    }, Number(counts?.pending ?? 0), this.backfillFor(row).days)
+      chats: counts.chats,
+      messages: counts.messages,
+    }, counts.pending, this.backfillFor(row).days)
   }
 
   /**
@@ -342,6 +422,7 @@ export class SessionManager {
 
     await this.dispose(rt, { saveState: false })
     await new SyncStore(this.sql, id).wipe()
+    this.counts.delete(id)
     await this.sql`
       UPDATE sessions
       SET session_enc = NULL, authorized_at = NULL, revoked_at = NULL,
@@ -372,7 +453,12 @@ export class SessionManager {
     }
     rt.heldElsewhere = false
 
+    // Whatever the heartbeat is connecting finishes first: two clients on one
+    // auth key, even in one process, is what AUTH_KEY_DUPLICATED punishes.
+    await rt.connecting?.catch(() => {})
     await this.dispose(rt)
+    // Asked for by a person: no back-off.
+    rt.retryAt = undefined
     // Reached by a request: a rejection here (lock or DB read failing) must be
     // logged, never left unhandled. The heartbeat retries.
     this.resume(rt, await this.row(id))
@@ -395,6 +481,7 @@ export class SessionManager {
     }
     await this.sql`DELETE FROM sessions WHERE id = ${id}`
     this.runtimes.delete(id)
+    this.counts.delete(id)
   }
 
   async setWebhook(id: string, url: string | null, headers: Record<string, string>): Promise<void> {
@@ -558,6 +645,7 @@ export class SessionManager {
       rt.healthy = true
       rt.revoked = false
       rt.lastError = undefined
+      clearRetry(rt)
       console.info(`[sessions] ${rt.id}: linked`)
       void sync.start()
     }
@@ -575,17 +663,31 @@ export class SessionManager {
     }
   }
 
-  /** Connect a linked session from its stored string, and resume syncing it. */
-  private async resume(rt: Runtime, row: SessionRow): Promise<void> {
+  /**
+   * Connect a linked session from its stored string, and resume syncing it.
+   * One build per session at a time: a caller arriving while one runs waits on it.
+   */
+  private resume(rt: Runtime, row: SessionRow): Promise<void> {
+    rt.connecting ??= this.connectClient(rt, row).finally(() => { rt.connecting = undefined })
+    return rt.connecting
+  }
+
+  private async connectClient(rt: Runtime, row: SessionRow): Promise<void> {
     if (rt.client || rt.pairing || !row.session_enc || this.stopping) return
     // Linked earlier, and the credentials have since been removed. Nothing to
     // connect with; `describe` reports it as closed, with the reason.
     if (!this.config.telegram) return
+    // Backing off after failed connects (see `scheduleRetry`).
+    if (rt.retryAt !== undefined && Date.now() < rt.retryAt) return
+    // The lock is checked on every connect, so a session another process has
+    // taken meanwhile is never connected twice.
     if (!(await this.locks.acquire(rt.id))) {
       rt.heldElsewhere = true
       return
     }
     rt.heldElsewhere = false
+    // Re-checked after the await.
+    if (rt.client || rt.pairing || this.stopping) return
 
     let saved: string
     try {
@@ -619,6 +721,8 @@ export class SessionManager {
       const me = await withTimeout(client.getMe(), PROBE_TIMEOUT_MS)
       rt.healthy = true
       rt.lastError = undefined
+      if (rt.rebuilding || rt.failures > 0) console.info(`[sessions] ${rt.id}: connected again`)
+      rt.rebuilding = false
       await this.recordMe(rt.id, me)
       void sync.start()
     }
@@ -627,10 +731,11 @@ export class SessionManager {
         await this.markRevoked(rt, error)
         return
       }
-      // Transient. Drop the client but keep the lock: the next heartbeat tries
+      // Transient. Drop the client but keep the lock: a later heartbeat tries
       // again, and this process is still the one entitled to.
       rt.lastError = describeError(error)
-      console.error(`[sessions] ${rt.id}: could not connect: ${rt.lastError}`)
+      const delay = scheduleRetry(rt)
+      console.error(`[sessions] ${rt.id}: could not connect: ${rt.lastError}; next attempt in ${Math.round(delay / 1000)}s`)
       await this.dispose(rt, { saveState: false })
     }
   }
@@ -642,6 +747,7 @@ export class SessionManager {
       await withTimeout(client.invoke(new Api.updates.GetState()), PROBE_TIMEOUT_MS)
       rt.healthy = true
       rt.lastError = undefined
+      clearRetry(rt)
       await this.saveUpdateState(rt)
     }
     catch (error) {
@@ -651,9 +757,45 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Whether the running client is past saving: teleproto gave up reconnecting it
+   * (its sender is `dead`, and stays so — teleproto never tries again), or it has
+   * not answered for STALLED_AFTER_MS. Called after `probe`, which has already
+   * routed a revocation to `markRevoked`; a revoked session never gets here.
+   */
+  private stalled(rt: Runtime): boolean {
+    const client = rt.client
+    if (!client || rt.pairing) return false
+    if (rt.healthy && client.connected) {
+      rt.downSince = undefined
+      return false
+    }
+    rt.downSince ??= Date.now()
+    return client._sender?.lifecycle === 'dead' || Date.now() - rt.downSince >= STALLED_AFTER_MS
+  }
+
+  /**
+   * Drop a client that stopped reconnecting and build a new one. Without this a
+   * network drop longer than teleproto's retry budget left the session offline
+   * until a restart (#187): the heartbeat probed the dead client for ever.
+   */
+  private async rebuild(rt: Runtime): Promise<void> {
+    console.error(`[sessions] ${rt.id}: client stopped reconnecting (${rt.lastError ?? 'not connected'}); rebuilding`)
+    rt.rebuilding = true
+    // Saves the update state first, so catch-up resumes from there, and finishes
+    // destroying the old client before `resume` builds the next one.
+    await this.dispose(rt)
+    // Read again: the row the heartbeat started with holds the state from before
+    // `dispose` saved it. A failed read leaves no client, which the next
+    // heartbeat connects from its own read.
+    const row = await this.findRow(rt.id).catch(() => undefined)
+    if (row) await this.resume(rt, row)
+  }
+
   private async markRevoked(rt: Runtime, error: unknown): Promise<void> {
     const reason = describeError(error)
     console.error(`[sessions] ${rt.id}: Telegram no longer accepts this session (${reason}); it must be paired again`)
+    clearRetry(rt)
     await this.dispose(rt, { saveState: false })
     await this.sql`UPDATE sessions SET session_enc = NULL, revoked_at = now(), updated_at = now() WHERE id = ${rt.id}`
     rt.revoked = true
@@ -686,7 +828,10 @@ export class SessionManager {
       for (const row of rows) {
         const rt = this.runtime(row.id)
         if (row.revoked_at) rt.revoked = true
-        if (rt.client) await this.probe(rt)
+        if (rt.client) {
+          await this.probe(rt)
+          if (this.stalled(rt)) await this.rebuild(rt)
+        }
         else await this.resume(rt, row)
         this.publish(rt)
       }
@@ -714,18 +859,21 @@ export class SessionManager {
   private runtime(id: string): Runtime {
     let rt = this.runtimes.get(id)
     if (!rt) {
-      rt = { id, healthy: false, revoked: false, heldElsewhere: false }
+      rt = { id, healthy: false, revoked: false, heldElsewhere: false, failures: 0, rebuilding: false }
       this.runtimes.set(id, rt)
     }
     return rt
   }
 
   private async row(id: string): Promise<SessionRow> {
-    const row = UUID.test(id)
-      ? (await this.sql<SessionRow[]>`SELECT ${this.sql(SESSION_COLUMNS)} FROM sessions WHERE id = ${id}`)[0]
-      : undefined
+    const row = await this.findRow(id)
     if (!row) throw new HttpError(404, 'No such session.')
     return row
+  }
+
+  private async findRow(id: string): Promise<SessionRow | undefined> {
+    if (!UUID.test(id)) return undefined
+    return (await this.sql<SessionRow[]>`SELECT ${this.sql(SESSION_COLUMNS)} FROM sessions WHERE id = ${id}`)[0]
   }
 
   private connectedClient(rt: Runtime): TelegramClient {
@@ -754,7 +902,12 @@ export class SessionManager {
     logger.handler = (record) => {
       const level = String(record.level)
       if (level !== 'error' && level !== 'warn') return
-      console.error(`[teleproto] ${level}: ${String(record.message).slice(0, 300)}`)
+      const message = String(record.message)
+      // teleproto's own polls (channel differences, every minute per channel)
+      // failing on a disconnected client: the consequence, not the news. The
+      // heartbeat reports the disconnection once and rebuilds the client.
+      if (message.includes('Cannot send requests while disconnected')) return
+      console.error(`[teleproto] ${level}: ${message.slice(0, 300)}`)
     }
     const { apiId, apiHash } = this.credentials()
     return new TelegramClient(session, apiId, apiHash, {
@@ -780,8 +933,42 @@ export class SessionManager {
     rt.client = undefined
     rt.sync = undefined
     rt.healthy = false
+    rt.downSince = undefined
     sync?.stop()
     if (client) await destroyClient(client)
+  }
+
+  /**
+   * Chats, live messages and chats still backfilling, reused for COUNTS_TTL_MS
+   * and shared by concurrent callers. A failed read is not kept, so the next
+   * call asks again. Dropped wherever synced data is wiped, so a logout never
+   * reports the previous account's numbers.
+   *
+   * The message count is an index-only scan on `messages_live_by_session`
+   * (migration 0003); before it, every call read each of the session's rows.
+   */
+  private async sessionCounts(id: string, fresh: boolean): Promise<SessionCounts> {
+    const cached = this.counts.get(id)
+    if (!fresh && cached && Date.now() - cached.at < COUNTS_TTL_MS) return await cached.value
+
+    const value = this.sql<{ chats: string, messages: string, pending: string }[]>`
+      SELECT (SELECT count(*) FROM chats WHERE session_id = ${id}) AS chats,
+             (SELECT count(*) FROM messages WHERE session_id = ${id} AND deleted_at IS NULL) AS messages,
+             (SELECT count(*) FROM chats WHERE session_id = ${id} AND backfill_stopped IS NULL) AS pending`
+      .then(([row]) => ({
+        chats: Number(row?.chats ?? 0),
+        messages: Number(row?.messages ?? 0),
+        pending: Number(row?.pending ?? 0),
+      }))
+    const entry = { at: Date.now(), value }
+    this.counts.set(id, entry)
+    try {
+      return await value
+    }
+    catch (error) {
+      if (this.counts.get(id) === entry) this.counts.delete(id)
+      throw error
+    }
   }
 
   private async saveUpdateState(rt: Runtime): Promise<void> {
@@ -813,6 +1000,7 @@ export class SessionManager {
     if (row?.data_user_id && row.data_user_id !== meId) {
       console.info(`[sessions] ${id}: a different Telegram account was linked; discarding the chats synced for the previous one`)
       await new SyncStore(this.sql, id).wipe()
+      this.counts.delete(id)
     }
     await this.sql`
       UPDATE sessions SET data_user_id = ${meId},
@@ -861,6 +1049,26 @@ export class SessionManager {
       }
     })()
   }
+}
+
+/**
+ * Count a failed connect and set when the next may be tried: 30 s, 1 min, 2 min …
+ * capped at 10 min, plus up to a fifth more so sessions that dropped together do
+ * not all reconnect together. A long Telegram outage must not become a connect
+ * storm across every session. Returns the delay.
+ */
+function scheduleRetry(rt: Runtime): number {
+  rt.failures += 1
+  const base = Math.min(RETRY_BASE_MS * 2 ** Math.min(rt.failures - 1, 10), RETRY_CAP_MS)
+  const delay = Math.round(base * (1 + Math.random() * 0.2))
+  rt.retryAt = Date.now() + delay
+  return delay
+}
+
+/** The session answered (or starts afresh): no back-off. */
+function clearRetry(rt: Runtime): void {
+  rt.failures = 0
+  rt.retryAt = undefined
 }
 
 function describe(rt: Runtime, row: SessionRow, telegramConfigured: boolean, stats: SessionState['stats'], pendingBackfill: number, backfillDays: number): SessionState {
