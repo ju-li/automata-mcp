@@ -27,7 +27,7 @@
 4. On the connection's dashboard, press **New token**: a name, an
    expiry (30 days, 90 days — the default — 1 year, or never) and a scope.
 5. Add it to Claude. The **How to connect** dialog has the steps for Claude.ai
-   (Settings → Connectors → Add custom connector), Claude Code
+   (Settings → Customize → Connectors → Add → Add custom connector), Claude Code
    (`claude mcp add --transport http <name> <url>`), clients that send an
    `Authorization: Bearer` header, and the MCP Inspector.
    **Cursor** (hosted server only): install the Automata plugin from
