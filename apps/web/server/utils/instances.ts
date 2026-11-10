@@ -1485,26 +1485,9 @@ export async function logoutInstance(instance: AppInstance): Promise<void> {
  */
 export async function enableFullHistorySync(instance: AppInstance): Promise<void> {
   // Before anything changes: refused, the account stays linked.
-  if (await whatsappHistoryLimited(instance)) throw fullHistoryLimitError()
+  if (await historyLimited(instance)) throw fullHistoryLimitError()
 
-  const evolution = evolutionClientForInstance(instance)
-  const name = encodeURIComponent(instance.name)
-
-  // Read-modify-write, never a partial write. Evolution's `setSettings` copies
-  // every field of the body onto the live instance's in-memory settings, so a key
-  // left out of the request becomes `undefined` there until the process restarts
-  // — omitting `groupsIgnore` silently un-sets it on a running socket. Its schema
-  // also *requires* all six booleans, so a partial body is a 400 anyway.
-  // Not caught: `find` answers `null` when the instance has no settings row yet,
-  // so anything thrown here is a real failure. Swallowing it would mean writing
-  // defaults over settings we simply failed to read.
-  const current = await evolution<EvolutionSettings | null>(`/settings/find/${name}`)
-
-  await evolution(`/settings/set/${name}`, {
-    method: 'POST',
-    body: settingsBody(current, { syncFullHistory: true }),
-  })
-  historySettingCache.delete(instance.id)
+  await writeSyncFullHistory(instance, true)
 
   // The new setting only reaches Baileys when the socket is next constructed, and
   // that only counts as a fresh device link — the thing that triggers a history
@@ -1595,20 +1578,59 @@ export async function deleteInstance(
 }
 
 /**
- * Whether this WhatsApp connection may import only recent history: its
- * organization is limited to that (`recent_history_only`, which the cloud
- * service sets for Free) **and** it lives on the deployment's own Evolution
- * server. A bring-your-own server stores history on the user's disk, which is
- * what the limit is about, so it never applies there.
+ * Whether this connection may import only recent history: its organization is
+ * limited to that (`recent_history_only`, which the cloud service sets for
+ * Free) **and** it lives on the deployment's own backend — Evolution server for
+ * WhatsApp, bridge for Telegram. A bring-your-own backend stores history on the
+ * user's disk, which is what the limit is about, so it never applies there.
+ * `undefined` for kinds that import no history.
  *
- * The one place the rule lives for an existing connection — the full-history
- * import and pairing ask here. Creating one asks the same question before the
- * row exists, in `provisionWhatsappInstance`: no `server` there is exactly
+ * The one place the rule lives for an existing connection: WhatsApp's
+ * full-history import and pairing, Telegram's pairing
+ * (`startTelegramPairing`) and the dashboard's `historyLimitedByPlan` ask here.
+ * Creating a WhatsApp connection asks the same question before the row exists,
+ * in `provisionWhatsappInstance`: no `server` there is exactly
  * `onDeploymentServer` here.
  */
-export async function whatsappHistoryLimited(instance: AppInstance): Promise<boolean> {
-  if (!onDeploymentServer(instance)) return false
+export async function historyLimited(instance: AppInstance): Promise<boolean | undefined> {
+  const kind = instanceKind(instance)
+  let ownBackend: boolean
+  switch (kind) {
+    case 'whatsapp': ownBackend = onDeploymentServer(instance); break
+    case 'telegram': ownBackend = onDeploymentBridge(instance); break
+    case 'postgres':
+    case 'imap': return undefined
+    default: return assertNever(kind)
+  }
+  if (!ownBackend) return false
   return await orgRecentHistoryOnly(await appDb(), instance.org)
+}
+
+/**
+ * Set `syncFullHistory` on the connection's Evolution instance. Answers whether
+ * anything was written: a value already in place is left alone.
+ *
+ * Read-modify-write, never a partial write. Evolution's `setSettings` copies
+ * every field of the body onto the live instance's in-memory settings, so a key
+ * left out of the request becomes `undefined` there until the process restarts
+ * — omitting `groupsIgnore` silently un-sets it on a running socket. Its schema
+ * also *requires* all six booleans, so a partial body is a 400 anyway.
+ * Not caught: `find` answers `null` when the instance has no settings row yet
+ * (Evolution's default, off), so anything thrown here is a real failure.
+ * Swallowing it would mean writing defaults over settings we failed to read.
+ */
+async function writeSyncFullHistory(instance: AppInstance, on: boolean): Promise<boolean> {
+  const evolution = evolutionClientForInstance(instance)
+  const name = encodeURIComponent(instance.name)
+  const current = await evolution<EvolutionSettings | null>(`/settings/find/${name}`)
+  if ((current?.syncFullHistory === true) === on) return false
+
+  await evolution(`/settings/set/${name}`, {
+    method: 'POST',
+    body: settingsBody(current, { syncFullHistory: on }),
+  })
+  historySettingCache.delete(instance.id)
+  return true
 }
 
 /**
@@ -1636,19 +1658,8 @@ async function applyHistoryLimitBeforePairing(instance: AppInstance): Promise<vo
   const checked = historyLimitChecked.get(instance.id)
   if (checked && now - checked < HISTORY_LIMIT_CHECK_MS) return
 
-  if (await whatsappHistoryLimited(instance)) {
-    const evolution = evolutionClientForInstance(instance)
-    const name = encodeURIComponent(instance.name)
-    // Read-modify-write, for the reasons `enableFullHistorySync` gives.
-    const current = await evolution<EvolutionSettings | null>(`/settings/find/${name}`)
-    if (current?.syncFullHistory) {
-      await evolution(`/settings/set/${name}`, {
-        method: 'POST',
-        body: settingsBody(current, { syncFullHistory: false }),
-      })
-      historySettingCache.delete(instance.id)
-      console.info(`[instances] ${instance.id} (${instance.name}): full-history sync turned off before pairing — the organization imports recent history only`)
-    }
+  if (await historyLimited(instance) && await writeSyncFullHistory(instance, false)) {
+    console.info(`[instances] ${instance.id} (${instance.name}): full-history sync turned off before pairing — the organization imports recent history only`)
   }
 
   // Bounded by sweeping old entries rather than by connection count: a

@@ -101,29 +101,29 @@ import { canReadMessages, readGroupChatNames } from './evolution-db'
 /** How long a process serves the merged names before reading the sources again. */
 const GROUP_TTL_MS = 5 * 60_000
 /** Shortest gap between two lookup runs for one account, across replicas. */
-export const GROUP_LOOKUP_INTERVAL_MS = 15 * 60_000
+const GROUP_LOOKUP_INTERVAL_MS = 15 * 60_000
 /** Most groups one run asks WhatsApp about. */
-export const GROUP_LOOKUPS_PER_RUN = 4
+const GROUP_LOOKUPS_PER_RUN = 4
 /** Pause between two lookups in one run. */
-export const GROUP_LOOKUP_DELAY_MS = 5_000
+const GROUP_LOOKUP_DELAY_MS = 5_000
 /** One `findGroupInfos`: a `groupMetadata` and a picture. */
 const GROUP_LOOKUP_TIMEOUT_MS = 30_000
 /** Longer than a whole run, so a run still going is never claimed twice. */
 const GROUP_LOOKUP_LEASE_MS = GROUP_LOOKUPS_PER_RUN * (GROUP_LOOKUP_TIMEOUT_MS + GROUP_LOOKUP_DELAY_MS) + 60_000
 /** A group with a name is looked up again after this long — renames, sizes. */
-export const GROUP_REFRESH_AGE_MS = 7 * 24 * 60 * 60_000
+const GROUP_REFRESH_AGE_MS = 7 * 24 * 60 * 60_000
 /** A group with no name at all is retried after this long. */
-export const GROUP_UNNAMED_RETRY_MS = 24 * 60 * 60_000
+const GROUP_UNNAMED_RETRY_MS = 24 * 60 * 60_000
 /** Back-off after the first run in a row where every lookup failed; doubles. */
-export const GROUP_LOOKUP_FAILURE_BACKOFF_MS = 60 * 60_000
+const GROUP_LOOKUP_FAILURE_BACKOFF_MS = 60 * 60_000
 /** The longest back-off, however many failed runs. */
-export const GROUP_LOOKUP_MAX_FAILURE_BACKOFF_MS = 24 * 60 * 60_000
+const GROUP_LOOKUP_MAX_FAILURE_BACKOFF_MS = 24 * 60 * 60_000
 /** Failed runs past this many no longer lengthen the back-off; keeps the arithmetic finite. */
 const GROUP_LOOKUP_FAILURE_EXPONENT_CAP = 10
 /** A stored lookup older than this no longer names anything. */
-export const GROUP_MAX_AGE_MS = 30 * 24 * 60 * 60_000
+const GROUP_MAX_AGE_MS = 30 * 24 * 60 * 60_000
 /** A group WhatsApp said the account is not in is asked about again after this long — in case it rejoined. */
-export const GROUP_GONE_RETRY_MS = 30 * 24 * 60 * 60_000
+const GROUP_GONE_RETRY_MS = 30 * 24 * 60 * 60_000
 /** Groups remembered per account as asked for and unnamed (`noteUnnamed`). */
 const MAX_NOTED_UNNAMED = 500
 /** What Evolution's `groupJidSchema` accepts; anything else is never looked up. */
@@ -139,7 +139,7 @@ export interface GroupInfo {
  * the first, then 2 h, 4 h … up to `GROUP_LOOKUP_MAX_FAILURE_BACKOFF_MS`.
  * `claimGroupLookups` applies the same rule in SQL; this copy is for logging.
  */
-export function groupLookupBackoffMs(failures: number): number {
+function groupLookupBackoffMs(failures: number): number {
   const doublings = Math.min(Math.max(failures - 1, 0), GROUP_LOOKUP_FAILURE_EXPONENT_CAP)
   return Math.min(GROUP_LOOKUP_FAILURE_BACKOFF_MS * 2 ** doublings, GROUP_LOOKUP_MAX_FAILURE_BACKOFF_MS)
 }
@@ -271,7 +271,7 @@ async function readChatNames(instance: AppInstance): Promise<Map<string, string 
           + 'come only from slow per-group lookups. Add the "Chat" grant in docs/whatsapp.md "Reading and searching messages".')
       }
     }
-    else if ((error as { statusCode?: number })?.statusCode !== 429) {
+    else if (httpStatusOf(error) !== 429) {
       console.warn(`[groups] could not read group names from Evolution's database for connection ${instance.id}:`,
         error instanceof Error ? error.message : error)
     }
@@ -324,12 +324,11 @@ async function refreshGroups(instance: AppInstance, evolution: EvolutionClient):
   let succeeded = 0
   let gone = 0
   let tried = 0
-  let throttled: LookupFailure | undefined
   let lastFailure: LookupFailure | undefined
 
   for (const [index, jid] of due.entries()) {
     if (index > 0) await delay(GROUP_LOOKUP_DELAY_MS)
-    tried++
+    tried = index + 1
     let found: GroupInfo | undefined
     let failure: LookupFailure | undefined
     try {
@@ -357,12 +356,10 @@ async function refreshGroups(instance: AppInstance, evolution: EvolutionClient):
 
     await storeLookup(instance.id, jid, undefined)
     lastFailure = failure
-    if (failure?.kind === 'throttled') {
-      // Every further query now only adds to what WhatsApp is counting.
-      throttled = failure
-      break
-    }
+    // Every further query now only adds to what WhatsApp is counting.
+    if (failure?.kind === 'throttled') break
   }
+  const throttled = lastFailure?.kind === 'throttled'
 
   if (gone > 0) {
     console.info(`[groups] ${gone} of ${tried} group lookups for connection ${instance.id} named groups the account is no longer in; `
@@ -388,7 +385,7 @@ async function refreshGroups(instance: AppInstance, evolution: EvolutionClient):
 }
 
 /** Why one lookup failed, as far as it decides who pays for it — see the header. */
-export interface LookupFailure {
+interface LookupFailure {
   kind: 'gone' | 'throttled' | 'other'
   /** For the log: WhatsApp's error text when Evolution relayed it, else the request error. */
   reason: string
@@ -403,7 +400,7 @@ const RATE_LIMITED = /rate-overlimit/i
  * the exact texts in `NOT_A_MEMBER` is a group the account is not in — anything
  * looser would let an unrecognised failure skip the account's back-off.
  */
-export function classifyLookupFailure(error: unknown): LookupFailure {
+function classifyLookupFailure(error: unknown): LookupFailure {
   const raw = (error as { data?: { response?: { message?: unknown } } } | undefined)?.data?.response?.message
   const entries = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]
   const texts = entries.filter((e): e is string => typeof e === 'string').map(e => e.trim())

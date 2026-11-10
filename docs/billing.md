@@ -43,8 +43,8 @@ Free, and moving to Pro imports nothing by itself. An admin who upgrades presses
 **Telegram history.** Telegram has no "recent slice" to ask for: the bridge
 fetches older history itself after an account is linked, back to
 `TELEGRAM_BACKFILL_DAYS` (365 by default). On Free it fetches the last 90 days
-instead — the same `recent_history_only` flag, read by `telegramHistoryLimited`
-in `apps/web/server/utils/telegram-instances.ts`, with the number in
+instead — the same `recent_history_only` flag, read by `historyLimited`
+in `apps/web/server/utils/instances.ts`, with the number in
 `apps/web/shared/history.ts`. The app sends the cap when pairing starts and the
 bridge stores it on the session, so it is decided at linking, like WhatsApp's:
 an account linked under Pro keeps its longer history after a move to Free, and

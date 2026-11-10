@@ -7,7 +7,7 @@ import { HttpError, describeError, telegramNotConfigured } from './http-error.ts
 import { SessionLocks } from './locks.ts'
 import { chatRow, entityId, inputPeerFor, markedId, usersOf } from './sync/convert.ts'
 import { type ChatListing, SyncStore } from './sync/store.ts'
-import { type BackfillOptions, SessionSync, type SyncStatus } from './sync/syncer.ts'
+import { type BackfillOptions, SessionSync, type SyncStatus, heapMb } from './sync/syncer.ts'
 import { deliverWebhook } from './webhook.ts'
 
 /**
@@ -257,7 +257,7 @@ export class SessionManager {
       oldestPendingSeconds: oldest === undefined ? 0 : Math.round((Date.now() - oldest) / 1000),
       sheddingSessions: shedding,
       dirtyChannels,
-      heapUsedMb: Math.round(process.memoryUsage().heapUsed / 1_048_576),
+      heapUsedMb: heapMb(),
     }
   }
 
@@ -1025,7 +1025,7 @@ export class SessionManager {
   private publish(rt: Runtime): void {
     void (async () => {
       try {
-        const [row] = await this.sql<SessionRow[]>`SELECT ${this.sql(SESSION_COLUMNS)} FROM sessions WHERE id = ${rt.id}`
+        const row = await this.findRow(rt.id)
         if (!row?.webhook_url) return
 
         const state = describe(rt, row, this.config.telegram !== undefined, { chats: 0, messages: 0 }, 0, this.backfillFor(row).days)
