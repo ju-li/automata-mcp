@@ -320,12 +320,10 @@ what it deletes:
   does not clear it, so a connection that was paired and later signed out is
   never removed. Rows that existed before this was added were backfilled from
   alert history and, where Evolution shares the app's database, from Evolution's
-  `ownerJid` and stored messages. One case neither the backfill nor the live
-  check below can see: a connection signed out *before* upgrading, on a server
-  whose database the app has no URL for, that never raised an alert. It looks
-  exactly like one nobody paired, and the first run after the upgrade removes
-  it. To keep one, add its database URL (**Enable reading**) or pair it again
-  first.
+  `ownerJid` and stored messages. A connection signed out before upgrading is
+  still recognised: Evolution keeps the account's `ownerJid` through a logout,
+  and the live check below reads it (through Evolution's API when the app has
+  no URL for that server's database).
 - **Re-checked live just before deleting.** If Evolution now reports the account
   `open` or linked, or its database holds messages for it, the connection is
   marked paired and kept. If the check can't reach Evolution or its database,
