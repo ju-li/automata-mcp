@@ -279,7 +279,7 @@ built from it. See [Self-hosting](docs/self-hosting.md).
 
 1. Create a connection and pair it, link it, or enter its credentials.
 2. On its dashboard, create a **connector token** and choose what it may reach.
-3. In Claude, open **Settings → Connectors → Add custom connector** and paste the
+3. In Claude, open **Settings → Customize → Connectors → Add → Add custom connector** and paste the
    connector URL. For Claude Code: `claude mcp add --transport http <name> <url>`.
    Other clients: <https://www.getautomata.app/docs/clients>.
 
