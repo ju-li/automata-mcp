@@ -24,7 +24,7 @@ Self-hosted deployments never run the cloud service.
 | Connections | 1 | unlimited |
 | Connector tokens | 1 | unlimited |
 | Users | 1 | 5 included, $10/user/month after |
-| Requests | unlimited | unlimited |
+| Requests | no monthly cap; [per-minute rate limits](#rate-limits) | the same |
 | Telemetry | always on, stored 30 days | optional, off by default |
 | WhatsApp history at pairing | recent only | recent, or full if chosen |
 | Telegram history at linking | last 90 days | the deployment's setting (365 days by default) |
@@ -53,6 +53,29 @@ linked again. New messages are kept either way, and a bring-your-own bridge is
 never capped. A bridge too old to store the cap makes linking on Free answer
 503, with the reason in the web log, rather than pair uncapped. See
 [What syncs](telegram.md#what-syncs).
+
+### Rate limits
+
+No plan has a monthly request quota, but no plan is unmetered either. Every
+`/mcp` request counts against per-minute budgets that are the same on Free and
+Pro, so one runaway agent loop cannot slow the shared databases and mail
+servers for every other customer:
+
+| Budget | Default |
+|---|---|
+| Per connector token, every request | 120 a minute |
+| Per organization, all its tokens together | 600 a minute |
+| Per connection, costly tools only (`search-messages`, `search-telegram-messages`, `search-emails` with `text`, `run-query` without `explain`) | 30 a minute |
+
+Each budget can be spent all at once and refills continuously. A request over
+any of them gets **429** with `Retry-After` and a JSON-RPC error naming which
+budget ran out. It never gets 401, so the client keeps the token. The budgets are
+deployment settings (`NUXT_MCP_RATE_*`; see
+[self-hosting.md](self-hosting.md#mcp-rate-limits)). They are not plan rules:
+`plans.ts` writes no number for them, and the copy says "no monthly request cap
+(per-minute rate limits)" rather than "unlimited". If they ever differ by plan,
+they become `max_*`-style columns written by the cloud service, like the
+others.
 
 The numbers are set in three places:
 
@@ -317,7 +340,16 @@ NUXT_CLOUD_ADMIN_KEY=…                              # the same value as CLOUD_
 NUXT_PUBLIC_APP_URL=https://mcp.getautomata.app
 NUXT_SIGNUP=open
 NUXT_OPS_ALERT_EMAIL=…                              # where reconnect loops on our Evolution are reported
+NUXT_REDIS_URL=redis://…/1                          # rate-limit counts shared across replicas
 ```
+
+`NUXT_REDIS_URL` keeps the [rate limits](#rate-limits) in Redis, so they hold
+across web replicas and redeploys. Without it each replica counts on its own,
+and two replicas allow twice the budget. If Redis can't be reached, the web app
+falls back to counting in-process and logs that once a minute. Requests are
+never refused because Redis is down. If it shares a Redis with Evolution, give
+it its own database number (Evolution's cache uses `/6`). Self-hosted
+deployments don't need it.
 
 `NUXT_OPS_ALERT_EMAIL` is not about billing, but hosted mode is what makes it
 matter: with it set, a customer whose WhatsApp connection is stuck reconnecting

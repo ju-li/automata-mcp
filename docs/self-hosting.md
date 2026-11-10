@@ -310,6 +310,45 @@ The single container's equivalent is `docker volume rm` on the volume mounted at
 `/data` — it holds the sessions and the database alike. `docker rm` alone is
 safe.
 
+## MCP rate limits
+
+Every `/mcp` request counts against per-minute budgets, so one runaway agent
+loop cannot hammer the Evolution database, a connected Postgres or a mail
+server for everyone else:
+
+| Variable | Default | Budget |
+|---|---|---|
+| `NUXT_MCP_RATE_TOKEN_PER_MINUTE` | `120` | every request, per connector token |
+| `NUXT_MCP_RATE_ORG_PER_MINUTE` | `600` | every request, per organization (all its tokens together) |
+| `NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE` | `30` | costly tools only, per connection: `search-messages`, `search-telegram-messages`, `search-emails` with `text`, and `run-query` without `explain` |
+
+Each budget can be spent all at once and refills continuously. `0` turns that
+budget off. A request over any budget is refused whole and costs nothing. It
+gets **429** with a `Retry-After` header and a JSON-RPC error that says which
+budget ran out and when to retry. The token stays valid. The web log gets one
+line per budget per minute, with ids only.
+
+**Where the counts live.** By default they are kept in each web process, which
+is right for a single replica. With several replicas, each counts on its own and
+the effective budget multiplies by the number of replicas. To share the counts,
+set `NUXT_REDIS_URL`; nothing else needs Redis, and nothing requires it:
+
+| `NUXT_REDIS_URL` | behaviour |
+|---|---|
+| unset | counted in-process; one line at boot says so |
+| set, unreachable | counted in-process for as long as it is down, logged at most once a minute; requests are never refused because of it |
+| set, reachable | shared across replicas and kept across redeploys |
+
+If you point it at a Redis that something else uses, such as Compose's `redis`
+service, which Evolution caches into:
+
+- Use a database number of its own, for example `redis://redis:6379/1`.
+  Evolution's cache uses `/6`.
+- The app writes only keys starting with `automata:`, every one with a one-minute
+  expiry. It never runs `FLUSHALL`, `FLUSHDB`, `CONFIG` or `KEYS`.
+- The app never picks up Evolution's `CACHE_REDIS_URI` on its own. Sharing is
+  your decision.
+
 ## The app database
 
 Everything the app itself keeps is in the `app` schema of `NUXT_DATABASE_URL` —

@@ -113,6 +113,44 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
   ON "Message" ("instanceId", "messageTimestamp" DESC);
 ```
 
+`read-messages` reads one chat, and that index still visits every row the account
+holds in the requested time range before filtering by chat. On accounts with a
+large history import, a per-chat index lets one chat's page skip the rest:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_chat_ts_idx
+  ON "Message" ("instanceId", (key->>'remoteJid'), "messageTimestamp" DESC);
+```
+
+It is optional and costs disk and insert time on every message. Before keeping
+it, check on your largest account that Postgres actually uses it. Use the
+account's id from `"Instance"` and one of its busy chats:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT 1 FROM "Message" m
+WHERE m."instanceId" = '<instance id>' AND m.key->>'remoteJid' = ANY(ARRAY['<jid>'])
+ORDER BY m."messageTimestamp" DESC LIMIT 51;
+```
+
+The plan should name `message_instance_chat_ts_idx`. If it still names
+`message_instance_ts_idx` or a sequential scan, drop the new index with
+`DROP INDEX CONCURRENTLY`. Like the indexes below, it lives on Evolution's table
+and must be re-checked after an image-tag bump.
+
+**How big each account is.** `"Message"` grows without bound; nothing here or in
+Evolution deletes old messages. To see where the space goes before deciding on
+retention:
+
+```sql
+SELECT "instanceId", count(*) AS messages
+FROM "Message" GROUP BY 1 ORDER BY 2 DESC LIMIT 20;
+
+SELECT pg_size_pretty(pg_total_relation_size('"Message"')) AS message_table;
+```
+
+The first reads every row. Run it at a quiet hour.
+
 Two more changes, both for Evolution's own queries rather than this app's. Make
 them as a superuser too.
 
@@ -158,7 +196,7 @@ ALTER TABLE "Message" SET (autovacuum_vacuum_insert_scale_factor = 0.01,
 should then stay close to 1.
 
 The trigram index and these storage parameters live on Evolution's tables, as
-`message_instance_ts_idx` does. They survive restarts, but a Prisma migration
+`message_instance_ts_idx` (and `message_instance_chat_ts_idx`, if you added it) does. They survive restarts, but a Prisma migration
 that recreates either table drops them without any warning. Re-check all three
 after bumping Evolution's image tag.
 
