@@ -129,7 +129,7 @@ Limits and options worth knowing:
 - Requests are rate-limited per minute: by default 120 per token, 600 per
   organization, and 30 costly calls per connection (`search-messages`,
   `search-telegram-messages`, `search-emails` with `text`, and `run-query`
-  without `explain`). There is no monthly cap. A request over a budget gets
+  without `explain`). Requests are otherwise unlimited. A request over a budget gets
   **429** with `Retry-After`. The token stays valid, so wait and retry. See
   [self-hosting.md](self-hosting.md#mcp-rate-limits) to change the numbers.
 

@@ -218,9 +218,12 @@ const meters = computed(() => {
             <li>Unlimited connections and connector tokens</li>
             <li>{{ data.includedSeats }} users included, $10/user/month after</li>
             <li>Full WhatsApp history imported when you link an account</li>
-            <li>No monthly request cap (per-minute rate limits)</li>
+            <li>Unlimited requests*</li>
             <li>Telemetry optional, off by default</li>
           </ul>
+          <p class="mt-3 text-xs text-muted-foreground">
+            * Subject to generous rate limits. Rate limits are to protect our servers from abuse.
+          </p>
         </CardContent>
       </Card>
     </template>

@@ -24,7 +24,7 @@ Self-hosted deployments never run the cloud service.
 | Connections | 1 | unlimited |
 | Connector tokens | 1 | unlimited |
 | Users | 1 | 5 included, $10/user/month after |
-| Requests | no monthly cap; [per-minute rate limits](#rate-limits) | the same |
+| Requests | unlimited, subject to [rate limits](#rate-limits) | the same |
 | Telemetry | always on, stored 30 days | optional, off by default |
 | WhatsApp history at pairing | recent only | recent, or full if chosen |
 | Telegram history at linking | last 90 days | the deployment's setting (365 days by default) |
@@ -72,8 +72,11 @@ any of them gets **429** with `Retry-After` and a JSON-RPC error naming which
 budget ran out. It never gets 401, so the client keeps the token. The budgets are
 deployment settings (`NUXT_MCP_RATE_*`; see
 [self-hosting.md](self-hosting.md#mcp-rate-limits)). They are not plan rules:
-`plans.ts` writes no number for them, and the copy says "no monthly request cap
-(per-minute rate limits)" rather than "unlimited". If they ever differ by plan,
+`plans.ts` writes no number for them. The copy on both plans says "Unlimited
+requests*", with the fine print "\* Subject to generous rate limits. Rate limits
+are to protect our servers from abuse." under the plan cards in `signup.vue` and
+under the Pro list in `billing.vue`. Keep the asterisk and the fine print
+together. If the budgets ever differ by plan,
 they become `max_*`-style columns written by the cloud service, like the
 others.
 
