@@ -29,7 +29,9 @@ account linked by QR code, so it lives in this repo. It is built on
    `NUXT_TELEGRAM_ADMIN_KEY` to the same value as the admin key.
 3. **Give the bridge its database:** `TELEGRAM_BRIDGE_DATABASE_URL`, required —
    the bridge refuses to start without it (see
-   [Where the data lives](#where-the-data-lives)).
+   [Where the data lives](#where-the-data-lives)). It listens on
+   `TELEGRAM_BRIDGE_PORT`, else `PORT`, else 8095 — on Railway, which injects
+   `PORT=8080`, set `TELEGRAM_BRIDGE_PORT` so the app's URL keeps working.
 4. **Point the app at it:** `NUXT_TELEGRAM_URL` and
    `NUXT_TELEGRAM_DATABASE_URL`. The bridge reports a dropped or restored
    connection to `NUXT_TELEGRAM_WEBHOOK_URL`, which drives disconnect alerts and

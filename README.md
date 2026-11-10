@@ -94,8 +94,9 @@ Every connector token is bound to exactly one connection and can do only what it
   email tokens start read-only.
 - **Chats, folders and tables.** A token can be limited to listed WhatsApp or
   Telegram chats, email folders, or database tables. Anything outside is
-  refused by name, and listings and searches exclude it in the query itself
-  rather than filtering results afterwards.
+  refused by name. Searches, and the Telegram, email-folder and table listings,
+  exclude it in the query itself; the WhatsApp chat list drops out-of-scope
+  chats from each page it reads.
 - **Database checks.** Read queries run one statement at a time in a read-only
   transaction. Every statement's query plan is checked against the table
   allowlist before a row is read. The real security boundary is the database
@@ -185,7 +186,7 @@ allow.
 
 <p align="center">
   <img src="docs/images/claude-chat.png" alt="Claude searching a WhatsApp team chat and a Telegram client group to recap a project and its action items" width="720">
-  <br><em>Claude pulls a meeting plan from a WhatsApp group and the numbers from your database, in one answer.</em>
+  <br><em>Claude recaps a client project from a WhatsApp group and a Telegram group, in one answer.</em>
 </p>
 
 <p align="center">
@@ -205,8 +206,8 @@ allow.
 
 ## Other features
 
-- **History, not just new messages.** WhatsApp history is imported when a
-  number is paired; Telegram chats are synced and backfilled; email headers are
+- **History, not just new messages.** Recent WhatsApp history is imported
+  when a number is paired, full history on request; Telegram chats are synced and backfilled; email headers are
   synced while bodies and attachments are fetched live and never stored.
 - **Complete-or-labelled answers.** Every page says when there is more;
   reactions and WhatsApp control records are filtered and counted; duplicate

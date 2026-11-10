@@ -83,6 +83,11 @@ Free allows:
 - Every other token answers **403**, never 401, so the MCP client keeps it.
   Resubscribing brings every token back with nothing to reconfigure.
 - Everyone in the organization sees a banner about it.
+- Telemetry becomes required: every tool call and its reason are recorded, and
+  admins cannot turn it off.
+- WhatsApp connections on this deployment's Evolution server can no longer
+  import full history, and one created under Pro gets recent history only the
+  next time it pairs. History already imported stays.
 
 `past_due` counts as Pro while Stripe is still retrying the charge. Your
 retry settings in Stripe decide how long that lasts.
@@ -166,7 +171,7 @@ That is the whole list. Nothing about connections, tokens or usage is sent. The 
    `BREVO_API_KEY` turns the sync on. Without it there is no sync, and any list ids set are ignored (the startup log names them), so a Railway PR environment that lost the sealed key still starts. With the key set, both list ids are required and must differ. A missing, non-numeric or repeated list id stops the service from starting.
 4. Redeploy. `GET /health` reports `crm`:
    - `unconfigured`: `BREVO_API_KEY` is not set.
-   - `waiting`: the start-up checks have not passed yet. The log says why: the web app's migration `0009_marketing_consent` is missing, a list doesn't exist, the key is wrong, or an attribute exists with the wrong type. The service checks again every 15 seconds while the migration is missing, and every five minutes otherwise; billing is unaffected.
+   - `waiting`: the start-up checks have not passed yet. Until the web app's migration `0022_recent_history_only` has run the sync does not start at all (`app` reads `waiting` too). After that the log says why: a list doesn't exist, the key is wrong, or an attribute exists with the wrong type. The service checks again every five minutes; billing is unaffected.
    - `ready`: the sync is running.
 
    The first time the sync runs, it starts from the **oldest** retained event, so every signup since the event log existed becomes a contact.
@@ -274,7 +279,7 @@ STRIPE_PRICE_SEAT=price_…
 
 This is what lets a Railway PR environment start. Railway never copies sealed variables into a PR environment, so the two secrets go missing while the price ids arrive. The preview then runs without billing. To test Checkout in previews, give the PR environment's base environment unsealed **test-mode** values. Never use live keys there.
 
-`GET /health` answers `{ ok, app, billing, crm }`. `app` is `waiting` until the web app has run its migrations; the cloud service waits for them rather than failing.
+`GET /health` answers `{ ok, app, billing, crm }`. `app` is `waiting` until the web app has run its migrations; the cloud service waits for them rather than failing. `billing` is `configured` when `STRIPE_SECRET_KEY` is set, else `unconfigured`. The service listens on `CLOUD_PORT`, else `PORT`, else 8096, and refuses to start with a `CLOUD_ADMIN_KEY` shorter than 24 characters.
 
 **Database access.** The service connects to the web app's database. It reads `app` tables, writes only organizations' billing and limit columns, `app.hosted_events` and `app.entitlement_defaults`, and keeps its own state in a `cloud` schema it creates. The simplest setup reuses the web app's database URL. To narrow it, give it a role with:
 - `USAGE` on the `app` schema;

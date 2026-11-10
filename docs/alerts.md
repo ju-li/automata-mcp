@@ -2,12 +2,18 @@
 
 A WhatsApp or Telegram connection that stops working emails everyone who can
 reach it, and emails them again once it recovers. Always on, no setting; it needs SMTP
-configured on the web service (`NUXT_SMTP_*`) and nothing else.
+on the web service (`NUXT_SMTP_*` and `NUXT_MAIL_FROM`). With `NUXT_PUBLIC_APP_URL`
+set, each mail links to the connection. Without `NUXT_WEBHOOK_URL` no
+per-connection webhook is registered and alerts arrive only as fast as the
+five-minute sweep; set `NUXT_WEBHOOK_SECRET` too, which both the Evolution and
+the Telegram webhook send as `x-webhook-secret`.
 
 The same SMTP settings deliver organization invitations: the invitation-link
 dialog has **Send invite email**, and each pending invitation has **Resend
-email**, which replaces the old link with a new one. Without SMTP both answer
-with an error and the link can still be copied by hand.
+email**, which replaces the old link with a new one. Without SMTP neither mail
+goes out: **Send invite email** answers with an error and leaves the link on
+screen to copy; **Resend email** has already replaced the link, so it shows the
+new one to copy — the old one no longer works.
 
 **Who gets it:** every admin of the owning organization, plus the members the
 connection is assigned to — the same set that can reach it in the app, decided by
