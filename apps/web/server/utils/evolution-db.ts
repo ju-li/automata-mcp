@@ -775,8 +775,9 @@ export interface ChatActivityOptions {
  * cannot tell. Re-check if Evolution starts persisting `chats.update`.
  *
  * **Cost: proportional to chats, not messages — given the index (#174).** With
- * `message_chat_ts_idx` (`"instanceId", key->>'remoteJid', "messageTimestamp"`,
- * docs/whatsapp.md) the read is a loose index scan: a recursive CTE walks the
+ * an index on `("instanceId", key->>'remoteJid', "messageTimestamp")` —
+ * `message_instance_chat_ts_idx` in docs/whatsapp.md, `message_chat_ts_idx` on
+ * production; any name or direction — the read is a loose index scan: a recursive CTE walks the
  * account's distinct `remoteJid`s one index descent each, then for each chat
  * reads its newest rows backwards off the same index and keeps the first that
  * is not a control record — usually the first. Measured on production (PG 17,
@@ -858,7 +859,7 @@ export async function listChatActivity(
 }
 
 /**
- * `per_jid` from a loose index scan over `message_chat_ts_idx` — see
+ * `per_jid` from a loose index scan over the per-chat timestamp index — see
  * `listChatActivity`. Two CTEs, `jids` (recursive) then `per_jid`.
  *
  * The jid walk asks the index for the smallest `remoteJid` above the last one,
@@ -911,7 +912,7 @@ function perJidBySkipScan(sql: Sql, instanceId: string) {
 
 /**
  * `per_jid` from one aggregate over every row of the account — the shape used
- * before #174, kept for a database without `message_chat_ts_idx`. See
+ * before #174, kept for a database without the per-chat timestamp index. See
  * `listChatActivity` for why `msg` is a fenced CTE.
  */
 function perJidByAggregate(sql: Sql, instanceId: string) {
@@ -980,7 +981,7 @@ async function chatTimestampIndexPresent(instance: AppInstance, query: SharedPoo
       console.warn(
         '[chats] "Message" has no index on ("instanceId", (key->>\'remoteJid\'), "messageTimestamp"), '
         + 'so every chat listing reads all of an account\'s messages and large accounts time out. '
-        + 'Create message_chat_ts_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
+        + 'Create message_instance_chat_ts_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
       )
     }
     if (present) chatIndexMissingReported.delete(key)

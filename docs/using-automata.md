@@ -126,6 +126,12 @@ Limits and options worth knowing:
 - `read-email` fetches at most 2 MB of a body from the mail server; anything
   past that is cut before `maxChars` applies.
 - `run-query` and `run-statement` take a `sql` of at most 20 000 characters.
+- Requests are rate-limited per minute: by default 120 per token, 600 per
+  organization, and 30 costly calls per connection (`search-messages`,
+  `search-telegram-messages`, `search-emails` with `text`, and `run-query`
+  without `explain`). Requests are otherwise unlimited. A request over a budget gets
+  **429** with `Retry-After`. The token stays valid, so wait and retry. See
+  [self-hosting.md](self-hosting.md#mcp-rate-limits) to change the numbers.
 
 ## Scoping a token
 
