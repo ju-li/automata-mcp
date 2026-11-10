@@ -7,7 +7,7 @@ import { HttpError, describeError, telegramNotConfigured } from './http-error.ts
 import { SessionLocks } from './locks.ts'
 import { chatRow, entityId, inputPeerFor, markedId, usersOf } from './sync/convert.ts'
 import { type ChatListing, SyncStore } from './sync/store.ts'
-import { SessionSync, type SyncStatus } from './sync/syncer.ts'
+import { type BackfillOptions, SessionSync, type SyncStatus } from './sync/syncer.ts'
 import { deliverWebhook } from './webhook.ts'
 
 /**
@@ -58,6 +58,12 @@ export interface SessionState {
     dialogsSyncedAt?: string
     /** Chats whose older history is still to be fetched. */
     pendingBackfill: number
+    /**
+     * How many days back this session's backfill reaches: the lower of the
+     * deployment's `TELEGRAM_BACKFILL_DAYS` and the cap set when pairing started.
+     * The app reads it to confirm a cap it asked for was applied.
+     */
+    backfillDays: number
   }
 }
 
@@ -140,12 +146,13 @@ interface SessionRow {
   update_seq: number | null
   data_user_id: string | null
   dialogs_synced_at: Date | null
+  backfill_days: number | null
 }
 
 const SESSION_COLUMNS = [
   'id', 'session_enc', 'me_id', 'me_username', 'me_name', 'me_phone', 'revoked_at', 'webhook_url',
   'webhook_headers_enc', 'update_pts', 'update_qts', 'update_date', 'update_seq', 'data_user_id',
-  'dialogs_synced_at',
+  'dialogs_synced_at', 'backfill_days',
 ]
 
 /** How long a QR flow may wait for a scan (and a password) before it is abandoned. */
@@ -289,7 +296,7 @@ export class SessionManager {
     return describe(rt, row, this.config.telegram !== undefined, {
       chats: counts.chats,
       messages: counts.messages,
-    }, counts.pending)
+    }, counts.pending, this.backfillFor(row).days)
   }
 
   /**
@@ -303,14 +310,22 @@ export class SessionManager {
     return { state, qr: this.runtimes.get(id)?.pairing?.qr }
   }
 
-  /** Start a QR flow. Idempotent while one is already running. */
-  async pair(id: string): Promise<SessionState> {
+  /**
+   * Start a QR flow. Idempotent while one is already running.
+   *
+   * `backfillDays` caps how far back this session's backfill reaches (null = the
+   * deployment's setting), and is stored on every call, so the cap that applies
+   * is the one given when the account was linked. It lowers the deployment's
+   * setting, never raises it — see `backfillFor`.
+   */
+  async pair(id: string, backfillDays: number | null): Promise<SessionState> {
     const row = await this.row(id)
     const rt = this.runtime(id)
-    if (rt.pairing) return await this.state(id)
-    if (row.session_enc) {
+    if (row.session_enc && !rt.pairing) {
       throw new HttpError(409, 'This session is already linked to a Telegram account. Log it out before pairing again.')
     }
+    await this.sql`UPDATE sessions SET backfill_days = ${backfillDays}, updated_at = now() WHERE id = ${id}`
+    if (rt.pairing) return await this.state(id)
 
     if (!(await this.locks.acquire(id))) {
       rt.heldElsewhere = true
@@ -622,7 +637,8 @@ export class SessionManager {
       const meId = await this.recordMe(rt.id, user)
       await this.claimData(rt.id, meId)
 
-      const sync = new SessionSync(client, this.sql, rt.id, meId, this.config.backfill)
+      const [linked] = await this.sql<{ backfill_days: number | null }[]>`SELECT backfill_days FROM sessions WHERE id = ${rt.id}`
+      const sync = new SessionSync(client, this.sql, rt.id, meId, this.backfillFor(linked ?? { backfill_days: null }))
       sync.attach()
       rt.client = client
       rt.sync = sync
@@ -695,7 +711,7 @@ export class SessionManager {
       })
     }
     // Attached before connect, so the catch-up difference has somewhere to go.
-    const sync = new SessionSync(client, this.sql, rt.id, row.me_id, this.config.backfill)
+    const sync = new SessionSync(client, this.sql, rt.id, row.me_id, this.backfillFor(row))
     sync.attach()
     rt.client = client
     rt.sync = sync
@@ -992,6 +1008,19 @@ export class SessionManager {
       WHERE id = ${id}`
   }
 
+  /**
+   * This session's backfill options: the deployment's, with `days` lowered to
+   * the session's own cap when it has one. The lower always wins, so a cap set
+   * by the app can hold a session below the operator's setting but a session
+   * row can never lift it above.
+   */
+  private backfillFor(row: Pick<SessionRow, 'backfill_days'>): BackfillOptions {
+    const days = row.backfill_days === null
+      ? this.config.backfill.days
+      : Math.min(this.config.backfill.days, row.backfill_days)
+    return { ...this.config.backfill, days }
+  }
+
   /** Send a state change to the session's webhook, once per change. Never throws. */
   private publish(rt: Runtime): void {
     void (async () => {
@@ -999,7 +1028,7 @@ export class SessionManager {
         const [row] = await this.sql<SessionRow[]>`SELECT ${this.sql(SESSION_COLUMNS)} FROM sessions WHERE id = ${rt.id}`
         if (!row?.webhook_url) return
 
-        const state = describe(rt, row, this.config.telegram !== undefined, { chats: 0, messages: 0 }, 0)
+        const state = describe(rt, row, this.config.telegram !== undefined, { chats: 0, messages: 0 }, 0, this.backfillFor(row).days)
         const signature = [state.state, state.sessionLost, state.revoked, state.pairing ?? ''].join('|')
         if (signature === rt.lastPublished) return
         rt.lastPublished = signature
@@ -1042,7 +1071,7 @@ function clearRetry(rt: Runtime): void {
   rt.retryAt = undefined
 }
 
-function describe(rt: Runtime, row: SessionRow, telegramConfigured: boolean, stats: SessionState['stats'], pendingBackfill: number): SessionState {
+function describe(rt: Runtime, row: SessionRow, telegramConfigured: boolean, stats: SessionState['stats'], pendingBackfill: number, backfillDays: number): SessionState {
   const base = {
     sessionLost: false,
     revoked: rt.revoked || row.revoked_at !== null,
@@ -1053,6 +1082,7 @@ function describe(rt: Runtime, row: SessionRow, telegramConfigured: boolean, sta
       ...(rt.sync?.status() ?? { backfilling: false }),
       dialogsSyncedAt: row.dialogs_synced_at?.toISOString(),
       pendingBackfill,
+      backfillDays,
     },
     me: row.me_id
       ? {

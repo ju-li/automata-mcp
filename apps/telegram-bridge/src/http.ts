@@ -46,6 +46,10 @@ const createBody = z.object({
   name: z.string().trim().min(1).max(64).regex(/^[A-Za-z0-9_-]+$/, 'letters, digits, _ and - only'),
 })
 
+// Optional so a caller that sends no body (an older app) pairs with the
+// deployment's own backfill setting.
+const pairBody = z.object({ backfillDays: z.number().int().min(0).max(36_500).nullable().default(null) })
+
 const passwordBody = z.object({ password: z.string().min(1).max(256) })
 
 const webhookBody = z.object({
@@ -100,7 +104,7 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
     },
     {
       label: 'POST /sessions/:id/pair', method: 'POST', pattern: /^\/sessions\/([^/]+)\/pair$/, access: 'session', needsTelegram: true,
-      handle: async ({ id }) => ({ status: 202, body: await manager.pair(id) }),
+      handle: async ({ id, body }) => ({ status: 202, body: await manager.pair(id, parse(pairBody, body).backfillDays) }),
     },
     {
       label: 'GET /sessions/:id/qr', method: 'GET', pattern: /^\/sessions\/([^/]+)\/qr$/, access: 'session',

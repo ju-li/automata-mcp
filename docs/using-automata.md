@@ -16,7 +16,8 @@
    **Telegram:** on the connection's page press **Show QR code** and scan it —
    Telegram → Settings → Devices → Link Desktop Device. An account with two-step
    verification is then asked for its password, which goes to Telegram and is
-   stored nowhere. Chats start syncing as soon as it links.
+   stored nowhere. Chats start syncing as soon as it links; on the hosted Free
+   plan, older history is fetched back 90 days.
    **Postgres:** paste a connection string, or fill in host, port, database,
    user, password and SSL mode on the **Parameters** tab, which builds one. It
    is proved by connecting before anything is saved (see

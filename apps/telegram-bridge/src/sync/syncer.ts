@@ -23,7 +23,10 @@ import { type BackfillChat, type BackfillStop, type ChatOp, SyncStore } from './
  *              top message is newer than what we hold is filled forward. This is
  *              what covers channels Telegram stopped pushing while nobody polled.
  *   backfill   Older history, newest chat first, one page at a time, bounded by
- *              the configured caps and paused on flood waits.
+ *              the configured caps and paused on flood waits. Nothing older than
+ *              `days` is stored from it, nor from the dialog list: `days` is a
+ *              limit on what is kept (a plan's cap rides on it), not only on how
+ *              far the walk goes. Live traffic and catch-up are never cut.
  *
  * What cannot be recovered is recorded, not hidden: a forward fill or channel
  * difference that could not reach back far enough sets `chats.gap_since`.
@@ -710,7 +713,9 @@ export class SessionSync {
           archived: dialog.archived,
           pts: dialog.dialog.pts ?? null,
         })
-        if (dialog.message) await this.saveMessages([dialog.message])
+        // A chat's newest message can be older than the backfill window; storing
+        // it would put history the window excludes into the chat.
+        if (dialog.message && this.withinWindow(dialog.message)) await this.saveMessages([dialog.message])
         if (storedMax !== null && dialog.dialog.topMessage > storedMax) {
           await this.fillForward(row.chat_id, storedMax)
         }
@@ -806,16 +811,18 @@ export class SessionSync {
     if (!peer) return await this.store.stopBackfill(chat.chat_id, 'inaccessible')
 
     const result = await this.history(peer, { offsetId: Number(chat.backfill_cursor ?? 0) })
-    await this.saveMessages(result.messages, result.entities)
+    // The page that crosses the window's edge is cut at it, so `days` is where
+    // stored history ends rather than roughly where the last page did.
+    const kept = result.messages.filter(message => this.withinWindow(message))
+    await this.saveMessages(kept, result.entities)
 
-    const dates = result.messages.flatMap(message =>
-      message instanceof Api.Message || message instanceof Api.MessageService ? [message.date] : [])
+    const dates = kept.flatMap(message => dateOf(message) ?? [])
     const oldest = dates.length > 0 ? new Date(Math.min(...dates) * 1000) : null
     const count = chat.backfill_count + dates.length
 
     let stopped: BackfillStop | null = null
     if (result.ids.length === 0) stopped = 'start'
-    else if (oldest && oldest.getTime() < Date.now() - this.options.days * 86_400_000) stopped = 'days'
+    else if (kept.length < result.messages.length) stopped = 'days'
     else if (count >= this.options.maxPerChat) stopped = 'count'
 
     await this.store.recordBackfill(chat.chat_id, {
@@ -827,6 +834,12 @@ export class SessionSync {
   }
 
   // ── helpers ────────────────────────────────────────────────────────────────
+
+  /** Whether a history message falls inside the backfill window. One without a date is kept. */
+  private withinWindow(message: unknown): boolean {
+    const date = dateOf(message)
+    return date === undefined || date * 1000 >= Date.now() - this.options.days * 86_400_000
+  }
 
   private async history(peer: Api.TypeInputPeer, params: { offsetId: number, minId?: number }) {
     const result = await this.client.invoke(new Api.messages.GetHistory({
@@ -927,6 +940,11 @@ function channelPtsOf(update: MessageUpdate): { chatId: string, pts: number } | 
 function chatOp(chatId: string, entities: EntityMap | undefined): ChatOp {
   const row = entities?.has(chatId) ? chatRow(entities.get(chatId)) : undefined
   return row ? { op: 'upsert', row } : { op: 'stub', chatId }
+}
+
+/** A history message's unix date in seconds; `undefined` for MessageEmpty and anything unknown. */
+function dateOf(message: unknown): number | undefined {
+  return message instanceof Api.Message || message instanceof Api.MessageService ? message.date : undefined
 }
 
 function isFlood(error: unknown): boolean {
