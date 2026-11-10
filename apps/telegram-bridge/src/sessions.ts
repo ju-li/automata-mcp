@@ -61,6 +61,13 @@ export interface SessionState {
   }
 }
 
+interface SessionCounts {
+  chats: number
+  messages: number
+  /** Chats whose older history is still to be fetched. */
+  pending: number
+}
+
 export interface PairingQr {
   /** `tg://login?token=…` — what the QR code encodes. As sensitive as the image. */
   url: string
@@ -122,6 +129,13 @@ const PAIRING_WINDOW_MS = 5 * 60_000
 const HEARTBEAT_MS = 30_000
 const PROBE_TIMEOUT_MS = 20_000
 const DISPOSE_TIMEOUT_MS = 10_000
+/**
+ * How long `state` reuses a session's chat, message and backfill counts (#183).
+ * The message count reads the session's whole live-message index; the dashboard
+ * polls every 15 s and the pairing screen every 2 s, neither for a number that
+ * must be to the second.
+ */
+const COUNTS_TTL_MS = 30_000
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -149,6 +163,8 @@ export class SessionManager {
   private readonly config: BridgeConfig
   private readonly locks: SessionLocks
   private readonly runtimes = new Map<string, Runtime>()
+  /** Per-session counts for `state`, shared while in flight. See COUNTS_TTL_MS. */
+  private readonly counts = new Map<string, { at: number, value: Promise<SessionCounts> }>()
   private heartbeat: NodeJS.Timeout | undefined
   private ticking = false
   private stopping = false
@@ -199,17 +215,18 @@ export class SessionManager {
     return row !== undefined && digestsEqual(row.api_key_hash, hashKey(presented))
   }
 
-  async state(id: string): Promise<SessionState> {
+  /**
+   * The session's state. Its counts may be up to COUNTS_TTL_MS old unless
+   * `freshCounts` is set; everything else is read now.
+   */
+  async state(id: string, options: { freshCounts?: boolean } = {}): Promise<SessionState> {
     const row = await this.row(id)
-    const [counts] = await this.sql<{ chats: string, messages: string, pending: string }[]>`
-      SELECT (SELECT count(*) FROM chats WHERE session_id = ${id}) AS chats,
-             (SELECT count(*) FROM messages WHERE session_id = ${id} AND deleted_at IS NULL) AS messages,
-             (SELECT count(*) FROM chats WHERE session_id = ${id} AND backfill_stopped IS NULL) AS pending`
+    const counts = await this.sessionCounts(id, options.freshCounts === true)
     const rt = this.runtime(id)
     return describe(rt, row, this.config.telegram !== undefined, {
-      chats: Number(counts?.chats ?? 0),
-      messages: Number(counts?.messages ?? 0),
-    }, Number(counts?.pending ?? 0))
+      chats: counts.chats,
+      messages: counts.messages,
+    }, counts.pending)
   }
 
   /**
@@ -327,6 +344,7 @@ export class SessionManager {
 
     await this.dispose(rt, { saveState: false })
     await new SyncStore(this.sql, id).wipe()
+    this.counts.delete(id)
     await this.sql`
       UPDATE sessions
       SET session_enc = NULL, authorized_at = NULL, revoked_at = NULL,
@@ -380,6 +398,7 @@ export class SessionManager {
     }
     await this.sql`DELETE FROM sessions WHERE id = ${id}`
     this.runtimes.delete(id)
+    this.counts.delete(id)
   }
 
   async setWebhook(id: string, url: string | null, headers: Record<string, string>): Promise<void> {
@@ -768,6 +787,39 @@ export class SessionManager {
     if (client) await destroyClient(client)
   }
 
+  /**
+   * Chats, live messages and chats still backfilling, reused for COUNTS_TTL_MS
+   * and shared by concurrent callers. A failed read is not kept, so the next
+   * call asks again. Dropped wherever synced data is wiped, so a logout never
+   * reports the previous account's numbers.
+   *
+   * The message count is an index-only scan on `messages_live_by_session`
+   * (migration 0003); before it, every call read each of the session's rows.
+   */
+  private async sessionCounts(id: string, fresh: boolean): Promise<SessionCounts> {
+    const cached = this.counts.get(id)
+    if (!fresh && cached && Date.now() - cached.at < COUNTS_TTL_MS) return await cached.value
+
+    const value = this.sql<{ chats: string, messages: string, pending: string }[]>`
+      SELECT (SELECT count(*) FROM chats WHERE session_id = ${id}) AS chats,
+             (SELECT count(*) FROM messages WHERE session_id = ${id} AND deleted_at IS NULL) AS messages,
+             (SELECT count(*) FROM chats WHERE session_id = ${id} AND backfill_stopped IS NULL) AS pending`
+      .then(([row]) => ({
+        chats: Number(row?.chats ?? 0),
+        messages: Number(row?.messages ?? 0),
+        pending: Number(row?.pending ?? 0),
+      }))
+    const entry = { at: Date.now(), value }
+    this.counts.set(id, entry)
+    try {
+      return await value
+    }
+    catch (error) {
+      if (this.counts.get(id) === entry) this.counts.delete(id)
+      throw error
+    }
+  }
+
   private async saveUpdateState(rt: Runtime): Promise<void> {
     const state = rt.sync?.updateState()
     if (!state) return
@@ -797,6 +849,7 @@ export class SessionManager {
     if (row?.data_user_id && row.data_user_id !== meId) {
       console.info(`[sessions] ${id}: a different Telegram account was linked; discarding the chats synced for the previous one`)
       await new SyncStore(this.sql, id).wipe()
+      this.counts.delete(id)
     }
     await this.sql`
       UPDATE sessions SET data_user_id = ${meId},

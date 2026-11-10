@@ -87,7 +87,11 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
     },
     {
       label: 'GET /sessions/:id/state', method: 'GET', pattern: /^\/sessions\/([^/]+)\/state$/, access: 'session',
-      handle: async ({ id }) => ({ status: 200, body: await manager.state(id) }),
+      // Counts are cached per session for 30 s; `?fresh=counts` reads them now.
+      handle: async ({ id, query }) => ({
+        status: 200,
+        body: await manager.state(id, { freshCounts: query.get('fresh') === 'counts' }),
+      }),
     },
     {
       label: 'POST /sessions/:id/pair', method: 'POST', pattern: /^\/sessions\/([^/]+)\/pair$/, access: 'session', needsTelegram: true,
