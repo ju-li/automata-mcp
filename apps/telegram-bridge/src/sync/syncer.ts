@@ -54,6 +54,8 @@ const LONG_FLOOD_S = 300
  * (columns × rows parameters) as much as the work lost to one failed batch.
  */
 const MAX_BATCH = 500
+/** How often backfill looks again while the client is disconnected. */
+const DISCONNECTED_WAIT_MS = 30_000
 /** Telegram's answer for history this account cannot read any more. */
 const INACCESSIBLE = new Set(['CHANNEL_PRIVATE', 'CHANNEL_INVALID', 'PEER_ID_INVALID', 'CHAT_ID_INVALID', 'CHAT_FORBIDDEN'])
 
@@ -379,7 +381,9 @@ export class SessionSync {
   }
 
   private async reconcile(): Promise<void> {
-    if (this.stopped || Date.now() < this.pausedUntil) return
+    // Disconnected: every request would fail. The session manager rebuilds the
+    // client (and this syncer with it); nothing to do here meanwhile.
+    if (this.stopped || Date.now() < this.pausedUntil || !this.client.connected) return
     await this.guard('reconcile', () => this.syncDialogs(RECONCILE_DIALOGS))
     void this.runBackfill()
   }
@@ -414,6 +418,11 @@ export class SessionSync {
         const wait = this.pausedUntil - Date.now()
         if (wait > 0) {
           await sleep(Math.min(wait, 60_000))
+          continue
+        }
+        // teleproto reconnecting, or given up: wait rather than fail a page a minute.
+        if (!this.client.connected) {
+          await sleep(DISCONNECTED_WAIT_MS)
           continue
         }
 

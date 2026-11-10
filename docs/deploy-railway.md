@@ -204,6 +204,50 @@ look for `[app-db] applied migrations` in its logs.
 Then open the web service's domain and sign up. The first account becomes
 the admin; invite everyone else from the Organization page.
 
+## Postgres sizing
+
+Railway's Postgres template starts with the stock settings, sized for a small
+machine: `shared_buffers` 128 MB and `max_connections` 500. Production runs
+with these instead, set once as a superuser (`railway connect Postgres`):
+
+```sql
+ALTER SYSTEM SET shared_buffers = '2GB';
+ALTER SYSTEM SET effective_cache_size = '6GB';
+ALTER SYSTEM SET max_connections = 150;
+```
+
+`ALTER SYSTEM` writes `postgresql.auto.conf` in the data directory
+(`/var/lib/postgresql/data/pgdata`), which is on the service's volume, so the
+settings survive redeploys. `shared_buffers` and `max_connections` take effect
+only at the next restart of the Postgres service; check with `SHOW` afterwards.
+To undo one, run `ALTER SYSTEM RESET <name>;` and restart.
+
+- **`shared_buffers` 2 GB.** At 128 MB, about a third of block reads were served
+  from Postgres's own cache. The rest went to the kernel's file cache.
+- **`effective_cache_size` 6 GB** is a hint to the planner and allocates
+  nothing.
+- **`max_connections` 150, not 100.** Count the connection budget before you
+  lower it or add a pool. Each process's pool ceiling: web 18 (app 10, Evolution
+  reads 3 + 2, Telegram reads 3), Telegram bridge 11 (10 + 1 for its lock
+  connection), cloud 5. Evolution sets no `connection_limit`, so Prisma uses its
+  default of `2 × vCPU + 1`. Add each Postgres connection pointed at this
+  database (up to 3 each), double the ceiling of whichever service is mid-deploy,
+  and multiply by replicas. Postgres also keeps 3 slots back for superusers.
+  `SELECT usename, application_name, count(*) FROM pg_stat_activity GROUP BY 1, 2`
+  shows the live split. Evolution's connections are the ones with no
+  `application_name`.
+- **`work_mem` stays at 16 MB.** The temp files written to disk come from full
+  scans of `"Message"`. Raising it would only let those scans use more memory.
+
+**The memory graph is mostly file cache, and these settings don't shrink it.**
+Railway counts the kernel's cache of the data files as the container's memory,
+and the kernel fills that cache up to the service's limit. So the graph follows
+the size of `"Message"` and how much of it gets scanned, not what Postgres
+needs. The cache is reclaimable, so a large graph is not a sign of memory
+pressure. Two ways to bring it down: set a memory limit on the service, which
+makes the kernel evict cache instead of growing it, or read less of `"Message"`.
+Production has no limit, by choice.
+
 ## Notes
 
 - **Do not ship a `.env`.** It is gitignored, and Railway variables replace it.
