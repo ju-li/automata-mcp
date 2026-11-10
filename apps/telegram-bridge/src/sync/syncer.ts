@@ -3,16 +3,17 @@ import type { Sql } from '../db.ts'
 import { describeError } from '../http-error.ts'
 import {
   channelChatId, chatRow, chatsOf, entityMap, inputChannelFor, inputPeerFor, long, markedId,
-  messageRow, migrationOf, reactionList, shortMessageRow, userRow, usersOf,
+  type MessageRow, messageRow, migrationOf, reactionList, shortMessageRow, type UserRow, userRow, usersOf,
 } from './convert.ts'
-import { type BackfillChat, type BackfillStop, SyncStore } from './store.ts'
+import { type BackfillChat, type BackfillStop, type ChatOp, SyncStore } from './store.ts'
 
 /**
  * Keeping one session's chats in Postgres.
  *
  * Four sources, because no one of them is complete:
  *
- *   live       Every update teleproto dispatches, applied in arrival order.
+ *   live       Every update teleproto dispatches, applied in arrival order —
+ *              written in batches: see `drain`.
  *   catch-up   On connect: teleproto's common difference (private chats, basic
  *              groups) from the persisted pts, then **our own** channel
  *              difference per channel from `chats.channel_pts`. teleproto only
@@ -48,6 +49,11 @@ const CHANNEL_CATCHUP_DELAY_MS = 250
 const MAX_CHANNEL_DIFFERENCE_ROUNDS = 50
 /** A flood wait longer than this is logged: it means this account is syncing too hard. */
 const LONG_FLOOD_S = 300
+/**
+ * Most queued live updates one transaction writes. Bounds the statement size
+ * (columns × rows parameters) as much as the work lost to one failed batch.
+ */
+const MAX_BATCH = 500
 /** How often backfill looks again while the client is disconnected. */
 const DISCONNECTED_WAIT_MS = 30_000
 /** Telegram's answer for history this account cannot read any more. */
@@ -63,7 +69,8 @@ export class SessionSync {
   private readonly meId: string | null
   private readonly rawEvent = new events.Raw({})
   private readonly onUpdate = (update: unknown) => { this.enqueue(update) }
-  private queue: Promise<void> = Promise.resolve()
+  private readonly pending: unknown[] = []
+  private draining = false
   private stopped = false
   private syncingDialogs = false
   private backfillRunning = false
@@ -124,52 +131,124 @@ export class SessionSync {
     })
     if (rows.length === 0) return
 
-    const known = []
-    const stubs = []
-    for (const chatId of new Set(rows.map(row => row.chat_id))) {
-      const row = entities?.has(chatId) ? chatRow(entities.get(chatId)) : undefined
-      if (row) known.push(row)
-      else stubs.push(chatId)
-    }
-    await this.store.upsertChats(known)
-    await this.store.ensureChats(stubs)
-    await this.store.upsertMessages(rows)
-
-    for (const message of messages) {
-      const migration = migrationOf(message)
-      if (migration) await this.store.markMigrated(migration.from, migration.to)
-    }
+    await this.store.writeBatch({
+      chats: [...new Set(rows.map(row => row.chat_id))].map(chatId => chatOp(chatId, entities)),
+      messages: rows,
+      migrations: messages.flatMap(message => migrationOf(message) ?? []),
+    })
   }
 
   // ── live ───────────────────────────────────────────────────────────────────
 
   private enqueue(update: unknown): void {
-    this.queue = this.queue
-      .then(() => this.apply(update))
-      .catch((error) => {
-        const name = (update as { className?: string } | undefined)?.className ?? 'update'
-        console.error(`[sync] ${this.sessionId}: could not apply ${name}: ${describeError(error)}`)
-      })
+    this.pending.push(update)
+    if (!this.draining) void this.drain()
   }
 
+  /**
+   * Apply queued updates in arrival order, as few writes as possible.
+   *
+   * A run of consecutive batchable updates (`batchable`) is written as one
+   * transaction with one statement per table, instead of about six round trips
+   * per message — the per-message path could not keep up with a busy account,
+   * and the backlog grew without bound (#188, #189). Any other update ends the
+   * run: the run is written, the update applied on its own, then a new run
+   * starts, so deletions, reactions and catch-ups still land in arrival order
+   * relative to the messages around them.
+   *
+   * Never throws: a failed batch is retried one update at a time, so one bad
+   * row costs one update, not the batch.
+   */
+  private async drain(): Promise<void> {
+    this.draining = true
+    try {
+      while (this.pending.length > 0) {
+        if (this.stopped) {
+          this.pending.length = 0
+          return
+        }
+        let run = 0
+        while (run < this.pending.length && run < MAX_BATCH && batchable(this.pending[run])) run++
+        if (run > 0) await this.applyBatch(this.pending.splice(0, run))
+        else await this.applyOne(this.pending.shift())
+      }
+    }
+    finally {
+      this.draining = false
+    }
+  }
+
+  private async applyOne(update: unknown): Promise<void> {
+    try {
+      await this.apply(update)
+    }
+    catch (error) {
+      const name = (update as { className?: string } | undefined)?.className ?? 'update'
+      console.error(`[sync] ${this.sessionId}: could not apply ${name}: ${describeError(error)}`)
+    }
+  }
+
+  private async applyBatch(updates: unknown[]): Promise<void> {
+    if (updates.length === 1) return await this.applyOne(updates[0])
+    try {
+      await this.writeBatch(updates)
+    }
+    catch (error) {
+      if (this.stopped) return
+      console.error(`[sync] ${this.sessionId}: a batch of ${updates.length} updates failed (${describeError(error)}); applying them one at a time`)
+      for (const update of updates) {
+        if (this.stopped) return
+        await this.applyOne(update)
+      }
+    }
+  }
+
+  /**
+   * What `apply` would write for each of `updates` in turn, as one batch. Every
+   * update here passed `batchable`, so it is entities plus, at most, one
+   * message upsert and a forward-only pts.
+   */
+  private async writeBatch(updates: unknown[]): Promise<void> {
+    if (this.stopped) return
+    const users: UserRow[] = []
+    const chats: ChatOp[] = []
+    const messages: MessageRow[] = []
+    const channelPts = new Map<string, number>()
+
+    for (const update of updates) {
+      const entities = entitiesOf(update)
+      if (entities) {
+        const list = [...entities.values()]
+        users.push(...usersOf(list))
+        chats.push(...chatsOf(list).map(row => ({ op: 'refresh' as const, row })))
+      }
+      if (!isMessageUpdate(update)) continue
+
+      const row = messageRow(update.message, this.meId)
+      if (row) {
+        chats.push(chatOp(row.chat_id, entities))
+        messages.push(row)
+      }
+      const pts = channelPtsOf(update)
+      if (pts) channelPts.set(pts.chatId, Math.max(channelPts.get(pts.chatId) ?? 0, pts.pts))
+    }
+
+    await this.store.writeBatch({ users, chats, messages, channelPts })
+  }
+
+  /**
+   * One update on its own. Every class handled here other than a message upsert
+   * must be listed in ORDERED, or the batch path will treat it as entities only.
+   */
   private async apply(update: unknown): Promise<void> {
     if (this.stopped) return
-    // teleproto keys this map with getPeerId, which mis-marks channel ids that are
-    // not ten digits long; rebuilt so a lookup by a correct id finds its entity.
-    const attached = (update as { _entities?: EntityMap } | undefined)?._entities
-    const entities = attached && attached.size > 0 ? entityMap([...attached.values()]) : undefined
+    const entities = entitiesOf(update)
     if (entities) await this.absorb(entities.values())
 
-    if (
-      update instanceof Api.UpdateNewMessage || update instanceof Api.UpdateEditMessage
-      || update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateEditChannelMessage
-    ) {
+    if (isMessageUpdate(update)) {
       await this.saveMessages([update.message], entities)
-      const isChannelUpdate = update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateEditChannelMessage
-      // pts 0 marks a message teleproto synthesised from a difference.
-      if (isChannelUpdate && update.ptsCount > 0 && 'peerId' in update.message && update.message.peerId) {
-        await this.store.setChannelPts(markedId(update.message.peerId), update.pts, false)
-      }
+      const pts = channelPtsOf(update)
+      if (pts) await this.store.setChannelPts(pts.chatId, pts.pts, false)
     }
     else if (update instanceof Api.UpdateShortMessage || update instanceof Api.UpdateShortChatMessage) {
       const row = shortMessageRow(update, this.meId)
@@ -448,6 +527,65 @@ export class SessionSync {
       console.error(`[sync] ${this.sessionId}: Telegram asked this account to wait ${seconds}s; sync is paused until then`)
     }
   }
+}
+
+type MessageUpdate = Api.UpdateNewMessage | Api.UpdateEditMessage | Api.UpdateNewChannelMessage | Api.UpdateEditChannelMessage
+
+/**
+ * Updates `apply` handles that are not a message upsert. Each one's effect
+ * depends on where it lands among the upserts around it — a tombstone must
+ * follow the message it deletes, a reaction count is replaced wholesale, a
+ * catch-up sets pts exactly — so it ends a batch and is applied on its own.
+ * Short messages are here only because `apply` stores them by a separate path.
+ */
+const ORDERED = [
+  Api.UpdateShortMessage, Api.UpdateShortChatMessage, Api.UpdateDeleteMessages,
+  Api.UpdateDeleteChannelMessages, Api.UpdateMessageReactions, Api.UpdateChannelTooLong,
+]
+
+function isMessageUpdate(update: unknown): update is MessageUpdate {
+  return update instanceof Api.UpdateNewMessage || update instanceof Api.UpdateEditMessage
+    || update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateEditChannelMessage
+}
+
+/**
+ * Whether an update may share a batch: a message upsert that is not a group
+ * migration (whose `markMigrated` stays on the one-at-a-time path), or an update
+ * `apply` reads only for its entities. Never throws: `drain` must not, and an
+ * update this cannot read goes to `applyOne`, which logs it.
+ */
+function batchable(update: unknown): boolean {
+  try {
+    if (isMessageUpdate(update)) return migrationOf(update.message) === undefined
+    return !ORDERED.some(type => update instanceof type)
+  }
+  catch {
+    return false
+  }
+}
+
+/**
+ * The entities teleproto attached to an update, re-keyed: teleproto keys this
+ * map with getPeerId, which mis-marks channel ids that are not ten digits long;
+ * rebuilt so a lookup by a correct id finds its entity.
+ */
+function entitiesOf(update: unknown): EntityMap | undefined {
+  const attached = (update as { _entities?: EntityMap } | undefined)?._entities
+  return attached && attached.size > 0 ? entityMap([...attached.values()]) : undefined
+}
+
+/** The channel pts a live message update moves forward, if any. pts 0 marks a message teleproto synthesised from a difference. */
+function channelPtsOf(update: MessageUpdate): { chatId: string, pts: number } | undefined {
+  const isChannelUpdate = update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateEditChannelMessage
+  if (!isChannelUpdate || update.ptsCount <= 0) return undefined
+  if (!('peerId' in update.message) || !update.message.peerId) return undefined
+  return { chatId: markedId(update.message.peerId), pts: update.pts }
+}
+
+/** The chat write for a stored message: its entity when the update carried one, else a stub. */
+function chatOp(chatId: string, entities: EntityMap | undefined): ChatOp {
+  const row = entities?.has(chatId) ? chatRow(entities.get(chatId)) : undefined
+  return row ? { op: 'upsert', row } : { op: 'stub', chatId }
 }
 
 function isFlood(error: unknown): boolean {
