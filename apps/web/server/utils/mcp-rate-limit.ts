@@ -1,7 +1,8 @@
 import type Redis from 'ioredis'
 import type { McpAuth } from './mcp-auth'
-import { decide, type BucketCharge, type BucketState } from './token-bucket'
-import { REDIS_KEY_PREFIX, logRedisError, redisClient } from './redis'
+import { decideBuckets, type BucketCharge, type BucketState } from './token-bucket'
+import { REDIS_KEY_PREFIX, logRedisError, readyRedis } from './redis'
+import { rememberBounded } from './lookup-cache'
 import { isExpensiveCall } from './mcp-kind-tool'
 
 /**
@@ -39,7 +40,7 @@ import { isExpensiveCall } from './mcp-kind-tool'
  *   client text reaches Redis or the log — ids only.
  */
 
-export type RateScope = 'token' | 'organization' | 'connection'
+type RateScope = 'token' | 'organization' | 'connection'
 
 interface Limits { token: number, organization: number, connection: number }
 
@@ -64,7 +65,7 @@ function perMinute(value: unknown, fallback: number): number {
 }
 
 /** The configured budgets, read once. */
-export function mcpRateLimits(): Limits {
+function mcpRateLimits(): Limits {
   if (!limits) {
     const config = useRuntimeConfig()
     limits = {
@@ -77,7 +78,7 @@ export function mcpRateLimits(): Limits {
 }
 
 /** One `tools/call` in a request body. */
-export interface ToolCallInBody {
+interface ToolCallInBody {
   name: string
   args: Record<string, unknown>
 }
@@ -145,7 +146,7 @@ export async function takeMcpBudget(charges: readonly ScopedCharge[]): Promise<B
   if (!charges.length) return undefined
 
   let result: { waitMs: number, limiting?: number } | undefined
-  const redis = redisClient()
+  const redis = readyRedis()
   if (redis) {
     try {
       result = await takeFromRedis(redis, charges)
@@ -162,23 +163,15 @@ export async function takeMcpBudget(charges: readonly ScopedCharge[]): Promise<B
   return { retryAfterMs: result.waitMs, scope: limiting.scope, perMinute: limiting.perMinute }
 }
 
-/** Same arithmetic as `decide`, synchronous so concurrent requests see each other. */
+/** Same arithmetic as the Lua, synchronous so concurrent requests see each other. */
 function takeLocally(charges: readonly BucketCharge[], now: number): { waitMs: number, limiting?: number } {
-  const decision = decide(charges.map(charge => local.get(charge.key)), charges, now)
-  charges.forEach((charge, i) => {
-    // Re-insert to move it to the newest end; eviction takes from the oldest.
-    local.delete(charge.key)
-    local.set(charge.key, decision.next[i]!)
-  })
-  for (const key of local.keys()) {
-    if (local.size <= MAX_LOCAL_BUCKETS) break
-    local.delete(key)
-  }
+  const decision = decideBuckets(charges.map(charge => local.get(charge.key)), charges, now)
+  decision.next?.forEach((state, i) => rememberBounded(local, charges[i]!.key, state, MAX_LOCAL_BUCKETS))
   return decision
 }
 
 /**
- * token-bucket.ts's `decide`, restated for Redis so check and take are one
+ * token-bucket.ts's `decideBuckets`, restated for Redis so check and take are one
  * atomic step across replicas. The clock is Redis's own `TIME`, so replicas
  * whose clocks disagree still agree on the bucket. ARGV holds per-minute and
  * cost for each key in turn. Returns `{ waitMs, limiting (1-based, 0 = none) }`.
@@ -241,12 +234,7 @@ async function takeFromRedis(redis: Redis, charges: readonly BucketCharge[]): Pr
 function logRefusal(charge: ScopedCharge): void {
   const now = Date.now()
   if (now - (lastLogged.get(charge.key) ?? 0) < LOG_EVERY_MS) return
-  lastLogged.delete(charge.key)
-  lastLogged.set(charge.key, now)
-  for (const key of lastLogged.keys()) {
-    if (lastLogged.size <= MAX_LOGGED_KEYS) break
-    lastLogged.delete(key)
-  }
+  rememberBounded(lastLogged, charge.key, now, MAX_LOGGED_KEYS)
   // Ids only: the key names a token, an organization or a connection.
   console.warn(`[mcp-rate-limit] ${charge.scope} budget of ${charge.perMinute}/min spent (${charge.key}); answering 429`)
 }

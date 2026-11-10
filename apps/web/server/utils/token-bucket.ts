@@ -26,35 +26,35 @@ export interface BucketCharge {
   cost: number
 }
 
-export interface BucketDecision {
+interface BucketDecision {
   /** 0 when the charge fits; otherwise milliseconds until every bucket could pay. */
   waitMs: number
   /** Index into the charges of the bucket that needs the longest wait, when refused. */
   limiting?: number
-  /** New state per charge: consumed when it fits, refilled-only when refused. */
-  next: BucketState[]
+  /** New state per charge, only when it fits. A refused request writes nothing, as in the Lua. */
+  next?: BucketState[]
 }
 
 /** Tokens in a bucket at `now`, given its last state (absent = full). */
-export function tokensAt(state: BucketState | undefined, perMinute: number, now: number): number {
+function tokensAt(state: BucketState | undefined, perMinute: number, now: number): number {
   if (!state) return perMinute
   const elapsed = Math.max(0, now - state.at)
   return Math.min(perMinute, state.tokens + elapsed * perMinute / 60_000)
 }
 
 /** All-or-nothing: consume `cost` from every bucket, or from none and say how long to wait. */
-export function decide(
+export function decideBuckets(
   states: readonly (BucketState | undefined)[],
   charges: readonly BucketCharge[],
   now: number,
 ): BucketDecision {
   const available = charges.map((charge, i) => tokensAt(states[i], charge.perMinute, now))
+  const costs = charges.map(charge => Math.min(charge.cost, charge.perMinute))
 
   let waitMs = 0
   let limiting: number | undefined
   charges.forEach((charge, i) => {
-    const cost = Math.min(charge.cost, charge.perMinute)
-    const short = cost - available[i]!
+    const short = costs[i]! - available[i]!
     if (short <= 0) return
     const wait = Math.ceil(short * 60_000 / charge.perMinute)
     if (wait > waitMs) {
@@ -63,9 +63,6 @@ export function decide(
     }
   })
 
-  const next = charges.map((charge, i) => ({
-    tokens: waitMs ? available[i]! : available[i]! - Math.min(charge.cost, charge.perMinute),
-    at: now,
-  }))
-  return { waitMs, limiting, next }
+  if (waitMs) return { waitMs, limiting }
+  return { waitMs, next: available.map((tokens, i) => ({ tokens: tokens - costs[i]!, at: now })) }
 }

@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises'
 import type { AppInstance } from './app-db'
 import type { EvolutionClient } from './evolution'
 import { canReadMessages, readGroupChatNames } from './evolution-db'
@@ -146,7 +147,8 @@ function groupLookupBackoffMs(failures: number): number {
 
 // ── the cache callers read ──────────────────────────────────────────────────
 
-const emptyGroups: Map<string, GroupInfo> = new Map()
+/** No groups known. Shared — also chats.ts's answer when it asks about none — so keep it immutable. */
+export const emptyGroups: Map<string, GroupInfo> = new Map()
 
 /**
  * Per process, refreshed in the background (`staleWhileRevalidate`). A cold
@@ -464,10 +466,6 @@ async function lookUpGroup(instance: AppInstance, evolution: EvolutionClient, ji
     subject: row.subject?.trim() || undefined,
     size: typeof row.size === 'number' && Number.isInteger(row.size) && row.size >= 0 ? row.size : undefined,
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 // ── storage ─────────────────────────────────────────────────────────────────

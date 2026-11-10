@@ -10,8 +10,7 @@ export default defineNitroPlugin(() => {
     console.info('[redis] NUXT_REDIS_URL not set: MCP rate limits and caches are kept in-process (per replica)')
     return
   }
-  const client = redisClient()
-  if (!client) return
+  const client = redisClient()!
   // Wait for the first connection rather than pinging at once: with the
   // offline queue off, a command sent before the socket is up fails by design.
   const timer = setTimeout(() => {

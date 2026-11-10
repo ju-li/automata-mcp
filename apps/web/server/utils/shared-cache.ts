@@ -1,9 +1,11 @@
-import { REDIS_KEY_PREFIX, logRedisError, redisClient } from './redis'
+import { REDIS_KEY_PREFIX, logRedisError, readyRedis } from './redis'
+import { rememberBounded } from './lookup-cache'
 
 /**
  * Short-lived caches that several replicas can share — through the app's
  * optional Redis (`redis.ts`, `NUXT_REDIS_URL`) when it is set and connected,
- * in-process otherwise. Today: the chat listing (`chats.ts`, #174).
+ * in-process otherwise. Today: the chat listing (`chats.ts`, #174) and each
+ * WhatsApp connection's history setting (`recentHistoryOnly` in `instances.ts`).
  *
  * **Never a failure mode.** Unset — every self-hosted install — means
  * in-process, per replica. Set but unreachable means in-process too, logged by
@@ -35,9 +37,10 @@ export interface SharedCacheOptions {
   namespace: string
   /** How long a value is served for, in both layers. */
   ttlMs: number
-  /** In-process entries kept, oldest dropped first. */
-  maxLocalEntries?: number
 }
+
+/** In-process entries kept per cache, oldest dropped first. */
+const MAX_LOCAL_ENTRIES = 500
 
 export interface SharedCache<T> {
   /** The cached value for `key`, or `load()`'s, stored for `ttlMs`. Throws only what `load` throws. */
@@ -55,18 +58,15 @@ interface Envelope<T> {
 export function sharedCache<T>(options: SharedCacheOptions): SharedCache<T> {
   const local = new Map<string, Envelope<T>>()
   const inFlight = new Map<string, Promise<T>>()
-  const maxLocal = options.maxLocalEntries ?? 500
 
   function remember(key: string, entry: Envelope<T>) {
-    local.delete(key)
-    local.set(key, entry)
-    if (local.size <= maxLocal) return
-    const now = Date.now()
-    for (const [k, e] of local) {
-      if (e.expiresAt <= now) local.delete(k)
+    if (local.size >= MAX_LOCAL_ENTRIES) {
+      const now = Date.now()
+      for (const [k, e] of local) {
+        if (e.expiresAt <= now) local.delete(k)
+      }
     }
-    // Insertion order is age order, since `remember` re-inserts.
-    while (local.size > maxLocal) local.delete(local.keys().next().value!)
+    rememberBounded(local, key, entry, MAX_LOCAL_ENTRIES)
   }
 
   async function refresh(key: string, load: () => Promise<T>): Promise<T> {
@@ -100,7 +100,7 @@ export function sharedCache<T>(options: SharedCacheOptions): SharedCache<T> {
 
     forget(key) {
       local.delete(key)
-      const client = readyClient()
+      const client = readyRedis()
       if (!client) return
       client.del(`${KEY_PREFIX}${options.namespace}:${key}`).catch(error => logRedisError('cache delete', error))
     },
@@ -109,17 +109,8 @@ export function sharedCache<T>(options: SharedCacheOptions): SharedCache<T> {
 
 // ---------------------------------------------------------------------------
 
-/**
- * The client only once connected: a miss costs nothing while Redis is down,
- * rather than one failed command (and its timeout) per read.
- */
-function readyClient() {
-  const client = redisClient()
-  return client?.status === 'ready' ? client : undefined
-}
-
 async function redisGet<V>(key: string): Promise<V | undefined> {
-  const client = readyClient()
+  const client = readyRedis()
   if (!client) return undefined
   try {
     const raw = await client.get(key)
@@ -132,7 +123,7 @@ async function redisGet<V>(key: string): Promise<V | undefined> {
 }
 
 function redisSet(key: string, value: unknown, ttlMs: number): void {
-  const client = readyClient()
+  const client = readyRedis()
   if (!client) return
 
   let raw: string

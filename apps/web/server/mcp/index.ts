@@ -45,15 +45,16 @@ export default defineMcpHandler({
     // the costly budget depends on which tools the body calls; before the
     // client capture, so a throttled request writes nothing. Redis-backed when
     // NUXT_REDIS_URL is set, in-process otherwise. See mcp-rate-limit.ts.
-    const calls = event.method === 'POST' ? toolCallsIn(await readRawBody(event, 'utf8')) : []
-    const throttled = await takeMcpBudget(chargesFor(auth, calls))
+    // Decoded once here and handed to both readers below.
+    const body = event.method === 'POST' ? await readRawBody(event, 'utf8') : undefined
+    const throttled = await takeMcpBudget(chargesFor(auth, toolCallsIn(body)))
     if (throttled) return mcpRateLimited(throttled)
 
     // Which client this token is used from, recorded on `initialize` only and
     // never awaited past the body read. Here rather than in a tool or hook: we
     // run stateless, so nothing later in the request has seen the initialize.
     // See server/utils/mcp-clients.ts.
-    await captureTokenClient(event, auth.tokenId)
+    captureTokenClient(event, auth.tokenId, body)
 
     return next()
   },
