@@ -325,7 +325,8 @@ export class SessionSync {
   private reportLoad(): void {
     const load = this.load()
     if (load.pending === 0 && load.dirtyChannels === 0 && this.skippedSinceReport === 0) return
-    const age = load.oldestAt ? Math.round((Date.now() - Date.parse(load.oldestAt)) / 1000) : 0
+    const oldest = this.queue[this.head]
+    const age = oldest ? Math.round((Date.now() - oldest.at) / 1000) : 0
     console.info(
       `[sync] ${this.sessionId}: ${load.pending} updates pending (oldest ${age}s), `
       + `${load.dirtyChannels} channels to catch up, ${this.skippedSinceReport} channel updates skipped `

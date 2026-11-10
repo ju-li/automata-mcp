@@ -929,7 +929,7 @@ function nextChurn(stored: RowChurn, read: { columnOpen: boolean, rowWrittenAt?:
 export function forgetInstanceStatus(instanceId: string): void {
   apiRowCache.delete(instanceId)
   countsCache.delete(instanceId)
-  historySettingCache.delete(instanceId)
+  historySettingCache.forget(instanceId)
   holdRefreshedAt.delete(instanceId)
 }
 
@@ -1100,7 +1100,7 @@ async function cachedSqlCounts(
 
 /** A count that ran out of time, or never got a turn — not a broken read. */
 function isSlowCount(error: unknown): boolean {
-  return isStatementTimeout(error) || (error as { statusCode?: unknown } | undefined)?.statusCode === 429
+  return isStatementTimeout(error) || httpStatusOf(error) === 429
 }
 
 /** Said once per five minutes like the others; no grant is involved. */
@@ -1629,7 +1629,7 @@ async function writeSyncFullHistory(instance: AppInstance, on: boolean): Promise
     method: 'POST',
     body: settingsBody(current, { syncFullHistory: on }),
   })
-  historySettingCache.delete(instance.id)
+  historySettingCache.forget(instance.id)
   return true
 }
 
@@ -1688,36 +1688,27 @@ async function applyHistoryLimitBeforePairing(instance: AppInstance): Promise<vo
  * Also true for an account paired before `syncFullHistory` was turned on, which
  * is accurate: it has only what arrived since.
  *
- * Cached five minutes per connection, successes only, cleared wherever the
- * setting is written and by `forgetInstanceStatus`.
+ * Cached five minutes per connection (`sharedCache`: one read for concurrent
+ * tool calls, successes only), cleared wherever the setting is written and by
+ * `forgetInstanceStatus`.
  */
 export async function recentHistoryOnly(instance: AppInstance): Promise<boolean | undefined> {
-  const now = Date.now()
-  const cached = historySettingCache.get(instance.id)
-  if (cached && now - cached.at < HISTORY_SETTING_TTL_MS) return cached.recentOnly
-
-  let settings: EvolutionSettings | null
   try {
-    settings = await evolutionClientForInstance(instance)<EvolutionSettings | null>(
-      `/settings/find/${encodeURIComponent(instance.name)}`,
-    )
+    return await historySettingCache.get(instance.id, async () => {
+      const settings = await evolutionClientForInstance(instance)<EvolutionSettings | null>(
+        `/settings/find/${encodeURIComponent(instance.name)}`,
+      )
+      // No settings row is Evolution's default, which is off.
+      return settings?.syncFullHistory !== true
+    })
   }
   catch (error) {
     console.warn(`[instances] could not read history settings for ${instance.id} (${instance.name}):`, error)
     return undefined
   }
-
-  // No settings row is Evolution's default, which is off.
-  const recentOnly = settings?.syncFullHistory !== true
-  for (const [id, entry] of historySettingCache) {
-    if (now - entry.at >= HISTORY_SETTING_TTL_MS) historySettingCache.delete(id)
-  }
-  historySettingCache.set(instance.id, { at: now, recentOnly })
-  return recentOnly
 }
 
-const historySettingCache = new Map<string, { at: number, recentOnly: boolean }>()
-const HISTORY_SETTING_TTL_MS = 5 * 60_000
+const historySettingCache = sharedCache<boolean>({ namespace: 'history-setting', ttlMs: 5 * 60_000 })
 
 /**
  * Said to a model alongside `recentHistoryOnly: true`. Shared by the read and

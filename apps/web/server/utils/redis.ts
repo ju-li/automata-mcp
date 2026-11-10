@@ -3,9 +3,9 @@ import Redis from 'ioredis'
 /**
  * The app's optional Redis, from `NUXT_REDIS_URL`. Set on the hosted offering's
  * web service; self-hosted deployments normally leave it unset, and nothing may
- * require it. Today its only user is the MCP rate limit (mcp-rate-limit.ts),
- * which keeps its counts in-process when this answers `undefined` or a command
- * fails.
+ * require it. Users: the MCP rate limit (mcp-rate-limit.ts) and the shared
+ * caches (shared-cache.ts), which both fall back to in-process state when
+ * `readyRedis()` answers `undefined` or a command fails.
  *
  * | `NUXT_REDIS_URL` | behaviour |
  * |---|---|
@@ -20,7 +20,7 @@ import Redis from 'ioredis'
  * `CACHE_REDIS_URI` automatically — sharing is the operator's call.
  *
  * The URL may carry a password, so it is never logged; errors are logged by
- * message, at most once a minute.
+ * message, at most once a minute per context.
  */
 
 export const REDIS_KEY_PREFIX = 'automata:'
@@ -32,7 +32,7 @@ const LOG_EVERY_MS = 60_000
 
 let client: Redis | undefined
 let configured: boolean | undefined
-let lastLoggedAt = 0
+const lastLoggedAt = new Map<string, number>()
 
 /** Whether `NUXT_REDIS_URL` is set at all. */
 export function redisConfigured(): boolean {
@@ -64,10 +64,23 @@ export function redisClient(): Redis | undefined {
   return client
 }
 
-/** Log a Redis failure, at most once a minute. Message only — never the URL. */
+/**
+ * The client only once connected; `undefined` when unset or down. Callers go
+ * straight to their fallback while Redis is down, rather than paying one
+ * rejected command per request.
+ */
+export function readyRedis(): Redis | undefined {
+  const redis = redisClient()
+  return redis?.status === 'ready' ? redis : undefined
+}
+
+/**
+ * Log a Redis failure, at most once a minute per context, so one caller's
+ * errors never mute another's. Message only — never the URL.
+ */
 export function logRedisError(context: string, error: unknown): void {
   const now = Date.now()
-  if (now - lastLoggedAt < LOG_EVERY_MS) return
-  lastLoggedAt = now
+  if (now - (lastLoggedAt.get(context) ?? 0) < LOG_EVERY_MS) return
+  lastLoggedAt.set(context, now)
   console.warn(`[redis] ${context} failed, using in-process state instead:`, (error as Error)?.message ?? error)
 }

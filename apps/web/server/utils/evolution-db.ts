@@ -745,15 +745,6 @@ export interface ChatActivityRow {
   lastRowId: string | null
 }
 
-export interface ChatActivityOptions {
-  /**
-   * Phone-number JID → LID, from `lidLinks()`. Each phone-number chat named
-   * here is folded into its LID's row, so the listing counts people, not
-   * storage keys. Omitted or empty: every JID is its own row, as before.
-   */
-  links?: ReadonlyMap<string, string>
-}
-
 /**
  * The account's conversations, most recent activity first — **all of them**, in
  * one read. Paging is the caller's: `chats.ts` keeps this answer for a minute
@@ -817,15 +808,22 @@ export interface ChatActivityOptions {
  */
 export async function listChatActivity(
   instance: AppInstance,
-  options: ChatActivityOptions = {},
+  /**
+   * Phone-number JID → LID, from `lidLinks()`. Each phone-number chat named
+   * here is folded into its LID's row, so the listing counts people, not
+   * storage keys. Omitted or empty: every JID is its own row, as before.
+   */
+  links?: ReadonlyMap<string, string>,
 ): Promise<ChatActivityRow[]> {
   // Database first, for the same reason as `listMessagesPage`.
   const { query } = await evolutionDbFor(instance)
-  const instanceId = await resolveEvolutionInstanceId(instance)
-  const skipScan = await chatTimestampIndexPresent(instance, query)
+  const [instanceId, skipScan] = await Promise.all([
+    resolveEvolutionInstanceId(instance),
+    chatTimestampIndexPresent(instance, query),
+  ])
 
-  const pns = [...(options.links?.keys() ?? [])]
-  const lids = [...(options.links?.values() ?? [])]
+  const pns = [...(links?.keys() ?? [])]
+  const lids = [...(links?.values() ?? [])]
 
   let rows: ChatActivityRow[]
   try {

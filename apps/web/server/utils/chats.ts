@@ -113,7 +113,7 @@ export type UnreadableReason = 'encrypted-edit' | 'encrypted-content'
 export interface ChatQuery {
   /** Page size. */
   take?: number
-  /** Rows to skip. Evolution maps this straight to SQL `OFFSET`. */
+  /** Rows to skip in the cached listing. */
   skip?: number
 }
 
@@ -122,20 +122,21 @@ export interface ChatQuery {
  *
  * The envelope is here because the obvious completeness signal is a trap. The
  * dashboard's chat count is `_count.Chat` — rows in Evolution's `Chat` table —
- * while this listing is `DISTINCT ON (remoteJid)` over `"Message"`. History sync
- * writes a `Chat` row for every conversation the phone lists but persists only
- * the messages it actually delivered, so the listing is legitimately shorter and
- * no amount of paging closes the gap. Comparing the two announces a truncation
- * that is not there and offers a next page that comes back empty.
+ * while this listing is built from `"Message"`, one row per conversation with
+ * messages. History sync writes a `Chat` row for every conversation the phone
+ * lists but persists only the messages it actually delivered, so the listing is
+ * legitimately shorter and no amount of paging closes the gap. Comparing the two
+ * announces a truncation that is not there and offers a next page that comes
+ * back empty.
  */
 export interface ChatPage {
   chats: ChatSummary[]
   /**
-   * There may be another page behind this one.
+   * There is another page behind this one.
    *
-   * Derived from "the page came back full", never from a count — the same rule
-   * `MessagePage.hasMore` follows, and here the only count within reach counts a
-   * different population entirely.
+   * From the length of the whole cached listing this page was sliced from,
+   * which is exact — never from `_count.Chat`, which counts a different
+   * population entirely.
    */
   hasMore: boolean
 }
@@ -207,7 +208,7 @@ async function chatListing(instance: AppInstance, window: { limit: number, offse
       // Before the listing, so the fold happens in SQL and the listing counts
       // people. Never throws: a failed read serves the last good links, or none.
       const links = await lidLinks(instance)
-      return await listChatActivity(instance, { links: links.lidOf })
+      return await listChatActivity(instance, links.lidOf)
     })
   }
   catch (error) {
@@ -447,7 +448,7 @@ async function withPreviews(instance: AppInstance, chats: ListedChat[]): Promise
  */
 export async function listChats(instance: AppInstance, query: ChatQuery = {}): Promise<ChatPage> {
   const { take = 200, skip = 0 } = query
-  const listing = await chatListing(instance, { limit: take, offset: skip })
+  const { page, listing } = await activityPage(instance, take, skip)
 
   // An empty first page is already the honest answer for a freshly paired
   // account, and must not break the picker or the MCP tool. A page past the
@@ -460,9 +461,15 @@ export async function listChats(instance: AppInstance, query: ChatQuery = {}): P
     })
   }
 
+  return page
+}
+
+/** One window of the listing in its own order, previewed. Shared by both listing entry points. */
+async function activityPage(instance: AppInstance, limit: number, skip: number): Promise<{ page: ChatPage, listing: ChatListing }> {
+  const listing = await chatListing(instance, { limit, offset: skip })
   return {
-    chats: await withPreviews(instance, listing.chats),
-    hasMore: skip + take < listing.total,
+    page: { chats: await withPreviews(instance, listing.chats), hasMore: skip + limit < listing.total },
+    listing,
   }
 }
 
@@ -526,10 +533,9 @@ export async function listChatsPage(instance: AppInstance, query: ChatTableQuery
   const needle = q?.trim().toLowerCase()
 
   if (!needle && sort === 'last' && dir === 'desc') {
-    const listing = await chatListing(instance, { limit, offset: skip })
+    const { page, listing } = await activityPage(instance, limit, skip)
     return {
-      chats: await withPreviews(instance, listing.chats),
-      hasMore: skip + limit < listing.total,
+      ...page,
       total: listing.total,
       truncated: listing.truncated,
       incomplete: listing.failed,
@@ -547,7 +553,8 @@ export async function listChatsPage(instance: AppInstance, query: ChatTableQuery
       )
     : listing.chats
 
-  const sorted = [...matching].sort(chatComparator(sort, dir))
+  // `filter` and `nameChats` both return fresh arrays, so sorting in place is safe.
+  const sorted = matching.sort(chatComparator(sort, dir))
 
   return {
     chats: await withPreviews(instance, sorted.slice(skip, skip + limit)),
@@ -570,14 +577,22 @@ function missingLast<T>(a: T | undefined, b: T | undefined, cmp: (x: T, y: T) =>
   return dir * cmp(a, b)
 }
 
+/** Built once: `localeCompare` without a collator builds one per call, and a name sort makes ~140k calls on 10k chats. */
+const nameCollator = new Intl.Collator()
+const numberCollator = new Intl.Collator(undefined, { numeric: true })
+
 function chatComparator(sort: ChatSortKey, dir: 'asc' | 'desc'): (a: ChatSummary, b: ChatSummary) => number {
   const sign = dir === 'asc' ? 1 : -1
-  const byName = (a: ChatSummary, b: ChatSummary) => a.name.localeCompare(b.name)
+  const byName = (a: ChatSummary, b: ChatSummary) => nameCollator.compare(a.name, b.name)
+  // Parsed once per chat, not twice per comparison.
+  const parsed = new Map<ChatSummary, number | undefined>()
   const activity = (chat: ChatSummary) => {
+    if (parsed.has(chat)) return parsed.get(chat)
     const iso = chat.lastMessageAt ?? chat.updatedAt
-    if (!iso) return undefined
-    const ms = Date.parse(iso)
-    return Number.isNaN(ms) ? undefined : ms
+    const ms = iso ? Date.parse(iso) : Number.NaN
+    const value = Number.isNaN(ms) ? undefined : ms
+    parsed.set(chat, value)
+    return value
   }
 
   switch (sort) {
@@ -585,7 +600,7 @@ function chatComparator(sort: ChatSortKey, dir: 'asc' | 'desc'): (a: ChatSummary
       return (a, b) => sign * byName(a, b)
     case 'number':
       // Sorted by what the column shows, which for a LID chat is the revealed number.
-      return (a, b) => missingLast(a.number ?? a.phoneNumber, b.number ?? b.phoneNumber, (x, y) => x.localeCompare(y, undefined, { numeric: true }), sign) || byName(a, b)
+      return (a, b) => missingLast(a.number ?? a.phoneNumber, b.number ?? b.phoneNumber, numberCollator.compare, sign) || byName(a, b)
     case 'type':
       return (a, b) => sign * (Number(a.isGroup) - Number(b.isGroup)) || byName(a, b)
     case 'last':
@@ -1085,9 +1100,6 @@ async function fetchContacts(instance: AppInstance, evolution: EvolutionClient):
 
   return byJid
 }
-
-/** Shared, so keep it immutable. */
-const emptyGroups: Map<string, GroupInfo> = new Map()
 
 // ── internals ──────────────────────────────────────────────────────────────
 

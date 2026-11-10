@@ -4,7 +4,7 @@
  * conversations and simply does not learn the others exist.
  *
  * **This answers with one page, and says so.** `listChats` returns a `ChatPage`
- * whose `hasMore` means "the page came back full", and dropping it here left the
+ * whose `hasMore` means "more conversations exist past this page", and dropping it here left the
  * only read tool that presents a page as a complete listing — the exact gap
  * `read-messages` and `list-tables` both carry an envelope to close. A model
  * told nothing concludes these are all the conversations there are.
@@ -65,9 +65,7 @@ export default defineKindTool({
     return {
       // `count` is what survived scope; `hasMore` is about the page underneath
       // it, so a scoped token can legitimately see few chats and still be told
-      // there are more. Wrong only in the safe direction, as everywhere else: a
-      // page that came back exactly full reports true and costs nothing but a
-      // sentence.
+      // there are more.
       count: visible.length,
       hasMore,
       ...(hasMore && {
