@@ -149,10 +149,11 @@ export default defineNuxtConfig({
     mcpRateTokenPerMinute: '120',
     mcpRateOrgPerMinute: '600',
     mcpRateExpensivePerMinute: '30',
-    // Optional Redis for state that should hold across replicas — today only
-    // those budgets. Set on the hosted offering; unset, they are kept
-    // in-process. Unreachable = in-process too, never an error. Use a database
-    // number of its own (Evolution's cache uses /6). See server/utils/redis.ts.
+    // Optional Redis for state that should hold across replicas — those
+    // budgets, and the one-minute chat listing cache (shared-cache.ts). Set on
+    // the hosted offering; unset, both are kept in-process. Unreachable =
+    // in-process too, never an error. Use a database number of its own
+    // (Evolution's cache uses /6). See server/utils/redis.ts.
     redisUrl: '',
 
     // Let a user-supplied Postgres DSN or Evolution URL point at a private or

@@ -8,6 +8,7 @@ import type { LidLinks } from './whatsapp-identity'
 import { canonicalJid, lidLinks, linkedJidOf, phoneNumberBehind, phoneNumberOf } from './whatsapp-identity'
 import type { GroupInfo } from './whatsapp-groups'
 import { groupNamesFor } from './whatsapp-groups'
+import { sharedCache } from './shared-cache'
 
 /**
  * Reading conversations out of Evolution.
@@ -174,32 +175,40 @@ interface ChatListing {
 /**
  * One window of the account's conversations, most recent activity first.
  *
- * **Read live on every call — no listing cache.** It used to walk Evolution's
- * `findChats` into a 60-second memo, which is why a message already visible on
- * the dashboard could be missing from `list-chats` for up to a minute. Now it is
- * one aggregate over `"Message"` (`listChatActivity`), which is the same scan
- * `findChats` ran. Only *names* still come from caches — `contactDirectory()` and the group listing —
- * since a name changes on a human timescale and a message does not.
+ * **One read per account per minute, shared by every page and caller (#174).**
+ * `listChatActivity` answers with the whole listing — a loose index scan whose
+ * cost follows the number of chats — and `chatActivityCache` keeps that answer
+ * for `CHAT_ACTIVITY_TTL_MS`, in Redis when `NUXT_REDIS_URL` is set, else
+ * in-process (`shared-cache.ts`). Pages are sliced out of it here, so paging
+ * the dashboard dialog, the scope picker walking the list, and an agent calling
+ * `list-chats` in a loop all reuse one read. The cost: a message sent a moment
+ * ago can take up to that long to move its chat to the top. Before #174 this
+ * was read live, as one aggregate over every message of the account per page,
+ * and large accounts timed out.
+ *
+ * Only the window is named (`nameChats`): names come from their own caches —
+ * `contactDirectory()` and the group listing — and naming thousands of chats
+ * per page would be the cost this avoids.
  *
  * A connection with no message database (its own Evolution server, no
  * `evolution_db_url`) cannot run that query, so it keeps the old `findChats`
  * walk, uncached.
  *
- * A failure is reported, not thrown: an empty first page is already the honest
- * answer for a freshly paired account and must not break the scope picker. The
- * callers decide what a failed later page means.
+ * A failure is reported, not thrown, and never cached: an empty first page is
+ * already the honest answer for a freshly paired account and must not break
+ * the scope picker. The callers decide what a failed later page means.
  */
 async function chatListing(instance: AppInstance, window: { limit: number, offset: number }): Promise<ChatListing> {
   if (!canReadMessages(instance)) return walkFindChats(instance, window)
 
-  // Before the listing, so the fold happens in SQL and pages count people.
-  // Never throws: a failed read serves the last good links, or none.
-  const links = await lidLinks(instance)
-
   let rows: ChatActivityRow[]
-  let total: number
   try {
-    ({ rows, total } = await listChatActivity(instance, { ...window, links: links.lidOf }))
+    rows = await chatActivityCache.get(instance.id, async () => {
+      // Before the listing, so the fold happens in SQL and the listing counts
+      // people. Never throws: a failed read serves the last good links, or none.
+      const links = await lidLinks(instance)
+      return await listChatActivity(instance, { links: links.lidOf })
+    })
   }
   catch (error) {
     // Also covers resolving the Evolution instance id, which can fail before
@@ -208,15 +217,28 @@ async function chatListing(instance: AppInstance, window: { limit: number, offse
     return { chats: [], total: 0, truncated: false, failed: true }
   }
 
-  const chats = await nameChats(instance, rows.map(row => ({
+  const chats = await nameChats(instance, rows.slice(window.offset, window.offset + window.limit).map(row => ({
     jid: row.jid,
     jids: row.jids,
     lastMessageAt: isoFromEpochSeconds(row.lastTimestamp),
     lastRowId: row.lastRowId ?? undefined,
   })))
 
-  return { chats, total, truncated: false, failed: false }
+  return { chats, total: rows.length, truncated: false, failed: false }
 }
+
+/**
+ * How long one account's chat listing is served before it is read again.
+ * Short, so "a new message moves its chat up" still holds within a minute.
+ */
+const CHAT_ACTIVITY_TTL_MS = 60_000
+
+/**
+ * The whole listing per connection id: JIDs, timestamps and row ids — never a
+ * name, a preview or message content. Unscoped, like the read it caches: chat
+ * scope is applied by the callers after slicing, as before.
+ */
+const chatActivityCache = sharedCache<ChatActivityRow[]>({ namespace: 'chat-activity', ttlMs: CHAT_ACTIVITY_TTL_MS })
 
 /**
  * The fallback for a connection whose messages this app cannot read: walk
@@ -421,7 +443,7 @@ async function withPreviews(instance: AppInstance, chats: ListedChat[]): Promise
  * Recent conversations, newest activity first.
  *
  * For the token scope picker and the `list-chats` tool, which page with
- * `take`/`skip` in activity order — pushed down to SQL as `LIMIT`/`OFFSET`.
+ * `take`/`skip` in activity order — sliced out of the cached listing.
  */
 export async function listChats(instance: AppInstance, query: ChatQuery = {}): Promise<ChatPage> {
   const { take = 200, skip = 0 } = query
@@ -492,10 +514,11 @@ export interface ChatTablePage extends ChatPage {
  * One page of the chats table, searched, sorted and sliced over the whole
  * account, here rather than in the browser.
  *
- * The default view — newest activity first, no search — is exactly the SQL
- * order, so it is paged in SQL. Anything that searches or sorts by *name* has to
- * name every chat first, and names are not in the database this reads, so those
- * load the whole listing (up to `CHAT_LISTING_CAP`) and sort it here.
+ * The default view — newest activity first, no search — is exactly the
+ * listing's order, so only the page is named. Anything that searches or sorts
+ * by *name* has to name every chat first, and names are not in the database
+ * this reads, so those name the whole listing (up to `CHAT_LISTING_CAP`) and
+ * sort it here. Both slice the same cached listing (`chatListing`).
  */
 export async function listChatsPage(instance: AppInstance, query: ChatTableQuery = {}): Promise<ChatTablePage> {
   const { q, sort = 'last', dir = sort === 'last' ? 'desc' : 'asc', limit = 100, page = 1 } = query

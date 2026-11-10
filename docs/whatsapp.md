@@ -99,6 +99,8 @@ undetected.
 NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:change-me@localhost:5432/evolution
 ```
 
+### Indexes on Evolution's tables
+
 Evolution ships `@@index([instanceId])` and nothing else — no index on
 `messageTimestamp`, none on the `key` JSONB — so reading and searching are both a
 sequential scan within one account. History import makes that corpus much larger than it would
@@ -113,18 +115,33 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
   ON "Message" ("instanceId", "messageTimestamp" DESC);
 ```
 
-`read-messages` reads one chat, and that index still visits every row the account
-holds in the requested time range before filtering by chat. On accounts with a
-large history import, a per-chat index lets one chat's page skip the rest:
+**Index each chat's messages by time.** This one index serves two reads:
+
+- `read-messages` reads one chat, and `message_instance_ts_idx` still visits
+  every row the account holds in the requested time range before filtering by
+  chat. With this index, one chat's page skips the rest.
+- `list-chats`, the token scope picker and the dashboard's chats dialog list an
+  account's conversations. With this index the app reads one index entry and
+  usually one row per chat. On an account with 1.9M messages and 3,200 chats
+  that is about 0.1 s warm and 2.4 s cold. Without it, every listing reads
+  every message of the account, and large accounts hit the 10-second timeout.
 
 ```sql
 CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_chat_ts_idx
   ON "Message" ("instanceId", (key->>'remoteJid'), "messageTimestamp" DESC);
 ```
 
-It is optional and costs disk and insert time on every message. Before keeping
-it, check on your largest account that Postgres actually uses it. Use the
-account's id from `"Instance"` and one of its busy chats:
+It costs disk and insert time on every message. Any index on these three
+columns in this order counts, whatever its name and whichever direction the
+timestamp sorts: if one exists already (for example `message_chat_ts_idx`),
+don't build a second. The chat listing looks for an index of this shape every
+ten minutes, so there's no need to restart the app. Until it finds one, it keeps
+the full scan and logs once that the index is missing. Either way, one
+account's listing is read at most once a minute and shared by every page and
+caller.
+
+To check that `read-messages` uses it, take your largest account's id from
+`"Instance"` and one of its busy chats:
 
 ```sql
 EXPLAIN (ANALYZE, BUFFERS)
@@ -133,10 +150,10 @@ WHERE m."instanceId" = '<instance id>' AND m.key->>'remoteJid' = ANY(ARRAY['<jid
 ORDER BY m."messageTimestamp" DESC LIMIT 51;
 ```
 
-The plan should name `message_instance_chat_ts_idx`. If it still names
-`message_instance_ts_idx` or a sequential scan, drop the new index with
-`DROP INDEX CONCURRENTLY`. Like the indexes below, it lives on Evolution's table
-and must be re-checked after an image-tag bump.
+The plan should name the new index. If it still names `message_instance_ts_idx`
+or a sequential scan, `read-messages` gains nothing from it on that account, but
+keep it anyway: the chat listing still needs it. Like the indexes below, it
+lives on Evolution's table and must be re-checked after an image-tag bump.
 
 **How big each account is.** `"Message"` grows without bound; nothing here or in
 Evolution deletes old messages. To see where the space goes before deciding on
@@ -196,9 +213,9 @@ ALTER TABLE "Message" SET (autovacuum_vacuum_insert_scale_factor = 0.01,
 should then stay close to 1.
 
 The trigram index and these storage parameters live on Evolution's tables, as
-`message_instance_ts_idx` (and `message_instance_chat_ts_idx`, if you added it) does. They survive restarts, but a Prisma migration
-that recreates either table drops them without any warning. Re-check all three
-after bumping Evolution's image tag.
+`message_instance_ts_idx` and `message_instance_chat_ts_idx` do. They survive
+restarts, but a Prisma migration that recreates either table drops them without
+any warning. Re-check all four after bumping Evolution's image tag.
 
 Worth knowing before you go looking for a bug:
 

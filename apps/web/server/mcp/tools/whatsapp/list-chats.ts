@@ -9,13 +9,13 @@
  * `read-messages` and `list-tables` both carry an envelope to close. A model
  * told nothing concludes these are all the conversations there are.
  *
- * No page-size or offset argument, though, and that is not an omission: every
- * page is one aggregate over the account's whole message table (see
- * `listChatActivity`), so walking a small `skip` costs that scan per page. One
- * large page is cheaper. The page size stays this server's decision.
+ * No page-size or offset argument, though, and that is not an omission: the
+ * page size stays this server's decision, and one large page is what a model
+ * needs to find a chat.
  *
- * Read live, not cached: a message that has reached the dashboard is in this
- * listing on the next call.
+ * Fresh within a minute, not live: the account's whole listing is read once
+ * and shared by every page and caller for `CHAT_ACTIVITY_TTL_MS` (`chats.ts`,
+ * #174), so a chat whose message arrived seconds ago can still sit lower down.
  *
  * `phoneNumber` on a LID chat discloses nothing a token could not already reach:
  * its evidence is the LID chat's own rows, and `filterChatsToScope` keeps it only
