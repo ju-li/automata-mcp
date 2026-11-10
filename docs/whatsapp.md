@@ -155,6 +155,78 @@ or a sequential scan, `read-messages` gains nothing from it on that account, but
 keep it anyway: the chat listing still needs it. Like the indexes below, it
 lives on Evolution's table and must be re-checked after an image-tag bump.
 
+**Index message text for search.** Without this index, `search-messages` and
+the dashboard's message filter read every message of the account on every
+search, and open each message's stored payload to find its text. On an account
+with 1.3M messages, that was about 330 MB read per search, and some searches
+timed out. A trigram index on the message text lets Postgres read only the
+messages that contain the words. It needs `pg_trgm`; find its schema as shown
+under `"IsOnWhatsapp"` below, and qualify the operator class the same way:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_body_trgm
+  ON "Message" USING gin ((COALESCE(
+    message->>'conversation',
+    message->'extendedTextMessage'->>'text',
+    message->'imageMessage'->>'caption',
+    message->'videoMessage'->>'caption',
+    message->'documentMessage'->>'caption',
+    message->'documentWithCaptionMessage'->'message'->'documentMessage'->>'caption',
+    message->>'speechToText',
+    message->'reactionMessage'->>'text',
+    message->'associatedChildMessage'->'message'->>'conversation',
+    message->'associatedChildMessage'->'message'->'extendedTextMessage'->>'text',
+    message->'associatedChildMessage'->'message'->'imageMessage'->>'caption',
+    message->'associatedChildMessage'->'message'->'videoMessage'->>'caption',
+    message->'associatedChildMessage'->'message'->'documentMessage'->>'caption',
+    message->'protocolMessage'->'editedMessage'->>'conversation',
+    message->'protocolMessage'->'editedMessage'->'extendedTextMessage'->>'text',
+    message->'protocolMessage'->'editedMessage'->'imageMessage'->>'caption',
+    message->'protocolMessage'->'editedMessage'->'videoMessage'->>'caption',
+    message->'protocolMessage'->'editedMessage'->'documentMessage'->>'caption',
+    message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->>'conversation',
+    message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'extendedTextMessage'->>'text',
+    message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'imageMessage'->>'caption',
+    message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'videoMessage'->>'caption',
+    message->'associatedChildMessage'->'message'->'protocolMessage'->'editedMessage'->'documentMessage'->>'caption'
+  )) telegram.gin_trgm_ops);
+
+ANALYZE "Message";
+```
+
+Copy the expression exactly. Postgres uses the index only for a query whose
+expression is identical to it, and the app's searches use this one. A copy that
+differs in any arm or in their order is never used, and searches stay as slow as
+before without any error. If an app release changes how message text is read,
+its release notes say so; drop the index and build it again from this page.
+`ANALYZE` gives the planner statistics on the new expression, so it can tell a
+rare word from a common one.
+
+What to expect:
+
+- It covers every account on the server, so the database finds matching
+  messages first and then keeps the ones from the searched account. Rare words
+  are fast on any account. Very common words match many rows, and the database
+  falls back to reading the account when that's cheaper.
+- A word needs three letters or digits in a row to use the index. A search made
+  only of shorter words or emoji (`ok`, `👍`) still reads the whole account.
+- It costs disk (expect something like 1–2 GB on a table of a few million
+  messages) and a little time on every insert.
+
+Check `indisvalid` as for the `"IsOnWhatsapp"` index below. To see that searches
+use it, run a typical two-word search on your largest account:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT 1 FROM "Message" m
+WHERE m."instanceId" = '<instance id>'
+  AND COALESCE(m.message->>'conversation', /* …every arm above, with m. … */) ILIKE '%<word>%'
+  AND COALESCE(m.message->>'conversation', /* … */) ILIKE '%<other word>%';
+```
+
+The plan should show `Bitmap Index Scan on message_body_trgm`, and `Buffers`
+should be a small fraction of what the same query reads without it.
+
 **How big each account is.** `"Message"` grows without bound; nothing here or in
 Evolution deletes old messages. To see where the space goes before deciding on
 retention:
@@ -213,9 +285,11 @@ ALTER TABLE "Message" SET (autovacuum_vacuum_insert_scale_factor = 0.01,
 should then stay close to 1.
 
 The trigram index and these storage parameters live on Evolution's tables, as
-`message_instance_ts_idx` and `message_instance_chat_ts_idx` do. They survive
-restarts, but a Prisma migration that recreates either table drops them without
-any warning. Re-check all four after bumping Evolution's image tag.
+`message_instance_ts_idx`, `message_instance_chat_ts_idx` and
+`message_body_trgm` do. They survive restarts, but a Prisma migration that
+recreates either table drops them without any warning. Re-check all five after
+bumping Evolution's image tag. Both trigram indexes use `pg_trgm`'s operator
+class, so dropping the schema it lives in with `CASCADE` drops both.
 
 Worth knowing before you go looking for a bug:
 

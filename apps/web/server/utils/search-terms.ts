@@ -1,10 +1,12 @@
 /**
  * The words of a message search, split and bounded.
  *
- * Every term becomes one `ILIKE` pattern in an `ILIKE ALL (...)` predicate run
- * against every body in the account (`evolution-db.ts`, `telegram-db.ts`), so the
- * cost of a search grows with the number and length of its terms — and those
- * queries run on the message pools this deployment's tenants share. Uncapped, a
+ * Every term becomes one `ILIKE` pattern: in an `ILIKE ALL (...)` in
+ * `telegram-db.ts`, as its own clause in `evolution-db.ts` (`bodyMatchesAll`, so
+ * a trigram index can serve it; #202). Wherever no index serves a term, it is
+ * matched against every body in the account, so the cost of a search grows with
+ * the number and length of its terms. Those queries run on the message pools
+ * this deployment's tenants share. Uncapped, a
  * query of thousands of one-letter words ran every search to the statement
  * timeout and held the shared slots other accounts' reads and the status reads
  * wait on (GHSA-fpmx-gmx5-84vc).
@@ -36,7 +38,7 @@ export function splitSearchTerms(query: string, field: string): string[] {
 /**
  * The same limits, for terms already split.
  *
- * Called again by every query that builds an `ILIKE ALL` from terms, so a future
+ * Called again by every query that builds `ILIKE` patterns from terms, so a future
  * caller that splits for itself cannot bring the unbounded search back.
  */
 export function assertSearchTerms(terms: readonly string[], field = 'query'): void {

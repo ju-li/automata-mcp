@@ -481,7 +481,6 @@ export async function searchMessages(
   const { query } = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
 
-  const patterns = options.terms.map(term => `%${escapeLike(term)}%`)
   const since = toUnixSeconds(options.since, 'since')
   const until = toUnixSeconds(options.until, 'until')
 
@@ -503,11 +502,15 @@ export async function searchMessages(
     // key of the payload that is `conversation` or ends in `Message` — so a
     // reaction arriving alongside a `messageContextInfo` is stored under that
     // type instead, with `message.reactionMessage` sitting right there. The
-    // payload is the authority. It costs nothing next to the scan already
-    // happening — `@@index([instanceId])` is the only index on
-    // `Message`. None of it touches scope: `instanceId`, `jid` and `allowedJids`
-    // still bound the query, so an included reaction is only ever one from a
-    // chat this token already reaches.
+    // payload is the authority. It is checked only on rows the body match
+    // already admitted. None of it touches scope: `instanceId`, `jid` and
+    // `allowedJids` still bound the query, so an included reaction is only ever
+    // one from a chat this token already reaches.
+    //
+    // The body is matched through `bodyMatchesAll`, never `ILIKE ALL` on a
+    // lateral alias: that shape can't use the trigram index docs/whatsapp.md
+    // tells operators to build, so every search read every row of the account
+    // (#202).
     //
     // `jids` may name two JIDs — one person stored under a LID and a phone
     // number. `DISTINCT ON (key->>'id')` and everything outside the CTE are
@@ -515,7 +518,7 @@ export async function searchMessages(
     rows = await query(sql => sql<MessageRow[]>`
       WITH matched AS (
         SELECT DISTINCT ON (m.key->>'id')
-               m.key, m."pushName", m."messageType", m."messageTimestamp", t.body,
+               m.key, m."pushName", m."messageType", m."messageTimestamp", ${messageBody(sql)} AS body,
                m."contextInfo"->'mentionedJid' AS mentioned,
                -- Which message this one edits, when it is an edit. Not decoration:
                -- without it a search can return both the stale original and its
@@ -528,10 +531,9 @@ export async function searchMessages(
                ) AS "editOf",
                ${bestNamed(sql)} AS named, m.id AS "rowId"
         FROM "Message" m
-        ${messageBodyJoin(sql)}
         WHERE m."instanceId" = ${instanceId}
-          AND t.body IS NOT NULL
-          AND t.body ILIKE ALL (${patterns}::text[])
+          AND ${messageBody(sql)} IS NOT NULL
+          ${bodyMatchesAll(sql, options.terms)}
           ${options.jids === undefined ? sql`` : sql`AND m.key->>'remoteJid' = ANY(${[...options.jids]}::text[])`}
           ${options.allowedJids ? sql`AND m.key->>'remoteJid' = ANY(${options.allowedJids}::text[])` : sql``}
           ${since === undefined ? sql`` : sql`AND m."messageTimestamp" >= ${since}`}
@@ -603,8 +605,9 @@ export interface MessagePageOptions {
   includeReactions?: boolean
   /**
    * Every term must appear in the message body. Already split, not yet escaped —
-   * matched against the same `messageBodyJoin` expression `searchMessages` uses,
-   * so a listing and a search agree on what the text of a message is.
+   * matched by the same `bodyMatchesAll` over the same `messageBody` expression
+   * `searchMessages` uses, so a listing and a search agree on what the text of a
+   * message is, and both can use the trigram index.
    */
   terms?: string[]
   /** Which end of the range the first page comes from. Defaults to newest first. */
@@ -671,10 +674,9 @@ export async function listMessagesPage(
   const take = options.limit + 1
   const skip = (options.page - 1) * options.limit
 
-  // Joined only when there is something to match, so an ordinary read pays
+  // Matched only when there is something to match, so an ordinary read pays
   // nothing for it. The body expression is shared with `searchMessages`.
   const terms = options.terms?.length ? options.terms : undefined
-  const patterns = terms?.map(term => `%${escapeLike(term)}%`)
 
   // The tiebreaker travels with the direction. Evolution's own ordering has
   // none, and rows sharing a timestamp then land on two pages or on neither —
@@ -692,10 +694,9 @@ export async function listMessagesPage(
                m."contextInfo"->'mentionedJid' AS mentioned,
                ${bestNamed(sql)} AS named, m.id AS "rowId"
         FROM "Message" m
-        ${patterns ? messageBodyJoin(sql) : sql``}
         WHERE m."instanceId" = ${instanceId}
           ${options.jids === undefined ? sql`` : sql`AND m.key->>'remoteJid' = ANY(${[...options.jids]}::text[])`}
-          ${patterns === undefined ? sql`` : sql`AND t.body ILIKE ALL (${patterns}::text[])`}
+          ${terms === undefined ? sql`` : bodyMatchesAll(sql, terms)}
           ${since === undefined ? sql`` : sql`AND m."messageTimestamp" >= ${since}`}
           ${until === undefined ? sql`` : sql`AND m."messageTimestamp" <= ${until}`}
           ${options.includeReactions ? sql`` : sql`AND m.message->'reactionMessage' IS NULL`}
@@ -1177,19 +1178,27 @@ function notControl(sql: Sql) {
 }
 
 /**
- * The readable text of a message, as a `CROSS JOIN LATERAL ... AS t` yielding
- * `t.body` — null for a row that carries nothing renderable.
+ * The readable text of a message, as an expression over `m` — null for a row
+ * that carries nothing renderable.
  *
  * One authority for what counts as a body, shared by `searchMessages` (which
- * matches on it) and `listMessagesPage` (which joins it only when there are
- * terms to match). Two copies of this COALESCE would drift, and a search that
- * reads one definition while a listing reads another is a set of results that
- * cannot be paged.
+ * selects and matches on it) and `listMessagesPage` (which matches on it only
+ * when there are terms). Two copies of this COALESCE would drift, and a search
+ * that reads one definition while a listing reads another is a set of results
+ * that cannot be paged.
+ *
+ * **This text is also the definition of `message_body_trgm`**, the trigram
+ * index docs/whatsapp.md has operators build on `"Message"` (#202). Postgres
+ * uses an expression index only when the query's expression is identical to
+ * it, so changing an arm here (adding, removing, reordering) without changing
+ * the documented index makes every search read the whole account again —
+ * silently, with the same results. Change both together and say so in the
+ * release notes, since operators have to rebuild it. Inlined where it is used
+ * rather than behind a `LATERAL` alias, so matching the index never depends on
+ * the planner flattening a subquery.
  */
-function messageBodyJoin(sql: Sql) {
-  return sql`
-    CROSS JOIN LATERAL (
-      SELECT COALESCE(
+function messageBody(sql: Sql) {
+  return sql`COALESCE(
         m.message->>'conversation',
         m.message->'extendedTextMessage'->>'text',
         m.message->'imageMessage'->>'caption',
@@ -1228,11 +1237,42 @@ function messageBodyJoin(sql: Sql) {
         -- groups: Evolution writes the first at top level only, and a reaction
         -- is never an album child or an edit target. COALESCE short-circuits,
         -- so an ordinary text row still stops at the first arm — the extra
-        -- lookups are paid only by rows that produce no body at all, which
-        -- this scan already touches and discards.
-      ) AS body
-    ) t`
+        -- lookups are paid only by rows that produce no body at all.
+      )`
 }
+
+/**
+ * `AND` clauses requiring every term in `messageBody` — an empty fragment for no
+ * terms. Terms already split and bounded, not yet escaped.
+ *
+ * **One `ILIKE` per term, never `ILIKE ALL (array)`.** Postgres matches an array
+ * comparison to a GIN index only as `ANY`; `ALL` is always a filter, so the
+ * trigram index would sit unused and every search would read every row of the
+ * account and open its (often TOASTed) payload (#202). Separate clauses on the
+ * same expression let one bitmap scan of `message_body_trgm` intersect them.
+ *
+ * **Except a term with no trigram.** `pg_trgm` takes trigrams from runs of
+ * letters and digits, so `ok`, `👍` or `?!` yield none, and an index clause
+ * for one is a scan of the *whole* index — every account's messages — which
+ * the planner still picked for a two-letter search on a small account,
+ * costing more than the account scan it replaced. Those terms go in one
+ * `ILIKE ALL`, which no index can serve, so they filter the rows the other
+ * terms or `instanceId` found. `TRIGRAM_RUN` is the test: three letters or
+ * digits in a row always give at least one trigram. It decides only whether
+ * the index may be asked; the rows matched are the same either way.
+ */
+function bodyMatchesAll(sql: Sql, terms: readonly string[]) {
+  assertSearchTerms(terms)
+  const like = (term: string) => `%${escapeLike(term)}%`
+  const indexed = terms.filter(term => TRIGRAM_RUN.test(term))
+  const filtered = terms.filter(term => !TRIGRAM_RUN.test(term))
+
+  const clauses = indexed.map(term => sql`AND ${messageBody(sql)} ILIKE ${like(term)}`)
+  if (filtered.length) clauses.push(sql`AND ${messageBody(sql)} ILIKE ALL (${filtered.map(like)}::text[])`)
+  return clauses.reduce((all, clause) => sql`${all} ${clause}`, sql``)
+}
+
+const TRIGRAM_RUN = /[\p{L}\p{N}]{3}/u
 
 /**
  * Which row of a duplicate set to keep — as a select-list expression, aliased
