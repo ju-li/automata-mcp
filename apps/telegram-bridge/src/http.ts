@@ -72,7 +72,12 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       label: 'GET /health', method: 'GET', pattern: /^\/health$/, access: 'public',
       // Stays 200 without Telegram so a platform health check passes; `telegram`
       // is what the app reads to tell an admin what to set. No value is exposed.
-      handle: async () => ({ status: 200, body: { ok: true, telegram: config.telegram ? 'configured' : 'unconfigured' } }),
+      // `sync` is the live queues' backlog, as totals: an alarm on it catches a
+      // session falling behind before the heap does (#188).
+      handle: async () => ({
+        status: 200,
+        body: { ok: true, telegram: config.telegram ? 'configured' : 'unconfigured', sync: manager.load() },
+      }),
     },
     {
       label: 'POST /sessions', method: 'POST', pattern: /^\/sessions$/, access: 'admin', needsTelegram: true,

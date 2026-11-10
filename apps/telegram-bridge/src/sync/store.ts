@@ -307,6 +307,15 @@ export class SyncStore {
       ORDER BY last_message_at DESC NULLS LAST`
   }
 
+  /** One channel, if it can be caught up: the same conditions as `channelsForCatchUp`. */
+  async channelForCatchUp(chatId: string): Promise<{ chat_id: string, access_hash: string, channel_pts: number } | undefined> {
+    const [row] = await this.sql<{ chat_id: string, access_hash: string, channel_pts: number }[]>`
+      SELECT chat_id, access_hash, channel_pts FROM chats
+      WHERE session_id = ${this.sessionId} AND chat_id = ${chatId} AND chat_id <= -1000000000000
+        AND channel_pts IS NOT NULL AND access_hash IS NOT NULL AND migrated_to IS NULL`
+    return row
+  }
+
   async markDialogsSynced(): Promise<void> {
     await this.sql`UPDATE sessions SET dialogs_synced_at = now() WHERE id = ${this.sessionId}`
   }
