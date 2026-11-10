@@ -97,6 +97,8 @@ const MAX_CATCHUP_FAILURES = 5
 const LOAD_REPORT_MS = 60_000
 /** A flood wait longer than this is logged: it means this account is syncing too hard. */
 const LONG_FLOOD_S = 300
+/** How often backfill looks again while the client is disconnected. */
+const DISCONNECTED_WAIT_MS = 30_000
 /** Telegram's answer for history this account cannot read any more. */
 const INACCESSIBLE = new Set(['CHANNEL_PRIVATE', 'CHANNEL_INVALID', 'PEER_ID_INVALID', 'CHAT_ID_INVALID', 'CHAT_FORBIDDEN'])
 
@@ -455,6 +457,12 @@ export class SessionSync {
           continue
         }
         if (this.shedding) return
+        // Disconnected: every difference would fail and count toward giving up
+        // with a gap. Wait, as backfill does; a rebuilt client gets a new syncer.
+        if (!this.client.connected) {
+          await sleep(DISCONNECTED_WAIT_MS)
+          continue
+        }
         const next = this.nextDirty()
         if (next === undefined) return
         if (typeof next === 'number') {
@@ -642,7 +650,9 @@ export class SessionSync {
   }
 
   private async reconcile(): Promise<void> {
-    if (this.stopped || Date.now() < this.pausedUntil) return
+    // Disconnected: every request would fail. The session manager rebuilds the
+    // client (and this syncer with it); nothing to do here meanwhile.
+    if (this.stopped || Date.now() < this.pausedUntil || !this.client.connected) return
     await this.guard('reconcile', () => this.syncDialogs(RECONCILE_DIALOGS))
     void this.runBackfill()
   }
@@ -677,6 +687,11 @@ export class SessionSync {
         const wait = this.pausedUntil - Date.now()
         if (wait > 0) {
           await sleep(Math.min(wait, 60_000))
+          continue
+        }
+        // teleproto reconnecting, or given up: wait rather than fail a page a minute.
+        if (!this.client.connected) {
+          await sleep(DISCONNECTED_WAIT_MS)
           continue
         }
 

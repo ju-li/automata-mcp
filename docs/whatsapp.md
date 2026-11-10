@@ -113,6 +113,55 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
   ON "Message" ("instanceId", "messageTimestamp" DESC);
 ```
 
+Two more changes, both for Evolution's own queries rather than this app's. Make
+them as a superuser too.
+
+**Index `"IsOnWhatsapp"."jidOptions"`.** With `DATABASE_SAVE_IS_ON_WHATSAPP` on,
+Evolution looks numbers up with
+`WHERE "jidOptions"::text LIKE $1 OR "remoteJid" = $2`. `"remoteJid"` has a
+unique index, but `"jidOptions"` has none, so every lookup reads the whole
+table. On one deployment it was the most expensive statement on the server. A
+trigram index lets Postgres answer the `OR` with a `BitmapOr` instead:
+
+```sql
+-- where pg_trgm lives; the Telegram bridge installs it in the telegram schema
+SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+WHERE e.extname = 'pg_trgm';
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS isonwhatsapp_jidoptions_trgm
+  ON "IsOnWhatsapp" USING gin ("jidOptions" telegram.gin_trgm_ops);
+```
+
+Qualify `gin_trgm_ops` with the schema the first query names. Without the
+qualifier, the statement fails with `operator class "gin_trgm_ops" does not
+exist for access method "gin"`. If the query returns no row, run
+`CREATE EXTENSION pg_trgm SCHEMA public;` first and use `public.gin_trgm_ops`.
+An index built on the `telegram` copy depends on that schema: dropping it with
+`CASCADE` drops this index too, without a word. Check that
+`SELECT indisvalid FROM pg_index WHERE indexrelid = 'isonwhatsapp_jidoptions_trgm'::regclass`
+is `t`. A failed concurrent build leaves an invalid index behind; drop it with
+`DROP INDEX CONCURRENTLY` and build it again.
+
+**Vacuum `"Message"` more often.** Counting an account's messages is an
+index-only scan, which skips the table only for pages the visibility map marks
+all-visible. Freshly imported history isn't marked until autovacuum runs. By
+default autovacuum waits for inserts equal to 20% of the table, which is about
+1.1M rows at 5.5M, so the accounts counted most often (fresh imports) paid a
+table read for nearly every row:
+
+```sql
+ALTER TABLE "Message" SET (autovacuum_vacuum_insert_scale_factor = 0.01,
+                           autovacuum_vacuum_scale_factor = 0.05);
+```
+
+`SELECT relallvisible::float / relpages FROM pg_class WHERE oid = '"Message"'::regclass`
+should then stay close to 1.
+
+The trigram index and these storage parameters live on Evolution's tables, as
+`message_instance_ts_idx` does. They survive restarts, but a Prisma migration
+that recreates either table drops them without any warning. Re-check all three
+after bumping Evolution's image tag.
+
 Worth knowing before you go looking for a bug:
 
 - Both cover whatever Evolution holds: the history imported at pairing plus

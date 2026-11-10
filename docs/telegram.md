@@ -64,6 +64,19 @@ the bridge (it re-grants `SELECT` at every start: on `messages` whole, on `chats
 and `users` column by column so access hashes and phone numbers stay out, and
 never on `sessions`), and use that role in `NUXT_TELEGRAM_DATABASE_URL`.
 
+The bridge migrates its schema at start, in one transaction. Migration `0003`
+adds an index on `telegram.messages` and holds a write lock on that table while it
+builds, so sync writes wait for it. With millions of messages, build it by hand
+beforehand without the lock and the migration skips it:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS messages_live_by_session
+  ON telegram.messages (session_id) WHERE deleted_at IS NULL;
+```
+
+If that build fails, it leaves an invalid index under the same name. Drop that
+index and build it again before you deploy.
+
 ## What syncs
 
 Private chats, bots, groups, supergroups (including forum topics) and channels —
