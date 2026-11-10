@@ -79,6 +79,20 @@ channels unless `TELEGRAM_BACKFILL_BROADCAST=true`. An unofficial client that
 hammers history is how an account gets restricted. The read tools say when a
 chat's history stops at what was synced rather than at its first message.
 
+The day limit is a limit on what is stored, not only on how far backfill walks:
+the page that crosses it is cut at it, and a chat whose newest message is older
+than the limit gets no message from the dialog list either. Live messages and
+the catch-up after a restart are never cut.
+
+The app can lower the limit for one session: it sends `backfillDays` with
+`POST /sessions/:id/pair`, the bridge stores it on the session, and the lower of
+it and `TELEGRAM_BACKFILL_DAYS` applies — a session can be held below the
+operator's setting, never lifted above it. The hosted Free plan uses this for
+90 days (see [Plans and billing](billing.md)). Because it is stored at pairing,
+it applies to the account linked then; `GET /sessions/:id/state` reports the
+limit in force as `sync.backfillDays`, which the dashboard and
+`get-telegram-status` (`sync.historyDays`) show.
+
 **Secret chats are never visible.** They exist only on the devices that took
 part in them and cannot be synced by any client.
 

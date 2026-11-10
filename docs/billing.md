@@ -27,6 +27,7 @@ Self-hosted deployments never run the cloud service.
 | Requests | unlimited | unlimited |
 | Telemetry | always on, stored 30 days | optional, off by default |
 | WhatsApp history at pairing | recent only | recent, or full if chosen |
+| Telegram history at linking | last 90 days | the deployment's setting (365 days by default) |
 
 **WhatsApp history.** Every new WhatsApp connection imports the recent history
 by default: what WhatsApp hands any linked browser, rather than everything the
@@ -38,6 +39,20 @@ the deployment's own Evolution server, never to a bring-your-own one, and it
 deletes nothing: history already imported stays when an organization moves to
 Free, and moving to Pro imports nothing by itself. An admin who upgrades presses
 **Import full history** on the connection's dashboard, which costs a QR scan. See [WhatsApp history](whatsapp.md#recent-history-only).
+
+**Telegram history.** Telegram has no "recent slice" to ask for: the bridge
+fetches older history itself after an account is linked, back to
+`TELEGRAM_BACKFILL_DAYS` (365 by default). On Free it fetches the last 90 days
+instead — the same `recent_history_only` flag, read by `telegramHistoryLimited`
+in `apps/web/server/utils/telegram-instances.ts`, with the number in
+`apps/web/shared/history.ts`. The app sends the cap when pairing starts and the
+bridge stores it on the session, so it is decided at linking, like WhatsApp's:
+an account linked under Pro keeps its longer history after a move to Free, and
+an account linked under Free fetches further back only once it is unlinked and
+linked again. New messages are kept either way, and a bring-your-own bridge is
+never capped. A bridge too old to store the cap makes linking on Free answer
+503, with the reason in the web log, rather than pair uncapped. See
+[What syncs](telegram.md#what-syncs).
 
 The numbers are set in three places:
 
@@ -87,7 +102,8 @@ Free allows:
   admins cannot turn it off.
 - WhatsApp connections on this deployment's Evolution server can no longer
   import full history, and one created under Pro gets recent history only the
-  next time it pairs. History already imported stays.
+  next time it pairs. Telegram accounts linked from then on fetch 90 days of
+  history. History already imported stays.
 
 `past_due` counts as Pro while Stripe is still retrying the charge. Your
 retry settings in Stripe decide how long that lasts.
@@ -98,7 +114,7 @@ The plan and its limits are kept apart:
 - **Plan:** Stripe status, decided by the billing code.
 - **Limits:** three plain numbers on each organization, `max_connections`, `max_tokens` and `max_members`. NULL means unlimited.
 - **Required telemetry:** one flag on each organization, `tool_calls_required`. While it is true, every MCP tool call and the reason Claude gave for it are recorded and the organization can't turn that off. It's true on Free and false on Pro. See "Telemetry" in [using-automata.md](using-automata.md).
-- **Recent WhatsApp history only:** one more flag, `recent_history_only`. While it is true, the organization's WhatsApp connections on this deployment's Evolution server can't import full history (see above). It's true on Free and false on Pro.
+- **Recent history only:** one more flag, `recent_history_only`. While it is true, the organization's WhatsApp connections on this deployment's Evolution server can't import full history, and its Telegram accounts linked on this deployment's bridge fetch only 90 days of history (see above). It's true on Free and false on Pro.
 
 The cloud service writes those values whenever a subscription changes, and for every organization each time it starts. The web app's checks only ever read them, so they keep working, from the database, even while the cloud service is down.
 

@@ -1,3 +1,6 @@
+import { assertNever } from '#shared/connection'
+import type { AppInstance } from '~~/server/utils/app-db'
+
 /**
  * One connection, with whatever "state" means for its kind.
  *
@@ -20,6 +23,10 @@
  * instead of a full-history import the server would refuse. Decided by
  * `whatsappHistoryLimited`, not by the browser. A policy, not a fact about the
  * stored history — that is `recentHistoryOnly()`, which the MCP tools report.
+ *
+ * A Telegram connection carries it too, from `telegramHistoryLimited`: linking
+ * it now would fetch only the last `TELEGRAM_RECENT_HISTORY_DAYS` days. The
+ * fact for an account already linked is the bridge's `sync.historyDays`.
  */
 export default defineEventHandler(async (event) => {
   const { instance } = await requireReadableInstance(event, getRouterParam(event, 'id'))
@@ -27,7 +34,7 @@ export default defineEventHandler(async (event) => {
 
   const [state, historyLimitedByPlan] = await Promise.all([
     connectionState(instance, { freshCounts }),
-    instanceKind(instance) === 'whatsapp' ? whatsappHistoryLimited(instance) : undefined,
+    historyLimitedFor(instance),
   ])
 
   return {
@@ -36,3 +43,14 @@ export default defineEventHandler(async (event) => {
     ...(historyLimitedByPlan !== undefined && { historyLimitedByPlan }),
   }
 })
+
+async function historyLimitedFor(instance: AppInstance): Promise<boolean | undefined> {
+  const kind = instanceKind(instance)
+  switch (kind) {
+    case 'whatsapp': return await whatsappHistoryLimited(instance)
+    case 'telegram': return await telegramHistoryLimited(instance)
+    case 'postgres':
+    case 'imap': return undefined
+    default: return assertNever(kind)
+  }
+}

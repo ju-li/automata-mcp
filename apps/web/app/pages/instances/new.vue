@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Component } from 'vue'
+import { TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
 import {
   AppleIcon,
   CloudIcon,
@@ -431,6 +432,18 @@ async function create() {
                   </p>
                 </template>
               </NoticeCard>
+              <!-- Same flag as WhatsApp's locked box; enforced at pairing by
+                   startTelegramPairing, so this is wording, not control. -->
+              <p v-if="recentHistoryOnly" class="text-xs text-muted-foreground">
+                Your plan syncs the last {{ TELEGRAM_RECENT_HISTORY_DAYS }} days of
+                history when the account is linked; everything after that is kept.
+                <template v-if="billing">
+                  <NuxtLink to="/billing" class="underline underline-offset-2">
+                    Upgrade
+                  </NuxtLink>
+                  to sync further back.
+                </template>
+              </p>
             </template>
 
             <div v-if="ownServer" class="space-y-4 rounded-md border p-3">
