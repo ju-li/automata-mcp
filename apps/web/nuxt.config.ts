@@ -173,6 +173,12 @@ export default defineNuxtConfig({
     // without setting the new variables keeps its plans on (fail closed).
     billing: '',
 
+    // Optional Redis for short-lived caches shared across replicas (the chat
+    // listing). Unset — every self-hosted install — keeps them in-process;
+    // set but unreachable falls back to in-process, never a 503. Never point it
+    // at Evolution's database number. See server/utils/shared-cache.ts.
+    redisUrl: '',
+
     public: {
       appUrl: '',
     },

@@ -99,6 +99,8 @@ undetected.
 NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:change-me@localhost:5432/evolution
 ```
 
+### Indexes on Evolution's tables
+
 Evolution ships `@@index([instanceId])` and nothing else — no index on
 `messageTimestamp`, none on the `key` JSONB — so reading and searching are both a
 sequential scan within one account. History import makes that corpus much larger than it would
@@ -112,6 +114,23 @@ app):
 CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
   ON "Message" ("instanceId", "messageTimestamp" DESC);
 ```
+
+**Index the chat listing.** `list-chats`, the token scope picker and the
+dashboard's chats dialog list an account's conversations. With this index the
+app reads one index entry and usually one row per chat. On an account with 1.9M
+messages and 3,200 chats that is about 0.1 s warm and 2.4 s cold. Without it,
+every listing reads every message of the account, and large accounts hit the
+10-second timeout:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_chat_ts_idx
+  ON "Message" ("instanceId", (key->>'remoteJid'), "messageTimestamp");
+```
+
+The app looks for an index of this shape under any name, every ten minutes, so
+there's no need to restart it. Until it finds one, it keeps the full scan and
+logs once that the index is missing. Either way, one account's listing is read
+at most once a minute and shared by every page and caller.
 
 Two more changes, both for Evolution's own queries rather than this app's. Make
 them as a superuser too.
@@ -158,9 +177,9 @@ ALTER TABLE "Message" SET (autovacuum_vacuum_insert_scale_factor = 0.01,
 should then stay close to 1.
 
 The trigram index and these storage parameters live on Evolution's tables, as
-`message_instance_ts_idx` does. They survive restarts, but a Prisma migration
-that recreates either table drops them without any warning. Re-check all three
-after bumping Evolution's image tag.
+`message_instance_ts_idx` and `message_chat_ts_idx` do. They survive restarts,
+but a Prisma migration that recreates either table drops them without any
+warning. Re-check all four after bumping Evolution's image tag.
 
 Worth knowing before you go looking for a bug:
 
