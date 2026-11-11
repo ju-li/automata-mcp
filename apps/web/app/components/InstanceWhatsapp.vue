@@ -26,12 +26,20 @@ interface StatusResponse {
   sessionLost?: boolean
   /** Evolution keeps reopening the socket; reads `open` most of the time. */
   flapping?: boolean
-  /** With `flapping`: the deployment's operator is alerted and will restart Evolution. */
+  /** Reads `open`, but a send or group lookup found the socket dead since it last opened. */
+  stalled?: boolean
+  /** With `flapping` or `stalled`: the deployment's operator is alerted and will restart Evolution. */
   operatorAlerted?: boolean
   profileName?: string
   profilePicUrl?: string
   number?: string
-  stats: { messages: number, chats: number, contacts: number }
+  /** Absent when the counts could not be measured in time — unknown, not zero. */
+  stats?: { messages: number, chats: number, contacts: number }
+  /**
+   * The plan imports only the recent history WhatsApp sends any linked device,
+   * and refuses a full-history import. Decided by the server.
+   */
+  historyLimitedByPlan?: boolean
 }
 
 interface QrResponse {
@@ -112,11 +120,15 @@ const mode = computed<Mode>(() => {
 })
 
 const flapping = computed(() => data.value?.flapping === true)
-const operatorAlerted = computed(() => flapping.value && data.value?.operatorAlerted === true)
+// Not `stalled`: that name is taken below by a Reconnect that did not land.
+// The server never sends `stalled` alongside `flapping`.
+const socketStuck = computed(() => data.value?.stalled === true)
+const operatorAlerted = computed(() => (flapping.value || socketStuck.value) && data.value?.operatorAlerted === true)
 
 const display = computed(() => describeState(state.value, 'whatsapp', {
   lost: mode.value === 'lost',
   flapping: flapping.value,
+  stalled: socketStuck.value,
   operatorAlerted: operatorAlerted.value,
 }))
 
@@ -388,6 +400,7 @@ const importHistory = () => backToPairing(
       kind="whatsapp"
       :lost="mode === 'lost'"
       :flapping="flapping"
+      :stalled="socketStuck"
       @renamed="refresh()"
     >
       <!--
@@ -518,6 +531,35 @@ const importHistory = () => backToPairing(
         </template>
       </NoticeCard>
 
+      <!--
+        A dead socket under an `open` that never wavers (#205): a send or a
+        group lookup failed with Connection Closed, and Evolution has not
+        reopened the socket since. Its session is stuck; Reconnect answers 409
+        from `open`, so again nobody gets a button.
+      -->
+      <NoticeCard v-else-if="socketStuck" title="This account has stopped sending and receiving" tone="error">
+        <template #description>
+          <p class="mt-1 text-sm text-muted-foreground">
+            It reads as connected, but its last attempts to reach WhatsApp failed:
+            Evolution's session for it is stuck, so sends fail and new messages
+            are not arriving.
+            <template v-if="operatorAlerted">
+              This is on our side: we have been alerted and will restart the
+              service. Nothing needs scanning, the phone stays linked, and there
+              is nothing you need to do.
+            </template>
+            <template v-else-if="canManage">
+              Reconnect cannot end this. Restarting {{ evolutionServer }} does, with
+              no new QR scan.
+            </template>
+            <template v-else>
+              Nothing needs scanning. Whoever runs {{ evolutionServer }} has to
+              restart it — an admin of your organization can see to that.
+            </template>
+          </p>
+        </template>
+      </NoticeCard>
+
       <SessionLostNotice
         v-else-if="mode === 'lost'"
         service="WhatsApp"
@@ -553,14 +595,22 @@ const importHistory = () => backToPairing(
         :id="id"
         kind="whatsapp"
         :profile="{ name: data?.profileName || 'WhatsApp', detail: data?.number || '—', picUrl: data?.profilePicUrl }"
-        :stats="data?.stats ?? { messages: 0, chats: 0, contacts: 0 }"
+        :stats="data?.stats"
         :can-read-messages="data?.instance.canReadMessages !== false"
       />
 
       <!-- The last sentence points at a section a member does not have, and
            re-importing costs a QR scan on a real phone — so they are told what
            the counts mean, not how to change them. -->
-      <p class="text-xs text-muted-foreground">
+      <p v-if="data?.historyLimitedByPlan" class="text-xs text-muted-foreground">
+        Your plan imports recent history only: when a device is linked, WhatsApp
+        hands over the recent part of your conversations, and everything since is
+        kept. Older messages are not imported.
+        <UpgradeLink v-if="canManage">
+          to import an account's full history.
+        </UpgradeLink>
+      </p>
+      <p v-else class="text-xs text-muted-foreground">
         WhatsApp hands over its history only at the moment a device is linked, so
         these counts are the import from pairing plus everything since.
         <template v-if="canManage">
@@ -612,7 +662,11 @@ const importHistory = () => backToPairing(
             with the same phone.
           </ConfirmAction>
 
+          <!-- Hidden rather than left to fail: the server refuses it with 402
+               on a plan limited to recent history, and the note above says
+               why and where to upgrade. -->
           <ConfirmAction
+            v-if="!data?.historyLimitedByPlan"
             label="Import full history"
             title="Import this account's full history?"
             confirm-label="Disconnect and import"

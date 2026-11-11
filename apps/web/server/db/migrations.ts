@@ -761,4 +761,82 @@ export const APP_MIGRATIONS: AppMigration[] = [
       CREATE INDEX password_resets_expires_idx ON app.password_resets (expires_at);
     `,
   },
+  {
+    name: '0021_whatsapp_group_lookups',
+    sql: /* sql */ `
+      -- Group names no longer come from fetchAllGroups (a groupMetadata per
+      -- group, all at once: rate-overlimit bursts on large accounts, #175).
+      -- They come from Evolution's "Chat".name, and app.whatsapp_groups now
+      -- holds the answers of slow, one-group-at-a-time lookups instead of the
+      -- account's whole list. A row per group looked up:
+      --
+      --   fetched_at  the last lookup that answered; subject and size are
+      --               from it. NULL when every lookup of the group failed.
+      --   checked_at  the last lookup, answered or not, which paces the next.
+      --
+      -- Existing rows are scan answers, so both dates start as fetched_at.
+      ALTER TABLE app.whatsapp_groups
+        ALTER COLUMN fetched_at DROP NOT NULL,
+        ALTER COLUMN fetched_at DROP DEFAULT,
+        ADD COLUMN checked_at timestamptz;
+      UPDATE app.whatsapp_groups SET checked_at = fetched_at;
+      ALTER TABLE app.whatsapp_groups
+        ALTER COLUMN checked_at SET NOT NULL,
+        ALTER COLUMN checked_at SET DEFAULT now();
+
+      -- app.whatsapp_group_scans keeps its shape and becomes the per-account
+      -- lease for lookup runs: scanned_at = the last run that got an answer,
+      -- failed_at and failures = runs that got none, in a row.
+    `,
+  },
+  {
+    name: '0022_recent_history_only',
+    sql: /* sql */ `
+      -- Whether this organization may ask WhatsApp for an account's full
+      -- history at pairing (Baileys' requireFullSync) for connections on the
+      -- deployment's own Evolution server. A capability, not a plan: the cloud
+      -- service sets it for Free, since a full import is most of the disk an
+      -- account costs. false is no restriction — every self-hosted
+      -- organization. Full history is opt-in for everyone ("Import full
+      -- history" on the create form); this only locks that choice.
+      --
+      -- Read at create, by the dashboard's "Import full history" and before
+      -- every pairing (whatsappHistoryLimited in instances.ts). It deletes
+      -- nothing: history already imported stays.
+      --
+      -- IF NOT EXISTS: this shipped to preview databases as 0012 before main
+      -- took that number, and those must not fail on the renamed copy.
+      ALTER TABLE app.organizations
+        ADD COLUMN IF NOT EXISTS recent_history_only boolean NOT NULL DEFAULT false;
+
+      ALTER TABLE app.entitlement_defaults
+        ADD COLUMN IF NOT EXISTS recent_history_only boolean NOT NULL DEFAULT false;
+    `,
+  },
+  {
+    name: '0023_whatsapp_group_gone',
+    sql: /* sql */ `
+      -- When WhatsApp last told a lookup that the account is not in this group
+      -- (forbidden / item-not-found / not-authorized: left, removed, or the
+      -- group deleted). Such a group is not looked up again for 30 days, and
+      -- the refusal does not count toward the account's lookup back-off
+      -- (#178). Cleared by the next lookup that answers. NULL for every
+      -- existing row: none has been seen gone yet.
+      ALTER TABLE app.whatsapp_groups ADD COLUMN gone_at timestamptz;
+    `,
+  },
+  {
+    name: '0024_instance_socket_dead_seen_at',
+    sql: /* sql */ `
+      -- WhatsApp only: when a call that needs the account's socket — a send, a
+      -- group lookup — last failed with Evolution's dead-socket error
+      -- ("Connection Closed"). Evolution's in-memory state can keep reading
+      -- open over a socket that is gone (#205); this is the evidence that it
+      -- is not. Written by socket-evidence.ts at most once a minute, cleared
+      -- by the next socket call that succeeds, and judged in readStatus
+      -- (instances.ts) against when Evolution last reopened the socket. NULL
+      -- for every existing row: nothing has been seen yet.
+      ALTER TABLE app.instances ADD COLUMN socket_dead_seen_at timestamptz;
+    `,
+  },
 ]

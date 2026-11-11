@@ -18,12 +18,19 @@ export default defineKindTool({
   description:
     'Report whether the connected WhatsApp account is currently online, along with '
     + 'the profile it is signed in as and how many messages, chats and contacts have '
-    + 'been recorded. Call this before sending anything: only an account in the '
+    + 'been recorded. `stats` is absent when the counts could not be measured in time; '
+    + 'that means unknown, not zero. Call this before sending anything: only an account in the '
     + '`open` state can send or receive. `flapping: true` means the account keeps '
     + 'reconnecting over and over even though it reads `open`: messages may be missed '
     + 'and sends may fail, and only restarting the Evolution service ends it. '
-    + 'With `operatorAlerted: true` as well, the team running this service has '
-    + 'already been alerted and will restart it, so the user has nothing to do.',
+    + '`stalled: true` means the account reads `open` but its connection to WhatsApp '
+    + 'has stopped working: sends fail and new messages are not arriving until the '
+    + 'Evolution service is restarted, so do not retry a send. '
+    + 'With `operatorAlerted: true` as well (beside either), the team running this service has '
+    + 'already been alerted and will restart it, so the user has nothing to do. '
+    + '`recentHistoryOnly: true` means the history imported when the account was '
+    + 'linked is partial — recent messages only — so older conversations may be '
+    + 'missing from reads and searches.',
   annotations: {
     readOnlyHint: true,
     destructiveHint: false,
@@ -34,6 +41,11 @@ export default defineKindTool({
   inputSchema: {},
   handler: async () => {
     const { instance } = useMcpAuth()
-    return await getInstanceStatus(instance)
+    const [status, partialHistory] = await Promise.all([
+      getInstanceStatus(instance),
+      recentHistoryOnly(instance),
+    ])
+    // Omitted when false or unknown, as on the read tools.
+    return { ...status, ...(partialHistory && { recentHistoryOnly: true }) }
   },
 })

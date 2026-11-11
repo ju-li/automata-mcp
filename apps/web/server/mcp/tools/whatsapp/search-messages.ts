@@ -15,6 +15,8 @@ import type { MentionDirectory } from '~~/server/utils/mentions'
 export default defineKindTool({
   name: 'search-messages',
   kind: 'whatsapp',
+  // A scan over the account's messages: the per-connection budget in mcp-rate-limit.ts.
+  expensive: true,
   // No `messageDatabaseConfigured()` half any more. Both read paths need the
   // database now, so hiding only this one would leave `read-messages` visible
   // and failing — the boot warning in plugins/evolution-db-check.ts is where an
@@ -24,7 +26,9 @@ export default defineKindTool({
     'Find WhatsApp messages containing given words, newest first, across every '
     + 'chat unless a `jid` narrows it to one. Matching is case-insensitive and '
     + 'every word must appear in the same message. Covers the history imported '
-    + 'when the account was paired as well as everything since. Reaction messages '
+    + 'when the account was paired as well as everything since; when the response '
+    + 'carries `recentHistoryOnly: true` that import was partial, so older '
+    + 'messages may exist that were never imported and cannot be found. Reaction messages '
     + 'are not searched unless `includeReactions` is set, which also makes a bare '
     + 'emoji findable. A match you sent is marked `fromMe` and carries no '
     + '`author`; on one you received, `author` is the sender\'s name where the '
@@ -78,6 +82,7 @@ export default defineKindTool({
     const links = await lidLinks(instance)
     const chat = jid ? expandChat(scope, links, jid) : undefined
 
+    const historyCheck = recentHistoryOnly(instance)
     const { hits: stored, truncated } = await searchMessages(instance, {
       terms,
       jids: chat?.jids,
@@ -95,9 +100,10 @@ export default defineKindTool({
     // so one conversation stored under two JIDs is never reported as two chats.
     const hits = stored.map(hit => ({ ...hit, jid: displayJidInScope(scope, links, hit.jid) }))
 
-    const [names, directory] = await Promise.all([
+    const [names, directory, partialHistory] = await Promise.all([
       chatNames(instance, hits),
       resolveNames(instance, hits),
+      historyCheck,
     ])
 
     return {
@@ -121,6 +127,9 @@ export default defineKindTool({
       ...(chat && chat.outOfScope > 0 && { linkedOutOfScope: chat.outOfScope }),
       // Same principle: a whole message class this search never looked at.
       ...(!includeReactions && { reactionsExcluded: true }),
+      // And one more: messages from before the account was linked that were
+      // never imported. Every response, since a search can miss them anywhere.
+      ...(partialHistory && { recentHistoryOnly: true, note: RECENT_HISTORY_NOTE }),
     }
   },
 })

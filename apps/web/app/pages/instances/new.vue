@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Component } from 'vue'
+import { TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
 import {
   AppleIcon,
   CloudIcon,
@@ -27,7 +28,7 @@ const busy = ref(false)
 // An organization at its connection limit is told so before it fills in a
 // form the server will refuse. Never fetched without limits, so a self-hosted
 // deployment makes no such request.
-const { limited } = usePlan()
+const { limited, recentHistoryOnly } = usePlan()
 const { data: billingInfo } = await useFetch<{ usage: { connections: number }, limits: { connections?: number } | null }>(
   '/api/billing',
   { immediate: limited.value, server: false },
@@ -150,6 +151,16 @@ const serverKey = ref('')
 // trade for someone who only wants Claude to send.
 const serverDbUrl = ref('')
 
+// WhatsApp: ask for the full history at pairing. Off by default for everyone.
+// The plan's limit covers the deployment's server only — a user's own server is
+// their disk — so the box locks only while that is the one in use, and is
+// cleared if it becomes so. The server refuses it on its own (402) either way.
+const fullHistory = ref(false)
+const fullHistoryLocked = computed(() => recentHistoryOnly.value && !ownServer.value)
+watch(fullHistoryLocked, (locked) => {
+  if (locked) fullHistory.value = false
+})
+
 // Postgres
 const dsn = ref('')
 
@@ -206,6 +217,7 @@ async function create() {
     : {
         kind: kind.value,
         label: label.value,
+        ...(kind.value === 'whatsapp' && { fullHistory: fullHistory.value }),
         ...(ownServer.value && {
           server: {
             baseUrl: serverUrl.value.trim(),
@@ -420,6 +432,15 @@ async function create() {
                   </p>
                 </template>
               </NoticeCard>
+              <!-- Same flag as WhatsApp's locked box; enforced at pairing by
+                   startTelegramPairing, so this is wording, not control. -->
+              <p v-if="recentHistoryOnly" class="text-xs text-muted-foreground">
+                Your plan syncs the last {{ TELEGRAM_RECENT_HISTORY_DAYS }} days of
+                history when the account is linked; everything after that is kept.
+                <UpgradeLink>
+                  to sync further back.
+                </UpgradeLink>
+              </p>
             </template>
 
             <div v-if="ownServer" class="space-y-4 rounded-md border p-3">
@@ -528,6 +549,34 @@ async function create() {
                   Evolution's API cannot search message content. Pairing, listing
                   chats and sending all work without it, and you can add it later.
                   A <span class="font-mono">SELECT</span>-only role is enough.
+                </p>
+              </div>
+            </div>
+
+            <div class="flex items-start gap-2">
+              <Checkbox
+                id="full-history"
+                :model-value="fullHistory"
+                :disabled="fullHistoryLocked"
+                @update:model-value="value => fullHistory = value === true"
+              />
+              <div class="space-y-1">
+                <Label for="full-history" class="font-normal" :class="fullHistoryLocked && 'text-muted-foreground'">
+                  Import full history
+                </Label>
+                <p v-if="fullHistoryLocked" class="text-xs text-muted-foreground">
+                  Your plan imports the recent part of your conversations when the
+                  phone is linked.
+                  <UpgradeLink>
+                    to import an account's full history.
+                  </UpgradeLink>
+                </p>
+                <p v-else class="text-xs text-muted-foreground">
+                  WhatsApp hands over past conversations only while the phone is
+                  being linked. Leave this off to import the recent part of them;
+                  turn it on to ask for everything the phone holds, which takes
+                  longer and stores much more. Adding it later means scanning a
+                  new QR code.
                 </p>
               </div>
             </div>

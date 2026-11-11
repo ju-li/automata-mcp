@@ -185,7 +185,7 @@ const MAX_PLAN_CHARS = 20_000
  * `pg_cancel_backend` and by a client-side cancel, where advice about making
  * the query cheaper would be wrong. The message is Postgres's fixed wording.
  */
-function isStatementTimeout(error: unknown): boolean {
+export function isStatementTimeout(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false
   const { code, message } = error as { code?: unknown, message?: unknown }
   return code === '57014' && typeof message === 'string' && message.includes('statement timeout')

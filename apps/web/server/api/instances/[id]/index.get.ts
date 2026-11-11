@@ -14,13 +14,30 @@
  * couple of seconds instead of the few minutes they are otherwise cached for
  * (`getInstanceStatus`). Only the history-import screen after pairing sends it,
  * since it decides the import is over when the counts stop moving.
+ *
+ * A WhatsApp connection also carries `historyLimitedByPlan`: whether its plan
+ * imports only recent history, so the dashboard can say so and offer Billing
+ * instead of a full-history import the server would refuse. Decided by
+ * `historyLimited`, not by the browser. A policy, not a fact about the
+ * stored history — that is `recentHistoryOnly()`, which the MCP tools report.
+ *
+ * A Telegram connection carries it too: linking
+ * it now would fetch only the last `TELEGRAM_RECENT_HISTORY_DAYS` days. The
+ * fact for an account already linked is the bridge's `sync.backfillDays`
+ * (`historyDays` in `get-telegram-status`).
  */
 export default defineEventHandler(async (event) => {
   const { instance } = await requireReadableInstance(event, getRouterParam(event, 'id'))
   const freshCounts = getQuery(event).fresh === 'counts'
 
+  const [state, historyLimitedByPlan] = await Promise.all([
+    connectionState(instance, { freshCounts }),
+    historyLimited(instance),
+  ])
+
   return {
     instance: toPublicInstance(instance),
-    ...await connectionState(instance, { freshCounts }),
+    ...state,
+    ...(historyLimitedByPlan !== undefined && { historyLimitedByPlan }),
   }
 })

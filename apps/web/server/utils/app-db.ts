@@ -224,6 +224,12 @@ export interface OrgLimits {
   max_connections?: number
   max_tokens?: number
   max_members?: number
+  /**
+   * WhatsApp connections on the deployment's own Evolution server import only
+   * the recent history WhatsApp sends any linked device, never the full one.
+   * `false` (the column default) is no restriction. See `historyLimited`.
+   */
+  recent_history_only?: boolean
 }
 
 export type OrgRole = 'admin' | 'member'
@@ -357,10 +363,18 @@ export interface AppInstance {
   row_churn_seen_at?: string
   /**
    * WhatsApp only: the deployment's operator has been mailed about the current
-   * reconnect loop (`NUXT_OPS_ALERT_EMAIL`). Written only by
-   * server/utils/alerts.ts; empty means no loop reported to them.
+   * stuck session — a reconnect loop (`flapping`) or a dead socket under a live
+   * `open` (`stalled`) — (`NUXT_OPS_ALERT_EMAIL`). Written only by
+   * server/utils/alerts.ts; empty means nothing reported to them.
    */
   ops_alerted_at?: string
+  /**
+   * WhatsApp only: when a send or a group lookup last failed because
+   * Evolution's socket for the account is dead (`Connection Closed`), whatever
+   * its in-memory state said. Written and cleared only by socket-evidence.ts;
+   * judged by `socketStalled()` in instances.ts. Never from a webhook payload.
+   */
+  socket_dead_seen_at?: string
   /**
    * WhatsApp only: when this app first saw the account linked. Never cleared —
    * a logout does not make a paired connection an unfinished one. Written by
