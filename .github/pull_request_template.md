@@ -22,13 +22,17 @@ Closes #(issue_number)
 - [ ] Functionality verified in development environment
 - [ ] No breaking changes introduced
 - [ ] Tested with different connection types (if applicable)
+- [ ] `pnpm typecheck` passes
+- [ ] `pnpm bridge:typecheck` passes (if `apps/telegram-bridge` changed)
+- [ ] `pnpm cloud:typecheck` passes (if `apps/cloud` changed)
+- [ ] `pnpm test:emails` passes (if account emails changed)
 
 ## 📸 Screenshots (if applicable)
 <!-- Add screenshots to help explain your changes -->
 
 ## ✅ Checklist
 <!-- Mark with an `x` all the checkboxes that apply -->
-- [ ] My code follows the project's style guidelines
+- [ ] My changes follow the rules in `CLAUDE.md`
 - [ ] I have performed a self-review of my code
 - [ ] I have commented my code, particularly in hard-to-understand areas
 - [ ] I have made corresponding changes to the documentation
