@@ -227,7 +227,7 @@ allow.
 
 [Sign up at mcp.getautomata.app](https://mcp.getautomata.app/signup). Free
 covers one connection, one connector token and one user, with telemetry always
-on and only recent WhatsApp history imported. Pro is $19/month after a 7-day
+on, only recent WhatsApp history imported and Telegram history back 90 days. Pro is $19/month after a 7-day
 trial, with unlimited connections and tokens and five users included ($10/user
 after).
 
@@ -317,8 +317,9 @@ Local setup, networking and the Linux firewall rule are in
 
 Issues and pull requests are welcome at
 <https://github.com/ju-li/automata-mcp>. Before opening a pull request, run
-`pnpm typecheck`, `pnpm bridge:typecheck`, `pnpm cloud:typecheck` and
-`pnpm test:emails`; these are the repository's automated checks.
+`pnpm typecheck`, `pnpm bridge:typecheck`, `pnpm cloud:typecheck`,
+`pnpm test:emails` and `pnpm listings:check`; these are the repository's
+automated checks.
 
 ## License
 

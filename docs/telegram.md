@@ -135,6 +135,13 @@ a deployment overlap: while two copies run, the one without the lock reports tho
 connections as held elsewhere. A short overlap is harmless — alerts wait ten
 minutes for that state — but it buys nothing.
 
+A client that stops reconnecting on its own — Telegram unreachable for longer
+than teleproto's retries, or no answer for two minutes — is rebuilt by the
+bridge without a restart. The log says
+`[sessions] <id>: client stopped reconnecting (…); rebuilding`, then
+`connected again` once it is back. Failed attempts back off from 30 seconds,
+doubling to a 10-minute cap.
+
 ## Bring your own bridge
 
 **Self-hosted only**, like a bring-your-own Evolution server: the hosted
