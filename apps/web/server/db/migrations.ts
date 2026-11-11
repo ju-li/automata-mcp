@@ -825,4 +825,18 @@ export const APP_MIGRATIONS: AppMigration[] = [
       ALTER TABLE app.whatsapp_groups ADD COLUMN gone_at timestamptz;
     `,
   },
+  {
+    name: '0024_instance_socket_dead_seen_at',
+    sql: /* sql */ `
+      -- WhatsApp only: when a call that needs the account's socket — a send, a
+      -- group lookup — last failed with Evolution's dead-socket error
+      -- ("Connection Closed"). Evolution's in-memory state can keep reading
+      -- open over a socket that is gone (#205); this is the evidence that it
+      -- is not. Written by socket-evidence.ts at most once a minute, cleared
+      -- by the next socket call that succeeds, and judged in readStatus
+      -- (instances.ts) against when Evolution last reopened the socket. NULL
+      -- for every existing row: nothing has been seen yet.
+      ALTER TABLE app.instances ADD COLUMN socket_dead_seen_at timestamptz;
+    `,
+  },
 ]

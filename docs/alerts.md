@@ -69,14 +69,22 @@ What it will and will not send:
   says restarting the Evolution service is the fix, since Reconnect cannot help,
   and the web log gets a line saying the same. See [whatsapp.md](whatsapp.md)
   "Stuck reconnecting".
+- So does a WhatsApp account whose **socket is dead under a live `open`**:
+  every read says connected, but a send or a group lookup failed with
+  `Connection Closed` and Evolution has not reopened the socket since. The
+  connection is marked stuck from the next read, and the 10-minute grace runs
+  from there. The mail says the Evolution service needs restarting, never
+  Reconnect. A webhook delivery cannot start it. See
+  [whatsapp.md](whatsapp.md) "Stuck with the socket dead".
 
-### Telling the operator about a reconnect loop
+### Telling the operator about a reconnect loop or a stuck session
 
-A reconnect loop is the one outage nobody in the organization can fix: only
-whoever runs the Evolution service can restart it. Set `NUXT_OPS_ALERT_EMAIL`
-on the web service and that address is mailed as soon as a connection on the
-deployment's own Evolution server is marked unstable (no grace period), and once
-more when the loop has ended. The mail names the connection id, the Evolution
+A reconnect loop and a dead socket under a live `open` are the outages nobody
+in the organization can fix: only whoever runs the Evolution service can
+restart it. Set `NUXT_OPS_ALERT_EMAIL` on the web service and that address is
+mailed as soon as a connection on the deployment's own Evolution server is
+marked unstable or stuck (no grace period), and once more when that has
+ended. The mail names the connection id, the Evolution
 instance name and the organization id, and nothing the organization typed. A
 connection on a server the organization supplied is not reported: that server
 is theirs to restart. Unset, no operator mail is sent.

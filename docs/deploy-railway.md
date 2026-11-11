@@ -255,6 +255,13 @@ Production has no limit, by choice.
 
 ## Notes
 
+- **Restart Evolution after restarting Postgres.** Evolution's writes fail while
+  Postgres is down, and that can leave a WhatsApp account's session stuck: it
+  reads connected, but nothing is sent or received (see
+  [whatsapp.md](whatsapp.md) "Stuck with the socket dead"). Restarting the
+  Evolution service once Postgres is back reconnects every account without a
+  QR scan. This includes restarts Railway makes itself and the one
+  `shared_buffers` above needs.
 - **Do not ship a `.env`.** It is gitignored, and Railway variables replace it.
 - **`host.docker.internal` does not exist here.** The webhook uses the public
   HTTPS URL instead, which is the only thing that differs between dev and prod —

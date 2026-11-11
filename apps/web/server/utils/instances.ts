@@ -34,7 +34,15 @@ export type InstanceStatus = {
    */
   flapping?: boolean
   /**
-   * Set only with `flapping`: the deployment's operator is alerted to the loop
+   * The account reads `open` — live and stored — but a send or a group lookup
+   * since Evolution last opened its socket failed with `Connection Closed`:
+   * Evolution's own session for the account is stuck. Reconnect cannot end it
+   * (it answers 409 from `open`); restarting the Evolution service does. See
+   * `socketStalled` and socket-evidence.ts (#205).
+   */
+  stalled?: boolean
+  /**
+   * Set only with `flapping` or `stalled`: the deployment's operator is alerted
    * by itself and will restart Evolution, so the reader has nothing to do.
    * Hosted offering only — `operatorAlertedAboutLoop` in alerts.ts is the rule,
    * shared with the outage mail so the two cannot disagree.
@@ -683,7 +691,7 @@ export type InstanceHealth = Omit<InstanceStatus, 'stats'> & {
 }
 
 /**
- * `getInstanceStatus` without the counts: state, `sessionLost`, `flapping`,
+ * `getInstanceStatus` without the counts: state, `sessionLost`, `flapping`, `stalled`,
  * `ownerJid`, profile. For the alert sweep and webhook evaluation, which run
  * once per connection every few minutes and read none of the counts — so they
  * never cause one to be computed.
@@ -925,6 +933,69 @@ function nextChurn(stored: RowChurn, read: { columnOpen: boolean, rowWrittenAt?:
   return { since: continuing ? stored.since : at, seenAt: at }
 }
 
+// ── dead sockets under a live `open` ────────────────────────────────────────
+/**
+ * How long dead-socket evidence counts when the read cannot see when Evolution
+ * last wrote the row — a failed or denied `"updatedAt"` read on a connection
+ * that has a message database. Long enough to ride out one failed read, short
+ * enough that evidence nobody can check against a reopen lapses on its own.
+ */
+const STALL_UNCHECKED_MS = 30 * 60_000
+/**
+ * Clock allowance between Evolution's `updatedAt` (its own host's clock, set by
+ * Prisma) and `socket_dead_seen_at` (the app database's `now()`). A reopen
+ * written within this of the evidence counts as after it: a send that lands in
+ * a brief drop Evolution recovers from by itself must not read as a stuck
+ * session. Evidence from a socket that died again right after reopening is
+ * written once more a minute later, which is past this.
+ */
+const STALL_CLOCK_SKEW_MS = 30_000
+
+/**
+ * Judge the stored dead-socket evidence (socket-evidence.ts) against one status
+ * read: is Evolution's session for this account stuck — `stalled` — and is the
+ * evidence spent?
+ *
+ *   - Only an account that reads `open` live **and** stored can be stalled.
+ *     Anything else is an ordinary outage `state` / `sessionLost` already
+ *     reports; a known non-`open` live state also spends the evidence, since
+ *     the socket that failed is gone and a reopen starts afresh.
+ *   - A row written after the evidence (less `STALL_CLOCK_SKEW_MS`) means
+ *     Evolution opened a socket since — a restart, a Reconnect, its own retry —
+ *     so the evidence is about a socket that no longer exists: spent. 2.3.7
+ *     writes the `"Instance"` row on every open (see `rowChurn`), and a stuck
+ *     session writes nothing, which is what makes this the test.
+ *   - No message database at all: never stalled. Nothing could tell a stuck
+ *     session from a brief drop that already recovered, and mailing an
+ *     organization about the second is the wrong trade — `flapping` makes the
+ *     same one.
+ *   - A message database whose write time this read could not get: the
+ *     evidence alone, for `STALL_UNCHECKED_MS`, so one failed read neither
+ *     ends an alerted episode (a false "connected again") nor keeps an old one
+ *     alive for ever.
+ *
+ * Pure: the caller clears spent evidence (`forgetSocketEvidence`).
+ */
+export function socketStalled(
+  seenAt: string | undefined,
+  read: { live?: ConnectionState, columnOpen: boolean, canReadRow: boolean, rowWrittenAt?: string },
+  now = Date.now(),
+): { stalled: boolean, spent: boolean } {
+  const seen = seenAt ? Date.parse(seenAt) : Number.NaN
+  if (Number.isNaN(seen)) return { stalled: false, spent: false }
+
+  if (read.live !== 'open' || !read.columnOpen) {
+    const knownDown = read.live === 'close' || read.live === 'connecting'
+    return { stalled: false, spent: knownDown }
+  }
+  if (!read.canReadRow) return { stalled: false, spent: false }
+
+  const writtenAt = read.rowWrittenAt ? Date.parse(read.rowWrittenAt) : Number.NaN
+  if (Number.isNaN(writtenAt)) return { stalled: now - seen < STALL_UNCHECKED_MS, spent: false }
+  if (writtenAt > seen - STALL_CLOCK_SKEW_MS) return { stalled: false, spent: true }
+  return { stalled: true, spent: false }
+}
+
 /** Drop what this module has cached about one connection. */
 export function forgetInstanceStatus(instanceId: string): void {
   apiRowCache.delete(instanceId)
@@ -973,11 +1044,23 @@ async function readStatus(
     rowWrittenAt,
   })
 
+  // A loop is the stronger diagnosis and names the same fix; reporting both
+  // would only say it twice.
+  const socket = socketStalled(instance.socket_dead_seen_at, {
+    live,
+    columnOpen: row.connectionStatus === 'open',
+    canReadRow: viaSql,
+    rowWrittenAt,
+  })
+  if (socket.spent && instance.socket_dead_seen_at) forgetSocketEvidence(instance.id, instance.socket_dead_seen_at)
+  const stalled = socket.stalled && !flapping
+
   return {
     state: live ?? 'unknown',
     sessionLost: row.connectionStatus === 'open' && live !== undefined && live !== 'open',
     flapping,
-    ...(flapping && operatorAlertedAboutLoop(instance) && { operatorAlerted: true }),
+    ...(stalled && { stalled: true }),
+    ...((flapping || stalled) && operatorAlertedAboutLoop(instance) && { operatorAlerted: true }),
     rowChurn: churn,
     profileName: row.profileName ?? undefined,
     profilePicUrl: row.profilePicUrl ?? undefined,
