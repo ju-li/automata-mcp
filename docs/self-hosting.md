@@ -109,7 +109,9 @@ docker run -d --name automata …   # the same command as before
 ```
 
 Migrations run at boot and only go forward, so moving to a new major is a
-deliberate edit of the tag. See [Releases](releases.md).
+deliberate edit of the tag. `:1` gets a release only once it has been tested and
+promoted; `:beta` gets each one as soon as it is published, for anyone who wants
+to try it early. See [Releases](releases.md).
 
 ### When to use Compose instead
 
@@ -185,8 +187,9 @@ docker compose pull && docker compose up -d   # add the same --profile flags
 ```
 
 Migrations run at boot and only go forward, so moving to a new major is a
-deliberate edit of the tag, not something `pull` does for you. See
-[Releases](releases.md).
+deliberate edit of the tag, not something `pull` does for you. A release reaches
+`:1` only once it has been tested and promoted; to run each one as soon as it is
+published, use `:beta` instead. See [Releases](releases.md).
 
 ## Who can sign up
 
