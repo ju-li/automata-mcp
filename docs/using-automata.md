@@ -84,7 +84,7 @@ comes back.
 
 | Tool | Kind | | What it does |
 |---|---|---|---|
-| `get-connection-status` | WhatsApp | read | Whether the account is paired and connected (`open`); `flapping` when it reads `open` but keeps reconnecting — shown as **Unstable** on the dashboard, fixed by restarting the Evolution service, not by Reconnect |
+| `get-connection-status` | WhatsApp | read | Whether the account is paired and connected (`open`); `flapping` when it reads `open` but keeps reconnecting — shown as **Unstable** on the dashboard — and `stalled` when it reads `open` but its socket was found dead — shown as **Stuck**; both fixed by restarting the Evolution service, not by Reconnect |
 | `list-chats` | WhatsApp | read | Conversations in scope, most recently active first, with the `jid` other tools take; one person stored under both a LID and a phone number is one row listing both in `jids`, and a LID chat carries `phoneNumber` when WhatsApp has revealed it; says `hasMore` when it returned one page of several. No read/unread status — WhatsApp's read state isn't available to it |
 | `read-messages` | WhatsApp | read | One chat, newest first, 1–200 per page (default 50), optional `since` / `until`; reports `hasMore`, `nextPage`, `covered` and `totalMatching`; `recentHistoryOnly: true` when the account's import was partial |
 | `search-messages` | WhatsApp | read | Messages containing every word of `query`, across chats in scope or one `jid`; optional date range and `fromMe`; up to 100 matches (default 20) |

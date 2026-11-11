@@ -481,6 +481,44 @@ is emailed (see [alerts.md](alerts.md), which also covers what the hosted
 offering tells customers instead). That takes the message database URL
 and, with a dedicated role, the `"updatedAt"` grant above.
 
+## Stuck with the socket dead (`Connection Closed`)
+
+The signature: the dashboard says **Connected** and `get-connection-status`
+answers `state: open`, but every send fails with "The WhatsApp connection is
+down", the web log has `[evolution] send on connection … failed: WhatsApp socket
+not connected` and `[groups] every group lookup failed … Error: Connection
+Closed`, and no new message has been stored since some point. Evolution's
+stored status reads `open` too, and its row is not being rewritten, so this is
+not the reconnect loop above.
+
+Evolution's in-memory state for the account still reads `open` over a socket
+that is gone or no longer processed. The likeliest cause is the account's
+serial event queue sticking when Evolution's database writes failed mid-event —
+seen right after a Postgres restart. Nothing inside Evolution recovers it.
+
+**Fix: restart the Evolution service**, as for a loop. On boot it reconnects
+every account whose status is `open`, which this one's still is, so no QR scan
+is needed. Reconnect in the app cannot help: it acts only on a `close` socket.
+
+The app detects it from the failures themselves. A send or a group lookup that
+Evolution answers with `Connection Closed` (or `not connected` / `connection
+lost`) records the time on the connection (`socket_dead_seen_at`, at most once a
+minute). A status read that finds the account `open` live and stored, with no
+socket opened since — judged from the `"Instance"` row's `"updatedAt"`, which
+Evolution writes on every open — marks it **Stuck** on the dashboard, and
+`get-connection-status` returns `stalled: true`. With `NUXT_OPS_ALERT_EMAIL` set
+the operator is mailed straight away; after the usual ten-minute grace,
+everyone who can reach the connection is emailed that the service needs
+restarting (see [alerts.md](alerts.md)). The record clears when a send or group
+lookup next succeeds, or when Evolution reopens the socket.
+
+Limits: it needs the message database URL (with a dedicated role, the
+`"updatedAt"` grant above) — without it a stuck session cannot be told from a
+brief drop that already recovered, and nothing is reported. `Timed Out` is not
+counted, since a healthy socket can answer it too. A webhook delivery never
+records anything (deliveries are unsigned). And it is found only by a call that
+needs the socket: an account nobody sends from waits for its next group lookup.
+
 ## Connections never paired are removed after an hour
 
 A WhatsApp connection that nobody pairs within **one hour** of creating it is

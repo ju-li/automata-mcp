@@ -72,7 +72,9 @@ import { canReadMessages, readGroupChatNames } from './evolution-db'
  *     lookups answered.
  *   - anything else (dead socket, timeout, no body, a text never seen) — the
  *     account may not be able to answer; a run where nothing answered backs
- *     off, as before. Unknown text fails safe on this side, and its text is
+ *     off, as before. A dead socket (`Connection Closed`) is also recorded as
+ *     evidence for `stalled` (socket-evidence.ts, #205), and any answer from
+ *     WhatsApp clears that evidence. Unknown text fails safe on this side, and its text is
  *     logged (it is WhatsApp's error condition, never personal data) so a
  *     new one can be classified.
  *
@@ -341,6 +343,12 @@ async function refreshGroups(instance: AppInstance, evolution: EvolutionClient):
       failure = classifyLookupFailure(error)
     }
 
+    // WhatsApp answered over the socket — about this group, or to say the
+    // account is not in it, or that it is counting. Evidence of a dead socket
+    // is out of date; a dead one is evidence (#205, socket-evidence.ts).
+    if (found || failure?.kind === 'gone' || failure?.kind === 'throttled') noteSocketAlive(instance)
+    else if (failure?.deadSocket) noteSocketDead(instance, 'group lookup')
+
     if (found) {
       await storeLookup(instance.id, jid, found)
       succeeded++
@@ -391,6 +399,8 @@ interface LookupFailure {
   kind: 'gone' | 'throttled' | 'other'
   /** For the log: WhatsApp's error text when Evolution relayed it, else the request error. */
   reason: string
+  /** Evolution relayed Baileys' dead-socket error (`Connection Closed`) — see `namesDeadSocket`. */
+  deadSocket?: boolean
 }
 
 /** WhatsApp's answers meaning "the account is not in this group" — standard XMPP error conditions. */
@@ -412,7 +422,7 @@ function classifyLookupFailure(error: unknown): LookupFailure {
 
   if (cause && RATE_LIMITED.test(cause)) return { kind: 'throttled', reason }
   if (httpStatusOf(error) === 404 && texts.slice(1).some(text => NOT_A_MEMBER.test(text))) return { kind: 'gone', reason }
-  return { kind: 'other', reason }
+  return { kind: 'other', reason, ...(namesDeadSocket(texts.slice(1)) && { deadSocket: true }) }
 }
 
 /**
