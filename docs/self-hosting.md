@@ -86,10 +86,11 @@ ignored. `PORT` is the one extra; it has no line there.
 | `NUXT_PUBLIC_APP_URL` | the public address (above) |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Telegram — from <https://my.telegram.org>, both or neither. Without them the app tells an admin what to set. See [Telegram connections](telegram.md). |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS`, `MAIL_FROM`, `MAIL_FROM_NAME` | [connection alerts](alerts.md), invitation, email-verification and password-reset emails. Without `SMTP_HOST`, verification is off (unless `EMAIL_VERIFICATION=required`) and passwords cannot be reset from the app |
-| `OPS_ALERT_EMAIL` | where reconnect loops on this container's Evolution are reported — see [Telling the operator about a reconnect loop](alerts.md#telling-the-operator-about-a-reconnect-loop); needs SMTP |
+| `OPS_ALERT_EMAIL` | where reconnect loops and stuck sessions on this container's Evolution are reported — see [Telling the operator about a reconnect loop or a stuck session](alerts.md#telling-the-operator-about-a-reconnect-loop-or-a-stuck-session); needs SMTP |
 | `ALLOW_PRIVATE_TARGETS` | `true` lets connections reach private and loopback addresses — see below |
 | `SIGNUP`, `SIGNUP_CODE` | who can create an account — see [Who can sign up](#who-can-sign-up) |
 | `EMAIL_VERIFICATION` | `auto` / `required` / `off` — see [Email verification](#email-verification) |
+| `MCP_RATE_TOKEN_PER_MINUTE`, `MCP_RATE_ORG_PER_MINUTE`, `MCP_RATE_EXPENSIVE_PER_MINUTE`, `REDIS_URL` | [MCP rate limits](#mcp-rate-limits) and where their counts live |
 | `PORT` | the web app's port inside the container (default 3000) |
 
 `ALLOW_PRIVATE_TARGETS=true` (or `NUXT_ALLOW_PRIVATE_TARGETS=true`) reaches
@@ -148,8 +149,8 @@ Mail is optional: with `SMTP_HOST` empty, [connection alerts](alerts.md) and
 invitation emails are not delivered (an invitation link is still shown on
 screen when it is created), email verification stays off, and passwords cannot
 be reset from the app — see [Password reset](#password-reset). Set
-`OPS_ALERT_EMAIL` to have reconnect loops on your Evolution server reported to
-you — see [Telling the operator about a reconnect loop](alerts.md#telling-the-operator-about-a-reconnect-loop).
+`OPS_ALERT_EMAIL` to have reconnect loops and stuck sessions on your Evolution
+server reported to you — see [Telling the operator about a reconnect loop or a stuck session](alerts.md#telling-the-operator-about-a-reconnect-loop-or-a-stuck-session).
 
 `ALLOW_PRIVATE_TARGETS=true` lets connections reach private and loopback
 addresses, such as a database on your LAN. It is off by default; read the
@@ -322,6 +323,10 @@ server for everyone else:
 | `NUXT_MCP_RATE_ORG_PER_MINUTE` | `600` | every request, per organization (all its tokens together) |
 | `NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE` | `30` | costly tools only, per connection: `search-messages`, `search-telegram-messages`, `search-emails` with `text`, and `run-query` without `explain` |
 
+With Compose or the single container, set them in `.env` without the `NUXT_`
+prefix (`MCP_RATE_TOKEN_PER_MINUTE`, …, and `REDIS_URL` below), as
+`.env.selfhost.example` lists them.
+
 Each budget can be spent all at once and refills continuously. `0` turns that
 budget off. A request over any budget is refused whole and costs nothing. It
 gets **429** with a `Retry-After` header and a JSON-RPC error that says which
@@ -331,12 +336,14 @@ line per budget per minute, with ids only.
 **Where the counts live.** By default they are kept in each web process, which
 is right for a single replica. With several replicas, each counts on its own and
 the effective budget multiplies by the number of replicas. To share the counts,
-set `NUXT_REDIS_URL`; nothing else needs Redis, and nothing requires it:
+set `NUXT_REDIS_URL`. It also shares two short-lived caches (the chat listing,
+one minute; each WhatsApp connection's history setting, five minutes). Nothing
+requires it:
 
 | `NUXT_REDIS_URL` | behaviour |
 |---|---|
-| unset | counted in-process; one line at boot says so |
-| set, unreachable | counted in-process for as long as it is down, logged at most once a minute; requests are never refused because of it |
+| unset | counted and cached in-process; one line at boot says so |
+| set, unreachable | counted and cached in-process for as long as it is down, logged at most once a minute; requests are never refused because of it |
 | set, reachable | shared across replicas and kept across redeploys |
 
 If you point it at a Redis that something else uses, such as Compose's `redis`
@@ -344,8 +351,8 @@ service, which Evolution caches into:
 
 - Use a database number of its own, for example `redis://redis:6379/1`.
   Evolution's cache uses `/6`.
-- The app writes only keys starting with `automata:`, every one with a one-minute
-  expiry. It never runs `FLUSHALL`, `FLUSHDB`, `CONFIG` or `KEYS`.
+- The app writes only keys starting with `automata:`, every one with an expiry
+  (one minute for rate-limit counts, at most five minutes for cached values). It never runs `FLUSHALL`, `FLUSHDB`, `CONFIG` or `KEYS`.
 - The app never picks up Evolution's `CACHE_REDIS_URI` on its own. Sharing is
   your decision.
 
