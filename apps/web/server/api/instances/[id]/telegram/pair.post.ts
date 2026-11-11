@@ -12,10 +12,6 @@ export default defineEventHandler(async (event) => {
     return pairingView(await startTelegramPairing(instance))
   }
   catch (error) {
-    // Our own refusals (the bridge is too old to cap history, a half-provisioned
-    // row, an app-database outage) are already shaped for the browser; only the
-    // bridge's own errors need relaying.
-    if (isError(error)) throw error
     relayBridgeError(error, 'start pairing')
   }
 })

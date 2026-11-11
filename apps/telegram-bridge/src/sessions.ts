@@ -290,8 +290,7 @@ export class SessionManager {
    * `freshCounts` is set; everything else is read now.
    */
   async state(id: string, options: { freshCounts?: boolean } = {}): Promise<SessionState> {
-    const row = await this.row(id)
-    const counts = await this.sessionCounts(id, options.freshCounts === true)
+    const [row, counts] = await Promise.all([this.row(id), this.sessionCounts(id, options.freshCounts === true)])
     const rt = this.runtime(id)
     return describe(rt, row, this.config.telegram !== undefined, {
       chats: counts.chats,
@@ -637,7 +636,7 @@ export class SessionManager {
       const meId = await this.recordMe(rt.id, user)
       await this.claimData(rt.id, meId)
 
-      const [linked] = await this.sql<{ backfill_days: number | null }[]>`SELECT backfill_days FROM sessions WHERE id = ${rt.id}`
+      const linked = await this.findRow(rt.id)
       const sync = new SessionSync(client, this.sql, rt.id, meId, this.backfillFor(linked ?? { backfill_days: null }))
       sync.attach()
       rt.client = client

@@ -60,12 +60,6 @@ export function sharedCache<T>(options: SharedCacheOptions): SharedCache<T> {
   const inFlight = new Map<string, Promise<T>>()
 
   function remember(key: string, entry: Envelope<T>) {
-    if (local.size >= MAX_LOCAL_ENTRIES) {
-      const now = Date.now()
-      for (const [k, e] of local) {
-        if (e.expiresAt <= now) local.delete(k)
-      }
-    }
     rememberBounded(local, key, entry, MAX_LOCAL_ENTRIES)
   }
 
@@ -88,7 +82,11 @@ export function sharedCache<T>(options: SharedCacheOptions): SharedCache<T> {
   return {
     get(key, load) {
       const cached = local.get(key)
-      if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.value)
+      if (cached) {
+        if (cached.expiresAt > Date.now()) return Promise.resolve(cached.value)
+        // Not kept past its TTL: some values (a whole chat listing) are large.
+        local.delete(key)
+      }
 
       let pending = inFlight.get(key)
       if (!pending) {

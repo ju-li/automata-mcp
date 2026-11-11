@@ -1,5 +1,6 @@
 import { assertNever } from '#shared/connection'
 import { randomBytes } from 'node:crypto'
+import { rememberBounded } from './lookup-cache'
 import type { AppInstance } from './app-db'
 import type { EvolutionInstanceRecord } from './evolution-db'
 import type { ImapSecurity, ImapTarget } from './imap-client'
@@ -259,7 +260,6 @@ export async function provisionWhatsappInstance(
 
   const admin = createEvolutionClient(creds)
   const name = generateInstanceName()
-
 
   const created = await admin<{ instance?: { instanceId?: string }, hash?: string | { apikey?: string } }>(
     '/instance/create',
@@ -1703,12 +1703,10 @@ export async function historyLimited(instance: AppInstance): Promise<boolean | u
  * Swallowing it would mean writing defaults over settings we failed to read.
  */
 async function writeSyncFullHistory(instance: AppInstance, on: boolean): Promise<boolean> {
-  const evolution = evolutionClientForInstance(instance)
-  const name = encodeURIComponent(instance.name)
-  const current = await evolution<EvolutionSettings | null>(`/settings/find/${name}`)
+  const current = await readEvolutionSettings(instance)
   if ((current?.syncFullHistory === true) === on) return false
 
-  await evolution(`/settings/set/${name}`, {
+  await evolutionClientForInstance(instance)(`/settings/set/${encodeURIComponent(instance.name)}`, {
     method: 'POST',
     body: settingsBody(current, { syncFullHistory: on }),
   })
@@ -1723,6 +1721,14 @@ async function writeSyncFullHistory(instance: AppInstance, on: boolean): Promise
  */
 const historyLimitChecked = new Map<string, number>()
 const HISTORY_LIMIT_CHECK_MS = 60_000
+const MAX_HISTORY_LIMIT_CHECKED = 1000
+
+/** The connection's Evolution settings; `null` when it has no settings row yet (Evolution's default). */
+function readEvolutionSettings(instance: AppInstance): Promise<EvolutionSettings | null> {
+  return evolutionClientForInstance(instance)<EvolutionSettings | null>(
+    `/settings/find/${encodeURIComponent(instance.name)}`,
+  )
+}
 
 /**
  * Turn `syncFullHistory` off before a limited connection pairs.
@@ -1745,12 +1751,7 @@ async function applyHistoryLimitBeforePairing(instance: AppInstance): Promise<vo
     console.info(`[instances] ${instance.id} (${instance.name}): full-history sync turned off before pairing — the organization imports recent history only`)
   }
 
-  // Bounded by sweeping old entries rather than by connection count: a
-  // pairing that ended long ago has nothing left to check.
-  for (const [id, at] of historyLimitChecked) {
-    if (now - at >= HISTORY_LIMIT_CHECK_MS) historyLimitChecked.delete(id)
-  }
-  historyLimitChecked.set(instance.id, now)
+  rememberBounded(historyLimitChecked, instance.id, now, MAX_HISTORY_LIMIT_CHECKED)
 }
 
 /**
@@ -1777,13 +1778,8 @@ async function applyHistoryLimitBeforePairing(instance: AppInstance): Promise<vo
  */
 export async function recentHistoryOnly(instance: AppInstance): Promise<boolean | undefined> {
   try {
-    return await historySettingCache.get(instance.id, async () => {
-      const settings = await evolutionClientForInstance(instance)<EvolutionSettings | null>(
-        `/settings/find/${encodeURIComponent(instance.name)}`,
-      )
-      // No settings row is Evolution's default, which is off.
-      return settings?.syncFullHistory !== true
-    })
+    // No settings row is Evolution's default, which is off.
+    return await historySettingCache.get(instance.id, async () => (await readEvolutionSettings(instance))?.syncFullHistory !== true)
   }
   catch (error) {
     console.warn(`[instances] could not read history settings for ${instance.id} (${instance.name}):`, error)

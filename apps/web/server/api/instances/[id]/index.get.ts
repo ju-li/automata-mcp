@@ -1,4 +1,3 @@
-
 /**
  * One connection, with whatever "state" means for its kind.
  *
