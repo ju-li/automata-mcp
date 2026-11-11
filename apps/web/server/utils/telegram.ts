@@ -273,9 +273,12 @@ export async function deploymentBridgeReadiness(): Promise<BridgeReadiness> {
  * -100… instead", Telegram's own refusal code — so those pass through with their
  * status. Anything else, including a 401 that means this row's session key is
  * wrong, is this deployment's problem: logged, because a handled error is
- * invisible to Nitro, and answered as 503.
+ * invisible to Nitro, and answered as 503. Our own refusals thrown inside the
+ * same `try` (a half-provisioned row, an app-database outage) are already shaped
+ * for the browser and pass through unchanged.
  */
 export function relayBridgeError(error: unknown, action: string): never {
+  if (isError(error)) throw error
   const status = httpStatusOf(error)
   if (isTelegramNotConfigured(error)) {
     console.error(`[telegram] could not ${action}: the bridge has no TELEGRAM_API_ID / TELEGRAM_API_HASH`)

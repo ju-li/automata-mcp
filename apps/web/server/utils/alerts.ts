@@ -651,17 +651,9 @@ function outageMail(instance: AppInstance, health: ConnectionHealth, canManage: 
  * and the mail says so: nothing for the reader to do, admin or member.
  */
 function whatsappLoopCause(instance: AppInstance, canManage: boolean): string {
-  if (operatorAlertedAboutLoop(instance)) {
-    return 'Evolution keeps opening a new connection for this account and WhatsApp keeps replacing it. '
-      + 'This is on our side: we have been alerted and will restart the service. No QR scan is needed, '
-      + 'the phone stays linked, and there is nothing you need to do.'
-  }
-  const service = onDeploymentServer(instance)
-    ? 'whoever runs this deployment has to restart its Evolution service'
-    : 'the Evolution server this connection uses has to be restarted'
-  return canManage
-    ? `Evolution keeps opening a new connection for this account and WhatsApp keeps replacing it. Reconnect cannot end this — ${service}. No QR scan is needed, and the phone stays linked. Repeated logins can get a number flagged by WhatsApp, so this is worth doing soon.`
-    : `Evolution keeps opening a new connection for this account and WhatsApp keeps replacing it. Nothing needs scanning; ${service}, and an admin of your organization has been told as well.`
+  return evolutionStuckCause(instance, canManage,
+    'Evolution keeps opening a new connection for this account and WhatsApp keeps replacing it.',
+    ' Repeated logins can get a number flagged by WhatsApp, so this is worth doing soon.')
 }
 
 /**
@@ -670,16 +662,21 @@ function whatsappLoopCause(instance: AppInstance, canManage: boolean): string {
  * Never "press Reconnect": it answers 409 from `open`.
  */
 function whatsappStalledCause(instance: AppInstance, canManage: boolean): string {
+  return evolutionStuckCause(instance, canManage, 'Evolution\'s session for this account is stuck.')
+}
+
+/** The wording a loop and a stuck session share: who restarts Evolution, and the hosted promise. */
+function evolutionStuckCause(instance: AppInstance, canManage: boolean, diagnosis: string, adminExtra = ''): string {
   if (operatorAlertedAboutLoop(instance)) {
-    return 'Evolution\'s session for this account is stuck. This is on our side: we have been alerted and will '
-      + 'restart the service. No QR scan is needed, the phone stays linked, and there is nothing you need to do.'
+    return `${diagnosis} This is on our side: we have been alerted and will restart the service. `
+      + 'No QR scan is needed, the phone stays linked, and there is nothing you need to do.'
   }
   const service = onDeploymentServer(instance)
     ? 'whoever runs this deployment has to restart its Evolution service'
     : 'the Evolution server this connection uses has to be restarted'
   return canManage
-    ? `Evolution's session for this account is stuck. Reconnect cannot end this — ${service}. No QR scan is needed, and the phone stays linked.`
-    : `Evolution's session for this account is stuck. Nothing needs scanning; ${service}, and an admin of your organization has been told as well.`
+    ? `${diagnosis} Reconnect cannot end this — ${service}. No QR scan is needed, and the phone stays linked.${adminExtra}`
+    : `${diagnosis} Nothing needs scanning; ${service}, and an admin of your organization has been told as well.`
 }
 
 function whatsappOutageCause(health: ConnectionHealth, canManage: boolean): string {

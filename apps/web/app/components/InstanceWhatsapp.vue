@@ -49,8 +49,6 @@ interface QrResponse {
 
 const id = computed(() => props.id)
 
-/** Only with the hosted offering is there a Billing page to point at. */
-
 /**
  * Set while the history import runs. The server caches counts for a few minutes,
  * and the import screen decides it is done when they stop moving — so cached
@@ -123,7 +121,8 @@ const mode = computed<Mode>(() => {
 
 const flapping = computed(() => data.value?.flapping === true)
 // Not `stalled`: that name is taken below by a Reconnect that did not land.
-const socketStuck = computed(() => !flapping.value && data.value?.stalled === true)
+// The server never sends `stalled` alongside `flapping`.
+const socketStuck = computed(() => data.value?.stalled === true)
 const operatorAlerted = computed(() => (flapping.value || socketStuck.value) && data.value?.operatorAlerted === true)
 
 const display = computed(() => describeState(state.value, 'whatsapp', {

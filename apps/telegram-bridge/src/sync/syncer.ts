@@ -897,9 +897,12 @@ const ORDERED = [
   Api.UpdateDeleteChannelMessages, Api.UpdateMessageReactions, Api.UpdateChannelTooLong,
 ]
 
+function isChannelMessageUpdate(update: unknown): update is Api.UpdateNewChannelMessage | Api.UpdateEditChannelMessage {
+  return update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateEditChannelMessage
+}
+
 function isMessageUpdate(update: unknown): update is MessageUpdate {
-  return update instanceof Api.UpdateNewMessage || update instanceof Api.UpdateEditMessage
-    || update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateEditChannelMessage
+  return update instanceof Api.UpdateNewMessage || update instanceof Api.UpdateEditMessage || isChannelMessageUpdate(update)
 }
 
 /**
@@ -930,8 +933,7 @@ function entitiesOf(update: unknown): EntityMap | undefined {
 
 /** The channel pts a live message update moves forward, if any. pts 0 marks a message teleproto synthesised from a difference. */
 function channelPtsOf(update: MessageUpdate): { chatId: string, pts: number } | undefined {
-  const isChannelUpdate = update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateEditChannelMessage
-  if (!isChannelUpdate || update.ptsCount <= 0) return undefined
+  if (!isChannelMessageUpdate(update) || update.ptsCount <= 0) return undefined
   if (!('peerId' in update.message) || !update.message.peerId) return undefined
   return { chatId: markedId(update.message.peerId), pts: update.pts }
 }
@@ -962,7 +964,7 @@ function sleep(ms: number): Promise<void> {
  * again.
  */
 function channelOf(update: unknown): string | undefined {
-  if (update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateEditChannelMessage) {
+  if (isChannelMessageUpdate(update)) {
     const peer = 'peerId' in update.message ? update.message.peerId : undefined
     return peer instanceof Api.PeerChannel ? channelChatId(peer.channelId) : undefined
   }
@@ -974,13 +976,7 @@ function channelOf(update: unknown): string | undefined {
 
 /** The channel pts an update brings its channel to; 0 when it carries none. */
 function ptsOf(update: unknown): number {
-  if (
-    update instanceof Api.UpdateNewChannelMessage || update instanceof Api.UpdateEditChannelMessage
-    || update instanceof Api.UpdateDeleteChannelMessages
-  ) {
-    return update.pts
-  }
-  return 0
+  return isChannelMessageUpdate(update) || update instanceof Api.UpdateDeleteChannelMessages ? update.pts : 0
 }
 
 export function heapMb(): number {

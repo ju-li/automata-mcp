@@ -1,4 +1,5 @@
 import type { AppInstance } from './app-db'
+import { rememberBounded } from './lookup-cache'
 
 /**
  * Evidence that a WhatsApp account's socket is dead while Evolution's live
@@ -59,6 +60,7 @@ const EVIDENCE_WRITE_INTERVAL_MS = 60_000
 
 /** Per process: when this process last wrote evidence for a connection. */
 const lastWritten = new Map<string, number>()
+const MAX_LAST_WRITTEN = 10_000
 
 /**
  * Record that a call needing the socket found it dead. Fire and forget.
@@ -68,7 +70,7 @@ export function noteSocketDead(instance: Pick<AppInstance, 'id'>, what: string):
   const now = Date.now()
   const last = lastWritten.get(instance.id)
   if (last !== undefined && now - last < EVIDENCE_WRITE_INTERVAL_MS) return
-  lastWritten.set(instance.id, now)
+  rememberBounded(lastWritten, instance.id, now, MAX_LAST_WRITTEN)
 
   storeSocketDead(instance.id, what).catch((error) => {
     lastWritten.delete(instance.id)

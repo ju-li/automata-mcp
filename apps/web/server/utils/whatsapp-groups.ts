@@ -2,6 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { AppInstance } from './app-db'
 import type { EvolutionClient } from './evolution'
 import { canReadMessages, readGroupChatNames } from './evolution-db'
+import { rememberBounded } from './lookup-cache'
 
 /**
  * WhatsApp group subjects and sizes — the only file that decides where they
@@ -188,22 +189,16 @@ export async function groupNamesFor(
   return groups
 }
 
-const unnamedByAccount = new Map<string, Set<string>>()
+/** Per account, the unnamed groups callers asked about, oldest ask first. */
+const unnamedByAccount = new Map<string, Map<string, true>>()
+const MAX_NOTED_ACCOUNTS = 1000
 
 function noteUnnamed(instanceId: string, jids: readonly string[]): void {
   const usable = jids.filter(jid => GROUP_JID.test(jid))
   if (!usable.length) return
-  let noted = unnamedByAccount.get(instanceId)
-  if (!noted) unnamedByAccount.set(instanceId, noted = new Set())
-  for (const jid of usable) {
-    // Re-inserted at the end, so the oldest ask is the first to go.
-    noted.delete(jid)
-    noted.add(jid)
-  }
-  for (const jid of noted) {
-    if (noted.size <= MAX_NOTED_UNNAMED) break
-    noted.delete(jid)
-  }
+  const noted = unnamedByAccount.get(instanceId) ?? new Map<string, true>()
+  rememberBounded(unnamedByAccount, instanceId, noted, MAX_NOTED_ACCOUNTS)
+  for (const jid of usable) rememberBounded(noted, jid, true, MAX_NOTED_UNNAMED)
 }
 
 // ── sources ─────────────────────────────────────────────────────────────────
@@ -320,11 +315,11 @@ async function refreshGroups(instance: AppInstance, evolution: EvolutionClient):
   const sources = await groupSources(instance)
   if (!sources) return undefined
 
-  const due = dueLookups(sources, unnamedByAccount.get(instance.id) ?? new Set())
+  const noted = unnamedByAccount.get(instance.id)
+  const due = dueLookups(sources, noted ?? new Map())
   if (!due.length || !await claimGroupLookups(instance.id)) return sources.merged
 
   const merged = new Map(sources.merged)
-  const noted = unnamedByAccount.get(instance.id)
   let succeeded = 0
   let gone = 0
   let tried = 0
@@ -413,9 +408,7 @@ const RATE_LIMITED = /rate-overlimit/i
  * looser would let an unrecognised failure skip the account's back-off.
  */
 function classifyLookupFailure(error: unknown): LookupFailure {
-  const raw = (error as { data?: { response?: { message?: unknown } } } | undefined)?.data?.response?.message
-  const entries = Array.isArray(raw) ? raw : raw === undefined ? [] : [raw]
-  const texts = entries.filter((e): e is string => typeof e === 'string').map(e => e.trim())
+  const texts = evolutionErrorEntries(error).filter((e): e is string => typeof e === 'string').map(e => e.trim())
   // Entry 0 is Evolution's own 'Error fetching group'; the cause follows it.
   const cause = texts.length > 1 ? texts.slice(1).join('; ') : undefined
   const reason = (cause ?? (error instanceof Error ? error.message : String(error ?? 'no answer'))).slice(0, 200)
@@ -434,9 +427,9 @@ function classifyLookupFailure(error: unknown): LookupFailure {
  * (mostly dead, #178). Groups seen gone within `GROUP_GONE_RETRY_MS` are not
  * candidates at all, even when a caller asks for them.
  */
-function dueLookups(sources: GroupSources, noted: ReadonlySet<string>): string[] {
+function dueLookups(sources: GroupSources, noted: ReadonlyMap<string, true>): string[] {
   const now = Date.now()
-  const known = new Set([...sources.chatJids, ...sources.stored.keys(), ...noted])
+  const known = new Set([...sources.chatJids, ...sources.stored.keys(), ...noted.keys()])
 
   const candidates: Array<{ jid: string, rank: number, checkedAt: number }> = []
   for (const jid of known) {
