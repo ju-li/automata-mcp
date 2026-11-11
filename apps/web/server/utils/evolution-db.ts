@@ -1243,34 +1243,13 @@ function messageBody(sql: Sql) {
  * `AND` clauses requiring every term in `messageBody` — an empty fragment for no
  * terms. Terms already split and bounded, not yet escaped.
  *
- * **One `ILIKE` per term, never `ILIKE ALL (array)`.** Postgres matches an array
- * comparison to a GIN index only as `ANY`; `ALL` is always a filter, so the
- * trigram index would sit unused and every search would read every row of the
- * account and open its (often TOASTed) payload (#202). Separate clauses on the
- * same expression let one bitmap scan of `message_body_trgm` intersect them.
- *
- * **Except a term with no trigram.** `pg_trgm` takes trigrams from runs of
- * letters and digits, so `ok`, `👍` or `?!` yield none, and an index clause
- * for one is a scan of the *whole* index — every account's messages — which
- * the planner still picked for a two-letter search on a small account,
- * costing more than the account scan it replaced. Those terms go in one
- * `ILIKE ALL`, which no index can serve, so they filter the rows the other
- * terms or `instanceId` found. `TRIGRAM_RUN` is the test: three letters or
- * digits in a row always give at least one trigram. It decides only whether
- * the index may be asked; the rows matched are the same either way.
+ * One `ILIKE` per term with a trigram, the rest in one `ILIKE ALL`, so
+ * `message_body_trgm` can serve the search (#202) — `textMatchesAll` in
+ * `search-terms.ts` holds the rule and why, shared with Telegram's search.
  */
 function bodyMatchesAll(sql: Sql, terms: readonly string[]) {
-  assertSearchTerms(terms)
-  const like = (term: string) => `%${escapeLike(term)}%`
-  const indexed = terms.filter(term => TRIGRAM_RUN.test(term))
-  const filtered = terms.filter(term => !TRIGRAM_RUN.test(term))
-
-  const clauses = indexed.map(term => sql`AND ${messageBody(sql)} ILIKE ${like(term)}`)
-  if (filtered.length) clauses.push(sql`AND ${messageBody(sql)} ILIKE ALL (${filtered.map(like)}::text[])`)
-  return clauses.reduce((all, clause) => sql`${all} ${clause}`, sql``)
+  return textMatchesAll(sql, messageBody(sql), terms)
 }
-
-const TRIGRAM_RUN = /[\p{L}\p{N}]{3}/u
 
 /**
  * Which row of a duplicate set to keep — as a select-list expression, aliased
