@@ -106,7 +106,7 @@ export default defineNuxtPlugin(async () => {
   posthog.init(key, {
     api_host: String(posthogHost ?? '').trim() || 'https://r.getautomata.app',
     ui_host: String(posthogUiHost ?? '').trim() || 'https://us.posthog.com',
-    defaults: '2025-05-24',
+    defaults: '2026-05-30',
     persistence: 'memory',
     opt_out_capturing_persistence_type: 'localStorage',
     person_profiles: 'identified_only',
