@@ -25,6 +25,7 @@
     "nodemailer": "^8.0.11",
     "nuxt": "^4.5.2",
     "postgres": "3.4.9",
+    "posthog-js": "1.441.2",
     "qrcode": "1.5.4",
     "reka-ui": "^2.10.3",
     "shadcn-nuxt": "2.8.2",
