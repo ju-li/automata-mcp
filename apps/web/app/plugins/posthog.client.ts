@@ -31,6 +31,9 @@ import type { CaptureResult, PostHog } from 'posthog-js'
  *   verification and password-reset links carry `?token=`), and the invitation
  *   code in `/invite/<code>` — a bearer credential for joining an org —
  *   replaced. Any new page with a secret in its path joins `scrubPath`.
+ *
+ * Product events (connection and token created/removed) go through `track()`
+ * in `composables/analytics.ts`, never `posthog.capture` directly.
  */
 
 const SECRET_PATHS: RegExp[] = [/^\/invite\/[^/]+/]
@@ -123,6 +126,7 @@ export default defineNuxtPlugin(async () => {
     capture_exceptions: false,
     before_send: beforeSend,
   })
+  setAnalyticsClient(posthog)
 
   let identifiedAs: string | undefined
 

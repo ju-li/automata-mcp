@@ -232,6 +232,14 @@ async function create() {
       method: 'POST',
       body,
     })
+    if (kind.value) {
+      track('connection_created', {
+        connection_id: instance.id,
+        kind: kind.value,
+        own_server: ownServer.value,
+        ...(kind.value === 'whatsapp' && { full_history: fullHistory.value }),
+      })
+    }
     await navigateTo(`/instances/${instance.id}`)
   }
   catch (err: any) {

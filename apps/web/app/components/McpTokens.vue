@@ -244,6 +244,16 @@ async function create() {
     { failure: 'Could not create the token' },
   )
   if (!result) return
+  track('token_created', {
+    connection_id: props.instanceId,
+    kind: props.kind,
+    expiry: newExpiry.value,
+    all_tools: scope.all_tools,
+    tool_count: scope.tool_names.length,
+    all_chats: scope.all_chats,
+    all_tables: scope.all_tables,
+    for_other_member: Boolean(newAssignee.value) && newAssignee.value !== user.value?.id,
+  })
 
   // The plaintext exists only in this response, so the reveal dialog is opened
   // from the value in hand rather than from a refetch.
@@ -260,6 +270,7 @@ async function revoke(id: string) {
   await runRevoke(
     async () => {
       await $fetch(`/api/tokens/${id}`, { method: 'DELETE' })
+      track('token_revoked', { connection_id: props.instanceId, kind: props.kind, token_id: id })
       await refresh()
     },
     {
