@@ -12,7 +12,10 @@ The hosted offering is two services:
 - **The cloud service** (`apps/cloud`) sells plans. It owns Stripe (Checkout,
   the Customer Portal, the webhook, seat billing) and writes each
   organization's limits. It also keeps a Brevo CRM contact for every user
-  (see [CRM (Brevo)](#crm-brevo)). PostHog product analytics joins it later.
+  (see [CRM (Brevo)](#crm-brevo)).
+
+The web app also sends product analytics from the browser to PostHog (see
+[Product analytics (PostHog)](#product-analytics-posthog)).
 
 Self-hosted deployments never run the cloud service.
 
@@ -165,6 +168,15 @@ On the hosted deployment the web app also records account and organization chang
 Each consumer keeps its own position in `cloud.cursors`, and nothing deletes rows. A consumer added later therefore starts from the whole backlog.
 
 Events never contain credentials, connection strings, chat or table names, message content or tool arguments. Email addresses appear only on user events. A self-hosted deployment writes none.
+
+## Product analytics (PostHog)
+
+The web UI loads PostHog's browser library when `NUXT_PUBLIC_POSTHOG_KEY` is set **and** the deployment is hosted (`NUXT_CLOUD_URL` set). A self-hosted deployment never loads it, even with a key. Events go through our reverse proxy at `https://r.getautomata.app` (in front of PostHog US, so ad blockers that list `*.posthog.com` don't drop them); `NUXT_PUBLIC_POSTHOG_HOST` overrides it, `NUXT_PUBLIC_POSTHOG_UI_HOST` (default `https://us.posthog.com`) is only for links PostHog builds. The MCP endpoint sends nothing to PostHog.
+
+- **No cookies.** PostHog keeps its state in memory, so there is no consent banner. A visitor who is not signed in counts as a new person on each page load. The only thing stored in the browser is an opt-out flag, in localStorage, for users whose organization has telemetry off.
+- **Follows the organization's Telemetry switch** (Organization page). Free requires it, so Free users are always captured. On Pro it is the admin's choice, off by default: when a member of a Pro organization with Telemetry off signs in, the browser sends one `telemetry_opted_out` event under their user id (no email), sets `telemetry_opted_out` on their PostHog person, and then stops sending anything. Turning the switch back on resumes capture in that browser.
+- **Identified by user id**, with email and name as person properties, once signed in and only where the organization records telemetry. The organization is a PostHog group (`organization`, with its name and plan).
+- **What is never sent.** Autocapture masks all element text and attributes, so a click on a message, chat, contact or form field sends no content. Session replay, surveys, heatmaps and exception capture are off. URLs lose their query and hash (verification and password-reset links carry tokens there), and invitation links are sent as `/invite/:code`.
 
 ## CRM (Brevo)
 

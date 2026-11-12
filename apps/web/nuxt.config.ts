@@ -191,6 +191,16 @@ export default defineNuxtConfig({
 
     public: {
       appUrl: '',
+      // Product analytics in the browser, hosted offering only: the plugin
+      // also asks /api/hosted, so a self-hosted deployment never loads it even
+      // with a key set. Cookieless, follows each organization's telemetry
+      // switch. See app/plugins/posthog.client.ts and docs/billing.md.
+      posthogKey: '',
+      // Our reverse proxy in front of PostHog's US ingestion, so ad blockers
+      // that list *.posthog.com leave it alone. The UI host is only for links
+      // PostHog builds (toolbar), never a request the page makes.
+      posthogHost: 'https://r.getautomata.app',
+      posthogUiHost: 'https://us.posthog.com',
     },
   },
 

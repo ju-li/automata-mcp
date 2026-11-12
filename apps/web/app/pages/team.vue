@@ -32,7 +32,9 @@ const { busy: toolCallsBusy, run: runToolCalls } = useApiAction()
 async function setRecording(on: boolean) {
   await runToolCalls(async () => {
     await $fetch('/api/org', { method: 'PATCH', body: { recordToolCalls: on } })
-    await refresh()
+    // The session carries `telemetry`, which product analytics follows
+    // (plugins/posthog.client.ts) — refreshed so the switch applies at once.
+    await Promise.all([refresh(), refreshSession()])
   }, {
     success: on ? 'Telemetry is on.' : 'Telemetry is off.',
     failure: 'Could not change telemetry',

@@ -10,10 +10,10 @@ export interface SessionMembership {
   role: OrgRole
   /**
    * `plan` (a display name such as "Free" or "Pro (trial)"), `limited`,
-   * `overLimit` and `recentHistoryOnly` are present only on the hosted
-   * deployment; see usePlan().
+   * `overLimit`, `recentHistoryOnly` and `telemetry` are present only on the
+   * hosted deployment; see usePlan() and plugins/posthog.client.ts.
    */
-  org: { id: string, name: string, plan?: string, limited?: boolean, overLimit?: boolean, recentHistoryOnly?: boolean }
+  org: { id: string, name: string, plan?: string, limited?: boolean, overLimit?: boolean, recentHistoryOnly?: boolean, telemetry?: boolean }
 }
 
 interface MeResponse {
