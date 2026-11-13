@@ -283,6 +283,16 @@ ALTER TABLE "Message" SET (autovacuum_vacuum_insert_scale_factor = 0.01,
                            autovacuum_vacuum_scale_factor = 0.05);
 ```
 
+The app applies this itself, once, in its migration `0025_message_autovacuum`,
+when `"Message"` is in the app's own database (`NUXT_DATABASE_URL`) and the
+app's role owns it — the default compose file, the all-in-one image and the
+Railway template. Otherwise it skips, never failing the boot, and the boot log
+says why (`[app-db] "Message" autovacuum settings …`). Run the statement above
+yourself when it skipped: Evolution on a separate database, a role that doesn't
+own the table, `"Message"` not created yet when the app first started, or the
+table recreated by an Evolution upgrade since. Check with
+`SELECT reloptions FROM pg_class WHERE oid = '"Message"'::regclass`.
+
 `SELECT relallvisible::float / relpages FROM pg_class WHERE oid = '"Message"'::regclass`
 should then stay close to 1.
 

@@ -77,6 +77,22 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS messages_live_by_session
 If that build fails, it leaves an invalid index under the same name. Drop that
 index and build it again before you deploy.
 
+Migration `0005` sets `telegram.messages` to vacuum more often than Postgres's
+default (`autovacuum_vacuum_insert_scale_factor = 0.01`,
+`autovacuum_vacuum_scale_factor = 0.02`). The per-session counts behind each
+connection's status read only that index, but only for pages the visibility map
+marks all-visible; at the default thresholds a busy table falls behind, and the
+counts read the table instead until the status request times out. It changes
+storage parameters only and blocks neither reads nor writes. To catch up at once
+on a large table that has run without it, vacuum it by hand after deploying:
+
+```sql
+VACUUM (ANALYZE) telegram.messages;
+```
+
+`SELECT relallvisible::float / relpages FROM pg_class WHERE oid = 'telegram.messages'::regclass`
+should then stay close to 1.
+
 ## What syncs
 
 Private chats, bots, groups, supergroups (including forum topics) and channels —
