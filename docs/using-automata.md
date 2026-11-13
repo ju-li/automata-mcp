@@ -58,7 +58,13 @@ invitation, and an account belongs to exactly one organization.
   and mints or edits tokens on it for them — for as long as they keep access to
   it; an admin can take it away from them. On connections someone else created,
   a member sees only their own tokens, and may revoke a token or rotate its
-  secret but never widen its scope. Reconnecting, re-pairing and deleting are
+  secret but never widen its scope. To get a token there, a member presses
+  **Request token** and proposes a name, expiry and scope. Whoever manages the
+  connection is emailed (its creator, or every admin if the creator no longer
+  manages it; needs SMTP). They see the request on the token list, can change
+  anything, and then **Approve** or **Decline** it. Approving reveals nothing: the
+  member collects the secret afterwards with **Get token** on the same row. A
+  pending request never authenticates. Reconnecting, re-pairing and deleting are
   management, so a member is told what is wrong and who can fix it.
 - Every connection counts against the organization's limits, whoever created it.
 
@@ -68,7 +74,11 @@ shown once when it is created and can also be emailed (see [Connection alerts](a
 for SMTP). Accepting moves you out of your current organization, which is
 refused while that organization still owns connections or while you are its
 only admin with other members left. With email verification on, an invited
-signup must be confirmed in the same browser it was started in.
+signup must be confirmed in the same browser it was started in. An admin can
+give connections to someone before they accept: pending member invitations are
+listed in a connection's **Who can use this**, and ticking one assigns the
+connection the moment the invitation is accepted. Re-sending the invitation keeps
+those assignments.
 
 **Forgot your password?** **Forgot password?** on the sign-in page mails a link
 and a code, valid for 30 minutes (needs SMTP). An admin can send the same mail to

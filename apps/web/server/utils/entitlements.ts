@@ -221,6 +221,8 @@ export async function mcpLimitRefusal(
         SELECT t.id FROM app.mcp_tokens t
         WHERE t.instance IN (SELECT id FROM conns)
           AND NOT t.revoked AND (t.expires_at IS NULL OR t.expires_at > now())
+          -- A pending request never authenticates, so it takes no slot here.
+          AND (t.requested_at IS NULL OR t.approved_at IS NOT NULL)
         ORDER BY t.created, t.id LIMIT ${limits.max_tokens ?? null}
       )
       SELECT EXISTS (SELECT 1 FROM toks WHERE id = ${tokenId}) AS allowed

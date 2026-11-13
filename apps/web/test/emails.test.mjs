@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 import {
   alreadyRegisteredEmail, emailChangedNoticeEmail, emailChangeVerificationEmail,
   invitationEmail, invitedSignupVerificationEmail, passwordChangedNoticeEmail,
-  passwordResetEmail, signupVerificationEmail,
+  passwordResetEmail, signupVerificationEmail, tokenRequestEmail,
 } from '../server/emails/account.ts'
 import { COMPANY_ADDRESS, HOSTED_CONTACT_URL, maskEmail } from '../server/emails/layout.ts'
 
@@ -52,6 +52,8 @@ const cases = {
   '6b-password-reset-by-admin-self-hosted': passwordResetEmail({ code: '123456', url: resetLink(selfHosted), expiresInMs: RESET_TTL, requestedBy: { orgName: 'Acme' } }, selfHosted),
   '7-password-changed-notice': passwordChangedNoticeEmail({ email: 'person@example.com', changedAt, how: 'reset' }, hosted),
   '7-password-changed-notice-self-hosted': passwordChangedNoticeEmail({ email: 'person@example.com', changedAt, how: 'profile' }, selfHosted),
+  '8-token-request': tokenRequestEmail({ requesterName: 'Sam Lee', requesterEmail: 'sam@example.com', orgName: 'Acme', connectionName: 'Sales WhatsApp', tokenLabel: 'Claude desktop', url: `${hosted.appUrl}/instances/SAMPLE-id` }, hosted),
+  '8-token-request-no-app-url': tokenRequestEmail({ requesterName: '', requesterEmail: 'sam@example.com', orgName: 'Acme', connectionName: 'Sales WhatsApp', tokenLabel: 'Claude desktop' }, noAppUrl),
 }
 
 function snapshotText(mail) {
@@ -145,6 +147,7 @@ test('user-typed names are escaped in the HTML and kept to one line in headers',
   const mails = [
     invitationEmail({ inviterName, orgName, role: 'member', email: 'a"b@example.com', url: 'https://x.test/invite/waorg_1?a=1&b="2"', expiresInMs: INVITE_TTL }, hosted),
     invitedSignupVerificationEmail({ code: '123456', url: 'https://x.test/v?t=1&u=2', expiresInMs: VERIFY_TTL, orgName, role: 'member' }, hosted),
+    tokenRequestEmail({ requesterName: inviterName, requesterEmail: 'a"b@example.com', orgName, connectionName: orgName, tokenLabel: inviterName, url: 'https://x.test/instances/1?a=1&b="2"' }, hosted),
   ]
   for (const mail of mails) {
     assert.ok(!/[\r\n]/.test(mail.subject), mail.subject)
@@ -156,6 +159,12 @@ test('user-typed names are escaped in the HTML and kept to one line in headers',
     for (const href of mail.html.match(/href="[^"]*"/g) ?? []) assert.ok(!/[<>]/.test(href), href)
   }
   assert.ok(mails[0].html.includes('href="https://x.test/invite/waorg_1?a=1&amp;b=&quot;2&quot;"'))
+})
+
+test('token request: button only with an app URL', () => {
+  assert.ok(cases['8-token-request'].html.includes('href="https://mcp.getautomata.app/instances/SAMPLE-id"'))
+  assert.ok(!cases['8-token-request-no-app-url'].html.includes('href='))
+  assert.ok(cases['8-token-request-no-app-url'].subject.startsWith('A colleague asked'))
 })
 
 test('email-changed notice masks the new address', () => {

@@ -309,3 +309,41 @@ export function passwordChangedNoticeEmail(p: {
     ],
   }, brand)
 }
+
+// ── 8 · connector token request (to whoever approves it) ───────────────────
+
+export function tokenRequestEmail(p: {
+  /** The requester's name, or their address when they set none. */
+  requesterName: string
+  requesterEmail: string
+  orgName: string
+  /** The connection's label as its organization sees it. */
+  connectionName: string
+  tokenLabel: string
+  /**
+   * The connection's page. Absent when `NUXT_PUBLIC_APP_URL` is unset — never
+   * built from the request, same rule as every other link in these mails.
+   */
+  url?: string
+}, brand: EmailBrand): RenderedEmail {
+  const requester = nameOr(p.requesterName, 'A colleague')
+  const org = nameOr(p.orgName, 'your organization')
+  const connection = nameOr(p.connectionName, 'a connection')
+  return renderEmail({
+    subject: `${requester} asked for a connector token on ${connection}`,
+    preview: 'Nothing works until you approve it, and you choose what it can reach.',
+    reason: `You’re getting this because you manage ${connection} in ${org} on Automata.`,
+    blocks: [
+      eyebrow('Token request'),
+      heading(`${requester} asked for a connector token.`),
+      lead(`They want to use ${connection} from Claude. Review the request on the connection’s page: you can change what the token may reach before approving it, or decline it.`),
+      rows([['From', p.requesterEmail]]),
+      body('Token name: ', { strong: nameOr(p.tokenLabel, 'Untitled token') }),
+      p.url && button('Review request', p.url),
+      p.url && pasteLink('Button not working? Paste this link into your browser:', p.url),
+      !p.url && body('Open the connection in Automata and look under Connector tokens.'),
+      divider(),
+      secondary('Nothing reaches Claude until you approve. Approving doesn’t send them the token: they collect it from the same page afterwards.'),
+    ],
+  }, brand)
+}

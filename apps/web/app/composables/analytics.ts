@@ -43,6 +43,17 @@ export interface AnalyticsEvents {
     kind: InstanceKind
     token_id: string
   }
+  token_requested: {
+    connection_id: string
+    kind: InstanceKind
+    expiry: string
+  }
+  token_approved: {
+    connection_id: string
+    kind: InstanceKind
+    token_id: string
+    expiry: string
+  }
 }
 
 let client: PostHog | undefined

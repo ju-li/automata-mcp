@@ -457,6 +457,21 @@ export interface AppMcpToken {
   tool_names: unknown
   /** Appended to every message the send tools send with this token. Absent = off. */
   send_disclaimer?: string
+  /**
+   * Set when a member asked for this token rather than a manager minting it.
+   * Pending while `approved_at` is absent: `resolveMcpAuth` refuses it, and
+   * rotation refuses it. See token-requests.ts.
+   */
+  requested_at?: string
+  approved_at?: string
+  approved_by?: string
+  /** The expiry preset the request asked for; `expires_at` is written at approval. */
+  requested_expiry?: string
+  /**
+   * Whether the holder has ever been shown a working secret. False for an
+   * approved request until they rotate ("Get token").
+   */
+  secret_issued: boolean
 }
 
 /** One recorded MCP tool call. See tool-calls.ts. */

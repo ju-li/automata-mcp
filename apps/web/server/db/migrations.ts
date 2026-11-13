@@ -893,4 +893,41 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN members_create_connections boolean NOT NULL DEFAULT true;
     `,
   },
+  {
+    name: '0027_token_requests_and_invite_assignments',
+    sql: /* sql */ `
+      -- A member asking for a token on a connection they reach but do not
+      -- manage. The request is an ordinary token row so that revoke,
+      -- unassign and member removal already handle it; pending = requested_at
+      -- set and approved_at NULL, and resolveMcpAuth refuses it. Its token_hash
+      -- is the hash of a secret nobody was shown: the holder gets a usable one
+      -- by rotating after approval (secret_issued says whether they have).
+      -- requested_expiry = the preset asked for; expires_at is written only at
+      -- approval, so the clock starts when the token can work.
+      ALTER TABLE app.mcp_tokens
+        ADD COLUMN requested_at timestamptz,
+        ADD COLUMN approved_at timestamptz,
+        ADD COLUMN approved_by text REFERENCES app.users(id) ON DELETE SET NULL,
+        ADD COLUMN requested_expiry text
+          CHECK (requested_expiry IS NULL OR requested_expiry IN ('30d', '90d', '1y', 'never')),
+        ADD COLUMN secret_issued boolean NOT NULL DEFAULT true;
+
+      -- At most one open request per member per connection.
+      CREATE UNIQUE INDEX mcp_tokens_one_pending_request
+        ON app.mcp_tokens (instance, assigned_to)
+        WHERE requested_at IS NOT NULL AND approved_at IS NULL AND NOT revoked;
+
+      -- Connections an admin gave someone before they accepted the invitation.
+      -- Turned into instance_assignments by acceptInviteInto; both sides
+      -- cascade, and acceptance re-checks the connection's org, so nothing
+      -- outside the inviting organization is ever assigned.
+      CREATE TABLE app.invitation_instances (
+        invitation text NOT NULL REFERENCES app.invitations(id) ON DELETE CASCADE,
+        instance text NOT NULL REFERENCES app.instances(id) ON DELETE CASCADE,
+        created timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (invitation, instance)
+      );
+      CREATE INDEX invitation_instances_instance ON app.invitation_instances (instance);
+    `,
+  },
 ]
