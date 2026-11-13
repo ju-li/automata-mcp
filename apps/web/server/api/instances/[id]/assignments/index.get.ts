@@ -6,6 +6,9 @@
  * is to show both halves at once, and every member can already read the roster
  * from `/api/org`.
  *
+ * Admins also get the pending member invitations: ticking one gives the
+ * connection to that person the moment they accept (see `markInviteAccepted`).
+ *
  * Admins are listed as reaching the connection without holding an assignment
  * row, because they do — they reach every connection in the organization. A
  * picker that showed them as unassigned would invite someone to "grant" access
@@ -32,5 +35,10 @@ export default defineEventHandler(async (event) => {
     tokens: await countTokensOn(member.userId, instance.id),
   })))
 
-  return { members: rows }
+  // Pending member invitations, for admins only: who has been invited is an
+  // admin's view of the organization (`/api/org` carries it for them alone),
+  // and a member who created this connection manages it, not the roster.
+  const invites = actor.role === 'admin' ? await listInviteAssignments(actor.org.id, instance.id) : []
+
+  return { members: rows, invites }
 })

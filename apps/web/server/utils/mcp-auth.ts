@@ -74,7 +74,7 @@ export type McpAuth =
 interface McpTokenFacts extends Pick<AppMcpToken,
   'id' | 'assigned_to' | 'instance' | 'token_hash' | 'expires_at' | 'revoked'
   | 'all_chats' | 'chat_jids' | 'all_tables' | 'table_names' | 'all_tools' | 'tool_names'
-  | 'send_disclaimer'> {
+  | 'send_disclaimer' | 'requested_at' | 'approved_at'> {
   user_email?: string
   user_name?: string
   member_role?: OrgRole
@@ -160,7 +160,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     ;[record] = await sql<McpTokenFacts[]>`
       SELECT t.id, t.assigned_to, t.instance, t.token_hash, t.expires_at, t.revoked,
              t.all_chats, t.chat_jids, t.all_tables, t.table_names, t.all_tools, t.tool_names,
-             t.send_disclaimer,
+             t.send_disclaimer, t.requested_at, t.approved_at,
              u.email AS user_email, u.name AS user_name,
              m.role AS member_role, m.org AS member_org,
              o.max_connections, o.max_tokens,
@@ -194,6 +194,12 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   }
 
   if (record.revoked) return undefined
+  // A member's request no manager has approved. Its secret was never shown to
+  // anyone, but the row must not authenticate whatever is presented for it.
+  if (isPendingRequest(record)) {
+    console.warn(`[mcp-auth] token ${record.id} refused: its request is still awaiting approval`)
+    return undefined
+  }
   if (record.expires_at && new Date(record.expires_at).getTime() <= Date.now()) {
     return undefined
   }

@@ -103,15 +103,27 @@ export async function createInvite(
   const { code, hash } = mintInviteCode()
 
   const invite = await sql.begin(async (tx) => {
-    await tx`
+    const superseded = await tx<{ id: string }[]>`
       UPDATE app.invitations SET revoked = true, updated = now()
       WHERE org = ${orgId} AND email = ${address} AND NOT revoked AND accepted_at IS NULL
+      RETURNING id
     `
     const [row] = await tx<AppInvitation[]>`
       INSERT INTO app.invitations (org, email, role, code_hash, invited_by, expires_at)
       VALUES (${orgId}, ${address}, ${role}, ${hash}, ${invitedBy.id}, ${inviteExpiry()})
       RETURNING *
     `
+    // Connections already given to this person carry over to the new link:
+    // re-inviting means "the last link got lost", not "start over". Not for an
+    // admin invitation, which needs none.
+    if (superseded.length && role === 'member') {
+      await tx`
+        INSERT INTO app.invitation_instances (invitation, instance)
+        SELECT ${row!.id}, instance FROM app.invitation_instances
+        WHERE invitation IN ${tx(superseded.map(s => s.id))}
+        ON CONFLICT DO NOTHING
+      `
+    }
     return row!
   })
 
@@ -282,4 +294,91 @@ export async function markInviteAccepted(tx: Db, inviteId: string, userId: strin
   if (!result.count) {
     throw createError({ statusCode: 409, statusMessage: inviteProblemMessage('accepted') })
   }
+
+  // Connections an admin gave this person while the invitation was pending
+  // (invitation_instances) become real assignments now, in the transaction that
+  // spends the invitation — every join path (accept, invited signup, invited
+  // verify) comes through here after acceptInviteInto. Only while the joiner is
+  // a member of the connection's own organization: an admin needs no rows, and
+  // a connection that left the org (it cannot today, but the join costs
+  // nothing) is never assigned across the boundary.
+  await tx`
+    INSERT INTO app.instance_assignments (instance, user_id)
+    SELECT ii.instance, m.user_id
+    FROM app.invitation_instances ii
+    JOIN app.instances i ON i.id = ii.instance
+    JOIN app.memberships m ON m.user_id = ${userId} AND m.org = i.org AND m.role = 'member'
+    WHERE ii.invitation = ${inviteId}
+    ON CONFLICT (instance, user_id) DO NOTHING
+  `
+}
+
+/** A pending member invitation as the "Who can use this" dialog shows it. */
+export interface InviteAssignment {
+  inviteId: string
+  email: string
+  assigned: boolean
+}
+
+/**
+ * The organization's pending member invitations, and whether each will be
+ * given this connection on acceptance. Admin invitations are left out: an admin
+ * reaches every connection, so a checkbox for one would do nothing.
+ */
+export async function listInviteAssignments(orgId: string, instanceId: string): Promise<InviteAssignment[]> {
+  const sql = await appDb()
+  return await sql<InviteAssignment[]>`
+    SELECT inv.id AS "inviteId", inv.email,
+           EXISTS (
+             SELECT 1 FROM app.invitation_instances ii
+             WHERE ii.invitation = inv.id AND ii.instance = ${instanceId}
+           ) AS assigned
+    FROM app.invitations inv
+    WHERE inv.org = ${orgId} AND inv.role = 'member'
+      AND NOT inv.revoked AND inv.accepted_at IS NULL
+      AND (inv.expires_at IS NULL OR inv.expires_at > now())
+    ORDER BY inv.created DESC
+  `
+}
+
+/**
+ * A pending member invitation of this organization, or 404. The same answer
+ * for another organization's id, a spent one and a missing one.
+ */
+async function requirePendingMemberInvite(orgId: string, inviteId: string | undefined): Promise<AppInvitation> {
+  if (!inviteId) throw createError({ statusCode: 404, statusMessage: 'Not found' })
+  const sql = await appDb()
+  const [invite] = await sql<AppInvitation[]>`
+    SELECT * FROM app.invitations WHERE id = ${inviteId} AND org = ${orgId}
+  `
+  if (!invite || inviteProblemOf(invite)) throw createError({ statusCode: 404, statusMessage: 'Not found' })
+  if (invite.role !== 'member') {
+    throw createError({
+      statusCode: 422,
+      statusMessage: 'This person is invited as an admin, and admins already reach every connection.',
+    })
+  }
+  return invite
+}
+
+/** Give a connection to someone who has not accepted their invitation yet. */
+export async function assignInvite(orgId: string, instanceId: string, inviteId: string | undefined): Promise<void> {
+  const invite = await requirePendingMemberInvite(orgId, inviteId)
+  const sql = await appDb()
+  await sql`
+    INSERT INTO app.invitation_instances (invitation, instance) VALUES (${invite.id}, ${instanceId})
+    ON CONFLICT DO NOTHING
+  `
+}
+
+/** Take it back again. Nothing to revoke: they hold no tokens yet. */
+export async function unassignInvite(orgId: string, instanceId: string, inviteId: string | undefined): Promise<void> {
+  if (!inviteId) throw createError({ statusCode: 404, statusMessage: 'Not found' })
+  const sql = await appDb()
+  await sql`
+    DELETE FROM app.invitation_instances ii
+    USING app.invitations inv
+    WHERE ii.invitation = inv.id AND inv.id = ${inviteId} AND inv.org = ${orgId}
+      AND ii.instance = ${instanceId}
+  `
 }
