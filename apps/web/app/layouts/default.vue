@@ -5,6 +5,23 @@ const { user, org, isAdmin, logout } = useSession()
 // Undefined without billing, so a self-hosted header carries no plan at all.
 const { plan, overLimit } = usePlan()
 const hosted = useHosted()
+
+// The marketing site's contact form prefills from these params. `type` keys on
+// the host the visitor is on, not on hosted mode: only our own deployment is
+// "Hosted", any other install is someone's self-host. Plan labels such as
+// "Pro (trial)" are cut to the tier name the form lists.
+const HOSTED_APP_HOST = 'mcp.getautomata.app'
+const requestUrl = useRequestURL()
+const contactUrl = computed(() => {
+  const isHosted = requestUrl.hostname === HOSTED_APP_HOST
+  const params = new URLSearchParams()
+  if (user.value?.name) params.set('name', user.value.name)
+  if (user.value?.email) params.set('email', user.value.email)
+  const tier = isHosted ? plan.value?.replace(/\s*\(.*\)$/, '') : 'Self-Hosted'
+  if (tier) params.set('tier', tier)
+  params.set('type', isHosted ? 'Hosted' : 'Self-Hosted')
+  return `https://www.getautomata.app/contact?${params}`
+})
 </script>
 
 <template>
@@ -25,7 +42,7 @@ const hosted = useHosted()
 
         <div class="flex items-center gap-3">
           <Button as-child variant="ghost" size="sm">
-            <a href="https://www.getautomata.app/contact" target="_blank" rel="noopener noreferrer">
+            <a :href="contactUrl" target="_blank" rel="noopener noreferrer">
               <MailIcon class="size-4" />
               <span class="hidden sm:inline">Contact</span>
             </a>
