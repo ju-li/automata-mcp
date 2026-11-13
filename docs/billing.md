@@ -217,7 +217,7 @@ Promo campaigns for Free users only: filter on `PLAN` equals `Free`. Winback: fi
 
 **Activity dates are synced daily, not per event.** A call writes no outbox event, and neither does turning Telemetry off. Once per UTC day (checked every ten minutes, so a restart or a pause resumes soon) the service compares each member's current dates with what it last sent (`cloud.crm_last_use`) and updates only the contacts that differ, through the same upsert as everything else. `cloud.daily_jobs` holds the finished day and a lease, so replicas run it once. The first run after deploying sends every user who has ever made a call. Event-driven updates carry the current dates too.
 
-**Before relying on the clear:** Brevo does not document how to empty an attribute. The service sends `null` (`CLEARED` in `crm.ts`). Check once against a test contact: set `LAST_MCP_USE` on it, run an update sending `null`, and confirm the field is empty. If it isn't, change `CLEARED` (to `""`, say) and repeat.
+**How a date is cleared:** Brevo does not document how to empty an attribute. Tested against a real contact (2026-11-12): an update sending `""` empties a date attribute; `null` is answered 204 and **ignored**. The service sends `""` (`CLEARED` in `crm.ts`). If Brevo's behaviour ever changes, a cleared date would silently stay — re-test by setting `LAST_MCP_USE` on a contact, sending `""`, and reading it back.
 
 ### Setting it up
 

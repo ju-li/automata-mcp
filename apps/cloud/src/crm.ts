@@ -45,11 +45,12 @@ type AttributeType = 'text' | 'date' | 'boolean'
 
 /**
  * What an update sends to empty an attribute. Brevo's reference does not say;
- * verified by hand against a test contact (see "CRM (Brevo)" in
- * docs/billing.md). Used only for the activity dates: a value Brevo silently
- * ignored would leave a date behind after Telemetry was turned off.
+ * verified against a real contact on 2026-11-12: `""` empties a date
+ * attribute, while `null` answers 204 and changes nothing. Used only for the
+ * activity dates: a value Brevo silently ignored would leave a date behind
+ * after Telemetry was turned off — so never "simplify" this to `null`.
  */
-const CLEARED: null = null
+const CLEARED = ''
 
 
 /** Everything a contact carries besides its address and id. */
