@@ -255,3 +255,8 @@ tokens, an admin those of every token in the organization.
   for access, limits or billing.
 - **Turning it off** stops collection. What was already stored is deleted
   when its 30 days are up.
+- **On the hosted service**, while telemetry is on, the day of each member's
+  last connector call (and the organization's) is shared with our customer
+  CRM, so we can tell when an account has gone quiet. Only the date — no
+  tools, reasons or counts. Turning telemetry off stops this and removes the
+  dates already shared, within a day.

@@ -14,7 +14,8 @@ export type Db = postgres.Sql | postgres.TransactionSql
  *           `plan.changed` to `app.hosted_events`. It never touches `instances`
  *           credentials.
  *   cloud   this service's own state — consumer cursors on the event outbox,
- *           and CRM updates Brevo refused for good. Created here at boot.
+ *           CRM updates Brevo refused for good, the activity dates each
+ *           contact last received, and daily job leases. Created here at boot.
  */
 export const CLOUD_SCHEMA = 'cloud'
 
@@ -83,6 +84,30 @@ export async function ensureCloudSchema(sql: Sql): Promise<void> {
       status   integer NOT NULL,
       code     text,
       at       timestamptz NOT NULL DEFAULT now()
+    )
+  `
+
+  // The activity dates (last MCP call, the user's and their organization's)
+  // each contact last received, so the daily pass sends only what changed —
+  // including a clear when Telemetry was turned off. `YYYY-MM-DD` text, NULL =
+  // nothing sent (or cleared). A missing row = never sent.
+  await sql`
+    CREATE TABLE IF NOT EXISTS cloud.crm_last_use (
+      user_id          text PRIMARY KEY,
+      last_mcp_use     text,
+      org_last_mcp_use text,
+      sent_at          timestamptz NOT NULL DEFAULT now()
+    )
+  `
+
+  // Daily jobs: the UTC day each last finished, and a lease so only one
+  // replica runs a job at a time. Claimed by conditional UPDATE, like the web
+  // app's leases, so no connection is held for the length of a run.
+  await sql`
+    CREATE TABLE IF NOT EXISTS cloud.daily_jobs (
+      job         text PRIMARY KEY,
+      done_day    date,
+      lease_until timestamptz NOT NULL DEFAULT '-infinity'
     )
   `
 }

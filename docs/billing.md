@@ -208,8 +208,16 @@ A contact is keyed on the user's id (Brevo's `ext_id`), so an email change updat
 | `INVITED` | whether they signed up through an invitation |
 | `ORG_ID`, `ORG_NAME`, `ORG_ROLE` | their organization and role (`admin` / `member`) |
 | `PLAN` | the organization's current plan (`Free`, `Pro`, `Pro (trial)`) |
+| `LAST_MCP_USE` | the UTC day of the user's last MCP call on their organization's connections; empty if none, or while Telemetry is off |
+| `ORG_LAST_MCP_USE` | the same for anyone in their organization |
 
-That is the whole list. Nothing about connections, tokens or usage is sent. The service creates any missing attribute when it starts, and refuses to start the sync if one exists with a different type.
+That is the whole list. Nothing about connections or tokens is sent, and of usage only those two dates. They follow the organization's **Telemetry** switch (always on for Free, the admin's choice on Pro): while it is off they are not sent, and a date already in Brevo is cleared. The service creates any missing attribute when it starts, and refuses to start the sync if one exists with a different type.
+
+Promo campaigns for Free users only: filter on `PLAN` equals `Free`. Winback: filter on `ORG_LAST_MCP_USE` older than N days (empty = never used, or Telemetry off).
+
+**Activity dates are synced daily, not per event.** A call writes no outbox event, and neither does turning Telemetry off. Once per UTC day (checked every ten minutes, so a restart or a pause resumes soon) the service compares each member's current dates with what it last sent (`cloud.crm_last_use`) and updates only the contacts that differ, through the same upsert as everything else. `cloud.daily_jobs` holds the finished day and a lease, so replicas run it once. The first run after deploying sends every user who has ever made a call. Event-driven updates carry the current dates too.
+
+**How a date is cleared:** Brevo does not document how to empty an attribute. Tested against a real contact (2026-11-12): an update sending `""` empties a date attribute; `null` is answered 204 and **ignored**. The service sends `""` (`CLEARED` in `crm.ts`). If Brevo's behaviour ever changes, a cleared date would silently stay — re-test by setting `LAST_MCP_USE` on a contact, sending `""`, and reading it back.
 
 ### Setting it up
 
