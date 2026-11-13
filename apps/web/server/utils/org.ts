@@ -67,6 +67,27 @@ export function authorizesInstance(
 }
 
 /**
+ * May this actor change this connection — delete, re-pair, rotate credentials,
+ * assign it to colleagues, mint and scope tokens on it?
+ *
+ * Pure, like `authorizesInstance`, and only meaningful once that one said yes:
+ * management is a subset of reach, never a way around it. An admin manages every
+ * connection in their organization. A member manages the connections they
+ * created — while they still reach them. Their creator status alone grants
+ * nothing: an admin who unassigns the creator takes management away with the
+ * dashboard, which is the admin's lever over a member-created connection.
+ */
+export function managesInstance(
+  actor: { role: OrgRole, userId: string },
+  instance: Pick<AppInstance, 'created_by'>,
+  reaches: boolean,
+): boolean {
+  if (!reaches) return false
+  if (actor.role === 'admin') return true
+  return Boolean(instance.created_by) && instance.created_by === actor.userId
+}
+
+/**
  * The acting user's organization and role.
  *
  * Memoized on `event.context.orgMembership` — deliberately NOT resolved in
@@ -244,7 +265,7 @@ export async function countTokensOn(userId: string, instanceId: string): Promise
   return row?.count ?? 0
 }
 
-async function hasAssignment(userId: string, instanceId: string): Promise<boolean> {
+export async function hasAssignment(userId: string, instanceId: string): Promise<boolean> {
   const sql = await appDb()
   const [row] = await sql`
     SELECT 1 FROM app.instance_assignments WHERE user_id = ${userId} AND instance = ${instanceId}
@@ -331,22 +352,24 @@ export async function requireReadableInstanceOfKinds<const K extends InstanceKin
 }
 
 /**
- * A connection this actor may change: create, delete, reconnect, resync, rotate
- * credentials.
+ * A connection this actor may change: delete, reconnect, resync, rotate
+ * credentials, assign, mint tokens. An admin, or the member who created it
+ * (`managesInstance`).
  *
  * Readable first, so an id the actor cannot see stays a 404. Then 403 — they are
- * looking at the connection, so refusing by role tells them nothing new and
- * "you need an admin" is a far more useful answer than "no such thing".
+ * looking at the connection, so refusing tells them nothing new and "ask an
+ * admin or its creator" is a far more useful answer than "no such thing".
  */
 export async function requireManagedInstance(
   event: H3Event,
   instanceId: string | undefined,
 ): Promise<{ instance: AppInstance, actor: Actor }> {
   const found = await requireReadableInstance(event, instanceId)
-  if (found.actor.role !== 'admin') {
+  // Readable already established reach; this is the management half only.
+  if (!managesInstance({ role: found.actor.role, userId: found.actor.user.id }, found.instance, true)) {
     throw createError({
       statusCode: 403,
-      statusMessage: 'Only an organization admin can manage a connection.',
+      statusMessage: 'Only an organization admin or the member who created this connection can manage it.',
     })
   }
   return found
@@ -647,10 +670,12 @@ export type TokenAccess = 'manage' | 'use'
  * never looked at the connection's organization, so a user who had left could
  * keep managing a token for as long as the row survived.
  *
- * `manage` is an admin of the connection's organization — edit scope, revoke,
- * rotate. `use` is the member the token was issued to — revoke and rotate only,
- * never scope. Everything else is 404, including a member asking about a
- * colleague's token on a connection they share: they cannot see that it exists.
+ * `manage` is whoever manages the token's connection (`managesInstance`: an
+ * admin of its organization, or the member who created it and still reaches
+ * it) — edit scope, revoke, rotate. `use` is the member the token was issued to
+ * — revoke and rotate only, never scope. Everything else is 404, including a
+ * member asking about a colleague's token on a connection they share but did
+ * not create: they cannot see that it exists.
  */
 export async function resolveTokenForActor(
   event: H3Event,
@@ -670,6 +695,13 @@ export async function resolveTokenForActor(
 
   if (instance.org && instance.org === actor.org.id) {
     if (actor.role === 'admin') return { token, instance, actor, can: 'manage' }
+    // A member manages a token only through the connection: they created it and
+    // still hold its assignment. The assignment read is skipped unless they
+    // created it, so the ordinary member path costs no extra query.
+    if (instance.created_by === actor.user.id
+      && managesInstance({ role: actor.role, userId: actor.user.id }, instance, await hasAssignment(actor.user.id, instance.id))) {
+      return { token, instance, actor, can: 'manage' }
+    }
     if (token.assigned_to === actor.user.id) return { token, instance, actor, can: 'use' }
   }
 

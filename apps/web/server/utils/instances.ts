@@ -304,7 +304,8 @@ export async function provisionWhatsappInstance(
 
   try {
     record = await insertRow<AppInstance>('instances', {
-      // The organization owns it; `created_by` is provenance and grants nothing.
+      // The organization owns it; `created_by` grants management only alongside
+      // reach (`managesInstance`), never reach itself.
       org: actor.org.id,
       created_by: actor.user.id,
       kind: 'whatsapp',

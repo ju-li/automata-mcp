@@ -6,7 +6,8 @@ const body = z.object({
 
 /**
  * Give a member the use of this connection: its dashboard, and connector tokens
- * on it. Never the right to change it — that stays with admins.
+ * on it. Never the right to change it — that stays with admins and the
+ * connection's creator.
  */
 export default defineEventHandler(async (event) => {
   const { instance, actor } = await requireManagedInstance(event, getRouterParam(event, 'id'))

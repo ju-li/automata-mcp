@@ -8,8 +8,8 @@ const query = z.object({
  * One page of a token's recorded tool calls, newest first, with the reasons the
  * model gave. See server/utils/tool-calls.ts.
  *
- * Visible exactly where the token is: an admin of the connection's organization,
- * or the member it was issued to. A colleague's token is 404, as on every other
+ * Visible exactly where the token is: whoever manages the connection (an admin,
+ * or the member who created it), or the member it was issued to. A colleague's token is 404, as on every other
  * token route (`resolveTokenForActor`).
  *
  * `toolCalls` says whether the organization records at all, so an empty list can

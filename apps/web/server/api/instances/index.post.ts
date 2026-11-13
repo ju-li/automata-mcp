@@ -61,10 +61,11 @@ const body = z.discriminatedUnion('kind', [
 ])
 
 export default defineEventHandler(async (event) => {
-  // Admin-only: a connection costs money and, for WhatsApp, a real phone number.
-  // The organization owns whatever is created here; the acting admin is recorded
-  // as its creator and gains nothing extra by it.
-  const actor = await requireOrgAdmin(event)
+  // Any member of the organization. The organization owns whatever is created
+  // here — never the person — and the organization's connection limit below is
+  // the cost control. The creator is recorded in `created_by`; for a member that
+  // is what makes them its manager (`managesInstance`), alongside every admin.
+  const actor = await requireMembership(event)
   const parsed = await parseBody(event, body)
 
   // The organization's connection limit, before anything is provisioned:
@@ -92,6 +93,25 @@ export default defineEventHandler(async (event) => {
       break
     default:
       return assertNever(parsed, 'connection kind')
+  }
+
+  // A member reaches a connection only through an assignment, so the one they
+  // just created is assigned to them — without it, they would have made
+  // something only admins can see. Admins reach everything and hold no rows.
+  // Not in the insert's transaction (provisioning made remote calls); a failure
+  // here leaves a connection the admins can still see and assign, so say that
+  // rather than pretend nothing was created.
+  if (actor.role !== 'admin') {
+    try {
+      await assignInstance(actor.org.id, instance.id, actor.user.id)
+    }
+    catch (error) {
+      console.error(`[instances] created ${instance.id} but could not assign it to its creator ${actor.user.id}:`, error)
+      throw createError({
+        statusCode: 503,
+        statusMessage: 'The connection was created, but could not be assigned to you. Ask an admin of your organization to assign it.',
+      })
+    }
   }
 
   // The kind only: hosts, credentials and labels never go into an event.

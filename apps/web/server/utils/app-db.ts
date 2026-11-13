@@ -336,7 +336,9 @@ export interface AppInstance {
    */
   org: string
   /**
-   * Who created the connection. Provenance only — it grants nothing, and it is
+   * Who created the connection. Grants nothing on its own: a member who created
+   * it manages it only while they also reach it (`managesInstance`). Reach is
+   * never decided from this column. It is
    * empty on a row whose creator has since been removed.
    */
   created_by?: string

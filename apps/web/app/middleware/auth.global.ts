@@ -77,13 +77,6 @@ export default defineNuxtRouteMiddleware(async (to) => {
     return navigateTo('/instances')
   }
 
-  // Only an admin can create a connection, so the create flow is a dead end for
-  // a member. The team page is not gated: a member seeing who the admins are is
-  // what makes "ask an admin to assign you a connection" actionable.
-  if (!isAdmin.value && to.path === '/instances/new') {
-    return navigateTo('/instances')
-  }
-
   // Billing is an admin's page, and exists only where plans do: a deployment
   // without billing reports no plan, and has no such page to show.
   if (to.path === '/billing' && (!isAdmin.value || !membership.value?.org.plan)) {

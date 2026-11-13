@@ -14,6 +14,10 @@ import { toast } from 'vue-sonner'
  * connection in the organization, and a checkbox that does nothing is worse than
  * no checkbox.
  *
+ * The member who created the connection is marked: they manage it only while
+ * they keep access, so taking it away also takes away management. They cannot
+ * remove themselves (the server refuses); an admin can.
+ *
  * Unassigning revokes that person's tokens on this connection. That is not a
  * side effect worth hiding: the alternative is a token that still reads "Active"
  * and answers 401 on every call. The count is shown before the click, not after.
@@ -29,15 +33,18 @@ interface AssignableMember {
   role: OrgRole
   assigned: boolean
   implicit: boolean
+  creator: boolean
   tokens: number
 }
+
+const { user } = useSession()
 
 const open = ref(false)
 const pending = ref<string | null>(null)
 
 const { data, refresh, status } = await useFetch<{ members: AssignableMember[] }>(
   () => `/api/instances/${props.id}/assignments`,
-  // Only when the dialog is actually opened: this is an admin-only route and a
+  // Only when the dialog is actually opened: this is a manager-only route and a
   // member's dashboard must not fire it on every page load.
   { immediate: false },
 )
@@ -122,12 +129,19 @@ async function unassign(member: AssignableMember) {
                 <div class="truncate text-sm font-medium">
                   {{ member.email }}
                 </div>
+                <div v-if="member.creator" class="text-xs text-muted-foreground">
+                  Created this connection{{ member.assigned ? ' — removing access also ends their management of it' : '' }}
+                </div>
                 <div v-if="member.assigned && member.tokens" class="text-xs text-muted-foreground">
                   {{ member.tokens }} connector token(s) — removing access revokes them
                 </div>
               </div>
 
+              <span v-if="member.userId === user?.id" class="text-xs text-muted-foreground">
+                You
+              </span>
               <Button
+                v-else
                 size="sm"
                 :variant="member.assigned ? 'ghost' : 'outline'"
                 :class="member.assigned ? 'text-destructive' : ''"

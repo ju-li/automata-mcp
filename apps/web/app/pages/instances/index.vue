@@ -9,8 +9,8 @@ const empty = computed(() => status.value !== 'pending' && !data.value?.instance
 
 // A fresh organization has nothing to list, so send its admin straight to the
 // create flow — that is what makes signup land somewhere useful rather than on
-// an empty page. A member cannot create anything, so for them an empty list is
-// the real answer and the redirect would be a dead end.
+// an empty page. A member is not redirected: they usually joined to use what a
+// colleague will assign them, so the empty state offers both paths instead.
 if (empty.value && isAdmin.value) {
   await navigateTo('/instances/new', { replace: true })
 }
@@ -26,11 +26,11 @@ if (empty.value && isAdmin.value) {
         <p class="text-sm text-muted-foreground">
           {{ isAdmin
             ? 'Each connection gets its own Claude connector.'
-            : 'The connections assigned to you. Each one gets its own Claude connector.' }}
+            : 'The connections you created or were assigned. Each one gets its own Claude connector.' }}
         </p>
       </div>
 
-      <Button v-if="isAdmin" as-child size="sm">
+      <Button as-child size="sm">
         <NuxtLink to="/instances/new">
           <PlusIcon class="size-4" />
           Add a connection
@@ -49,8 +49,8 @@ if (empty.value && isAdmin.value) {
       <CardHeader>
         <CardTitle>No connections yet</CardTitle>
         <CardDescription>
-          Nothing has been assigned to you. An admin of your organization can
-          give you access to a connection.
+          Nothing has been assigned to you yet. Add a connection of your own, or
+          ask an admin of your organization to give you access to one.
         </CardDescription>
       </CardHeader>
     </Card>

@@ -7,9 +7,10 @@ const props = withDefaults(defineProps<{
   kind: InstanceKind
   connected?: boolean
   /**
-   * Whether this viewer administers the connection.
+   * Whether this viewer manages the connection — an admin, or the member who
+   * created it.
    *
-   * An admin mints tokens, edits their scope, and sees every token on the
+   * A manager mints tokens, edits their scope, and sees every token on the
    * connection with who holds it. A member sees only their own and may revoke or
    * rotate them — destroying or replacing your own credential must never need
    * someone else's approval, and widening one must always be theirs.
@@ -102,7 +103,7 @@ interface TokenRow {
   expires_at?: string
   revoked: boolean
   expired: boolean
-  /** The email is present only for an admin; a member's own list carries none. */
+  /** The email is present only for a manager; another member's own list carries none. */
   assignedTo: { id: string, email?: string }
   scope: TokenScope
   send_disclaimer?: string
@@ -139,9 +140,9 @@ const { run: runRotate } = useApiAction()
 const rotating = ref<string | null>(null)
 
 /**
- * Who an admin may issue a token to.
+ * Who a manager may issue a token to.
  *
- * Fetched only for an admin, and only for the create dialog. The server refuses
+ * Fetched only for a manager, and only for the create dialog. The server refuses
  * a token for someone who cannot reach the connection — it would be born dead —
  * so the picker offers exactly the people who can.
  */
@@ -344,9 +345,9 @@ function statusOf(token: TokenRow) {
         </p>
       </div>
 
-      <!-- Minting is admin-only: what a token reaches is an organization
-           decision, and a member who could mint could grant themselves any scope
-           the connection has. -->
+      <!-- Minting is manager-only: what a token reaches is the manager's
+           decision, and any other member who could mint could grant themselves
+           any scope the connection has. -->
       <Button v-if="canManage" size="sm" @click="openCreate()">
         <PlusIcon class="size-4" />
         New token
@@ -366,7 +367,7 @@ function statusOf(token: TokenRow) {
           </template>
           <template v-else>
             You have no connector tokens for this connection yet. An admin of your
-            organization can issue you one.
+            organization, or whoever created this connection, can issue you one.
           </template>
         </p>
 
@@ -388,8 +389,8 @@ function statusOf(token: TokenRow) {
             <TableRow v-for="token in data.tokens" :key="token.id">
               <TableCell class="font-medium">
                 {{ token.label }}
-                <!-- Whose it is, for an admin looking at the whole
-                     organization's tokens. Under the name rather than in its own
+                <!-- Whose it is, for a manager looking at everyone's tokens
+                     on this connection. Under the name rather than in its own
                      column: a seventh column pushes the row actions off the
                      edge at ordinary widths. -->
                 <div v-if="canManage" class="text-xs font-normal text-muted-foreground">
@@ -451,7 +452,7 @@ function statusOf(token: TokenRow) {
                 >
                   How to
                 </Button>
-                <!-- Scope is admin-only. A member may replace the secret, never
+                <!-- Scope is manager-only. A token holder may replace the secret, never
                      widen what it reaches. -->
                 <Button
                   v-if="canManage && !token.revoked"
