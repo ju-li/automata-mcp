@@ -2,6 +2,7 @@ import { Billing } from './billing.ts'
 import { type CloudConfig, loadConfig } from './config.ts'
 import { ConsentRegions } from './consent-region.ts'
 import { Crm } from './crm.ts'
+import { syncActivityDates } from './crm-activity.ts'
 import { connect, ensureCloudSchema, waitForApp } from './db.ts'
 import { createCloudServer } from './http.ts'
 import { describeError } from './http-error.ts'
@@ -19,6 +20,8 @@ import { applyPlanEntitlements, recordPlanChanges, writeEntitlementDefaults } fr
  */
 
 const OUTBOX_INTERVAL_MS = 15_000
+/** How often to ask whether today's activity-date pass is due; a run happens once per UTC day. */
+const DAILY_CHECK_INTERVAL_MS = 10 * 60_000
 const RECONCILE_INTERVAL_MS = 60 * 60 * 1000
 
 // Defence in depth: every request path catches its own rejections; one that
@@ -101,7 +104,7 @@ async function startWork(): Promise<void> {
   console.info('[cloud] ready')
 
   /** Run `pass` every interval, skipping a tick while the previous pass is still going. */
-  const everyOutboxTick = (label: string, pass: () => Promise<unknown>) => {
+  const everyTick = (label: string, pass: () => Promise<unknown>, intervalMs = OUTBOX_INTERVAL_MS) => {
     let running = false
     timers.push(setInterval(() => {
       if (running) return
@@ -109,13 +112,17 @@ async function startWork(): Promise<void> {
       pass()
         .catch(error => console.error(`[${label}] pass failed: ${describeError(error)}`))
         .finally(() => { running = false })
-    }, OUTBOX_INTERVAL_MS))
+    }, intervalMs))
   }
 
-  everyOutboxTick('outbox', () => consumeBillingEvents(sql, billing))
+  everyTick('outbox', () => consumeBillingEvents(sql, billing))
   // A separate guard and cursor: a slow or paused Brevo never holds up seats
   // and cancellations, and the reverse.
-  if (crm.configured) everyOutboxTick('crm', () => consumeCrmEvents(sql, crm))
+  if (crm.configured) everyTick('crm', () => consumeCrmEvents(sql, crm))
+  // Last-call dates, once per UTC day (crm-activity.ts). Checked every ten
+  // minutes so a restart or a paused run resumes soon; the lease and the
+  // finished day keep it to one run per day across replicas.
+  if (crm.configured) everyTick('crm-activity', () => syncActivityDates(sql, crm), DAILY_CHECK_INTERVAL_MS)
 
   // The backstop for a lost webhook and a seat sync that failed: re-read every
   // billed organization. Idempotent, so several replicas may run it.

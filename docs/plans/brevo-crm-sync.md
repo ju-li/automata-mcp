@@ -179,11 +179,20 @@ a second one.
 | `ORG_ID`, `ORG_NAME` | the user's organization | text |
 | `ORG_ROLE` | `admin` / `member` | text |
 | `PLAN` | `organizations.plan_label` (`Free`, `Pro`, `Pro (trial)`) | text |
+| `LAST_MCP_USE` | UTC day of `max(mcp_tokens.last_used_at)` over the user's tokens on their organization's connections; gated by Telemetry | date |
+| `ORG_LAST_MCP_USE` | the same over every token in the organization; gated by Telemetry | date |
 
 That is the whole list. The rule from `hosted-events.ts` extends to Brevo:
 never send connection kinds or counts, hosts, chat, folder or table names,
-token data, usage, or anything else from `instances`. Adding a field later is
-a decision recorded in this file, not a one-line change.
+token data, or anything else from `instances`. Of usage, only the two dates
+above (decided 2026-11-12, for winback campaigns), and only while the
+organization's Telemetry is on (`tool_calls_required OR record_tool_calls`);
+off, they are cleared in Brevo. No counts, tool names or reasons. Adding a
+field later is a decision recorded in this file, not a one-line change.
+
+The dates are synced by a daily pass (`crm-activity.ts`), not by the outbox: a
+call writes no event, and neither does turning Telemetry off. The pass compares
+the live, gated dates with `cloud.crm_last_use` and sends only the differences.
 
 The service never sends `emailBlacklisted`, `smsBlacklisted` or unsubscribe
 state. Unsubscribes belong to Brevo, and a re-sync must not undo one.
@@ -369,9 +378,9 @@ There is no test framework (see `CLAUDE.md`). `pnpm typecheck` and
 - **Organizations as Brevo companies:** `org.created` → `POST /companies`,
   members linked through `link-unlink`, `org.deleted` → delete. Worth doing
   once sales works per account rather than per person.
-- **Activation signals:** a "first connection created" date, or a "last MCP
-  use" date from `usage.rollup`. These would need a decision against the
-  payload rules above, so they are left out on purpose.
+- **Activation signals:** a "first connection created" date. ("Last MCP use"
+  is done: `LAST_MCP_USE` / `ORG_LAST_MCP_USE`, from `mcp_tokens`, not
+  `usage.rollup`, gated by Telemetry.)
 - **A nightly full reconcile** that re-upserts every user, as a backstop like
   the hourly Stripe one. Only worth it if `cloud.crm_skipped` or drift shows
   it is needed.
