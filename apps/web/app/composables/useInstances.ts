@@ -57,6 +57,11 @@ export interface InstanceListRow {
   /** WhatsApp only. Absent for kinds with no message counts. */
   stats?: { messages: number, chats: number, contacts: number }
   /**
+   * Who added it. `former` = no longer in the organization (no name then);
+   * absent = not recorded. Listing only.
+   */
+  createdBy?: { id: string, name?: string, email?: string, former?: true }
+  /**
    * Whether this actor may change the connection — delete it, reconnect it,
    * rotate its credentials — as opposed to merely use it.
    *
@@ -66,6 +71,21 @@ export interface InstanceListRow {
    * refused with a 403.
    */
   canManage?: boolean
+}
+
+/**
+ * Who added a connection, in prose: "you", their name or address, or "a former
+ * member". `undefined` when it was never recorded — say nothing rather than
+ * guess. Shared by the card footer and the creator filter so they agree.
+ */
+export function creatorLabel(
+  createdBy: InstanceListRow['createdBy'],
+  viewerId: string | undefined,
+): string | undefined {
+  if (!createdBy) return undefined
+  if (createdBy.id === viewerId) return 'you'
+  if (createdBy.former) return 'a former member'
+  return createdBy.name || createdBy.email || 'a former member'
 }
 
 /** What to call this kind of connection in prose, singular. */

@@ -22,6 +22,22 @@ const draftName = ref('')
 const { busy: renameBusy, run: runRename } = useApiAction()
 const { busy: memberBusy, run: runMember } = useApiAction()
 const { busy: toolCallsBusy, run: runToolCalls } = useApiAction()
+const { busy: creationBusy, run: runCreation } = useApiAction()
+
+/**
+ * Let members add connections, or keep that to admins. Stops new connections
+ * only — ones members already added stay theirs to manage. The session is
+ * refreshed because it carries `canCreateConnections`.
+ */
+async function setMemberCreation(on: boolean) {
+  await runCreation(async () => {
+    await $fetch('/api/org', { method: 'PATCH', body: { membersCreateConnections: on } })
+    await Promise.all([refresh(), refreshSession()])
+  }, {
+    success: on ? 'Members can now add connections.' : 'Only admins can add connections now.',
+    failure: 'Could not change who can add connections',
+  })
+}
 
 /**
  * Turn tool-call recording on or off. The server refuses turning it off while
@@ -238,6 +254,37 @@ const adminCount = computed(() => (data.value?.members ?? []).filter(m => m.role
             <PencilIcon class="size-4" />
             Rename
           </Button>
+        </div>
+      </CardContent>
+    </Card>
+
+    <!-- Shown to members too, so a member can see why "Add a connection" is
+         missing rather than guess. -->
+    <Card v-if="data?.membersCreateConnections !== undefined">
+      <CardHeader>
+        <CardTitle>Connections</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div class="flex items-start gap-3">
+          <Checkbox
+            id="members-create-connections"
+            :model-value="data.membersCreateConnections"
+            :disabled="!isAdmin || creationBusy"
+            class="mt-0.5"
+            @update:model-value="setMemberCreation($event === true)"
+          />
+          <div class="space-y-1">
+            <Label for="members-create-connections" class="font-normal">Members can add connections</Label>
+            <p class="text-xs text-muted-foreground">
+              A member who adds a connection manages it and can share it with
+              colleagues. Admins can manage every connection, and can remove a
+              member's access to one. Turning this off doesn't affect connections
+              members have already added.
+            </p>
+            <p v-if="!isAdmin" class="text-xs text-muted-foreground">
+              Only an admin can change this.
+            </p>
+          </div>
         </div>
       </CardContent>
     </Card>

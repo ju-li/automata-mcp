@@ -246,6 +246,12 @@ export interface AppOrganization {
   id: string
   name: string
   created?: string
+  /**
+   * Whether members may create connections (admins always may). Read with the
+   * membership in `loadActor`; absent on an object built without it, which
+   * `membersMayCreateConnections` reads as on — the column default.
+   */
+  members_create_connections?: boolean
 }
 
 /**

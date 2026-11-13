@@ -52,7 +52,7 @@ const RESET_ROUTES = new Set(['/forgot-password', '/reset-password'])
  * browser gets you a 403, not an action.
  */
 export default defineNuxtRouteMiddleware(async (to) => {
-  const { user, hasOrg, isAdmin, membership, ensureLoaded } = useSession()
+  const { user, hasOrg, isAdmin, canCreateConnections, membership, ensureLoaded } = useSession()
   await ensureLoaded()
 
   if (isInviteRoute(to.path) || to.path === VERIFY_ROUTE || RESET_ROUTES.has(to.path)) return
@@ -74,6 +74,12 @@ export default defineNuxtRouteMiddleware(async (to) => {
   }
 
   if (hasOrg.value && to.path === ORGLESS_ROUTE) {
+    return navigateTo('/instances')
+  }
+
+  // An organization that lets only admins add connections makes the create flow
+  // a dead end for its members.
+  if (!canCreateConnections.value && to.path === '/instances/new') {
     return navigateTo('/instances')
   }
 

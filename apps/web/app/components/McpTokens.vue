@@ -20,7 +20,7 @@ const props = withDefaults(defineProps<{
   canManage?: boolean
 }>(), { canManage: false })
 
-const { user } = useSession()
+const { user, isAdmin } = useSession()
 
 /**
  * Whether a new token starts with the read tools only, which is also whether
@@ -416,11 +416,12 @@ function statusOf(token: TokenRow) {
                 {{ formatDate(token.created) }}
               </TableCell>
               <TableCell class="text-muted-foreground">
-                <!-- Opens the token's recorded tool calls. On the date rather
-                     than a row button: the actions column is already as wide
-                     as an ordinary screen allows. -->
+                <!-- Opens the token's recorded tool calls — admins only, the
+                     server refuses everyone else. On the date rather than a row
+                     button: the actions column is already as wide as an
+                     ordinary screen allows. -->
                 <button
-                  v-if="token.last_used_at"
+                  v-if="token.last_used_at && isAdmin"
                   type="button"
                   class="underline-offset-2 hover:underline"
                   title="Show recorded tool calls"
@@ -428,6 +429,9 @@ function statusOf(token: TokenRow) {
                 >
                   {{ formatDate(token.last_used_at) }}
                 </button>
+                <template v-else-if="token.last_used_at">
+                  {{ formatDate(token.last_used_at) }}
+                </template>
                 <template v-else>
                   Never
                 </template>

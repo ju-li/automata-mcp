@@ -61,11 +61,18 @@ const body = z.discriminatedUnion('kind', [
 ])
 
 export default defineEventHandler(async (event) => {
-  // Any member of the organization. The organization owns whatever is created
-  // here — never the person — and the organization's connection limit below is
-  // the cost control. The creator is recorded in `created_by`; for a member that
-  // is what makes them its manager (`managesInstance`), alongside every admin.
+  // Any admin, and any member while the organization allows it (admins' switch
+  // on the Organization page, on by default). The organization owns whatever is
+  // created here — never the person — and the connection limit below is the
+  // cost control. The creator is recorded in `created_by`; for a member that is
+  // what makes them its manager (`managesInstance`), alongside every admin.
   const actor = await requireMembership(event)
+  if (!mayCreateConnections(actor)) {
+    throw createError({
+      statusCode: 403,
+      statusMessage: 'Your organization lets only admins add connections. Ask an admin to add one, or to allow members to.',
+    })
+  }
   const parsed = await parseBody(event, body)
 
   // The organization's connection limit, before anything is provisioned:

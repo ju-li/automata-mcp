@@ -124,11 +124,12 @@ export async function requireMembership(event: H3Event): Promise<Actor> {
  * outage reads as "your account is gone".
  */
 export async function loadActor(user: AppUser): Promise<Actor | undefined> {
-  let row: { membership_id: string, role: OrgRole, org_id: string, org_name: string, org_created?: string } | undefined
+  let row: { membership_id: string, role: OrgRole, org_id: string, org_name: string, org_created?: string, members_create_connections: boolean } | undefined
   try {
     const sql = await appDb()
     ;[row] = await sql`
-      SELECT m.id AS membership_id, m.role, o.id AS org_id, o.name AS org_name, o.created AS org_created
+      SELECT m.id AS membership_id, m.role, o.id AS org_id, o.name AS org_name, o.created AS org_created,
+             o.members_create_connections
       FROM app.memberships m JOIN app.organizations o ON o.id = m.org
       WHERE m.user_id = ${user.id}
     `
@@ -143,10 +144,19 @@ export async function loadActor(user: AppUser): Promise<Actor | undefined> {
 
   return {
     user,
-    org: { id: row.org_id, name: row.org_name, created: row.org_created },
+    org: { id: row.org_id, name: row.org_name, created: row.org_created, members_create_connections: row.members_create_connections },
     role: row.role,
     membershipId: row.membership_id,
   }
+}
+
+/**
+ * May this actor create a connection? Admins always; members while the
+ * organization's switch (`members_create_connections`, default on) allows it.
+ * Pure over the loaded actor, so `/api/auth/me` and the create route agree.
+ */
+export function mayCreateConnections(actor: Pick<Actor, 'role' | 'org'>): boolean {
+  return actor.role === 'admin' || actor.org.members_create_connections !== false
 }
 
 /** An organization action: renaming it, inviting, changing roles, removing members. */

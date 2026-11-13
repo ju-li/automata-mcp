@@ -8,15 +8,21 @@ const query = z.object({
  * One page of a token's recorded tool calls, newest first, with the reasons the
  * model gave. See server/utils/tool-calls.ts.
  *
- * Visible exactly where the token is: whoever manages the connection (an admin,
- * or the member who created it), or the member it was issued to. A colleague's token is 404, as on every other
- * token route (`resolveTokenForActor`).
+ * Organization admins only. The reasons are model-written and can quote what a
+ * colleague asked Claude about, so neither a member who created the connection
+ * (who manages its tokens otherwise) nor the token's own holder reads them:
+ * Telemetry is the organization's record, kept by its admins. A token the actor
+ * cannot see at all is still 404 (`resolveTokenForActor`); one they can see is
+ * 403.
  *
  * `toolCalls` says whether the organization records at all, so an empty list can
  * say "not recorded" rather than "never called".
  */
 export default defineEventHandler(async (event) => {
   const { token, actor } = await resolveTokenForActor(event, getRouterParam(event, 'id'))
+  if (actor.role !== 'admin') {
+    throw createError({ statusCode: 403, statusMessage: 'Only an organization admin can see a token\'s tool calls.' })
+  }
   const { page: pageNumber } = await getValidatedQuery(event, q => query.parse(q))
 
   try {
