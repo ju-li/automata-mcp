@@ -66,6 +66,9 @@ const creatorOptions = computed(() => {
     .sort((a, b) => rank(a.value) - rank(b.value) || a.label.localeCompare(b.label))
 })
 
+// The creator filter shows whenever the bar does, even when everything here was
+// added by one person: an absent control reads as "this page can't filter by
+// creator", not as "there is only one creator".
 const showFilters = computed(() => kindOptions.value.length > 1 || creatorOptions.value.length > 1)
 
 const filtered = computed(() => instances.value.filter(row =>
@@ -140,7 +143,7 @@ function clearFilters() {
           </SelectContent>
         </Select>
 
-        <Select v-if="creatorOptions.length > 1" v-model="creatorFilter">
+        <Select v-model="creatorFilter">
           <SelectTrigger class="w-full sm:w-56" aria-label="Filter by who added it">
             <SelectValue />
           </SelectTrigger>
