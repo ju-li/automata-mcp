@@ -18,8 +18,9 @@ const body = scopeSchema.and(disclaimerSchema).and(z.object({
  * every MCP request, so the change takes effect on the next call. The name is
  * not part of the credential either, so renaming costs nothing on the wire.
  *
- * Admin-only, and that is the point of the whole permission split: what a token
- * may reach is an organization decision. A member holding the token may destroy
+ * Manager-only (an admin, or the member who created the connection), and that is
+ * the point of the whole permission split: what a token may reach is the
+ * connection manager's decision. A member merely holding the token may destroy
  * it or rotate its secret, and may not widen it. A token id outside the actor's
  * organization — or another member's token — resolves to 404 rather than 403, so
  * this cannot be used to probe which ids exist.
@@ -31,7 +32,7 @@ export default defineEventHandler(async (event) => {
   if (can !== 'manage') {
     throw createError({
       statusCode: 403,
-      statusMessage: 'Only an organization admin can change what a token may reach.',
+      statusMessage: 'Only an organization admin or the member who created this connection can change what a token may reach.',
     })
   }
 

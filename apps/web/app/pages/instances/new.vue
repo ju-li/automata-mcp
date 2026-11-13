@@ -27,11 +27,13 @@ const busy = ref(false)
 
 // An organization at its connection limit is told so before it fills in a
 // form the server will refuse. Never fetched without limits, so a self-hosted
-// deployment makes no such request.
+// deployment makes no such request — nor for a member, since Billing is an
+// admin's route; a member at the limit gets the server's 402 on the click.
 const { limited, recentHistoryOnly } = usePlan()
+const { isAdmin } = useSession()
 const { data: billingInfo } = await useFetch<{ usage: { connections: number }, limits: { connections?: number } | null }>(
   '/api/billing',
-  { immediate: limited.value, server: false },
+  { immediate: limited.value && isAdmin.value, server: false },
 )
 const atConnectionLimit = computed(() => {
   const limit = billingInfo.value?.limits?.connections
@@ -245,7 +247,7 @@ async function create() {
   catch (err: any) {
     // The server's message is the useful part here — it names the bad host, the
     // refused address or the connection error — so show it rather than a generic.
-    toastApiError(err, 'Could not create the connection', { isAdmin: true })
+    toastApiError(err, 'Could not create the connection', { isAdmin: isAdmin.value })
     busy.value = false
   }
 }

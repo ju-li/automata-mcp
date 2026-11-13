@@ -63,7 +63,14 @@ export default defineEventHandler(async (event) => {
   return {
     user: { id: user.id, email: user.email, name: user.name },
     membership: actor
-      ? { role: actor.role, org: { id: actor.org.id, name: actor.org.name, ...plan } }
+      ? {
+          role: actor.role,
+          // Whether this person may add connections — the role and the
+          // organization's switch, decided once (`mayCreateConnections`). Read
+          // with the membership, so no extra query.
+          canCreateConnections: mayCreateConnections(actor),
+          org: { id: actor.org.id, name: actor.org.name, ...plan },
+        }
       : null,
   }
 })

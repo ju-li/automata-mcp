@@ -881,4 +881,16 @@ export const APP_MIGRATIONS: AppMigration[] = [
       $$;
     `,
   },
+  {
+    name: '0026_members_create_connections',
+    sql: /* sql */ `
+      -- Whether a member (not only an admin) may create connections. The
+      -- organization's own switch, admin PATCH /api/org; on by default, for
+      -- existing organizations too. Gates creation only: a member who created
+      -- a connection keeps managing it when this is turned off, until an admin
+      -- unassigns them (managesInstance in org.ts).
+      ALTER TABLE app.organizations
+        ADD COLUMN members_create_connections boolean NOT NULL DEFAULT true;
+    `,
+  },
 ]

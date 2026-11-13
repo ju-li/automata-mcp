@@ -8,6 +8,8 @@ export type OrgRole = 'admin' | 'member'
 
 export interface SessionMembership {
   role: OrgRole
+  /** Admins always; members while the organization allows it. Server-decided. */
+  canCreateConnections?: boolean
   /**
    * `plan` (a display name such as "Free" or "Pro (trial)"), `limited`,
    * `overLimit`, `recentHistoryOnly` and `telemetry` are present only on the
@@ -72,6 +74,8 @@ export function useSession() {
     org: computed(() => membership.value?.org ?? null),
     role: computed(() => membership.value?.role ?? null),
     isAdmin: computed(() => membership.value?.role === 'admin'),
+    // UI only — POST /api/instances refuses independently (`mayCreateConnections`).
+    canCreateConnections: computed(() => membership.value?.canCreateConnections === true),
     hasOrg: computed(() => Boolean(membership.value)),
     loaded,
     refresh,

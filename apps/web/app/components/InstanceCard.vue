@@ -12,6 +12,11 @@ import { assertNever } from '#shared/connection'
  */
 const props = defineProps<{ instance: InstanceListRow }>()
 
+const { user } = useSession()
+
+/** "Added by …" for the footer; nothing when the creator was never recorded. */
+const addedBy = computed(() => creatorLabel(props.instance.createdBy, user.value?.id))
+
 /**
  * What the card's two lines carry. A database and a mailbox both show where
  * they point and a line of health; only the messaging accounts have a profile
@@ -78,6 +83,9 @@ const secondary = computed(() => {
           {{ instance.stats.messages }} messages · {{ instance.stats.chats }} chats
         </p>
       </CardContent>
+      <CardFooter v-if="addedBy" class="border-t pt-4 text-xs text-muted-foreground">
+        <span class="truncate">Added by {{ addedBy }}</span>
+      </CardFooter>
     </Card>
   </NuxtLink>
 </template>

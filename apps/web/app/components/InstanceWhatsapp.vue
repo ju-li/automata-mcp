@@ -606,7 +606,7 @@ const importHistory = () => backToPairing(
         Your plan imports recent history only: when a device is linked, WhatsApp
         hands over the recent part of your conversations, and everything since is
         kept. Older messages are not imported.
-        <UpgradeLink v-if="canManage">
+        <UpgradeLink>
           to import an account's full history.
         </UpgradeLink>
       </p>

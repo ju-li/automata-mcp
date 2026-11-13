@@ -51,10 +51,16 @@ invitation, and an account belongs to exactly one organization.
 - **Admins** manage the organization (**Organization** page): invite people, change
   roles, remove members, create and delete connections, assign them, and mint
   or edit tokens for anyone who can reach the connection.
-- **Members** use the connections assigned to them. They see only their own
-  tokens there, and may revoke a token or rotate its secret but never widen its
-  scope. Reconnecting, re-pairing and deleting are management, so a member is
-  told what is wrong and that an admin can fix it.
+- **Members** use the connections assigned to them, and may create connections
+  of their own — unless an admin turns off **Members can add connections** on
+  the **Organization** page (on by default; turning it off stops only new ones). A member who creates a connection manages it like an admin
+  would — pairs and deletes it, shares it with colleagues (**Who can use this**),
+  and mints or edits tokens on it for them — for as long as they keep access to
+  it; an admin can take it away from them. On connections someone else created,
+  a member sees only their own tokens, and may revoke a token or rotate its
+  secret but never widen its scope. Reconnecting, re-pairing and deleting are
+  management, so a member is told what is wrong and who can fix it.
+- Every connection counts against the organization's limits, whoever created it.
 
 An invitation names an email address and can be accepted only by an account
 with that address, so a forwarded link is useless to anyone else. The link is
@@ -242,8 +248,9 @@ written by the model, and not the prompt.
 When an organization's telemetry is on, each tool call is stored for **30
 days** with the tool's name, whether it worked, the reason (clipped to 300
 characters, or none if Claude gave none) and the client's user agent. Click a token's **Last
-used** date to see them, newest first. A member sees the calls of their own
-tokens, an admin those of every token in the organization.
+used** date to see them, newest first. Only admins can see them, for every
+token in the organization; members, including the token's holder and whoever
+created the connection, see the date only.
 
 - **Who decides.** An admin turns telemetry on or off under **Organization**. It is off
   by default. On the hosted service's Free plan it is always on and can't be

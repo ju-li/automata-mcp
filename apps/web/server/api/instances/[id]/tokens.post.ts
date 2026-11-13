@@ -3,19 +3,20 @@ import { z } from 'zod'
 const body = z.object({
   label: z.string().max(100).optional(),
   expiry: z.enum(['30d', '90d', '1y', 'never']).default('90d'),
-  /** The member to issue it to. Defaults to the acting admin. */
+  /** The member to issue it to. Defaults to the actor. */
   assignedTo: z.string().min(1).optional(),
 }).and(scopeSchema).and(disclaimerSchema)
 
 /**
  * Mint a connector token for this connection.
  *
- * Admin-only: what a token may reach is an organization decision, and a member
- * who could mint one could grant themselves any scope the connection has. A
- * member's recourse for a compromised token is to rotate its secret, which
- * changes nothing about what it reaches.
+ * Manager-only — an admin, or the member who created the connection: what a
+ * token may reach is the manager's decision, and any other member who could
+ * mint one could grant themselves any scope the connection has. Their recourse
+ * for a compromised token is to rotate its secret, which changes nothing about
+ * what it reaches.
  *
- * An admin may issue a token **to** a member, and that member must already reach
+ * A manager may issue a token **to** a colleague, and that member must already reach
  * this connection — be an admin, or hold an assignment on it. A token minted for
  * someone who does not is born dead: it would render as "Active" and answer 401
  * on every call, with nothing in the Nitro log. Refusing with a 422 that says to
