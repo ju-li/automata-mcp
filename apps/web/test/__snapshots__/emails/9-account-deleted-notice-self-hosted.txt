@@ -1,0 +1,20 @@
+Subject: Your Automata account was deleted
+Preview: Your account was deleted.
+
+ACCOUNT DELETED
+
+Your account was deleted.
+
+Your Automata account was deleted from its profile page. Connector tokens issued to you stopped working. Your organization and its connections are unchanged.
+
+Account: person@example.com
+When: 7 Nov 2026, 22:02 UTC
+
+This can’t be undone. You can sign up again with this address at any time, as a new account.
+
+---
+
+Didn’t do this? Someone had your password. Contact an admin of your organization right away.
+
+--
+You’re getting this notice because the Automata account at this address was deleted. It is the last email you’ll get about it.

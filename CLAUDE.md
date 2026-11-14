@@ -198,6 +198,17 @@ Rules easy to undo:
 
 Existing accounts never asked to verify; mode `off` keeps old password-only email change.
 
+## Account deletion
+
+`server/utils/account-deletion.ts` = one file deciding and doing it; profile page's **Delete account** (`DeleteAccountDialog.vue`) → `GET /api/auth/account/deletion` (preview, changes nothing) → `POST /api/auth/account/delete` (`currentPassword`; typed `DELETE` = browser-only typo guard). Three outcomes: **account** (member, or admin beside another admin — org + connections stay, `created_by` set null), **account-and-org** (only member — org and every connection go), **blocked** (only admin with other members — 409, same refusal as `acceptInviteInto`/`removeMember`).
+
+Rules easy to undo:
+
+- **Connections through `deleteInstance()`, one by one, before the transaction** — `instances.org` RESTRICT exists so an org can't vanish from under a live socket/bridge session. First failure stops it (503 naming the connection), account intact.
+- **Decided again under lock**: org row `FOR UPDATE` (= `assertCanAdd`'s lock, so an invite accept serialises) + memberships; answer changed since preview (someone joined/left, connection added) → 409, nothing deleted. Never delete what the dialog didn't name.
+- Rest is the schema's: every FK to `users` cascades or sets null (sessions, factors, tokens, assignments, verifications, resets); every FK to `organizations` but `instances` cascades. New table naming a user/org = decide its `ON DELETE`.
+- Outbox in same tx: `member.removed` (seats), `org.deleted` (cancels subscription), **`user.deleted`** → cloud CRM consumer **deletes** the Brevo contact by `ext_id` (404 = done) and its `crm_last_use` row. Account-deleted notice mailed after commit (`notifyAccountDeleted`).
+
 ## Password reset
 
 `server/utils/password-reset.ts` = one file minting, mailing, spending. "Forgot password?" on `/login` → `/forgot-password` (address, then code + new password); mail link → `/reset-password?token=`; admin's "Send password reset" on Organization page (`/team`) → `POST /api/org/members/:id/password-reset`. Row in `app.password_resets`, one per account (new replaces old), link + six-digit code, 30 min. Needs SMTP — none = 503 + log, page says so, Organization page button hidden (`/api/org` `passwordReset`); operator's fallback = DB recipe in `docs/self-hosting.md`.
@@ -504,7 +515,7 @@ Sweep in-process, so **multiple replicas mail multiple times**. `nitro.scheduled
 
 `sendAppEmail()` never throws, answers whether mail went out; with `NUXT_SMTP_HOST` unset answers false, warns once. Callers decide what "not sent" means — alert stays queued, invitation link stays on screen.
 
-**Account emails are HTML + plain text, from `server/emails/`; alerts stay plain text.** Eight templates in `account.ts` (signup verification, invited signup verification, already registered, email-change verification, email-changed notice, invitation, password reset — self or admin-requested — and password-changed notice), each a list of blocks handed to `renderEmail()` in `layout.ts`, which writes both parts from the same blocks — wording can't drift between them. Callers (`verificationMail()` in `email-verification.ts`, `sendInviteEmail()`, `password-reset.ts`) decide *which* mail and pass values; templates decide only how it reads. Copy = the "Account emails" boards on the Claude Design canvas. Rules easy to undo:
+**Account emails are HTML + plain text, from `server/emails/`; alerts stay plain text.** Templates in `account.ts` (signup verification, invited signup verification, already registered, email-change verification, email-changed notice, invitation, password reset — self or admin-requested — password-changed notice, token request, account-deleted notice), each a list of blocks handed to `renderEmail()` in `layout.ts`, which writes both parts from the same blocks — wording can't drift between them. Callers (`verificationMail()` in `email-verification.ts`, `sendInviteEmail()`, `password-reset.ts`) decide *which* mail and pass values; templates decide only how it reads. Copy = the "Account emails" boards on the Claude Design canvas. Rules easy to undo:
 
 - **Every interpolated value through `escapeHtml()`; subjects and preview through `singleLine()`.** Org and inviter names are user-typed and reach someone else's inbox. `test/emails.test.mjs` pins it with a hostile org name.
 - **Email-safe only:** 600px table, inline styles, no `<style>`/`<link>`/SVG/flex/grid. Lime (`#baf85a`) only as button label on ink — the test counts it.
