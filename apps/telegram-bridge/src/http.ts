@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { BridgeConfig } from './config.ts'
 import { digestsEqual, hashKey } from './crypto.ts'
 import { HttpError, describeError, telegramNotConfigured } from './http-error.ts'
-import type { SessionManager } from './sessions.ts'
+import type { CountsMode, SessionManager } from './sessions.ts'
 
 /**
  * The bridge's HTTP API, shaped like Evolution's: one global admin key creates
@@ -96,10 +96,12 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
     },
     {
       label: 'GET /sessions/:id/state', method: 'GET', pattern: /^\/sessions\/([^/]+)\/state$/, access: 'session',
-      // Counts are cached per session for 30 s; `?fresh=counts` reads them now.
+      // Counts are cached per session (see COUNTS_TTL_MS); `?fresh=counts` reads
+      // them now, `?counts=0` leaves them out (health checks). A slow count
+      // leaves `stats` stale or absent, never fails the request (#224).
       handle: async ({ id, query }) => ({
         status: 200,
-        body: await manager.state(id, { freshCounts: query.get('fresh') === 'counts' }),
+        body: await manager.state(id, { counts: countsMode(query) }),
       }),
     },
     {
@@ -214,6 +216,12 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
 function bearerOf(req: IncomingMessage): string | undefined {
   const match = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? '')
   return match?.[1]
+}
+
+/** `?counts=0` skips counts (wins over `fresh`); `?fresh=counts` reads them now. */
+function countsMode(query: URLSearchParams): CountsMode {
+  if (query.get('counts') === '0') return 'skip'
+  return query.get('fresh') === 'counts' ? 'fresh' : 'cached'
 }
 
 function clampInt(raw: string | null, fallback: number, min: number, max: number): number {

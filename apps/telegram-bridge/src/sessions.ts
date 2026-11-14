@@ -53,11 +53,17 @@ export interface SessionState {
   heldElsewhere: boolean
   me?: { id: string, username?: string, name?: string, phone?: string }
   lastError?: string
-  stats: { chats: number, messages: number }
+  /**
+   * Absent when the caller asked for none (`?counts=0`) or when they could not
+   * be read in time and none were read before — unknown, never 0 (#224).
+   * `asOf` is when they were read: up to COUNTS_TTL_MS old, or older when the
+   * latest read was slow or failed.
+   */
+  stats?: { chats: number, messages: number, asOf: string }
   sync: SyncStatus & {
     dialogsSyncedAt?: string
-    /** Chats whose older history is still to be fetched. */
-    pendingBackfill: number
+    /** Chats whose older history is still to be fetched. Absent with `stats`. */
+    pendingBackfill?: number
     /**
      * How many days back this session's backfill reaches: the lower of the
      * deployment's `TELEGRAM_BACKFILL_DAYS` and the cap set when pairing started.
@@ -87,6 +93,24 @@ interface SessionCounts {
   /** Chats whose older history is still to be fetched. */
   pending: number
 }
+
+interface ReadCounts {
+  /** When the read started. */
+  at: number
+  value: SessionCounts
+}
+
+interface CountsEntry {
+  /** The last counts read, kept past COUNTS_TTL_MS so a slow read can answer with them. */
+  last?: ReadCounts
+  /** The read in progress, shared by every caller. Never rejects. */
+  pending?: Promise<ReadCounts | undefined>
+  /** When a slow or failed read was last logged. */
+  loggedAt?: number
+}
+
+/** What `state` does about counts: reuse within the TTL, read now, or skip them. */
+export type CountsMode = 'cached' | 'fresh' | 'skip'
 
 export interface PairingQr {
   /** `tg://login?token=…` — what the QR code encodes. As sensitive as the image. */
@@ -161,12 +185,21 @@ const HEARTBEAT_MS = 30_000
 const PROBE_TIMEOUT_MS = 20_000
 const DISPOSE_TIMEOUT_MS = 10_000
 /**
- * How long `state` reuses a session's chat, message and backfill counts (#183).
- * The message count reads the session's whole live-message index; the dashboard
- * polls every 15 s and the pairing screen every 2 s, neither for a number that
- * must be to the second.
+ * How long `state` reuses a session's chat, message and backfill counts (#183,
+ * #224). The message count reads the session's whole live-message index; on a
+ * busy session it was the largest single source of reads on the database. Past
+ * this the cached counts are still served while a read refreshes them in the
+ * background. Five minutes, WhatsApp's figure.
  */
-const COUNTS_TTL_MS = 30_000
+const COUNTS_TTL_MS = 5 * 60_000
+/**
+ * How long `state` waits for counts it has to read. Past it, `state` answers
+ * with the last counts read, or none: a slow count must never fail, or hold up,
+ * the status read (#224). The read itself carries on and fills the cache.
+ */
+const COUNTS_DEADLINE_MS = 2_000
+/** A slow or failed count is logged at most this often per session. */
+const COUNTS_LOG_INTERVAL_MS = 60_000
 /**
  * A running client that has not answered for this long is dropped and built
  * again. Longer than teleproto's own retry budget (`connectionRetries: 5`, about
@@ -203,8 +236,8 @@ export class SessionManager {
   private readonly config: BridgeConfig
   private readonly locks: SessionLocks
   private readonly runtimes = new Map<string, Runtime>()
-  /** Per-session counts for `state`, shared while in flight. See COUNTS_TTL_MS. */
-  private readonly counts = new Map<string, { at: number, value: Promise<SessionCounts> }>()
+  /** Per-session counts for `state`. See `sessionCounts`. */
+  private readonly counts = new Map<string, CountsEntry>()
   private heartbeat: NodeJS.Timeout | undefined
   private ticking = false
   private stopping = false
@@ -286,16 +319,19 @@ export class SessionManager {
   }
 
   /**
-   * The session's state. Its counts may be up to COUNTS_TTL_MS old unless
-   * `freshCounts` is set; everything else is read now.
+   * The session's state, everything but the counts read now. Counts per
+   * `counts`: `cached` (default) may be older than COUNTS_TTL_MS, `fresh` reads
+   * them now, `skip` leaves them out — health checks never use them. Either way
+   * a slow or failed count only leaves `stats` stale or absent (#224).
    */
-  async state(id: string, options: { freshCounts?: boolean } = {}): Promise<SessionState> {
-    const [row, counts] = await Promise.all([this.row(id), this.sessionCounts(id, options.freshCounts === true)])
+  async state(id: string, options: { counts?: CountsMode } = {}): Promise<SessionState> {
+    const mode = options.counts ?? 'cached'
+    const [row, counts] = await Promise.all([
+      this.row(id),
+      mode === 'skip' ? undefined : this.sessionCounts(id, mode === 'fresh'),
+    ])
     const rt = this.runtime(id)
-    return describe(rt, row, this.config.telegram !== undefined, {
-      chats: counts.chats,
-      messages: counts.messages,
-    }, counts.pending, this.backfillFor(row).days)
+    return describe(rt, row, this.config.telegram !== undefined, counts, this.backfillFor(row).days)
   }
 
   /**
@@ -305,7 +341,8 @@ export class SessionManager {
    * away from by hand.
    */
   async qr(id: string): Promise<{ state: SessionState, qr?: PairingQr }> {
-    const state = await this.state(id)
+    // Polled every two seconds by the pairing screen, which shows no counts.
+    const state = await this.state(id, { counts: 'skip' })
     return { state, qr: this.runtimes.get(id)?.pairing?.qr }
   }
 
@@ -938,36 +975,81 @@ export class SessionManager {
   }
 
   /**
-   * Chats, live messages and chats still backfilling, reused for COUNTS_TTL_MS
-   * and shared by concurrent callers. A failed read is not kept, so the next
-   * call asks again. Dropped wherever synced data is wiped, so a logout never
-   * reports the previous account's numbers.
+   * Chats, live messages and chats still backfilling, for `state`.
+   *
+   * Within COUNTS_TTL_MS the last read is served. Past it the last read is
+   * still served, and a read starts in the background (stale-while-revalidate).
+   * With nothing read yet, or `fresh`, the caller waits for a read — at most
+   * COUNTS_DEADLINE_MS, then gets the last read or nothing. One read per
+   * session at a time, shared by every caller; a failed read is logged (at most
+   * once a minute) and keeps the last good one. Dropped wherever synced data
+   * is wiped, so a logout never reports the previous account's numbers — a
+   * read still running then writes into the dropped entry, not the new one.
    *
    * The message count is an index-only scan on `messages_live_by_session`
-   * (migration 0003); before it, every call read each of the session's rows.
+   * (migration 0003) while the visibility map is current (#208); before it,
+   * every call read each of the session's rows.
    */
-  private async sessionCounts(id: string, fresh: boolean): Promise<SessionCounts> {
-    const cached = this.counts.get(id)
-    if (!fresh && cached && Date.now() - cached.at < COUNTS_TTL_MS) return await cached.value
+  private async sessionCounts(id: string, fresh: boolean): Promise<ReadCounts | undefined> {
+    let entry = this.counts.get(id)
+    if (!entry) {
+      entry = {}
+      this.counts.set(id, entry)
+    }
+    const last = entry.last
+    if (!fresh && last && Date.now() - last.at < COUNTS_TTL_MS) return last
 
-    const value = this.sql<{ chats: string, messages: string, pending: string }[]>`
+    const read = this.readCounts(id, entry)
+    if (!fresh && last) return last
+
+    let timer: NodeJS.Timeout | undefined
+    const deadline = new Promise<'slow'>((resolve) => {
+      timer = setTimeout(() => resolve('slow'), COUNTS_DEADLINE_MS)
+    })
+    const answer = await Promise.race([read, deadline]).finally(() => clearTimeout(timer))
+    if (answer === 'slow') {
+      this.logCounts(id, entry, `counts took longer than ${COUNTS_DEADLINE_MS} ms; answering ${entry.last ? 'with older ones' : 'without them'}`)
+      return entry.last
+    }
+    return answer ?? entry.last
+  }
+
+  /** Start a count read for `entry`, or join the one running. */
+  private readCounts(id: string, entry: CountsEntry): Promise<ReadCounts | undefined> {
+    if (entry.pending) return entry.pending
+    const at = Date.now()
+    const pending: Promise<ReadCounts | undefined> = this.sql<{ chats: string, messages: string, pending: string }[]>`
       SELECT (SELECT count(*) FROM chats WHERE session_id = ${id}) AS chats,
              (SELECT count(*) FROM messages WHERE session_id = ${id} AND deleted_at IS NULL) AS messages,
              (SELECT count(*) FROM chats WHERE session_id = ${id} AND backfill_stopped IS NULL) AS pending`
-      .then(([row]) => ({
-        chats: Number(row?.chats ?? 0),
-        messages: Number(row?.messages ?? 0),
-        pending: Number(row?.pending ?? 0),
-      }))
-    const entry = { at: Date.now(), value }
-    this.counts.set(id, entry)
-    try {
-      return await value
-    }
-    catch (error) {
-      if (this.counts.get(id) === entry) this.counts.delete(id)
-      throw error
-    }
+      .then(([row]) => {
+        const read: ReadCounts = {
+          at,
+          value: {
+            chats: Number(row?.chats ?? 0),
+            messages: Number(row?.messages ?? 0),
+            pending: Number(row?.pending ?? 0),
+          },
+        }
+        entry.last = read
+        return read
+      })
+      .catch((error: unknown) => {
+        this.logCounts(id, entry, `could not read counts: ${describeError(error)}`)
+        return undefined
+      })
+      .finally(() => {
+        if (entry.pending === pending) entry.pending = undefined
+      })
+    entry.pending = pending
+    return pending
+  }
+
+  private logCounts(id: string, entry: CountsEntry, message: string): void {
+    const now = Date.now()
+    if (entry.loggedAt !== undefined && now - entry.loggedAt < COUNTS_LOG_INTERVAL_MS) return
+    entry.loggedAt = now
+    console.warn(`[sessions] ${id}: ${message}`)
   }
 
   private async saveUpdateState(rt: Runtime): Promise<void> {
@@ -1027,7 +1109,7 @@ export class SessionManager {
         const row = await this.findRow(rt.id)
         if (!row?.webhook_url) return
 
-        const state = describe(rt, row, this.config.telegram !== undefined, { chats: 0, messages: 0 }, 0, this.backfillFor(row).days)
+        const state = describe(rt, row, this.config.telegram !== undefined, undefined, this.backfillFor(row).days)
         const signature = [state.state, state.sessionLost, state.revoked, state.pairing ?? ''].join('|')
         if (signature === rt.lastPublished) return
         rt.lastPublished = signature
@@ -1070,17 +1152,21 @@ function clearRetry(rt: Runtime): void {
   rt.retryAt = undefined
 }
 
-function describe(rt: Runtime, row: SessionRow, telegramConfigured: boolean, stats: SessionState['stats'], pendingBackfill: number, backfillDays: number): SessionState {
+function describe(rt: Runtime, row: SessionRow, telegramConfigured: boolean, counts: ReadCounts | undefined, backfillDays: number): SessionState {
   const base = {
     sessionLost: false,
     revoked: rt.revoked || row.revoked_at !== null,
     heldElsewhere: rt.heldElsewhere,
     lastError: rt.lastError,
-    stats,
+    stats: counts && {
+      chats: counts.value.chats,
+      messages: counts.value.messages,
+      asOf: new Date(counts.at).toISOString(),
+    },
     sync: {
       ...(rt.sync?.status() ?? { backfilling: false }),
       dialogsSyncedAt: row.dialogs_synced_at?.toISOString(),
-      pendingBackfill,
+      pendingBackfill: counts?.value.pending,
       backfillDays,
     },
     me: row.me_id

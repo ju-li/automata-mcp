@@ -31,7 +31,8 @@ import type { ConnectionState, InstanceKind } from '#shared/connection'
  * One connection's health, in the terms alerting needs, whatever its kind.
  *
  * Built from a live read — `getInstanceHealth()` for WhatsApp, the bridge's
- * `/state` for Telegram — and never from a stored column.
+ * `/state` for Telegram (`getTelegramHealth()`, no counts) — and never from a
+ * stored column.
  */
 type ConnectionHealth = {
   kind: 'whatsapp' | 'telegram'
@@ -113,7 +114,8 @@ async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 't
       }
     }
     case 'telegram': {
-      const status = await getTelegramStatus(instance)
+      // Health only, as for WhatsApp: no counts asked for, none computed (#224).
+      const status = await getTelegramHealth(instance)
       const linked = Boolean(status.telegramUserId)
       const unreachable = status.state === 'unknown' && !linked
       return {

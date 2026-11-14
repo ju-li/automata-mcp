@@ -1898,7 +1898,7 @@ export async function connectionState(
     case 'telegram':
       // Never throws: a bridge that cannot be asked answers `unknown`, for the
       // reason given above.
-      return await getTelegramStatus(instance)
+      return await getTelegramStatus(instance, { freshCounts: options.freshCounts })
     case 'imap':
       return await getImapHealth(instance)
     default:
