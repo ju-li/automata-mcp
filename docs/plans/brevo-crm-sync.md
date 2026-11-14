@@ -129,6 +129,7 @@ Each event only says which users are affected:
 | `user.signed_up`, `user.email_changed` | `user_id` |
 | `member.joined`, `member.removed`, `member.role_changed` | `user_id` |
 | `plan.changed` | every current member of `org` |
+| `user.deleted` | `user_id` — its contact is **deleted** (by `ext_id`, 404 = done), not refreshed |
 | everything else (`connection.*`, `token.*`, `usage.rollup`, `org.*`) | none; the cursor moves past them |
 
 For each pass, the consumer gathers the affected user ids into a set, which

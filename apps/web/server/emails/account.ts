@@ -8,7 +8,8 @@ import type { EmailBrand, RenderedEmail } from './layout.ts'
 /**
  * The account emails: signup verification (self and invited), already
  * registered, email-change verification, email-changed notice, invitation,
- * password reset (self and admin-requested), password-changed notice.
+ * password reset (self and admin-requested), password-changed notice,
+ * connector token request, account-deleted notice.
  * Copy comes from the "Account emails" boards on the Claude Design canvas;
  * the differences from it, and why, are listed in the PR that added them.
  *
@@ -304,6 +305,44 @@ export function passwordChangedNoticeEmail(p: {
       lead(what),
       rows([['Account', p.email], ['When', formatDateTime(p.changedAt)]]),
       body('If you made this change, there’s nothing to do. Connector tokens keep working: a password change doesn’t revoke them. Revoke one from its connection’s page if you think it has leaked.'),
+      divider(),
+      ...help,
+    ],
+  }, brand)
+}
+
+// ── 9 · account-deleted notice ─────────────────────────────────────────────
+
+export function accountDeletedNoticeEmail(p: {
+  email: string
+  deletedAt: Date
+  /** The account was its organization's only member, so the organization and its connections went too. */
+  orgDeleted: boolean
+}, brand: EmailBrand): RenderedEmail {
+  const what = p.orgDeleted
+    ? 'Your Automata account was deleted from its profile page. You were the only member of your organization, so the organization and every connection in it were deleted too, and their connector tokens stopped working.'
+    : 'Your Automata account was deleted from its profile page. Connector tokens issued to you stopped working. Your organization and its connections are unchanged.'
+  // Support means us only on our own deployment, as in the other notices.
+  const help = brand.hosted
+    ? [
+        body({ strong: 'Didn’t do this?' }, ' Someone had your password. Contact us right away.'),
+        button('Contact us', HOSTED_CONTACT_URL),
+      ]
+    : [
+        body({ strong: 'Didn’t do this?' }, ' Someone had your password. Contact an admin of your organization right away.'),
+      ]
+  return renderEmail({
+    subject: 'Your Automata account was deleted',
+    preview: p.orgDeleted
+      ? 'Your account, organization and connections were deleted.'
+      : 'Your account was deleted.',
+    reason: 'You’re getting this notice because the Automata account at this address was deleted. It is the last email you’ll get about it.',
+    blocks: [
+      eyebrow('Account deleted'),
+      heading('Your account was deleted.'),
+      lead(what),
+      rows([['Account', p.email], ['When', formatDateTime(p.deletedAt)]]),
+      body('This can’t be undone. You can sign up again with this address at any time, as a new account.'),
       divider(),
       ...help,
     ],

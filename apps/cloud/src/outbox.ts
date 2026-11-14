@@ -27,6 +27,7 @@ import { describeError } from './http-error.ts'
  *   user.signed_up, user.email_changed,
  *   member.joined / .removed / .role_changed   that user
  *   plan.changed                               every member of that organization
+ *   user.deleted                               delete that user's contact
  *
  * There is no reconcile behind it, so a contact that fails for a reason that
  * may pass (no answer, 5xx, rate limit, wrong key) stops the cursor just
@@ -152,6 +153,7 @@ export async function consumeCrmEvents(sql: Sql, crm: Crm): Promise<number> {
   // events of one signup collapse into one call.
   const firstEvent = new Map<string, bigint>()
   const facts = new Map<string, SignupFacts>()
+  const deleted = new Set<string>()
   const touch = (userId: string | undefined, id: bigint) => {
     if (userId && !firstEvent.has(userId)) firstEvent.set(userId, id)
   }
@@ -171,20 +173,31 @@ export async function consumeCrmEvents(sql: Sql, crm: Crm): Promise<number> {
       case 'plan.changed':
         if (event.org) for (const userId of await crm.membersOf(event.org)) touch(userId, id)
         break
+      case 'user.deleted':
+        touch(event.user_id, id)
+        if (event.user_id) deleted.add(event.user_id)
+        break
     }
   }
 
   const users = await crm.loadUsers([...firstEvent.keys()])
-  const counts: Record<Upserted | 'skipped', number> = { created: 0, claimed: 0, updated: 0, skipped: 0 }
+  const counts: Record<Upserted | 'skipped' | 'deleted', number> = { created: 0, claimed: 0, updated: 0, skipped: 0, deleted: 0 }
   let stoppedAt: bigint | undefined
   for (const [userId, eventId] of firstEvent) {
     const user = users.get(userId)
-    if (!user) {
-      // The app deletes no accounts today, so this should not happen.
-      console.warn(`[crm] user ${userId} (event ${eventId}) has no account any more; nothing to sync`)
-      continue
-    }
     try {
+      if (deleted.has(userId)) {
+        // Account deleted: its contact goes, whatever earlier events in the
+        // batch said about it. A user id is never reused, so nothing later
+        // can want the contact back.
+        counts[await crm.deleteContactOrSkip(userId, eventId)]++
+        continue
+      }
+      if (!user) {
+        // Deleted by an event in a later batch, which removes the contact.
+        console.info(`[crm] user ${userId} (event ${eventId}) has no account any more; nothing to sync`)
+        continue
+      }
       counts[await crm.upsertOrSkip(user, { facts: facts.get(userId), eventId })]++
     }
     catch (error) {
@@ -197,8 +210,8 @@ export async function consumeCrmEvents(sql: Sql, crm: Crm): Promise<number> {
 
   const last = stoppedAt === undefined ? BigInt(events.at(-1)!.id) : stoppedAt - 1n
   if (last > from) await advanceCursor(sql, CRM_CONSUMER, last)
-  if (counts.created || counts.claimed || counts.updated || counts.skipped) {
-    console.info(`[crm] contacts: ${counts.created} created, ${counts.claimed} claimed, ${counts.updated} updated, ${counts.skipped} skipped`)
+  if (counts.created || counts.claimed || counts.updated || counts.skipped || counts.deleted) {
+    console.info(`[crm] contacts: ${counts.created} created, ${counts.claimed} claimed, ${counts.updated} updated, ${counts.deleted} deleted, ${counts.skipped} skipped`)
   }
   return events.length
 }

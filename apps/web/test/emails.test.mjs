@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  alreadyRegisteredEmail, emailChangedNoticeEmail, emailChangeVerificationEmail,
+  accountDeletedNoticeEmail, alreadyRegisteredEmail, emailChangedNoticeEmail, emailChangeVerificationEmail,
   invitationEmail, invitedSignupVerificationEmail, passwordChangedNoticeEmail,
   passwordResetEmail, signupVerificationEmail, tokenRequestEmail,
 } from '../server/emails/account.ts'
@@ -54,6 +54,8 @@ const cases = {
   '7-password-changed-notice-self-hosted': passwordChangedNoticeEmail({ email: 'person@example.com', changedAt, how: 'profile' }, selfHosted),
   '8-token-request': tokenRequestEmail({ requesterName: 'Sam Lee', requesterEmail: 'sam@example.com', orgName: 'Acme', connectionName: 'Sales WhatsApp', tokenLabel: 'Claude desktop', url: `${hosted.appUrl}/instances/SAMPLE-id` }, hosted),
   '8-token-request-no-app-url': tokenRequestEmail({ requesterName: '', requesterEmail: 'sam@example.com', orgName: 'Acme', connectionName: 'Sales WhatsApp', tokenLabel: 'Claude desktop' }, noAppUrl),
+  '9-account-deleted-notice': accountDeletedNoticeEmail({ email: 'person@example.com', deletedAt: changedAt, orgDeleted: true }, hosted),
+  '9-account-deleted-notice-self-hosted': accountDeletedNoticeEmail({ email: 'person@example.com', deletedAt: changedAt, orgDeleted: false }, selfHosted),
 }
 
 function snapshotText(mail) {
@@ -215,4 +217,13 @@ test('password-changed notice: contact link in hosted mode only, says tokens kee
   assert.ok(cases['7-password-changed-notice'].text.includes('Every browser signed in to the account was signed out.'))
   assert.ok(cases['7-password-changed-notice-self-hosted'].text.includes('Every other browser'))
   assert.ok(cases['7-password-changed-notice'].text.includes('Connector tokens keep working'))
+})
+
+test('account-deleted notice: contact link in hosted mode only, says whether the organization went too', () => {
+  const withOrg = accountDeletedNoticeEmail({ email: 'person@example.com', deletedAt: changedAt, orgDeleted: true }, hosted)
+  const alone = accountDeletedNoticeEmail({ email: 'person@example.com', deletedAt: changedAt, orgDeleted: false }, selfHosted)
+  assert.ok(withOrg.text.includes(HOSTED_CONTACT_URL))
+  assert.ok(!alone.text.includes(HOSTED_CONTACT_URL))
+  assert.match(withOrg.text, /organization and every connection in it were deleted/)
+  assert.match(alone.text, /organization and its connections are unchanged/)
 })

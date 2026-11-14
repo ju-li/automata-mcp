@@ -327,6 +327,39 @@ export class Crm {
   }
 
   /**
+   * Delete the contact of an account the web app deleted (`user.deleted`),
+   * found by its `ext_id` like every other contact call, and forget what the
+   * daily pass last sent it. Brevo answering 404 is success — never created,
+   * or already gone. Answers `deleted`, or `skipped` (recorded in
+   * `cloud.crm_skipped`) when Brevo refuses for good; every other failure
+   * throws, for the consumer to stop on like an upsert.
+   *
+   * Lists go with the contact. That includes an unsubscribe recorded only on
+   * it: the address is not blocklisted afterwards, and signing up again
+   * creates a fresh contact from that signup's own consent.
+   */
+  async deleteContactOrSkip(userId: string, eventId: bigint): Promise<'deleted' | 'skipped'> {
+    this.requireSettings()
+    try {
+      await this.call('DELETE', `/contacts/${encodeURIComponent(userId)}?identifierType=ext_id`)
+    }
+    catch (error) {
+      if (!(error instanceof BrevoError)) throw error
+      if (error.status !== 404) {
+        if (error.kind !== 'permanent') throw error
+        await this.sql`
+          INSERT INTO cloud.crm_skipped (event_id, user_id, status, code)
+          VALUES (${eventId.toString()}, ${userId}, ${error.status}, ${error.code ?? null})
+        `
+        console.warn(`[crm] Brevo refused to delete the contact for user ${userId} (event ${eventId}): ${error.message}; recorded in cloud.crm_skipped`)
+        return 'skipped'
+      }
+    }
+    await this.sql`DELETE FROM cloud.crm_last_use WHERE user_id = ${userId}`
+    return 'deleted'
+  }
+
+  /**
    * Hold off further calls after a failure that is not this contact's fault:
    * until Brevo's rate limit resets, a minute for a wrong key, a pass for the
    * rest. Logs it — at most once per pause, since passes stop while paused.
@@ -384,7 +417,7 @@ export class Crm {
    * calls about attributes and lists: on a contact call the message may quote
    * the address, which must not reach the log.
    */
-  private async call(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown, options: { detail?: boolean } = {}): Promise<unknown> {
+  private async call(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, options: { detail?: boolean } = {}): Promise<unknown> {
     const settings = this.requireSettings()
     let response: Response
     try {
