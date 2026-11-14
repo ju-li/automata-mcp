@@ -37,7 +37,7 @@ interface StatusResponse {
   error?: string
   stats?: { messages: number, chats: number }
   /** `historyDays`: how far back this account's older history is fetched, from the bridge. */
-  sync?: { backfilling: boolean, pendingBackfill: number, dialogsSyncedAt?: string, pausedUntil?: string, historyDays?: number }
+  sync?: { backfilling: boolean, pendingBackfill?: number, dialogsSyncedAt?: string, pausedUntil?: string, historyDays?: number }
   /** Linking now fetches only recent history (`historyLimited`). Policy, not the linked account's fact. */
   historyLimitedByPlan?: boolean
 }
@@ -366,12 +366,12 @@ const count = new Intl.NumberFormat()
         :id="id"
         kind="telegram"
         :profile="{ name: data?.profileName || 'Telegram', detail: profileDetail }"
-        :stats="data?.stats ?? { messages: 0, chats: 0 }"
+        :stats="data?.stats"
         :can-read-messages="data?.instance.canReadMessages !== false"
       />
 
       <p class="text-xs text-muted-foreground">
-        <template v-if="data?.sync && data.sync.pendingBackfill > 0">
+        <template v-if="data?.sync?.pendingBackfill">
           Fetching older history: {{ count.format(data.sync.pendingBackfill) }}
           {{ data.sync.pendingBackfill === 1 ? 'chat' : 'chats' }} to go<template v-if="data.sync.pausedUntil">,
             paused by Telegram until {{ new Date(data.sync.pausedUntil).toLocaleTimeString() }}</template>.

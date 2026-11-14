@@ -1,6 +1,6 @@
 import type { AppInstance } from './app-db'
 import type { McpAuth } from './mcp-auth'
-import type { ConnectionState } from '#shared/connection'
+import { assertNever, type ConnectionState } from '#shared/connection'
 
 /**
  * The one client for a Telegram bridge (apps/telegram-bridge). The Telegram
@@ -113,13 +113,39 @@ export type BridgeSessionState = {
   heldElsewhere: boolean
   me?: { id: string, username?: string, name?: string, phone?: string }
   lastError?: string
-  stats: { chats: number, messages: number }
+  /**
+   * Absent when asked for none (`counts: 'skip'`) or when the bridge could not
+   * read them in time and has none from before (#224). `asOf` is when they were
+   * read; absent from an older bridge, which always sends counts.
+   */
+  stats?: { chats: number, messages: number, asOf?: string }
   /**
    * `backfillDays` is how far back the session's backfill reaches. Absent from a
    * bridge older than per-session caps, which is how `startTelegramPairing`
-   * tells that a cap it needs would be ignored.
+   * tells that a cap it needs would be ignored. `pendingBackfill` is absent
+   * whenever `stats` is.
    */
-  sync: { backfilling: boolean, pausedUntil?: string, dialogsSyncedAt?: string, pendingBackfill: number, backfillDays?: number }
+  sync: { backfilling: boolean, pausedUntil?: string, dialogsSyncedAt?: string, pendingBackfill?: number, backfillDays?: number }
+}
+
+/**
+ * What the bridge's state read does about counts: reuse its cache (default),
+ * read them now, or leave them out. A bridge older than #224 ignores `skip`
+ * and sends them anyway, so callers that skip must not read them.
+ */
+export type BridgeCounts = 'cached' | 'fresh' | 'skip'
+
+function stateQuery(counts: BridgeCounts): Record<string, string> | undefined {
+  switch (counts) {
+    case 'cached':
+      return undefined
+    case 'fresh':
+      return { fresh: 'counts' }
+    case 'skip':
+      return { counts: '0' }
+    default:
+      return assertNever(counts)
+  }
 }
 
 export type BridgeQr = {
@@ -170,7 +196,7 @@ export function createTelegramBridge(creds: TelegramCredentials) {
   const session = `/sessions/${encodeURIComponent(creds.sessionId)}`
 
   return {
-    state: () => client<BridgeSessionState>(`${session}/state`),
+    state: (counts: BridgeCounts = 'cached') => client<BridgeSessionState>(`${session}/state`, { query: stateQuery(counts) }),
     // `backfillDays` caps how far back this session's history is fetched; null
     // leaves the bridge's own setting. Stored by the bridge at every call.
     pair: (backfillDays: number | null) => client<BridgeSessionState>(`${session}/pair`, { method: 'POST', body: { backfillDays } }),
@@ -310,30 +336,59 @@ export type TelegramStatus = {
   username?: string
   number?: string
   error?: string
-  stats: { messages: number, chats: number }
-  /** `historyDays`: how far back this account's history is fetched, in days. Absent from an older bridge. */
-  sync?: { backfilling: boolean, pendingBackfill: number, dialogsSyncedAt?: string, pausedUntil?: string, historyDays?: number }
+  /**
+   * Synced chats and messages. Absent when they could not be read — the bridge
+   * unreachable, or its count too slow with nothing read before — which means
+   * unknown, never 0 (#224, the rule WhatsApp follows since #156). `asOf`: when
+   * the bridge read them.
+   */
+  stats?: { messages: number, chats: number, asOf?: string }
+  /**
+   * `historyDays`: how far back this account's history is fetched, in days.
+   * Absent from an older bridge. `pendingBackfill` is absent whenever `stats` is.
+   */
+  sync?: { backfilling: boolean, pendingBackfill?: number, dialogsSyncedAt?: string, pausedUntil?: string, historyDays?: number }
 }
+
+/** `TelegramStatus` without counts — what health checks read. */
+export type TelegramHealth = Omit<TelegramStatus, 'stats' | 'sync'>
 
 /**
  * A Telegram connection's state, from its bridge. Never throws: a bridge that
  * cannot be asked is `unknown` — not `close`, which reads as "not linked" and is
  * the wrong instruction — so the listing and the dashboard always render.
+ *
+ * `freshCounts` asks the bridge to read the counts now rather than from its
+ * cache. A slow count leaves `stats` out (or older, per `asOf`), never fails.
  */
-export async function getTelegramStatus(instance: AppInstance): Promise<TelegramStatus> {
-  const empty = { messages: 0, chats: 0 }
+export async function getTelegramStatus(instance: AppInstance, options: { freshCounts?: boolean } = {}): Promise<TelegramStatus> {
+  return await readTelegramStatus(instance, options.freshCounts ? 'fresh' : 'cached')
+}
+
+/**
+ * The state alone, for the alert sweep and the webhook: they run per connection
+ * every five minutes and read none of the counts, so they must not cause one to
+ * be computed (#224) — the counterpart of WhatsApp's `getInstanceHealth`. An
+ * older bridge ignores `counts=0` and sends counts anyway; they are dropped.
+ */
+export async function getTelegramHealth(instance: AppInstance): Promise<TelegramHealth> {
+  const { stats: _stats, sync: _sync, ...health } = await readTelegramStatus(instance, 'skip')
+  return health
+}
+
+async function readTelegramStatus(instance: AppInstance, counts: BridgeCounts): Promise<TelegramStatus> {
   const creds = telegramCredentialsForInstance(instance)
   if (!creds) {
-    return { state: 'unknown', error: 'This Telegram connection is not fully provisioned.', stats: empty }
+    return { state: 'unknown', error: 'This Telegram connection is not fully provisioned.' }
   }
 
   let bridge: BridgeSessionState
   try {
-    bridge = await createTelegramBridge(creds).state()
+    bridge = await createTelegramBridge(creds).state(counts)
   }
   catch (error) {
     console.error(`[telegram] could not read connection ${instance.id} from its bridge: ${httpStatusOf(error) ?? (error as Error | undefined)?.message}`)
-    return { state: 'unknown', error: 'Could not reach the Telegram bridge for this connection.', stats: empty }
+    return { state: 'unknown', error: 'Could not reach the Telegram bridge for this connection.' }
   }
 
   return {
@@ -349,10 +404,16 @@ export async function getTelegramStatus(instance: AppInstance): Promise<Telegram
       number: bridge.me.phone,
     }),
     ...(bridge.lastError && { error: bridge.lastError }),
-    stats: { messages: bridge.stats.messages, chats: bridge.stats.chats },
+    ...(bridge.stats && {
+      stats: {
+        messages: bridge.stats.messages,
+        chats: bridge.stats.chats,
+        ...(bridge.stats.asOf && { asOf: bridge.stats.asOf }),
+      },
+    }),
     sync: {
       backfilling: bridge.sync.backfilling,
-      pendingBackfill: bridge.sync.pendingBackfill,
+      ...(typeof bridge.sync.pendingBackfill === 'number' && { pendingBackfill: bridge.sync.pendingBackfill }),
       ...(bridge.sync.dialogsSyncedAt && { dialogsSyncedAt: bridge.sync.dialogsSyncedAt }),
       ...(bridge.sync.pausedUntil && { pausedUntil: bridge.sync.pausedUntil }),
       ...(typeof bridge.sync.backfillDays === 'number' && { historyDays: bridge.sync.backfillDays }),
