@@ -2,7 +2,7 @@ import { assertNever } from '#shared/connection'
 import { randomBytes } from 'node:crypto'
 import { rememberBounded } from './lookup-cache'
 import type { AppInstance } from './app-db'
-import type { EvolutionInstanceRecord } from './evolution-db'
+import type { EvolutionInstanceRecord, LastInbound } from './evolution-db'
 import type { ImapSecurity, ImapTarget } from './imap-client'
 import type { HostedEvent } from './hosted-events'
 import type { Actor } from './org'
@@ -55,14 +55,29 @@ export type InstanceStatus = {
   ownerJid?: string
   disconnectedAt?: string
   /**
+   * WhatsApp's timestamp of the newest live inbound message (#240) — the sign
+   * that messages are still arriving, which the counts are not (cached, raw
+   * rows, moved by a redelivered backlog). See `readLastInbound`. Absent when
+   * unknown: no message database, no timestamp index, or the read failed.
+   */
+  lastInboundAt?: string
+  /**
+   * Set instead of `lastInboundAt` when the read worked and found no inbound
+   * message since this time (`LAST_INBOUND_WINDOW_MS` ago). Absent with
+   * `lastInboundAt` absent too means unknown, never "none".
+   */
+  noInboundSince?: string
+  /**
    * Absent when the counts could not be measured in time (a count that hit the
    * statement timeout with nothing cached, or Evolution unreachable). Absent is
    * never zero: the dashboard shows it as unavailable. See `cachedSqlCounts`.
+   * `asOf`: when they were counted — they are cached, so they lag.
    */
   stats?: {
     messages: number
     chats: number
     contacts: number
+    asOf?: string
   }
 }
 
@@ -304,7 +319,8 @@ export async function provisionWhatsappInstance(
 
   try {
     record = await insertRow<AppInstance>('instances', {
-      // The organization owns it; `created_by` is provenance and grants nothing.
+      // The organization owns it; `created_by` grants management only alongside
+      // reach (`managesInstance`), never reach itself.
       org: actor.org.id,
       created_by: actor.user.id,
       kind: 'whatsapp',
@@ -650,7 +666,9 @@ export async function getImapHealth(instance: AppInstance): Promise<ConnectionHe
  * `sessionLost` is the disagreement between the two, and it is what tells a
  * dropped session from an account with no session at all. A fresh instance and
  * a logout both leave the column `close`, and a QR on screen leaves it
- * `connecting`; only a retried close leaves it `open` with nothing live behind it.
+ * `connecting`; on stock 2.3.7 only a retried close leaves it `open` with
+ * nothing live behind it. The fork (ju-li/evolution-api-v2) writes `connecting`
+ * for a retried close instead, and records why — `isSessionLost` reads both.
  *
  * **Where the row and the counts come from — and why not `fetchInstances`.**
  * That route answers with Prisma's `_count`, which counts every account's rows
@@ -907,7 +925,7 @@ export interface RowChurn {
  */
 export function rowChurn(
   stored: RowChurn,
-  read: { columnOpen: boolean, rowWrittenAt?: string },
+  read: ChurnRead,
   now = Date.now(),
 ): { churn: RowChurn, flapping: boolean } {
   const churn = nextChurn(stored, read, now)
@@ -921,11 +939,43 @@ export function isFlapping(churn: RowChurn, now = Date.now()): boolean {
   return seenAt - since >= CHURN_CONFIRM_MS && now - seenAt < CHURN_CONFIRM_MS
 }
 
-function nextChurn(stored: RowChurn, read: { columnOpen: boolean, rowWrittenAt?: string }, now: number): RowChurn {
-  const writtenAt = read.rowWrittenAt ? Date.parse(read.rowWrittenAt) : Number.NaN
-  if (Number.isNaN(writtenAt)) return stored
+/**
+ * What one status read tells `rowChurn`. `retryableClose` is the fork's record
+ * of a close it is retrying (`recordedRetryableClose`); stock 2.3.7 never
+ * supplies one.
+ */
+export interface ChurnRead {
+  columnOpen: boolean
+  rowWrittenAt?: string
+  retryableClose?: number
+}
 
-  if (!read.columnOpen || now - writtenAt >= ROW_RECENT_MS) return {}
+/**
+ * **On the fork the row is mostly `connecting` during a loop.** It writes
+ * `connecting` on every retried close and backs off up to 5 min, with the
+ * attempt count reset only after a minute of stable `open` — so a 440 loop
+ * slows to one brief `open` every 5 min, and a read rarely lands on it. Two
+ * rules keep `flapping` meaning the same on both images:
+ *
+ *   - a recorded `CONNECTION_REPLACED` (440) counts as a socket just opened:
+ *     a socket was open and another on the same credentials replaced it, and
+ *     the fork is about to try again. One replacement that recovers writes
+ *     `open` within seconds and stops counting like any reopen; 440 rows seen
+ *     for `CHURN_CONFIRM_MS` are a loop.
+ *   - any other recorded retryable close leaves the observation as it was: an
+ *     attempt in a loop can fail some other way (428, 408) between two
+ *     replacements, and must not end the episode; a plain dropped session
+ *     (egress blocked) never opens anything, so it never starts one, and a
+ *     stale observation lapses on its own.
+ */
+function nextChurn(stored: RowChurn, read: ChurnRead, now: number): RowChurn {
+  if (read.retryableClose !== undefined && read.retryableClose !== CONNECTION_REPLACED) return stored
+
+  if (read.retryableClose === undefined) {
+    const writtenAt = read.rowWrittenAt ? Date.parse(read.rowWrittenAt) : Number.NaN
+    if (Number.isNaN(writtenAt)) return stored
+    if (!read.columnOpen || now - writtenAt >= ROW_RECENT_MS) return {}
+  }
 
   const lastSeen = stored.seenAt ? Date.parse(stored.seenAt) : Number.NaN
   const continuing = stored.since !== undefined && now - lastSeen < CHURN_CONFIRM_MS
@@ -964,7 +1014,11 @@ const STALL_CLOCK_SKEW_MS = 30_000
  *     Evolution opened a socket since — a restart, a Reconnect, its own retry —
  *     so the evidence is about a socket that no longer exists: spent. 2.3.7
  *     writes the `"Instance"` row on every open (see `rowChurn`), and a stuck
- *     session writes nothing, which is what makes this the test.
+ *     session writes nothing, which is what makes this the test. The fork's
+ *     extra writes (`connecting` on every retried close) cannot spend it while
+ *     the column reads `open`: the newest write is then an open. A retry that
+ *     never reopened leaves the column `connecting` and live `connecting` — an
+ *     ordinary outage the fork itself recorded, reported as `sessionLost`.
  *   - No message database at all: never stalled. Nothing could tell a stuck
  *     session from a brief drop that already recovered, and mailing an
  *     organization about the second is the wrong trade — `flapping` makes the
@@ -996,10 +1050,97 @@ export function socketStalled(
   return { stalled: true, spent: false }
 }
 
+// ── dropped sessions, as the fork records them ──────────────────────────────
+/** Closes Evolution never retries — stock 2.3.7 and the fork agree (`codesToNotReconnect`). */
+const NOT_RETRIED_CLOSES = new Set([401, 403, 402, 406])
+/**
+ * Baileys' `restartRequired`: the restart right after a QR scan, which the fork
+ * retries at once. Not a dropped session — on a re-pair after a logout the row
+ * still carries the old `ownerJid`, and reading this as `sessionLost` would
+ * call a pairing in progress a lost session for the second it lasts.
+ */
+const RESTART_REQUIRED = 515
+/** Baileys' `connectionReplaced`: another socket on the same credentials took over. */
+const CONNECTION_REPLACED = 440
+/**
+ * How far apart `disconnectionAt` and `updatedAt` may be and still be one write.
+ * The fork sets both in one `instance.update` (`recordDisconnection`), from the
+ * same host clock, milliseconds apart; any later write — a QR, a logout's
+ * cleanup, an open — moves `updatedAt` on and leaves `disconnectionAt` behind.
+ */
+const DISCONNECTION_RECORD_SKEW_MS = 5_000
+
+/**
+ * The reason code of a retryable close Evolution is retrying right now, when
+ * the row says so — `undefined` otherwise.
+ *
+ * **Why the column is not enough on the fork.** Stock 2.3.7 leaves the column
+ * `open` while it retries a close, and `sessionLost` was built on exactly that
+ * disagreement. The fork (ju-li/evolution-api-v2 #6, #10, #51) writes
+ * `connecting` with `disconnectionAt` and `disconnectionReasonCode` on every
+ * close it retries, backs off to every 5 min and never gives up — so a dropped
+ * session reads column `connecting`, live `connecting`, the same as a QR
+ * waiting to be scanned. Only the recorded reason tells them apart.
+ *
+ * All four must hold:
+ *   - column `connecting` — the fork writes `close` only with a code it will
+ *     not retry; a `close` carrying a retryable code is a stale reason left
+ *     under a logout's cleanup (`cleaningUp` writes the column alone);
+ *   - a reason code that is set, not one of `NOT_RETRIED_CLOSES`, and not
+ *     `RESTART_REQUIRED`;
+ *   - `disconnectionAt` within `DISCONNECTION_RECORD_SKEW_MS` of `updatedAt`,
+ *     i.e. the row's newest write *is* that record. A logout during the backoff
+ *     followed by a re-pair leaves the old retryable code under a QR's
+ *     `connecting`; without this, that pairing would read as a lost session.
+ *     A write time this read could not get turns the rule off.
+ *
+ * **Stock 2.3.7 never matches**: it writes the reason only on a close it will
+ * not retry, so this is safe to ship before the Evolution switch.
+ */
+export function recordedRetryableClose(row: {
+  connectionStatus?: string
+  disconnectionAt?: string
+  disconnectionReasonCode?: number
+  rowWrittenAt?: string
+}): number | undefined {
+  const code = row.disconnectionReasonCode
+  if (row.connectionStatus !== 'connecting' || code === undefined) return undefined
+  if (NOT_RETRIED_CLOSES.has(code) || code === RESTART_REQUIRED) return undefined
+
+  const recordedAt = row.disconnectionAt ? Date.parse(row.disconnectionAt) : Number.NaN
+  const writtenAt = row.rowWrittenAt ? Date.parse(row.rowWrittenAt) : Number.NaN
+  if (Number.isNaN(recordedAt) || Number.isNaN(writtenAt)) return undefined
+  return Math.abs(writtenAt - recordedAt) <= DISCONNECTION_RECORD_SKEW_MS ? code : undefined
+}
+
+/**
+ * The account was linked, and Evolution's live socket is down with the phone
+ * still linked — answered by reconnecting, never by a QR scan.
+ *
+ *   - `ownerJid`: a fresh instance has none (written only on `open`, kept
+ *     through logout — so a logged-out account still needs the next arm to fail).
+ *   - live known and not `open`: `undefined` is Evolution not answering, which
+ *     says nothing about the session.
+ *   - column `open` (stock 2.3.7: a retried close touches only the in-memory
+ *     state), or a retryable close the fork recorded (`recordedRetryableClose`).
+ *     A logout (401 or the column alone) and a QR on screen match neither.
+ */
+export function isSessionLost(
+  row: { connectionStatus?: string, ownerJid?: string },
+  live: ConnectionState | undefined,
+  retryableClose: number | undefined,
+): boolean {
+  if (!row.ownerJid || live === undefined || live === 'open') return false
+  return row.connectionStatus === 'open' || retryableClose !== undefined
+}
+
 /** Drop what this module has cached about one connection. */
 export function forgetInstanceStatus(instanceId: string): void {
   apiRowCache.delete(instanceId)
-  countsCache.delete(instanceId)
+  // Not the SQL counts: they count stored rows, which a logout or reconnect does
+  // not touch, and dropping a large account's would put its count back on the
+  // request path. Deleting the connection drops them (`forgetInstanceCounts`).
+  lastInboundCache.delete(instanceId)
   historySettingCache.forget(instanceId)
   holdRefreshedAt.delete(instanceId)
 }
@@ -1014,11 +1155,13 @@ async function readStatus(
   const viaSql = canReadMessages(instance)
   const storedChurn: RowChurn = { since: instance.row_churn_since, seenAt: instance.row_churn_seen_at }
 
-  const [live, record, rowWrittenAt, sqlCounts] = await Promise.all([
+  const [live, record, rowWrittenAt, reasonCode, sqlCounts, lastInbound] = await Promise.all([
     liveConnectionState(evolution, instance).catch(() => undefined),
     viaSql ? sqlInstanceRecord(instance) : undefined,
     viaSql ? sqlRowWrittenAt(instance) : undefined,
+    viaSql ? sqlDisconnectionReason(instance) : undefined,
     viaSql && options.counts ? cachedSqlCounts(instance, Boolean(options.freshCounts)) : undefined,
+    viaSql && options.counts ? cachedLastInbound(instance) : undefined,
   ])
 
   let row: EvolutionInstanceRecord | undefined = record
@@ -1026,10 +1169,11 @@ async function readStatus(
   // No SQL counts at all (no message database, counts not asked for) or a
   // failed count that `fetchInstances` may stand in for. A slow count may not.
   const countsFromApi = options.counts && !stats && (sqlCounts?.fallback ?? true)
+  let api: EvolutionInstanceRow | undefined
   if (!row || countsFromApi) {
-    const api = await cachedApiRow(instance, evolution, live, Boolean(options.freshCounts))
+    api = await cachedApiRow(instance, evolution, live, Boolean(options.freshCounts))
     row ??= api
-    if (options.counts) stats ??= api && statsFromApiRow(api)
+    if (options.counts) stats ??= api && statsFromApiRow(api, apiRowCache.get(instance.id)?.at)
   }
 
   if (!row) {
@@ -1039,9 +1183,21 @@ async function readStatus(
 
   if (live === 'open' || row.ownerJid) notePaired(instance)
 
+  // Reason and write time from the source that supplied the row — the SQL
+  // row's two side reads, or the `fetchInstances` row, which carries both —
+  // never one source's column judged against the other's write time.
+  const fromApi = row !== record
+  const retryableClose = recordedRetryableClose({
+    connectionStatus: row.connectionStatus,
+    disconnectionAt: row.disconnectionAt ?? undefined,
+    disconnectionReasonCode: fromApi ? api?.disconnectionReasonCode ?? undefined : reasonCode,
+    rowWrittenAt: fromApi ? api?.updatedAt ?? undefined : rowWrittenAt,
+  })
+
   const { churn, flapping } = rowChurn(storedChurn, {
     columnOpen: row.connectionStatus === 'open',
     rowWrittenAt,
+    retryableClose,
   })
 
   // A loop is the stronger diagnosis and names the same fix; reporting both
@@ -1057,7 +1213,7 @@ async function readStatus(
 
   return {
     state: live ?? 'unknown',
-    sessionLost: row.connectionStatus === 'open' && live !== undefined && live !== 'open',
+    sessionLost: isSessionLost(row, live, retryableClose),
     flapping,
     ...(stalled && { stalled: true }),
     ...((flapping || stalled) && operatorAlertedAboutLoop(instance) && { operatorAlerted: true }),
@@ -1067,6 +1223,8 @@ async function readStatus(
     number: row.number ?? row.ownerJid?.split('@')[0],
     ownerJid: row.ownerJid ?? undefined,
     disconnectedAt: row.disconnectionAt ?? undefined,
+    ...(lastInbound?.at && { lastInboundAt: lastInbound.at }),
+    ...(lastInbound && !lastInbound.at && { noInboundSince: lastInbound.since }),
     stats,
   }
 }
@@ -1078,12 +1236,28 @@ async function readStatus(
 const COUNTS_TTL_MS = 5 * 60_000
 /** How fresh "fresh" is: two import-screen polls in a row share one count. */
 const FRESH_FLOOR_MS = 2_000
+/** From this many messages an account is counted only in the background (#244). */
+const LARGE_ACCOUNT_MESSAGES = 100_000
+/** How old a large account's counts may get before a background recount is started. */
+const LARGE_COUNTS_TTL_MS = 60 * 60_000
+/**
+ * How long counts are kept at all, here and in Redis — served stale, with their
+ * `asOf`, rather than not at all, to an account nobody has looked at for days.
+ * Every count, inline or background, starts the week again; an account read at
+ * least once a week therefore never loses its counts.
+ */
+const COUNTS_KEEP_MS = 7 * 24 * 60 * 60_000
+/** A background count that failed is not tried again for this long. */
+const BACKGROUND_COUNT_RETRY_MS = 10 * 60_000
 const API_ROW_TTL_MS = 5 * 60_000
 /** See `cachedApiRow`: a cached column that disagrees with the live state is re-read sooner. */
 const API_ROW_DISAGREE_TTL_MS = 60_000
 
-const countsCache = new Map<string, { at: number, stats: InstanceStats }>()
-const countsInFlight = new Map<string, Promise<InstanceStats>>()
+interface CountsEntry { at: number, stats: InstanceStats }
+const countsCache = new Map<string, CountsEntry>()
+const countsInFlight = new Map<string, Promise<CountsEntry>>()
+/** What other replicas, and the previous deploy, counted. See `sharedRecord`. */
+const sharedCounts = sharedRecord<CountsEntry>({ namespace: 'instance-counts', ttlMs: COUNTS_KEEP_MS })
 const apiRowCache = new Map<string, { at: number, row: EvolutionInstanceRow }>()
 const apiRowInFlight = new Map<string, Promise<EvolutionInstanceRow | undefined>>()
 
@@ -1127,9 +1301,52 @@ async function sqlRowWrittenAt(instance: AppInstance): Promise<string | undefine
 }
 
 /**
- * Per-account counts, cached for `COUNTS_TTL_MS`. Concurrent callers share one
- * query, as `contactDirectory()` does. `fallback` says whether `readStatus` may
- * ask `fetchInstances` for counts this could not give.
+ * The reason code of Evolution's last recorded close, or `undefined` for "none,
+ * or cannot tell" — never throws. Uncached, like the row it is judged with.
+ * Unreadable (a role granted before this column was read) turns off only the
+ * fork's arm of `sessionLost` — the stock rule is unaffected — so it is logged
+ * once per five minutes and has no fallback.
+ */
+async function sqlDisconnectionReason(instance: AppInstance): Promise<number | undefined> {
+  if (sqlDenied('disconnection reason', instance)) return undefined
+  try {
+    return await readInstanceDisconnectionReason(instance)
+  }
+  catch (error) {
+    noteSqlFallback('disconnection reason', instance, error, {
+      denied: '[instances] the Evolution database role cannot read "Instance"."disconnectionReasonCode", '
+        + 'so a dropped WhatsApp session on an Evolution that records retried closes reads as unpaired. '
+        + 'Add it to the status grants in docs/whatsapp.md "Reading and searching messages".',
+      failed: '[instances] could not read the reason of Evolution\'s last recorded close; dropped-session '
+        + 'detection falls back to the stored status alone:',
+    })
+    return undefined
+  }
+}
+
+/**
+ * Per-account counts. Concurrent callers share one query, as
+ * `contactDirectory()` does. `fallback` says whether `readStatus` may ask
+ * `fetchInstances` for counts this could not give.
+ *
+ * **Two kinds of account (#244).** One under `LARGE_ACCOUNT_MESSAGES` is counted
+ * on the request path and cached for `COUNTS_TTL_MS` — a few milliseconds even
+ * from disk. A larger one is **never counted on the request path**: its last
+ * counts are served whatever their age (up to `COUNTS_KEEP_MS`, a week; `asOf`
+ * says how old), and once they pass `LARGE_COUNTS_TTL_MS` a recount is queued
+ * for `countInBackground`, which has a minute rather than 10 s. Past the week
+ * they are not shown — a number that old misleads more than a dash — and the
+ * recount is still queued rather than run inline, since the account is known
+ * to be large. On the largest
+ * accounts (~2M messages) the count is ~90 ms warm and over 10 s with the index
+ * on disk, which is what kept timing out. Large is judged by the last count; an
+ * account with none yet that times out is queued in the background too, so the
+ * next read has an answer.
+ *
+ * Counts are shared through Redis (`sharedCounts`) when it is set, so replicas
+ * and the next deploy start from what was last counted rather than from
+ * nothing. In-process otherwise: after a restart the first read of a large
+ * account counts inline once, and may time out into the background.
  *
  * A failed recount serves the previous value if there is one — counts that are
  * a few minutes old are still right enough for a dashboard, and falling back to
@@ -1144,41 +1361,147 @@ async function sqlRowWrittenAt(instance: AppInstance): Promise<string | undefine
  * the dashboard shows as unavailable. Fallback stays for what it exists for: a
  * missing grant (42501) and a database that cannot be reached.
  *
- * A `fresh` read (the import screen) gets no stale counts on a slow count: a
- * repeated old total reads to it as "the import stopped moving".
+ * A `fresh` read (the import screen) always counts inline, large or not, and
+ * gets no stale counts on a slow count: a repeated old total reads to it as
+ * "the import stopped moving".
  */
 async function cachedSqlCounts(
   instance: AppInstance,
   fresh: boolean,
 ): Promise<{ stats?: InstanceStats, fallback: boolean }> {
-  const cached = countsCache.get(instance.id)
-  const maxAge = fresh ? FRESH_FLOOR_MS : COUNTS_TTL_MS
-  if (cached && Date.now() - cached.at < maxAge) return { stats: cached.stats, fallback: false }
+  let cached = countsCache.get(instance.id)
+  if (cached && servable(cached, fresh)) return { stats: countedAt(cached), fallback: false }
   if (sqlDenied('counts', instance)) return { fallback: true }
+
+  // Another replica, or the previous deploy, may have counted since.
+  const shared = await sharedCounts.read(instance.id)
+  if (shared && Number.isFinite(shared.at) && shared.stats && (!cached || shared.at > cached.at)) {
+    cached = shared
+    rememberBounded(countsCache, instance.id, shared, MAX_COUNTS_ENTRIES)
+    if (servable(cached, fresh)) return { stats: countedAt(cached), fallback: false }
+  }
+
+  if (!fresh && cached && isLargeAccount(cached)) {
+    countInBackground(instance)
+    const kept = Date.now() - cached.at < COUNTS_KEEP_MS
+    return { stats: kept ? countedAt(cached) : undefined, fallback: false }
+  }
 
   let counting = countsInFlight.get(instance.id)
   if (!counting) {
     counting = countInstanceRows(instance)
-      .then((stats) => {
-        countsCache.set(instance.id, { at: Date.now(), stats })
-        return stats
-      })
+      .then(stats => storeCounts(instance.id, stats))
       .finally(() => countsInFlight.delete(instance.id))
     countsInFlight.set(instance.id, counting)
   }
 
   try {
-    return { stats: await counting, fallback: false }
+    return { stats: countedAt(await counting), fallback: false }
   }
   catch (error) {
     if (isSlowCount(error)) {
+      // Too slow here is what a large account looks like before its first count.
+      if (isStatementTimeout(error)) countInBackground(instance)
       // Its own key, so a slow count's quiet window cannot hide a broken read's log.
       noteSqlFallback('slow counts', instance, error, slowCountWording(instance))
-      return { stats: fresh ? undefined : cached?.stats, fallback: false }
+      return { stats: fresh || !cached ? undefined : countedAt(cached), fallback: false }
     }
     noteSqlFallback('counts', instance, error)
-    return { stats: cached?.stats, fallback: true }
+    return { stats: cached && countedAt(cached), fallback: true }
   }
+}
+
+/** Whether these counts may be served as they are, without a recount. */
+function servable(entry: CountsEntry, fresh: boolean): boolean {
+  const age = Date.now() - entry.at
+  if (fresh) return age < FRESH_FLOOR_MS
+  return age < (isLargeAccount(entry) ? LARGE_COUNTS_TTL_MS : COUNTS_TTL_MS)
+}
+
+function isLargeAccount(entry: CountsEntry): boolean {
+  return entry.stats.messages >= LARGE_ACCOUNT_MESSAGES
+}
+
+/** Keep counts here and in Redis; answers the entry it stored. */
+function storeCounts(instanceId: string, stats: InstanceStats): CountsEntry {
+  const entry = { at: Date.now(), stats }
+  rememberBounded(countsCache, instanceId, entry, MAX_COUNTS_ENTRIES)
+  sharedCounts.write(instanceId, entry)
+  return entry
+}
+
+/** One per connection; far above any deployment's count, a bound rather than a limit. */
+const MAX_COUNTS_ENTRIES = 5_000
+
+// ── background counts (#244) ───────────────────────────────────────────────
+// One at a time per process, oldest request first: a cold count of a large
+// account reads its whole index from disk, and two of them side by side compete
+// for the same I/O they are each waiting on. Each runs on its own one-connection
+// pool (`countInstanceRows`' `background`), never on the slots readers share,
+// and is bounded twice — the statement timeout on the database, and a deadline
+// here for a user-supplied database that would ignore it, so one hung server
+// cannot stop every other account's counts. Not shared across replicas: two that
+// queue the same account at the same moment each count it once, which costs a
+// read, not a wrong answer; a replica that sees a newer count in Redis first does
+// not queue it at all.
+
+const backgroundQueue = new Map<string, AppInstance>()
+const backgroundFailedAt = new Map<string, number>()
+let backgroundCounting: string | undefined
+
+function countInBackground(instance: AppInstance): void {
+  if (backgroundQueue.has(instance.id) || backgroundCounting === instance.id) return
+  const failedAt = backgroundFailedAt.get(instance.id)
+  if (failedAt !== undefined && Date.now() - failedAt < BACKGROUND_COUNT_RETRY_MS) return
+
+  backgroundQueue.set(instance.id, instance)
+  if (backgroundCounting === undefined) {
+    drainBackgroundCounts().catch(error => console.error('[instances] background counts stopped:', error))
+  }
+}
+
+async function drainBackgroundCounts(): Promise<void> {
+  for (;;) {
+    const next = backgroundQueue.entries().next()
+    if (next.done) break
+    const [id, instance] = next.value
+    backgroundQueue.delete(id)
+    backgroundCounting = id
+    try {
+      const stats = await withDeadline(
+        countInstanceRows(instance, { background: true }),
+        BACKGROUND_COUNT_TIMEOUT_MS + 15_000,
+        `background count for connection ${id}`,
+      )
+      storeCounts(id, stats)
+      backgroundFailedAt.delete(id)
+    }
+    catch (error) {
+      rememberBounded(backgroundFailedAt, id, Date.now(), MAX_COUNTS_ENTRIES)
+      noteSqlFallback('background counts', instance, error, {
+        denied: `[instances] the Evolution database role cannot count messages for connection ${id}; `
+          + 'see the status grants in docs/whatsapp.md "Reading and searching messages".',
+        failed: `[instances] background count for connection ${id} failed; serving its last counts, `
+          + `retrying in ${BACKGROUND_COUNT_RETRY_MS / 60_000} minutes:`,
+      })
+    }
+    finally {
+      backgroundCounting = undefined
+    }
+  }
+}
+
+/** A deleted connection's counts: here, in Redis, and in the queue. */
+function forgetInstanceCounts(instanceId: string): void {
+  countsCache.delete(instanceId)
+  sharedCounts.forget(instanceId)
+  backgroundQueue.delete(instanceId)
+  backgroundFailedAt.delete(instanceId)
+}
+
+/** Cached counts with the time they were taken, which the dashboard shows beside them. */
+function countedAt(entry: { at: number, stats: InstanceStats }): InstanceStats {
+  return { ...entry.stats, asOf: new Date(entry.at).toISOString() }
 }
 
 /** A count that ran out of time, or never got a turn — not a broken read. */
@@ -1189,7 +1512,7 @@ function isSlowCount(error: unknown): boolean {
 /** Said once per five minutes like the others; no grant is involved. */
 function slowCountWording(instance: AppInstance): SqlFallbackWording {
   const failed = `[instances] counting messages for connection ${instance.id} was too slow; `
-    + 'serving the last counts (or none), not falling back to fetchInstances:'
+    + 'serving the last counts (or none), not falling back to fetchInstances, and counting it in the background:'
   return { denied: failed, failed }
 }
 
@@ -1241,11 +1564,61 @@ async function cachedApiRow(
   return fetching
 }
 
-function statsFromApiRow(row: EvolutionInstanceRow): InstanceStats {
+function statsFromApiRow(row: EvolutionInstanceRow, at: number | undefined): InstanceStats {
   return {
     messages: row._count?.Message ?? 0,
     chats: row._count?.Chat ?? 0,
     contacts: row._count?.Contact ?? 0,
+    ...(at !== undefined && { asOf: new Date(at).toISOString() }),
+  }
+}
+
+// ── last received ──────────────────────────────────────────────────────────
+
+/**
+ * How long one `readLastInbound` answer serves. Short: it is the dashboard's and
+ * the model's sign of life, and a minute is well under anything it is read
+ * against ("14 min ago"). Long enough that a 15 s dashboard poll and a burst of
+ * MCP status calls share one index probe.
+ */
+const LAST_INBOUND_TTL_MS = 60_000
+
+const lastInboundCache = new Map<string, { at: number, value: LastInbound | undefined }>()
+const lastInboundInFlight = new Map<string, Promise<LastInbound | undefined>>()
+
+/**
+ * `readLastInbound`, cached per connection — `undefined` for unknown, never
+ * throws. A failed read serves the previous answer for one more window if
+ * there is one: an older "last received" is still true, only less fresh.
+ * Failures are logged like the other status reads, never cached as an answer.
+ */
+async function cachedLastInbound(instance: AppInstance): Promise<LastInbound | undefined> {
+  const cached = lastInboundCache.get(instance.id)
+  if (cached && Date.now() - cached.at < LAST_INBOUND_TTL_MS) return cached.value
+  if (sqlDenied('last inbound', instance)) return undefined
+
+  let reading = lastInboundInFlight.get(instance.id)
+  if (!reading) {
+    reading = readLastInbound(instance)
+      .then((value) => {
+        lastInboundCache.set(instance.id, { at: Date.now(), value })
+        return value
+      })
+      .finally(() => lastInboundInFlight.delete(instance.id))
+    lastInboundInFlight.set(instance.id, reading)
+  }
+
+  try {
+    return await reading
+  }
+  catch (error) {
+    noteSqlFallback('last inbound', instance, error, {
+      denied: '[instances] the Evolution database role cannot read "Message" for the last received '
+        + 'time. Add the grants in docs/whatsapp.md "Reading and searching messages".',
+      failed: '[instances] could not read when a WhatsApp account last received a message; leaving it unknown:',
+    })
+    if (cached && Date.now() - cached.at < 2 * LAST_INBOUND_TTL_MS) return cached.value
+    return undefined
   }
 }
 
@@ -1618,7 +1991,9 @@ export async function deleteInstance(
     // A connection on its own server may hold a pool onto that server's message
     // database. Keyed on the row, so it outlives the row unless dropped here.
     await closeKeyedPool(`evo:${instance.id}`)
+    await closeKeyedPool(`evo:${instance.id}:counts`)
     forgetInstanceStatus(instance.id)
+    forgetInstanceCounts(instance.id)
 
     // Uses the same server the instance was created on, with that server's own
     // global key when it brought one.
@@ -1803,9 +2178,15 @@ export const RECENT_HISTORY_NOTE
 
 // ── internals ──────────────────────────────────────────────────────────────
 
-/** One row of `fetchInstances` — the record `readInstanceRecord` reads, plus Prisma's counts. */
+/**
+ * One row of `fetchInstances` — the record `readInstanceRecord` reads, plus Prisma's counts
+ * and the two columns the SQL path reads in statements of their own.
+ */
 interface EvolutionInstanceRow extends EvolutionInstanceRecord {
   name?: string
+  /** Prisma's `@updatedAt`, ISO 8601 — see `recordedRetryableClose`. */
+  updatedAt?: string | null
+  disconnectionReasonCode?: number | null
   _count?: { Message?: number, Chat?: number, Contact?: number }
 }
 
@@ -1897,7 +2278,7 @@ export async function connectionState(
     case 'telegram':
       // Never throws: a bridge that cannot be asked answers `unknown`, for the
       // reason given above.
-      return await getTelegramStatus(instance)
+      return await getTelegramStatus(instance, { freshCounts: options.freshCounts })
     case 'imap':
       return await getImapHealth(instance)
     default:

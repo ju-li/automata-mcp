@@ -76,10 +76,14 @@ export function describeState(
           label: 'Connection lost',
           variant: 'destructive',
           // Reconnect is offered only from `close` (`reconnectInstance`), so
-          // the other states name what does help instead.
+          // the other states name what does help instead. In `connecting`
+          // Evolution is retrying by itself — every few minutes on an Evolution
+          // that records retried closes, until WhatsApp can be reached.
           hint: state === 'close'
             ? 'WhatsApp dropped this account\'s connection. Evolution normally reconnects within seconds — if it stays like this, reconnect.'
-            : 'WhatsApp dropped this account\'s connection. Evolution normally reconnects within seconds — if it stays like this, restart the Evolution service.',
+            : state === 'connecting'
+              ? 'WhatsApp dropped this account\'s connection. The phone is still linked and Evolution is retrying by itself — if it stays like this, restart the Evolution service.'
+              : 'WhatsApp dropped this account\'s connection. Evolution normally reconnects within seconds — if it stays like this, restart the Evolution service.',
         }
       }
       switch (state) {

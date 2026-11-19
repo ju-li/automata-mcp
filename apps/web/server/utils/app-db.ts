@@ -98,6 +98,7 @@ async function prepare(): Promise<Sql> {
   try {
     const applied = await migrateAppDb(pool)
     if (applied.length) console.log(`[app-db] applied migrations: ${applied.join(', ')}`)
+    if (applied.includes(MESSAGE_AUTOVACUUM_MIGRATION)) await reportMessageAutovacuum(pool)
   }
   catch (cause) {
     console.error(
@@ -109,6 +110,37 @@ async function prepare(): Promise<Sql> {
   }
 
   return pool
+}
+
+const MESSAGE_AUTOVACUUM_MIGRATION = '0025_message_autovacuum'
+
+/**
+ * Say whether `0025_message_autovacuum` set Evolution's `"Message"` storage
+ * parameters or skipped them. The migration swallows its own failure so a boot
+ * is never held up by a table that isn't ours, and this pool silences notices,
+ * so without this a skip would leave no trace. Best effort: a failed read here
+ * says so and moves on.
+ */
+async function reportMessageAutovacuum(sql: Sql): Promise<void> {
+  try {
+    const [row] = await sql<{ exists: boolean, set: boolean }[]>`
+      SELECT to_regclass('public."Message"') IS NOT NULL AS exists,
+             COALESCE((SELECT reloptions @> ARRAY['autovacuum_vacuum_insert_scale_factor=0.01']
+                       FROM pg_catalog.pg_class
+                       WHERE oid = to_regclass('public."Message"')), false) AS set`
+    if (row?.set) console.log('[app-db] "Message" autovacuum settings applied')
+    else if (row?.exists) {
+      console.warn('[app-db] "Message" autovacuum settings skipped (this role does not own the table, or its '
+        + 'lock was busy). Apply them by hand: docs/whatsapp.md, "Vacuum \"Message\" more often".')
+    }
+    else {
+      console.log('[app-db] no "Message" table in the app database, so its autovacuum settings were not '
+        + 'applied. If Evolution uses a separate database, apply them there: docs/whatsapp.md.')
+    }
+  }
+  catch (cause) {
+    console.warn('[app-db] could not check "Message" autovacuum settings:', cause)
+  }
 }
 
 /**
@@ -214,6 +246,18 @@ export interface AppOrganization {
   id: string
   name: string
   created?: string
+  /**
+   * Whether members may create connections (admins always may). Read with the
+   * membership in `loadActor`; absent on an object built without it, which
+   * `membersMayCreateConnections` reads as on — the column default.
+   */
+  members_create_connections?: boolean
+  /**
+   * The user the first-run setup is for (the admin whose signup created the
+   * organization), until they finish or skip it. Read with the membership in
+   * `loadActor`. See server/utils/onboarding.ts.
+   */
+  onboarding_for?: string
 }
 
 /**
@@ -304,7 +348,9 @@ export interface AppInstance {
    */
   org: string
   /**
-   * Who created the connection. Provenance only — it grants nothing, and it is
+   * Who created the connection. Grants nothing on its own: a member who created
+   * it manages it only while they also reach it (`managesInstance`). Reach is
+   * never decided from this column. It is
    * empty on a row whose creator has since been removed.
    */
   created_by?: string
@@ -342,7 +388,7 @@ export interface AppInstance {
    */
   imap_host?: string
   imap_port?: number
-  imap_security?: '' | 'tls' | 'starttls'
+  imap_security?: '' | 'tls' | 'starttls' | 'none'
   imap_user?: string
   imap_password?: string
   label?: string
@@ -417,6 +463,21 @@ export interface AppMcpToken {
   tool_names: unknown
   /** Appended to every message the send tools send with this token. Absent = off. */
   send_disclaimer?: string
+  /**
+   * Set when a member asked for this token rather than a manager minting it.
+   * Pending while `approved_at` is absent: `resolveMcpAuth` refuses it, and
+   * rotation refuses it. See token-requests.ts.
+   */
+  requested_at?: string
+  approved_at?: string
+  approved_by?: string
+  /** The expiry preset the request asked for; `expires_at` is written at approval. */
+  requested_expiry?: string
+  /**
+   * Whether the holder has ever been shown a working secret. False for an
+   * approved request until they rotate ("Get token").
+   */
+  secret_issued: boolean
 }
 
 /** One recorded MCP tool call. See tool-calls.ts. */

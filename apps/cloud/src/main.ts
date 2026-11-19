@@ -2,11 +2,13 @@ import { Billing } from './billing.ts'
 import { type CloudConfig, loadConfig } from './config.ts'
 import { ConsentRegions } from './consent-region.ts'
 import { Crm } from './crm.ts'
+import { syncActivityDates } from './crm-activity.ts'
 import { connect, ensureCloudSchema, waitForApp } from './db.ts'
 import { createCloudServer } from './http.ts'
 import { describeError } from './http-error.ts'
 import { consumeBillingEvents, consumeCrmEvents } from './outbox.ts'
 import { applyPlanEntitlements, recordPlanChanges, writeEntitlementDefaults } from './plans.ts'
+import { SelfHostUpdates } from './self-host-updates.ts'
 
 /**
  * The hosted offering's service: everything the hosted deployment does that a
@@ -19,7 +21,10 @@ import { applyPlanEntitlements, recordPlanChanges, writeEntitlementDefaults } fr
  */
 
 const OUTBOX_INTERVAL_MS = 15_000
+/** How often to ask whether today's activity-date pass is due; a run happens once per UTC day. */
+const DAILY_CHECK_INTERVAL_MS = 10 * 60_000
 const RECONCILE_INTERVAL_MS = 60 * 60 * 1000
+const SELF_HOST_SYNC_INTERVAL_MS = 10 * 60_000
 
 // Defence in depth: every request path catches its own rejections; one that
 // slips through is logged and the process keeps serving. Exiting would stop
@@ -55,7 +60,8 @@ const billing = new Billing(sql, config.stripe, config.appUrl)
 const crm = new Crm(sql, config.brevo)
 const state = { appReady: false, stopped: false }
 const regions = new ConsentRegions(config.ipLookupUrl)
-const server = createCloudServer(billing, crm, regions, config, state)
+const selfHost = new SelfHostUpdates(sql, crm, config.brevo?.selfHostList, config.brevo?.selfHostDoi)
+const server = createCloudServer(billing, crm, regions, selfHost, config, state)
 
 // :: accepts IPv6 and IPv4 (legacy Railway private networking is IPv6-only).
 // A host with IPv6 disabled refuses :: outright, so fall back to IPv4 there.
@@ -80,7 +86,27 @@ if (!crm.configured) {
   }
 }
 
+if (selfHost.status === 'stored-only') {
+  console.info('[cloud] BREVO_SELF_HOST_LIST is not set — self-hoster update signups are stored and added to the list once it is.')
+}
+else if (selfHost.status === 'confirming') {
+  console.info('[cloud] self-hoster update signups confirm by email (BREVO_SELF_HOST_DOI_TEMPLATE) before joining the list.')
+}
+
 const timers: NodeJS.Timeout[] = []
+
+// Self-hoster update signups that did not reach Brevo when they arrived. Needs
+// only the cloud schema, so it does not wait for the web app.
+{
+  let running = false
+  timers.push(setInterval(() => {
+    if (running) return
+    running = true
+    selfHost.syncPending()
+      .catch(error => console.error(`[self-host] pass failed: ${describeError(error)}`))
+      .finally(() => { running = false })
+  }, SELF_HOST_SYNC_INTERVAL_MS))
+}
 
 /**
  * Once the web app's schema is there: publish Free's limits for new
@@ -101,7 +127,7 @@ async function startWork(): Promise<void> {
   console.info('[cloud] ready')
 
   /** Run `pass` every interval, skipping a tick while the previous pass is still going. */
-  const everyOutboxTick = (label: string, pass: () => Promise<unknown>) => {
+  const everyTick = (label: string, pass: () => Promise<unknown>, intervalMs = OUTBOX_INTERVAL_MS) => {
     let running = false
     timers.push(setInterval(() => {
       if (running) return
@@ -109,13 +135,17 @@ async function startWork(): Promise<void> {
       pass()
         .catch(error => console.error(`[${label}] pass failed: ${describeError(error)}`))
         .finally(() => { running = false })
-    }, OUTBOX_INTERVAL_MS))
+    }, intervalMs))
   }
 
-  everyOutboxTick('outbox', () => consumeBillingEvents(sql, billing))
+  everyTick('outbox', () => consumeBillingEvents(sql, billing))
   // A separate guard and cursor: a slow or paused Brevo never holds up seats
   // and cancellations, and the reverse.
-  if (crm.configured) everyOutboxTick('crm', () => consumeCrmEvents(sql, crm))
+  if (crm.configured) everyTick('crm', () => consumeCrmEvents(sql, crm))
+  // Last-call dates, once per UTC day (crm-activity.ts). Checked every ten
+  // minutes so a restart or a paused run resumes soon; the lease and the
+  // finished day keep it to one run per day across replicas.
+  if (crm.configured) everyTick('crm-activity', () => syncActivityDates(sql, crm), DAILY_CHECK_INTERVAL_MS)
 
   // The backstop for a lost webhook and a seat sync that failed: re-read every
   // billed organization. Idempotent, so several replicas may run it.

@@ -105,6 +105,34 @@ export function sharedCache<T>(options: SharedCacheOptions): SharedCache<T> {
   }
 }
 
+/**
+ * The Redis layer of `sharedCache` alone, for a value its caller refreshes on
+ * its own schedule rather than on a miss — today the message counts of large
+ * WhatsApp accounts (`cachedSqlCounts` in `instances.ts`, #244), counted in the
+ * background and served stale. The caller keeps its own in-process copy and
+ * decides how old is too old; this only lets replicas, and the next deploy, see
+ * what one of them counted. Same keys, same rules, same failure mode as
+ * `sharedCache`: no Redis, or Redis down, reads `undefined` and writes nothing.
+ */
+export interface SharedRecord<T> {
+  read: (key: string) => Promise<T | undefined>
+  write: (key: string, value: T) => void
+  forget: (key: string) => void
+}
+
+export function sharedRecord<T>(options: SharedCacheOptions): SharedRecord<T> {
+  const redisKey = (key: string) => `${KEY_PREFIX}${options.namespace}:${key}`
+  return {
+    read: key => redisGet<T>(redisKey(key)),
+    write: (key, value) => redisSet(redisKey(key), value, options.ttlMs),
+    forget(key) {
+      const client = readyRedis()
+      if (!client) return
+      client.del(redisKey(key)).catch(error => logRedisError('cache delete', error))
+    },
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 async function redisGet<V>(key: string): Promise<V | undefined> {

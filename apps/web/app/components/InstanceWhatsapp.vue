@@ -17,7 +17,15 @@ const props = withDefaults(defineProps<{
    * only — every control it hides is independently refused with a 403.
    */
   canManage?: boolean
-}>(), { canManage: false })
+  /**
+   * First-run setup (pages/welcome.vue): only the pairing and import screens,
+   * no header, dashboard, tokens or controls — setup shows those steps itself.
+   * Emits `paired` once the phone is linked.
+   */
+  setup?: boolean
+}>(), { canManage: false, setup: false })
+
+const emit = defineEmits<{ paired: [] }>()
 
 interface StatusResponse {
   instance: PublicInstanceRow
@@ -34,7 +42,11 @@ interface StatusResponse {
   profilePicUrl?: string
   number?: string
   /** Absent when the counts could not be measured in time — unknown, not zero. */
-  stats?: { messages: number, chats: number, contacts: number }
+  stats?: { messages: number, chats: number, contacts: number, asOf?: string }
+  /** When the account last received a message; absent = unknown. */
+  lastInboundAt?: string
+  /** Set instead when the server looked and found nothing received since then. */
+  noInboundSince?: string
   /**
    * The plan imports only the recent history WhatsApp sends any linked device,
    * and refuses a full-history import. Decided by the server.
@@ -340,11 +352,35 @@ watch(mode, (next, previous) => {
 
 onMounted(() => applyMode(mode.value))
 
+// Setup moves on once the phone is linked; the history import carries on
+// server-side whether or not this screen stays open.
+watch(mode, (next) => {
+  if (next === 'importing' || next === 'connected') emit('paired')
+}, { immediate: true })
+
 function restartPairing() {
   pairingTimedOut.value = false
   pairingStartedAt.value = Date.now()
   resumeQrPoll()
 }
+
+/**
+ * "Scan not working?" under the QR (#258). A scan that fails on the phone —
+ * camera app instead of WhatsApp, device limit, WhatsApp refusing the link —
+ * sends us nothing, so the page cannot tell the user what went wrong; all it
+ * can do is list the usual causes. Collapsed at first so the code stays the
+ * focus, opened once by itself after a couple of minutes with no scan. Opened
+ * only once: a user who closed it has read it.
+ */
+const SCAN_HELP_AFTER_MS = 2 * 60 * 1000
+const scanHelpOpen = ref(false)
+let scanHelpAutoOpened = false
+watch(now, () => {
+  if (scanHelpAutoOpened || mode.value !== 'pairing' || pairingTimedOut.value) return
+  if (Date.now() - pairingStartedAt.value < SCAN_HELP_AFTER_MS) return
+  scanHelpAutoOpened = true
+  scanHelpOpen.value = true
+})
 
 // ── actions ────────────────────────────────────────────────────────────────
 /**
@@ -358,7 +394,16 @@ function restartPairing() {
  * Evolution status, which is a worse thing to show someone than the sentence
  * below.
  */
-function backToPairing(path: string, success: string, failure: string) {
+/**
+ * Which of the two is signing the device out right now. Evolution's logout
+ * takes a few seconds, and the dashboard behind the closed confirm dialog
+ * gave no sign anything was happening — so the page swaps to a card saying so
+ * until the request returns, then pairing takes over.
+ */
+const signingOut = ref<'logout' | 'resync' | null>(null)
+
+function backToPairing(path: 'logout' | 'resync', success: string, failure: string) {
+  signingOut.value = path
   return run(
     async () => {
       await $fetch(`/api/instances/${id.value}/${path}`, { method: 'POST' })
@@ -370,8 +415,18 @@ function backToPairing(path: string, success: string, failure: string) {
       await refresh()
     },
     { success, failure, preferServerMessage: false },
-  )
+  ).finally(() => {
+    signingOut.value = null
+  })
 }
+
+/**
+ * Said inside the empty QR frame. After a sign-out Evolution needs a while
+ * before it hands out a new code, and a grey square that long reads as stuck.
+ */
+const qrWaiting = computed(() => pairingRequested.value
+  ? 'Getting a new code from WhatsApp. After signing out this can take up to a minute.'
+  : 'Getting a code from WhatsApp…')
 
 const disconnect = () => backToPairing(
   'logout',
@@ -393,6 +448,7 @@ const importHistory = () => backToPairing(
 <template>
   <div class="space-y-8">
     <InstanceHeader
+      v-if="!setup"
       :id="id"
       :label="data?.instance.label"
       :can-manage="canManage"
@@ -422,7 +478,22 @@ const importHistory = () => backToPairing(
       stuck, and the dashboard that follows would show counts of zero while the
       history is still arriving.
     -->
-    <Card v-if="mode === 'importing' || (mode === 'pairing' && justPaired)">
+    <!-- ── signing out: Disconnect / Import full history in flight ─────── -->
+    <Card v-if="signingOut">
+      <CardContent role="status" class="flex flex-col items-center gap-3 py-12 text-center">
+        <Loader2Icon class="size-8 animate-spin text-muted-foreground" />
+        <p class="font-medium">
+          {{ signingOut === 'resync' ? 'Preparing the history import…' : 'Disconnecting…' }}
+        </p>
+        <p class="max-w-md text-sm text-muted-foreground">
+          {{ signingOut === 'resync'
+            ? 'Signing this device out of WhatsApp. A new QR code appears here as soon as it\'s ready — scan it with the same phone to import your history.'
+            : 'Signing this device out of WhatsApp. A new QR code appears here as soon as it\'s ready.' }}
+        </p>
+      </CardContent>
+    </Card>
+
+    <Card v-else-if="mode === 'importing' || (mode === 'pairing' && justPaired)">
       <CardContent class="flex flex-col items-center gap-3 py-12 text-center">
         <Loader2Icon class="size-8 animate-spin text-muted-foreground" />
         <p class="font-medium">
@@ -436,7 +507,7 @@ const importHistory = () => backToPairing(
           {{ importProgress }}
         </p>
         <Button
-          v-if="mode === 'importing'"
+          v-if="mode === 'importing' && !setup"
           variant="ghost"
           size="sm"
           class="mt-2"
@@ -452,15 +523,46 @@ const importHistory = () => backToPairing(
       <CardHeader>
         <CardTitle>Scan to connect</CardTitle>
         <CardDescription>
-          On your phone: WhatsApp → Settings → Linked devices → Link a device.
+          Open WhatsApp on your phone, go to Linked devices (iPhone: Settings → Linked devices;
+          Android: ⋮ menu → Linked devices), tap Link a device, and scan this code.
+          Scan it from inside WhatsApp — the phone's camera app can't link a device.
         </CardDescription>
       </CardHeader>
       <CardContent class="flex flex-col items-center gap-4 pb-8">
-        <QrFrame :src="qr?.base64" alt="WhatsApp pairing QR code" :expired="pairingTimedOut" />
+        <QrFrame :src="qr?.base64" alt="WhatsApp pairing QR code" :expired="pairingTimedOut" :waiting="qrWaiting" />
 
         <p v-if="qr?.pairingCode" class="text-sm text-muted-foreground">
           Or enter code <code class="font-mono font-medium">{{ qr.pairingCode }}</code> on your phone.
         </p>
+
+        <details
+          class="w-full max-w-sm rounded-md border p-3 text-sm"
+          :open="scanHelpOpen"
+          @toggle="scanHelpOpen = ($event.target as HTMLDetailsElement).open"
+        >
+          <summary class="cursor-pointer font-medium">
+            Scan not working?
+          </summary>
+          <ul class="mt-2 list-disc space-y-1.5 pl-5 text-muted-foreground">
+            <li>
+              Scan from WhatsApp's Linked devices screen, not with the camera app.
+              A camera reads the code but can't link anything.
+            </li>
+            <li>Make sure WhatsApp is up to date and the phone is online.</li>
+            <li>
+              WhatsApp allows a limited number of linked devices. If Linked devices
+              already lists several, remove one you don't use and scan again.
+            </li>
+            <li>
+              Each code lasts under a minute and a new one replaces it here by itself.
+              Scan the one on screen now.
+            </li>
+            <li>
+              If WhatsApp says it couldn't link the device, wait a few minutes before
+              trying again. Many attempts in a row can get a number flagged.
+            </li>
+          </ul>
+        </details>
 
         <p v-if="removalMinutes !== undefined && removalMinutes > 0" class="max-w-sm text-center text-xs text-muted-foreground">
           A connection that isn't paired within an hour of being created is removed automatically.
@@ -488,6 +590,18 @@ const importHistory = () => backToPairing(
             Show a new code
           </Button>
         </div>
+      </CardContent>
+    </Card>
+
+    <!-- Setup: linked, and nothing else to show here. -->
+    <Card v-else-if="setup">
+      <CardContent class="py-10 text-center">
+        <p class="font-medium">
+          {{ mode === 'connected' ? 'WhatsApp connected' : display.label }}
+        </p>
+        <p class="mt-1 text-sm text-muted-foreground">
+          {{ mode === 'connected' ? (data?.profileName || data?.number || 'Your phone is linked.') : display.hint }}
+        </p>
       </CardContent>
     </Card>
 
@@ -579,10 +693,13 @@ const importHistory = () => backToPairing(
             may be stuck — restarting {{ evolutionServer }} usually reconnects it
             without a new scan.
           </template>
+          <!-- Evolution retries by itself here — on an Evolution that records
+               retried closes, every few minutes until WhatsApp answers — and
+               Reconnect is refused in `connecting`, so no button. -->
           <template v-else-if="state === 'connecting'">
-            Evolution is still trying to connect this account. If it does not settle
-            within a minute or two, restarting {{ evolutionServer }} reconnects it
-            without a new scan.
+            Evolution is retrying the connection by itself and brings it back
+            without a new scan once WhatsApp can be reached. If it stays down,
+            restarting {{ evolutionServer }} reconnects it without a new scan.
           </template>
           <template v-else>
             Evolution has no live connection for this account. Restarting
@@ -596,6 +713,7 @@ const importHistory = () => backToPairing(
         kind="whatsapp"
         :profile="{ name: data?.profileName || 'WhatsApp', detail: data?.number || '—', picUrl: data?.profilePicUrl }"
         :stats="data?.stats"
+        :last-received="{ at: data?.lastInboundAt, noneSince: data?.noInboundSince }"
         :can-read-messages="data?.instance.canReadMessages !== false"
       />
 
@@ -606,7 +724,7 @@ const importHistory = () => backToPairing(
         Your plan imports recent history only: when a device is linked, WhatsApp
         hands over the recent part of your conversations, and everything since is
         kept. Older messages are not imported.
-        <UpgradeLink v-if="canManage">
+        <UpgradeLink>
           to import an account's full history.
         </UpgradeLink>
       </p>
@@ -623,6 +741,7 @@ const importHistory = () => backToPairing(
       </p>
     </template>
 
+    <template v-if="!setup">
     <Separator />
 
     <DbUrlNotice v-if="needsDbUrl" :id="id" kind="whatsapp" @saved="refresh()" />
@@ -685,6 +804,7 @@ const importHistory = () => backToPairing(
           <DeleteConnectionDialog :id="id" :label="data?.instance.label" kind="whatsapp" />
         </div>
       </section>
+    </template>
     </template>
   </div>
 </template>

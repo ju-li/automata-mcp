@@ -37,6 +37,14 @@ export interface ScopedChat {
   updatedAt?: string
   /** When the last message was sent, ISO 8601, when Evolution's row carries one. */
   lastMessageAt?: string
+  /**
+   * Telegram only: why older history stops short of the chat's start — `count`
+   * (the per-chat message limit, which a manager can raise), `days` (the day
+   * limit), `skipped`, `inaccessible`. Absent while still fetching, or complete.
+   */
+  historyStopped?: 'count' | 'days' | 'skipped' | 'inaccessible'
+  /** Telegram only: the oldest message synced, when `historyStopped` is set. */
+  historyFrom?: string
 }
 
 /** One reachable Postgres relation, `schema.table`, case-sensitive. */

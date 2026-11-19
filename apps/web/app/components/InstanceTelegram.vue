@@ -2,7 +2,7 @@
 import { useIntervalFn } from '@vueuse/core'
 import { SendIcon } from '@lucide/vue'
 import { toast } from 'vue-sonner'
-import { TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
+import { TELEGRAM_FULL_HISTORY_DAYS, TELEGRAM_HISTORY_MESSAGES_PER_CHAT, TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
 
 /**
  * The link-and-dashboard panel for a Telegram connection. Chosen by
@@ -20,7 +20,14 @@ const props = withDefaults(defineProps<{
    * independently refused with a 403.
    */
   canManage?: boolean
-}>(), { canManage: false })
+  /**
+   * First-run setup (pages/welcome.vue): only the link screens, no header,
+   * dashboard, tokens or controls. Emits `paired` once the account is linked.
+   */
+  setup?: boolean
+}>(), { canManage: false, setup: false })
+
+const emit = defineEmits<{ paired: [] }>()
 
 interface StatusResponse {
   instance: PublicInstanceRow
@@ -35,9 +42,9 @@ interface StatusResponse {
   username?: string
   number?: string
   error?: string
-  stats?: { messages: number, chats: number }
+  stats?: { messages: number, chats: number, asOf?: string }
   /** `historyDays`: how far back this account's older history is fetched, from the bridge. */
-  sync?: { backfilling: boolean, pendingBackfill: number, dialogsSyncedAt?: string, pausedUntil?: string, historyDays?: number }
+  sync?: { backfilling: boolean, pendingBackfill?: number, dialogsSyncedAt?: string, pausedUntil?: string, historyDays?: number }
   /** Linking now fetches only recent history (`historyLimited`). Policy, not the linked account's fact. */
   historyLimitedByPlan?: boolean
 }
@@ -67,6 +74,16 @@ const pairingError = ref('')
 const password = ref('')
 
 type Mode = 'connected' | 'pairing' | 'lost' | 'unreachable' | 'unlinked'
+
+/**
+ * What a chat stopped at the per-chat message limit offers in the chats table:
+ * a manager loads more where the plan allows it, sees Upgrade where it does
+ * not; anyone else sees the fact. The server decides again on the request.
+ */
+const moreHistory = computed<'load' | 'upgrade' | 'view'>(() => {
+  if (!props.canManage) return 'view'
+  return data.value?.historyLimitedByPlan ? 'upgrade' : 'load'
+})
 
 /**
  * **Only a manager enters pairing mode**, for the reason InstanceWhatsapp gives:
@@ -199,6 +216,10 @@ watch(mode, (next, previous) => {
 
 onMounted(() => applyMode(mode.value))
 
+watch(mode, (next) => {
+  if (next === 'connected') emit('paired')
+}, { immediate: true })
+
 // ── actions ────────────────────────────────────────────────────────────────
 async function unlink() {
   await run(
@@ -217,11 +238,13 @@ async function unlink() {
 }
 
 const count = new Intl.NumberFormat()
+const hosted = useHosted()
 </script>
 
 <template>
   <div class="space-y-8">
     <InstanceHeader
+      v-if="!setup"
       :id="id"
       :label="data?.instance.label"
       :can-manage="canManage"
@@ -268,10 +291,20 @@ const count = new Intl.NumberFormat()
         </Button>
         <p v-if="data?.historyLimitedByPlan" class="text-xs text-muted-foreground">
           Your plan syncs the last {{ TELEGRAM_RECENT_HISTORY_DAYS }} days of history when an
-          account is linked; everything that arrives after that is kept.
+          account is linked, up to {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} messages
+          per chat, so a busy group may not reach back that far. Everything that arrives after
+          that is kept.
           <UpgradeLink>
-            before linking to sync further back.
+            before linking to sync further back and load more per chat.
           </UpgradeLink>
+        </p>
+        <!-- Pro on the hosted bridge; a self-hosted operator may have set other numbers. -->
+        <p v-else-if="hosted && data?.historyLimitedByPlan === false && data?.instance.ownServer !== true" class="text-xs text-muted-foreground">
+          Your plan syncs the last {{ TELEGRAM_FULL_HISTORY_DAYS }} days of history when an
+          account is linked, {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} messages per
+          chat to start. Everything after that is kept, and you can load
+          {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} more for any chat from its Chats
+          list, back to {{ TELEGRAM_FULL_HISTORY_DAYS }} days.
         </p>
         <p class="text-xs text-muted-foreground">
           This app signs in as an unofficial Telegram client, which Telegram watches
@@ -332,6 +365,18 @@ const count = new Intl.NumberFormat()
       </template>
     </Card>
 
+    <!-- Setup: linked (or an error worth reading), nothing else here. -->
+    <Card v-else-if="setup">
+      <CardContent class="py-10 text-center">
+        <p class="font-medium">
+          {{ mode === 'connected' ? 'Telegram account linked' : display.label }}
+        </p>
+        <p class="mt-1 text-sm text-muted-foreground">
+          {{ mode === 'connected' ? (profileDetail !== '—' ? profileDetail : 'Chats are syncing now.') : display.hint }}
+        </p>
+      </CardContent>
+    </Card>
+
     <!-- ── linked, or was ──────────────────────────────────────────────── -->
     <template v-else>
       <SessionLostNotice
@@ -366,12 +411,13 @@ const count = new Intl.NumberFormat()
         :id="id"
         kind="telegram"
         :profile="{ name: data?.profileName || 'Telegram', detail: profileDetail }"
-        :stats="data?.stats ?? { messages: 0, chats: 0 }"
+        :stats="data?.stats"
         :can-read-messages="data?.instance.canReadMessages !== false"
+        :more-history="moreHistory"
       />
 
       <p class="text-xs text-muted-foreground">
-        <template v-if="data?.sync && data.sync.pendingBackfill > 0">
+        <template v-if="data?.sync?.pendingBackfill">
           Fetching older history: {{ count.format(data.sync.pendingBackfill) }}
           {{ data.sync.pendingBackfill === 1 ? 'chat' : 'chats' }} to go<template v-if="data.sync.pausedUntil">,
             paused by Telegram until {{ new Date(data.sync.pausedUntil).toLocaleTimeString() }}</template>.
@@ -385,11 +431,14 @@ const count = new Intl.NumberFormat()
              plan, which changes nothing until the account is linked again. -->
         <template v-if="data?.sync?.historyDays !== undefined">
           Older history reaches back {{ count.format(data.sync.historyDays) }}
-          {{ data.sync.historyDays === 1 ? 'day' : 'days' }}.
+          {{ data.sync.historyDays === 1 ? 'day' : 'days' }}, up to
+          {{ count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT) }} messages per chat<template v-if="moreHistory === 'load'">;
+            open Chats to load more for one chat</template>.
         </template>
       </p>
     </template>
 
+    <template v-if="!setup">
     <Separator />
 
     <DbUrlNotice v-if="needsDbUrl" :id="id" kind="telegram" @saved="refresh()" />
@@ -430,6 +479,7 @@ const count = new Intl.NumberFormat()
           <DeleteConnectionDialog :id="id" :label="data?.instance.label" kind="telegram" />
         </div>
       </section>
+    </template>
     </template>
   </div>
 </template>

@@ -18,9 +18,12 @@ import { htmlToText } from './html-text'
  *   against it. A mail host is a user-chosen outbound target exactly as a DSN
  *   is, so `imap.example.com` resolving to this deployment's Postgres is the
  *   same attack.
- * - **No plaintext.** `starttls` sets `doSTARTTLS: true`, which makes the
- *   upgrade mandatory — imapflow's default would carry on in cleartext when the
- *   server (or someone on the path) omits STARTTLS from its capabilities.
+ * - **Plaintext only when the owner chose `none`.** `starttls` sets
+ *   `doSTARTTLS: true`, which makes the upgrade mandatory — imapflow's default
+ *   would carry on in cleartext when the server (or someone on the path) omits
+ *   STARTTLS from its capabilities. `none` sets `doSTARTTLS: false` (never
+ *   attempted), so plaintext is exactly the setting's meaning, never a silent
+ *   fallback from one of the other two.
  * - **Every mailbox is opened read-only (EXAMINE), and parts are fetched with
  *   BODY.PEEK.** Reading a message through this connector must not mark it read
  *   in the user's mail client.
@@ -36,7 +39,7 @@ import { htmlToText } from './html-text'
  *   the database.
  */
 
-export type ImapSecurity = 'tls' | 'starttls'
+export type ImapSecurity = 'tls' | 'starttls' | 'none'
 
 export interface ImapTarget {
   host: string
@@ -103,7 +106,7 @@ const SEARCH_MAX_FOLDERS = 20
 export function imapTargetOf(instance: AppInstance): ImapTarget | undefined {
   const { imap_host: host, imap_port: port, imap_security: security, imap_user: user, imap_password: password } = instance
   if (!host || !port || !user || !password) return undefined
-  if (security !== 'tls' && security !== 'starttls') return undefined
+  if (security !== 'tls' && security !== 'starttls' && security !== 'none') return undefined
   return { host, port, security, user, password }
 }
 
@@ -141,8 +144,9 @@ export async function openImap(
     host: address,
     port: target.port,
     secure: target.security === 'tls',
-    // Mandatory upgrade, never "if offered" — see the header.
-    ...(target.security === 'starttls' && { doSTARTTLS: true }),
+    // Mandatory upgrade, never "if offered"; `none` never attempts one — see
+    // the header.
+    doSTARTTLS: target.security === 'starttls',
     // Dialled by address, so the hostname has to be carried for SNI and for
     // certificate verification. An IP literal has nothing to send.
     ...(!isIP(target.host) && { servername: target.host }),

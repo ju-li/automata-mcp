@@ -3,7 +3,8 @@ import { toast } from 'vue-sonner'
 
 /**
  * Your own account: display name, email address, password, two-factor
- * authentication (`TwoFactorSettings.vue`, which asks for the password itself).
+ * authentication (`TwoFactorSettings.vue`, which asks for the password itself),
+ * deleting the account (`DeleteAccountDialog.vue`, the same).
  *
  * A page rather than a dialog: with two-factor settings underneath, the dialog
  * scrolled well past the viewport.
@@ -309,6 +310,20 @@ async function submitPassword() {
     <Card>
       <CardContent>
         <TwoFactorSettings />
+      </CardContent>
+    </Card>
+
+    <Card class="border-destructive/40">
+      <CardHeader>
+        <CardTitle>Delete account</CardTitle>
+        <CardDescription>
+          Permanently delete your account. If you are the only member of your
+          organization, the organization and every connection in it are
+          deleted too.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <DeleteAccountDialog />
       </CardContent>
     </Card>
   </div>

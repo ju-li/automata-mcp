@@ -74,7 +74,7 @@ export type McpAuth =
 interface McpTokenFacts extends Pick<AppMcpToken,
   'id' | 'assigned_to' | 'instance' | 'token_hash' | 'expires_at' | 'revoked'
   | 'all_chats' | 'chat_jids' | 'all_tables' | 'table_names' | 'all_tools' | 'tool_names'
-  | 'send_disclaimer'> {
+  | 'send_disclaimer' | 'requested_at' | 'approved_at'> {
   user_email?: string
   user_name?: string
   member_role?: OrgRole
@@ -84,7 +84,18 @@ interface McpTokenFacts extends Pick<AppMcpToken,
   record_tool_calls?: boolean
   tool_calls_required?: boolean
   assigned: boolean
+  /** `last_used_at` is unset or older than `LAST_USED_RESOLUTION`, by the DB's clock. */
+  last_used_due: boolean
 }
+
+/**
+ * How stale `mcp_tokens.last_used_at` may get before a request rewrites it.
+ * Every reader shows the day (token list, CRM's `LAST_MCP_USE`), so writing it
+ * on every request bought nothing and cost a row lock, a dead tuple and a WAL
+ * record per call — concurrent calls queued on the row lock, each holding an
+ * app-DB pool connection while it waited (#249).
+ */
+const LAST_USED_RESOLUTION = '1 minute'
 
 /** Mint a new token. The plaintext is returned once and never stored. */
 export function mintMcpToken(): { token: string, hash: string } {
@@ -160,7 +171,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     ;[record] = await sql<McpTokenFacts[]>`
       SELECT t.id, t.assigned_to, t.instance, t.token_hash, t.expires_at, t.revoked,
              t.all_chats, t.chat_jids, t.all_tables, t.table_names, t.all_tools, t.tool_names,
-             t.send_disclaimer,
+             t.send_disclaimer, t.requested_at, t.approved_at,
              u.email AS user_email, u.name AS user_name,
              m.role AS member_role, m.org AS member_org,
              o.max_connections, o.max_tokens,
@@ -168,7 +179,9 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
              EXISTS (
                SELECT 1 FROM app.instance_assignments a
                WHERE a.user_id = t.assigned_to AND a.instance = t.instance
-             ) AS assigned
+             ) AS assigned,
+             (t.last_used_at IS NULL
+               OR t.last_used_at < now() - ${LAST_USED_RESOLUTION}::interval) AS last_used_due
       FROM app.mcp_tokens t
       LEFT JOIN app.users u ON u.id = t.assigned_to
       LEFT JOIN app.memberships m ON m.user_id = t.assigned_to
@@ -194,6 +207,12 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   }
 
   if (record.revoked) return undefined
+  // A member's request no manager has approved. Its secret was never shown to
+  // anyone, but the row must not authenticate whatever is presented for it.
+  if (isPendingRequest(record)) {
+    console.warn(`[mcp-auth] token ${record.id} refused: its request is still awaiting approval`)
+    return undefined
+  }
   if (record.expires_at && new Date(record.expires_at).getTime() <= Date.now()) {
     return undefined
   }
@@ -288,9 +307,21 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
   }
 
   // Best-effort; a write failure must not fail an otherwise valid request.
-  void appDb()
-    .then(sql => sql`UPDATE app.mcp_tokens SET last_used_at = now() WHERE id = ${record.id}`)
-    .catch(() => {})
+  // At most once per `LAST_USED_RESOLUTION` per token (#249): skipped outright
+  // when the read above already saw a fresh value — no row lock at all — and
+  // conditional in SQL, so concurrent requests that all read it stale write
+  // once between them; the rest match nothing and leave no row version behind.
+  // Clock comparison stays in Postgres on both sides: app and DB clocks differ.
+  if (record.last_used_due) {
+    const tokenId = record.id
+    void appDb()
+      .then(sql => sql`
+        UPDATE app.mcp_tokens SET last_used_at = now()
+        WHERE id = ${tokenId}
+          AND (last_used_at IS NULL OR last_used_at < now() - ${LAST_USED_RESOLUTION}::interval)
+      `)
+      .catch(() => {})
+  }
 
   return auth
 }

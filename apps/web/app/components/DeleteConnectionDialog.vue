@@ -39,6 +39,7 @@ async function destroy() {
   await run(
     async () => {
       await $fetch(`/api/instances/${props.id}`, { method: 'DELETE' })
+      track('connection_deleted', { connection_id: props.id, kind: props.kind })
       await navigateTo('/instances')
     },
     {

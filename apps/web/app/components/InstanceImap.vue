@@ -80,12 +80,7 @@ function folderProgress(folder: MailFolderRow): string {
 }
 
 function ago(iso: string | undefined): string {
-  if (!iso) return 'never'
-  const minutes = Math.round((Date.now() - Date.parse(iso)) / 60_000)
-  if (minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes} min ago`
-  const hours = Math.round(minutes / 60)
-  return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`
+  return iso ? timeAgo(iso) : 'never'
 }
 
 const { busy, run } = useApiAction()

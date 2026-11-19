@@ -1,5 +1,162 @@
 # WhatsApp connections
 
+## Which Evolution
+
+The deployment's own Evolution server runs **`evolution-api-reforged` 3.1.0**,
+our fork of Evolution API
+([repo](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged),
+formerly `ju-li/evolution-api-v2`). Every file that names it pins its digest:
+`docker-compose.yml`, `docker-compose.dev.yml`, `docker/aio/Dockerfile` and
+[deploy-railway.md](deploy-railway.md). A bring-your-own Evolution server can
+still be stock `evoapicloud/evolution-api` 2.3.7, so the app works with both.
+Where this page says "2.3.7", the fork behaves the same unless listed here.
+
+What the fork changes, and why we run it:
+
+- **Baileys 7.0.0-rc14 instead of rc.9.** On rc.9, one offline message Baileys
+  can't decode (a reply from a `…@bot` account, for example) stops the
+  account's offline queue for the life of the connection. The account then
+  reads `open` but receives nothing until Evolution restarts. rc14 logs that one
+  message and carries on.
+- **Status updates are acknowledged.** Stock never acknowledges them, so WhatsApp
+  drops the connection about every 50 minutes and sends them again.
+- **A retried close is written to the `"Instance"` row** (`connecting` plus the
+  close's time and code), where stock leaves the row `open`. Retries back off
+  from 1 s to every 5 min and never give up, so an outage of any length recovers
+  by itself. The app tells a dropped session from a QR waiting to be scanned by
+  the recorded code (see the grant for `"disconnectionReasonCode"` below).
+- **One socket per account.** A new connection ends the one it replaces, and
+  `POST /instance/restart` takes a single path, so Evolution itself no longer
+  produces the two-socket loop described under "Stuck reconnecting". The app
+  still never sends that route.
+- **One row per message.** `"Message"` has a unique index,
+  `Message_instanceId_key_unique`. The app still collapses duplicates when
+  reading, for stock servers and for older rows. On a large table the index has
+  to be built before the switch: see below.
+- **It refuses to start** when `AUTHENTICATION_API_KEY` is empty or one of the
+  example keys published in Evolution's docs, and warns when the key is under
+  32 characters.
+
+- **Retries stop where they can't succeed** (3.1.0,
+  [#56](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/56)).
+  A QR code nobody scans stops after `QRCODE_LIMIT` codes (30 in our compose
+  files): the row goes to `close` and the half-made session is cleaned up, so
+  Evolution no longer shows QR codes for it at every boot. Opening the pairing
+  screen starts a new count. After `RECONNECT_CONFLICT_LIMIT` 440 closes in a
+  row (default 10, `0` = no limit), Evolution stops fighting the other client
+  but keeps the session; see "Stuck reconnecting". A connection that opens no
+  longer carries the last close's code on its row.
+- **Incoming events survive an Evolution restart** (3.1.0). Messages, receipts,
+  chats, contacts and group updates are written to a per-account Redis stream
+  before they're processed and removed once done, so a restart replays what was
+  still queued instead of losing it. This needs `CACHE_REDIS_ENABLED=true` (set
+  in our compose files and the all-in-one image) and a Redis that persists
+  (AOF or RDB; ours run with `--appendonly yes`). `GET
+  /instance/connectionState` also reports the queue's lag. Settings:
+  `EVENT_QUEUE_PERSIST`, `EVENT_QUEUE_ITEM_TIMEOUT_MS`,
+  `EVENT_QUEUE_MAX_ENTRY_BYTES`, `EVENT_QUEUE_MAX_LENGTH`; the defaults fit.
+
+### Moving from stock Evolution 2.3.7
+
+At its first start, the fork runs a migration that deduplicates `"Message"` and
+adds the unique index. It does this in one transaction that blocks writes to the
+table, and Evolution serves nothing until it finishes. A large table can take
+many minutes. If a valid index with exactly that definition already exists, the
+migration skips itself. So with more than a few hundred thousand messages, build
+the index first, while stock 2.3.7 keeps serving. Run the steps at a quiet hour,
+as the table owner, from a `psql` session with no `statement_timeout`:
+
+1. **Check free space** for the sort and the new index. Expect it to be about
+   the size of `Message_instanceId_keyId_idx` if you have that index; otherwise
+   about a tenth of the table.
+2. **Deduplicate one account at a time**, each in its own transaction. This
+   takes row locks only, so live writes keep flowing. The order of the window is
+   the migration's own: it decides which copy survives.
+
+   ```sql
+   SET statement_timeout = 0;
+   DO $$
+   DECLARE
+     inst text;
+     removed bigint;
+   BEGIN
+     FOR inst IN SELECT id FROM "Instance" ORDER BY id LOOP
+       CREATE TEMP TABLE _dedupe ON COMMIT DROP AS
+       SELECT id, keep_id
+       FROM (
+         SELECT id,
+                first_value(id) OVER w AS keep_id,
+                row_number()    OVER w AS rn
+         FROM "Message"
+         WHERE "instanceId" = inst AND key->>'id' IS NOT NULL
+         WINDOW w AS (
+           PARTITION BY (key->>'remoteJid'), (key->>'id'), ((key->>'fromMe')::boolean)
+           ORDER BY
+             (status IN ('EDITED', 'DELETED')) DESC NULLS LAST,
+             CASE status
+               WHEN 'PLAYED' THEN 5 WHEN 'READ' THEN 4 WHEN 'DELIVERY_ACK' THEN 3
+               WHEN 'SERVER_ACK' THEN 2 WHEN 'PENDING' THEN 1 ELSE 0
+             END DESC,
+             ("pushName" IS NOT NULL AND "pushName" !~ '@' AND "pushName" !~ '^[0-9+ ]+$') DESC,
+             id ASC
+         )
+       ) ranked
+       WHERE rn > 1;
+
+       UPDATE "MessageUpdate" mu SET "messageId" = d.keep_id
+       FROM _dedupe d WHERE mu."messageId" = d.id;
+
+       -- Media.messageId is unique: move one duplicate's media only when the survivor has none.
+       UPDATE "Media" m SET "messageId" = moved.keep_id
+       FROM (
+         SELECT DISTINCT ON (d.keep_id) md.id AS media_id, d.keep_id
+         FROM "Media" md
+         JOIN _dedupe d ON md."messageId" = d.id
+         WHERE NOT EXISTS (SELECT 1 FROM "Media" k WHERE k."messageId" = d.keep_id)
+         ORDER BY d.keep_id, md."createdAt" ASC NULLS LAST, md.id ASC
+       ) moved
+       WHERE m.id = moved.media_id;
+
+       DELETE FROM "Message" m USING _dedupe d WHERE m.id = d.id;
+       GET DIAGNOSTICS removed = ROW_COUNT;
+       RAISE NOTICE '% removed %', inst, removed;
+       COMMIT;
+     END LOOP;
+   END $$;
+   ```
+
+   `COMMIT` inside `DO` needs `psql` in autocommit mode, not inside `BEGIN`.
+3. **Reclaim the space and refresh the planner's statistics:** `VACUUM (ANALYZE) "Message";`
+4. **Build the index** while nobody is pairing, so no history import races live
+   traffic:
+
+   ```sql
+   CREATE UNIQUE INDEX CONCURRENTLY "Message_instanceId_key_unique"
+     ON "Message" ("instanceId", ("key"->>'remoteJid'), ("key"->>'id'), (("key"->>'fromMe')::boolean));
+   ```
+
+   If it fails because a duplicate landed during the build, run
+   `DROP INDEX CONCURRENTLY "Message_instanceId_key_unique";`, repeat step 2
+   (only the new duplicates remain, so it is quick), then build again.
+5. **Confirm** that
+   `SELECT indisvalid, indisunique FROM pg_index WHERE indexrelid = '"Message_instanceId_key_unique"'::regclass;`
+   returns `true, true`. The definition must be exactly the one above: with any
+   other definition under that name, the migration stops Evolution from starting
+   rather than rebuilding.
+6. **Switch the image soon after.** Until you do, stock 2.3.7 runs with the
+   index, so a duplicate it tries to store fails instead of being stored twice.
+
+Then check that the [indexes below](#indexes-on-evolutions-tables) are still
+there (`pg_indexes`). The migration doesn't touch them.
+
+**Rolling back to stock 2.3.7** was rehearsed against the migrated schema with
+the index in place
+([fork #33](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/33)
+§5): stock ignores what the fork added, and runs with the unique index as in
+step 6. Nothing the fork's migrations changed is undone by a rollback, and stock
+does not record retried closes or acknowledge status updates, so the problems
+the fork fixes come back.
+
 ## Reading and searching messages
 
 `NUXT_EVOLUTION_DATABASE_URL` is **required** for accounts on this deployment's
@@ -65,7 +222,7 @@ GRANT CONNECT ON DATABASE evolution TO wamcp_search;
 GRANT USAGE ON SCHEMA public TO wamcp_search;
 GRANT SELECT ON "Message" TO wamcp_search;
 -- Connection status: the account's own row and per-account counts.
-GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "updatedAt")
+GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "disconnectionReasonCode", "updatedAt")
   ON "Instance" TO wamcp_search;
 GRANT SELECT ("instanceId") ON "Chat", "Contact" TO wamcp_search;
 -- Group names, read from Evolution's own chat rows.
@@ -82,7 +239,13 @@ With this URL set, the dashboard, the connection list, the alert sweep and
 `get-connection-status` read the account's `"Instance"` row by primary key, and
 count only that account's rows, caching the counts for five minutes (the history
 import screen after pairing asks for them fresh; the alert sweep reads no counts
-at all). A role created before these grants existed still works: status falls
+at all). An account with 100,000 messages or more is never counted while a page
+waits: its last counts are shown with their age, and it is recounted in the
+background at most once an hour, one account at a time, on a connection of its
+own with a 60-second limit — on a cold disk, counting a few million rows can take
+longer than the 10 seconds other reads get. With `NUXT_REDIS_URL` set, counts are
+shared between replicas and survive a redeploy. Counts are kept for a week after
+the last count, so an account nobody opens for a few days still shows them. A role created before these grants existed still works: status falls
 back to `fetchInstances`, cached per connection for five minutes, and the web
 log says a grant is missing. A count that is only *slow* — it hit the statement
 timeout, or the account already has a read running — never falls back, since
@@ -96,6 +259,15 @@ else keeps working, the log says the column is unreadable, and loops go
 undetected. A stuck session (below) is then reported from the failed calls
 alone, for 30 minutes after the last one, since a reopen by Evolution can't be
 seen to clear it.
+
+`"disconnectionReasonCode"` is how a dropped session is recognised on an
+Evolution that records the closes it retries (the fork, see "Which
+Evolution" above): there the stored status reads `connecting` while
+Evolution retries, and the recorded reason is what tells that from a QR waiting
+to be scanned. Stock 2.3.7 never needs it. Without the grant, the log says the
+column is unreadable and, on the fork, a dropped session reads as needing a QR
+scan rather than as **Connection lost**. A role granted before this column was
+read: run the `"Instance"` line again with it added.
 
 ```bash
 NUXT_EVOLUTION_DATABASE_URL=postgres://wamcp_search:change-me@localhost:5432/evolution
@@ -116,6 +288,12 @@ app):
 CREATE INDEX CONCURRENTLY IF NOT EXISTS message_instance_ts_idx
   ON "Message" ("instanceId", "messageTimestamp" DESC);
 ```
+
+The dashboard's "Last message received" and `lastInboundAt` in
+`get-connection-status` also need this index. They read the account's newest
+inbound message, newest first, and stop at the first one. Without the index that
+read would cover every message the account holds on every status poll, so the
+app leaves the time unknown and logs once that the index is missing.
 
 **Index each chat's messages by time.** This one index serves two reads:
 
@@ -156,6 +334,28 @@ The plan should name the new index. If it still names `message_instance_ts_idx`
 or a sequential scan, `read-messages` gains nothing from it on that account, but
 keep it anyway: the chat listing still needs it. Like the indexes below, it
 lives on Evolution's table and must be re-checked after an image-tag bump.
+
+**Index the messages that link a LID to a phone number.** The app reads which
+LID chats belong to which phone numbers ([Chats addressed by
+LID](#chats-addressed-by-lid-lid)) from the few live messages that carry
+`remoteJidAlt`. Without this index that read opens every message in the
+account's LID chats; on an account with 1.9M messages it took 25 s and never
+finished inside the timeout, so its LID chats showed no phone number and were
+never merged. With it, and with the per-chat index above, the read walks the
+account's chats and the handful of rows this index holds (about 2,000 of 1.9M
+there):
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS message_lid_alt_idx
+  ON "Message" ("instanceId")
+  WHERE key ? 'remoteJidAlt';
+```
+
+The `WHERE` clause has to match the app's query word for word, or Postgres
+won't use the index; any btree index leading with `"instanceId"` under that
+exact clause counts, whatever its name. The app looks for it every ten minutes,
+uses the old read until it finds it, and logs once that it is missing. It needs
+the per-chat index above too; without that one the old read stays.
 
 **Index message text for search.** Without this index, `search-messages` and
 the dashboard's message filter read every message of the account on every
@@ -283,13 +483,24 @@ ALTER TABLE "Message" SET (autovacuum_vacuum_insert_scale_factor = 0.01,
                            autovacuum_vacuum_scale_factor = 0.05);
 ```
 
+The app applies this itself, once, in its migration `0025_message_autovacuum`,
+when `"Message"` is in the app's own database (`NUXT_DATABASE_URL`) and the
+app's role owns it — the default compose file, the all-in-one image and the
+Railway template. Otherwise it skips, never failing the boot, and the boot log
+says why (`[app-db] "Message" autovacuum settings …`). Run the statement above
+yourself when it skipped: Evolution on a separate database, a role that doesn't
+own the table, `"Message"` not created yet when the app first started, or the
+table recreated by an Evolution upgrade since. Check with
+`SELECT reloptions FROM pg_class WHERE oid = '"Message"'::regclass`.
+
 `SELECT relallvisible::float / relpages FROM pg_class WHERE oid = '"Message"'::regclass`
 should then stay close to 1.
 
 The trigram index and these storage parameters live on Evolution's tables, as
-`message_instance_ts_idx`, `message_instance_chat_ts_idx` and
-`message_body_trgm` do. They survive restarts, but a Prisma migration that
-recreates either table drops them without any warning. Re-check all five after
+`message_instance_ts_idx`, `message_instance_chat_ts_idx`,
+`message_lid_alt_idx` and `message_body_trgm` do. They survive restarts, but a
+Prisma migration that recreates either table drops them without any warning.
+Re-check all six after
 bumping Evolution's image tag. Both trigram indexes use `pg_trgm`'s operator
 class, so dropping the schema it lives in with `CASCADE` drops both.
 
@@ -362,7 +573,7 @@ Worth knowing before you go looking for a bug:
   GRANT CONNECT ON DATABASE evolution TO evo_reader;
   GRANT USAGE ON SCHEMA public TO evo_reader;
   GRANT SELECT ON "Message" TO evo_reader;
-  GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "updatedAt")
+  GRANT SELECT ("id", "connectionStatus", "ownerJid", "profileName", "profilePicUrl", "number", "disconnectionAt", "disconnectionReasonCode", "updatedAt")
     ON "Instance" TO evo_reader;
   GRANT SELECT ("instanceId") ON "Chat", "Contact" TO evo_reader;
   GRANT SELECT ("remoteJid", "name") ON "Chat" TO evo_reader;
@@ -460,6 +671,22 @@ Two sockets are logging in with the same credentials and replacing each other.
 Evolution 2.3.7 retries a 440 close at once with no backoff, and replaces its
 client without ending the old socket, so nothing inside Evolution ends it. The
 stored status reads `open` throughout.
+
+On the fork, Evolution no longer makes a second socket itself (see "Which
+Evolution"), and it retries a 440 with the same backoff as any other close.
+What's left is a second client using the same session: another Evolution
+pointed at the same `instances` volume or database, for example a staging copy,
+or an old container still running. Stop that one first; restarting ours alone
+starts the fight again.
+
+After `RECONNECT_CONFLICT_LIMIT` 440s in a row (default 10), the fork stops
+retrying and keeps the session. The row reads `close` with code 440. A restart
+does **not** bring such an account back, because Evolution only auto-connects
+rows that are `open` or `connecting`. Once the other client is gone, have an
+admin (or the member who created the connection) open its page in the app. It
+shows the pairing screen, whose first request asks Evolution to connect, and
+Evolution resumes the kept session without a QR scan. The app doesn't yet say
+that another client was holding the session.
 
 **Fix: restart the Evolution service.** On boot it reconnects every account whose
 status is `open` or `connecting` with one socket each. Every account drops

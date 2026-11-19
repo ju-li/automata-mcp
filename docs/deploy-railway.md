@@ -9,7 +9,7 @@ connections alone is **Postgres** and **web**.
 |---|---|---|---|
 | **Postgres** | Railway template | — | managed |
 | **Redis** *(WhatsApp only)* | Railway template | — | managed |
-| **evolution** *(WhatsApp only)* | image `evoapicloud/evolution-api:v2.3.7` | 8080 | `/evolution/instances` |
+| **evolution** *(WhatsApp only)* | image `ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.1.0` (pin the digest: see below) | 8080 | `/evolution/instances` |
 | **telegram-bridge** *(Telegram only)* | image `ghcr.io/ju-li/automata-mcp-telegram-bridge:1`, or this repo, root directory `/`, Dockerfile path `/apps/telegram-bridge/Dockerfile` | 8095 | — |
 | **web** | image `ghcr.io/ju-li/automata-mcp-web:1`, or this repo, root directory `/`, Dockerfile path `apps/web/Dockerfile` | Railway's `PORT` (8080 unless you set it) | — |
 
@@ -83,6 +83,18 @@ CACHE_LOCAL_ENABLED=false
 WEBHOOK_GLOBAL_ENABLED=false
 TELEMETRY_ENABLED=false
 ```
+
+**The image is our Evolution fork**, `evolution-api-reforged`
+([repo](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged)),
+not stock `evoapicloud/evolution-api`. Pin it by digest. The one this release is
+tested with is
+`ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.1.0@sha256:09a2b03c065c888a9e3b80212ce372a5dae9128cdfbc6f59450b0c71131daea3`,
+the same reference as `docker-compose.yml`. The fork **refuses to start** when
+`AUTHENTICATION_API_KEY` is empty or one of the example values published in
+Evolution's docs (`429683C4C977415CAAFCCE10F7D57E11`, `BQYHJGJHJ`), and warns
+under 32 characters. `openssl rand -hex 16` gives 32. Moving an existing
+deployment from stock 2.3.7 has a step to do first: see
+[whatsapp.md](whatsapp.md) "Moving from stock Evolution 2.3.7".
 
 `WEBHOOK_GLOBAL_ENABLED=false` is deliberate. The app registers a webhook **per
 connection** instead, and Evolution fires the global and per-instance deliveries

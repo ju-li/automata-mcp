@@ -12,6 +12,11 @@ import { assertNever } from '#shared/connection'
  */
 const props = defineProps<{ instance: InstanceListRow }>()
 
+const { user } = useSession()
+
+/** "Added by …", bottom right; nothing when the creator was never recorded. */
+const addedBy = computed(() => creatorLabel(props.instance.createdBy, user.value?.id))
+
 /**
  * What the card's two lines carry. A database and a mailbox both show where
  * they point and a line of health; only the messaging accounts have a profile
@@ -70,13 +75,15 @@ const secondary = computed(() => {
           <ConnectionBadge :state="instance.state" :kind="instance.kind" :lost="instance.sessionLost" :flapping="instance.flapping" :stalled="instance.stalled" />
         </div>
       </CardHeader>
-      <CardContent>
-        <p v-if="layout === 'target'" class="truncate text-sm text-muted-foreground">
+      <CardContent class="flex items-baseline justify-between gap-3 text-sm text-muted-foreground">
+        <p v-if="layout === 'target'" class="min-w-0 truncate">
           {{ instance.detail || (instance.kind === 'imap' ? 'IMAP mailbox' : 'PostgreSQL') }}
         </p>
-        <p v-else-if="instance.stats" class="text-sm text-muted-foreground tabular-nums">
+        <p v-else-if="instance.stats" class="min-w-0 truncate tabular-nums">
           {{ instance.stats.messages }} messages · {{ instance.stats.chats }} chats
         </p>
+        <span v-else />
+        <span v-if="addedBy" class="max-w-[50%] shrink-0 truncate text-xs">Added by {{ addedBy }}</span>
       </CardContent>
     </Card>
   </NuxtLink>

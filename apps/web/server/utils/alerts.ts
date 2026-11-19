@@ -31,7 +31,8 @@ import type { ConnectionState, InstanceKind } from '#shared/connection'
  * One connection's health, in the terms alerting needs, whatever its kind.
  *
  * Built from a live read — `getInstanceHealth()` for WhatsApp, the bridge's
- * `/state` for Telegram — and never from a stored column.
+ * `/state` for Telegram (`getTelegramHealth()`, no counts) — and never from a
+ * stored column.
  */
 type ConnectionHealth = {
   kind: 'whatsapp' | 'telegram'
@@ -113,7 +114,8 @@ async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 't
       }
     }
     case 'telegram': {
-      const status = await getTelegramStatus(instance)
+      // Health only, as for WhatsApp: no counts asked for, none computed (#224).
+      const status = await getTelegramHealth(instance)
       const linked = Boolean(status.telegramUserId)
       const unreachable = status.state === 'unknown' && !linked
       return {
@@ -620,7 +622,7 @@ function outageMail(instance: AppInstance, health: ConnectionHealth, canManage: 
     }
   }
 
-  const cause = health.kind === 'telegram' ? telegramOutageCause(health, canManage) : whatsappOutageCause(health, canManage)
+  const cause = health.kind === 'telegram' ? telegramOutageCause(health, canManage) : whatsappOutageCause(instance, health, canManage)
 
   return {
     subject: `${label} is disconnected`,
@@ -679,7 +681,27 @@ function evolutionStuckCause(instance: AppInstance, canManage: boolean, diagnosi
     : `${diagnosis} Nothing needs scanning; ${service}, and an admin of your organization has been told as well.`
 }
 
-function whatsappOutageCause(health: ConnectionHealth, canManage: boolean): string {
+/**
+ * A dropped session in `connecting` is Evolution retrying by itself — the fork
+ * (ju-li/evolution-api-v2) every few minutes until it lands, stock 2.3.7 on a
+ * socket that hung while connecting. Reconnect answers 409 there
+ * (`reconnectInstance`) and the dashboard offers no button, so the mail must
+ * not send anyone to press one: it says Evolution is on it, and who restarts
+ * the service if it stays down.
+ */
+function whatsappOutageCause(instance: AppInstance, health: ConnectionHealth, canManage: boolean): string {
+  if (health.sessionLost && health.state === 'connecting') {
+    const service = onDeploymentServer(instance)
+      ? 'whoever runs this deployment can restart its Evolution service'
+      : 'the Evolution server this connection uses can be restarted'
+    return canManage
+      ? 'The session dropped. The phone is still linked and Evolution is retrying the connection '
+        + 'by itself, so no QR scan is needed — it comes back once WhatsApp can be reached. If it '
+        + `stays down, ${service}.`
+      : 'The session dropped. The phone is still linked and Evolution is retrying the connection '
+        + 'by itself — no QR scan needed. If it stays down, an admin of your organization can see '
+        + 'to it.'
+  }
   return health.sessionLost
     ? canManage
       ? 'The session dropped. The phone is still linked, so reconnecting should be '
@@ -783,7 +805,11 @@ async function recipientsFor(instance: AppInstance): Promise<AlertRecipient[]> {
       assigned.has(member.userId),
     ))
     .filter(member => Boolean(member.email))
-    .map(member => ({ email: member.email, canManage: member.role === 'admin' }))
+    .map(member => ({
+      email: member.email,
+      // Already filtered to those who reach it, so only the management half is asked.
+      canManage: managesInstance({ role: member.role, userId: member.userId }, instance, true),
+    }))
 }
 
 /**

@@ -1,9 +1,13 @@
 /**
  * Who can use this connection, and who else could be given it.
  *
- * Admin-only, and it returns the whole roster rather than just the assigned
- * ones: the picker's job is to show both halves at once, and an admin can
- * already read the roster from `/api/org`.
+ * Manager-only (an admin, or the member who created the connection), and it
+ * returns the whole roster rather than just the assigned ones: the picker's job
+ * is to show both halves at once, and every member can already read the roster
+ * from `/api/org`.
+ *
+ * Admins also get the pending member invitations: ticking one gives the
+ * connection to that person the moment they accept (see `markInviteAccepted`).
  *
  * Admins are listed as reaching the connection without holding an assignment
  * row, because they do — they reach every connection in the organization. A
@@ -26,8 +30,15 @@ export default defineEventHandler(async (event) => {
     assigned: assigned.has(member.userId),
     /** True for admins: reachable, but not through an assignment row. */
     implicit: member.role === 'admin',
+    /** Created this connection: manages it for as long as they keep access. */
+    creator: Boolean(instance.created_by) && instance.created_by === member.userId,
     tokens: await countTokensOn(member.userId, instance.id),
   })))
 
-  return { members: rows }
+  // Pending member invitations, for admins only: who has been invited is an
+  // admin's view of the organization (`/api/org` carries it for them alone),
+  // and a member who created this connection manages it, not the roster.
+  const invites = actor.role === 'admin' ? await listInviteAssignments(actor.org.id, instance.id) : []
+
+  return { members: rows, invites }
 })

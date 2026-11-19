@@ -14,5 +14,16 @@ export default defineEventHandler(async (event) => {
 
   if (!userId) throw createError({ statusCode: 404, statusMessage: 'Not found' })
 
+  // A member manages only through their own assignment (`managesInstance`), so
+  // removing it would lock them out of the connection they are managing — and
+  // revoke their tokens on it — in one click. An admin can still take a
+  // member-created connection away from its creator; that is the admin's lever.
+  if (actor.role !== 'admin' && userId === actor.user.id) {
+    throw createError({
+      statusCode: 409,
+      statusMessage: 'You would lose access to this connection. Ask an admin to remove you, or delete the connection.',
+    })
+  }
+
   return { ok: true, ...await unassignInstance(actor.org.id, instance.id, userId) }
 })

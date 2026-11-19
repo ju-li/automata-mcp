@@ -123,7 +123,7 @@ function incompleteNote(page: number, bounded: boolean): string {
 
 const STOPPED_BECAUSE: Record<NonNullable<TelegramHistory['stoppedBecause']>, string> = {
   days: 'they are older than the period this connection syncs',
-  count: 'this chat has more messages than this connection syncs per chat',
+  count: 'this chat has more messages than this connection syncs per chat (whoever manages the connection can load more from its Chats list in the web app)',
   skipped: 'the history of broadcast channels is not synced — only what arrived after the account was linked',
   inaccessible: 'Telegram did not let this account read the chat\'s history',
 }

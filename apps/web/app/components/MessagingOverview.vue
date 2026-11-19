@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { Component } from 'vue'
 import { BookUserIcon, MessageSquareTextIcon, MessagesSquareIcon, SendIcon, SmartphoneIcon } from '@lucide/vue'
+import { useNow } from '@vueuse/core'
 import { assertNever } from '#shared/connection'
 
 /**
@@ -18,9 +19,17 @@ const props = defineProps<{
   /**
    * Absent when the counts could not be measured in time; the cards then show a
    * dash rather than a 0 that reads as an empty account. `contacts` is absent
-   * for a kind that keeps none.
+   * for a kind that keeps none. `asOf`: when they were counted — they are
+   * cached, so the line under the cards says how old they are.
    */
-  stats?: { messages: number, chats: number, contacts?: number }
+  stats?: { messages: number, chats: number, contacts?: number, asOf?: string }
+  /**
+   * WhatsApp only: when the account last received a message (`at`), or that it
+   * received none since `noneSince`. Absent: unknown, and nothing is said —
+   * the counts are not offered as a stand-in, since they lag and count stored
+   * rows rather than arrivals (#240).
+   */
+  lastReceived?: { at?: string, noneSince?: string }
   /**
    * Messages is clickable only where the table behind it can answer. Reading
    * goes to the backend's own database, and a connection that has not been
@@ -28,6 +37,8 @@ const props = defineProps<{
    * `DbUrlNotice` explains at length.
    */
   canReadMessages: boolean
+  /** Telegram only: passed to the chats table. See `ChatsDialog`'s prop. */
+  moreHistory?: 'load' | 'upgrade' | 'view'
 }>()
 
 /** Stands in for a profile picture, which only WhatsApp provides. */
@@ -53,6 +64,19 @@ const hasContacts = computed(() => {
       return assertNever(props.kind, 'connection kind')
   }
 })
+
+/** Ticks so "14 min ago" keeps moving between status polls. */
+const now = useNow({ interval: 30_000 })
+
+const receivedLine = computed(() => {
+  const received = props.lastReceived
+  if (received?.at) return `Last message received ${timeAgo(received.at, now.value.getTime())}`
+  if (received?.noneSince) return `No message received since ${formatDate(received.noneSince)}`
+  return ''
+})
+
+const countsLine = computed(() =>
+  props.stats?.asOf ? `Counts as of ${timeAgo(props.stats.asOf, now.value.getTime())}` : '')
 
 const chatsOpen = ref(false)
 const messagesOpen = ref(false)
@@ -108,6 +132,16 @@ const contactsOpen = ref(false)
       clickable
       @click="contactsOpen = true"
     />
+
+    <!-- Inside the grid, full width, so it sits just under the cards rather than
+         a whole section gap below them. -->
+    <p v-if="receivedLine || countsLine" class="col-span-full -mt-2 text-xs text-muted-foreground">
+      <span v-if="receivedLine" :title="lastReceived?.at && formatDateTime(lastReceived.at)">{{ receivedLine }}</span>
+      <template v-if="receivedLine && countsLine">
+        ·
+      </template>
+      <span v-if="countsLine" :title="stats?.asOf && formatDateTime(stats.asOf)">{{ countsLine }}</span>
+    </p>
   </div>
 
   <ChatsDialog
@@ -115,6 +149,7 @@ const contactsOpen = ref(false)
     :instance-id="id"
     :kind="kind"
     :total="stats?.chats"
+    :more-history="moreHistory"
   />
 
   <MessagesDialog

@@ -8,7 +8,8 @@ import type { EmailBrand, RenderedEmail } from './layout.ts'
 /**
  * The account emails: signup verification (self and invited), already
  * registered, email-change verification, email-changed notice, invitation,
- * password reset (self and admin-requested), password-changed notice.
+ * password reset (self and admin-requested), password-changed notice,
+ * connector token request, account-deleted notice.
  * Copy comes from the "Account emails" boards on the Claude Design canvas;
  * the differences from it, and why, are listed in the PR that added them.
  *
@@ -306,6 +307,82 @@ export function passwordChangedNoticeEmail(p: {
       body('If you made this change, there’s nothing to do. Connector tokens keep working: a password change doesn’t revoke them. Revoke one from its connection’s page if you think it has leaked.'),
       divider(),
       ...help,
+    ],
+  }, brand)
+}
+
+// ── 9 · account-deleted notice ─────────────────────────────────────────────
+
+export function accountDeletedNoticeEmail(p: {
+  email: string
+  deletedAt: Date
+  /** The account was its organization's only member, so the organization and its connections went too. */
+  orgDeleted: boolean
+}, brand: EmailBrand): RenderedEmail {
+  const what = p.orgDeleted
+    ? 'Your Automata account was deleted from its profile page. You were the only member of your organization, so the organization and every connection in it were deleted too, and their connector tokens stopped working.'
+    : 'Your Automata account was deleted from its profile page. Connector tokens issued to you stopped working. Your organization and its connections are unchanged.'
+  // Support means us only on our own deployment, as in the other notices.
+  const help = brand.hosted
+    ? [
+        body({ strong: 'Didn’t do this?' }, ' Someone had your password. Contact us right away.'),
+        button('Contact us', HOSTED_CONTACT_URL),
+      ]
+    : [
+        body({ strong: 'Didn’t do this?' }, ' Someone had your password. Contact an admin of your organization right away.'),
+      ]
+  return renderEmail({
+    subject: 'Your Automata account was deleted',
+    preview: p.orgDeleted
+      ? 'Your account, organization and connections were deleted.'
+      : 'Your account was deleted.',
+    reason: 'You’re getting this notice because the Automata account at this address was deleted. It is the last email you’ll get about it.',
+    blocks: [
+      eyebrow('Account deleted'),
+      heading('Your account was deleted.'),
+      lead(what),
+      rows([['Account', p.email], ['When', formatDateTime(p.deletedAt)]]),
+      body('This can’t be undone. You can sign up again with this address at any time, as a new account.'),
+      divider(),
+      ...help,
+    ],
+  }, brand)
+}
+
+// ── 8 · connector token request (to whoever approves it) ───────────────────
+
+export function tokenRequestEmail(p: {
+  /** The requester's name, or their address when they set none. */
+  requesterName: string
+  requesterEmail: string
+  orgName: string
+  /** The connection's label as its organization sees it. */
+  connectionName: string
+  tokenLabel: string
+  /**
+   * The connection's page. Absent when `NUXT_PUBLIC_APP_URL` is unset — never
+   * built from the request, same rule as every other link in these mails.
+   */
+  url?: string
+}, brand: EmailBrand): RenderedEmail {
+  const requester = nameOr(p.requesterName, 'A colleague')
+  const org = nameOr(p.orgName, 'your organization')
+  const connection = nameOr(p.connectionName, 'a connection')
+  return renderEmail({
+    subject: `${requester} asked for a connector token on ${connection}`,
+    preview: 'Nothing works until you approve it, and you choose what it can reach.',
+    reason: `You’re getting this because you manage ${connection} in ${org} on Automata.`,
+    blocks: [
+      eyebrow('Token request'),
+      heading(`${requester} asked for a connector token.`),
+      lead(`They want to use ${connection} from Claude. Review the request on the connection’s page: you can change what the token may reach before approving it, or decline it.`),
+      rows([['From', p.requesterEmail]]),
+      body('Token name: ', { strong: nameOr(p.tokenLabel, 'Untitled token') }),
+      p.url && button('Review request', p.url),
+      p.url && pasteLink('Button not working? Paste this link into your browser:', p.url),
+      !p.url && body('Open the connection in Automata and look under Connector tokens.'),
+      divider(),
+      secondary('Nothing reaches Claude until you approve. Approving doesn’t send them the token: they collect it from the same page afterwards.'),
     ],
   }, brand)
 }

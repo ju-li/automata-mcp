@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { BridgeConfig } from './config.ts'
 import { digestsEqual, hashKey } from './crypto.ts'
 import { HttpError, describeError, telegramNotConfigured } from './http-error.ts'
-import type { SessionManager } from './sessions.ts'
+import type { CountsMode, SessionManager } from './sessions.ts'
 
 /**
  * The bridge's HTTP API, shaped like Evolution's: one global admin key creates
@@ -59,6 +59,10 @@ const webhookBody = z.object({
     .default({}),
 })
 
+const backfillBody = z.object({
+  chatId: z.string().regex(/^-?\d{1,20}$/, 'a chat id as a string of digits'),
+})
+
 const resolveBody = z.object({ query: z.string().trim().min(1).max(256) })
 
 const sendBody = z.object({
@@ -96,10 +100,12 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
     },
     {
       label: 'GET /sessions/:id/state', method: 'GET', pattern: /^\/sessions\/([^/]+)\/state$/, access: 'session',
-      // Counts are cached per session for 30 s; `?fresh=counts` reads them now.
+      // Counts are cached per session (see COUNTS_TTL_MS); `?fresh=counts` reads
+      // them now, `?counts=0` leaves them out (health checks). A slow count
+      // leaves `stats` stale or absent, never fails the request (#224).
       handle: async ({ id, query }) => ({
         status: 200,
-        body: await manager.state(id, { freshCounts: query.get('fresh') === 'counts' }),
+        body: await manager.state(id, { counts: countsMode(query) }),
       }),
     },
     {
@@ -136,6 +142,12 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
         status: 200,
         body: await manager.chats(id, clampInt(query.get('take'), 100, 1, 500), clampInt(query.get('skip'), 0, 0, 1_000_000)),
       }),
+    },
+    {
+      // Asks for more of one chat's older history. Stored and paced by backfill;
+      // no Telegram request here, but nothing would fetch it without credentials.
+      label: 'POST /sessions/:id/backfill', method: 'POST', pattern: /^\/sessions\/([^/]+)\/backfill$/, access: 'session', needsTelegram: true,
+      handle: async ({ id, body }) => ({ status: 202, body: await manager.extendBackfill(id, parse(backfillBody, body).chatId) }),
     },
     {
       label: 'POST /sessions/:id/resolve', method: 'POST', pattern: /^\/sessions\/([^/]+)\/resolve$/, access: 'session', needsTelegram: true,
@@ -214,6 +226,12 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
 function bearerOf(req: IncomingMessage): string | undefined {
   const match = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? '')
   return match?.[1]
+}
+
+/** `?counts=0` skips counts (wins over `fresh`); `?fresh=counts` reads them now. */
+function countsMode(query: URLSearchParams): CountsMode {
+  if (query.get('counts') === '0') return 'skip'
+  return query.get('fresh') === 'counts' ? 'fresh' : 'cached'
 }
 
 function clampInt(raw: string | null, fallback: number, min: number, max: number): number {

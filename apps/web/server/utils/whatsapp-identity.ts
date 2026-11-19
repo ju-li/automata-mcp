@@ -52,8 +52,9 @@ const PHONE = /^\d+@s\.whatsapp\.net$/
 const NO_LINKS: LidLinks = { pnOf: new Map(), lidOf: new Map(), unlinkedLids: 0, available: false }
 
 /**
- * Thirty minutes. The read is a scan of the account's LID-chat rows (#130), and
- * what it finds changes rarely: links appear only when live traffic carries one
+ * Thirty minutes. The read is a walk of the account's chats plus a small
+ * partial index — or, without the indexes docs/whatsapp.md recommends, a scan of
+ * every LID-chat row (#130, #222) — and what it finds changes rarely: links appear only when live traffic carries one
  * (history never does, #116), and a chat that shows up merged half an hour late
  * costs nothing. Every surface — listing, reading, searching, the picker — reads
  * through this one cache, so within a snapshot they all agree on who is linked.

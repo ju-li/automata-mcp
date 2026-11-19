@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { CheckIcon } from '@lucide/vue'
+import { TELEGRAM_FULL_HISTORY_DAYS, TELEGRAM_HISTORY_MESSAGES_PER_CHAT, TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
 
 const { refresh } = useSession()
 const route = useRoute()
@@ -39,13 +40,15 @@ const queryPlan = route.query.plan
 const plan = ref<PlanChoice | undefined>(queryPlan === 'free' || queryPlan === 'pro' ? queryPlan : undefined)
 const choosingPlan = computed(() => billing.value && !plan.value)
 
+const perChat = TELEGRAM_HISTORY_MESSAGES_PER_CHAT.toLocaleString('en-US')
+
 const plans: { id: PlanChoice, name: string, price: string, note: string, features: string[] }[] = [
   {
     id: 'free',
     name: 'Free',
     price: '$0',
     note: 'For trying it out on your own.',
-    features: ['1 connection', '1 connector token', 'Just you', 'Recent WhatsApp history', 'Unlimited requests*', 'Telemetry, stored for 30 days'],
+    features: ['1 connection', '1 connector token', 'Just you', 'Recent WhatsApp history', `Telegram history: last ${TELEGRAM_RECENT_HISTORY_DAYS} days, up to ${perChat} messages per chat`, 'Unlimited requests*', 'Telemetry, stored for 30 days'],
   },
   {
     id: 'pro',
@@ -57,6 +60,7 @@ const plans: { id: PlanChoice, name: string, price: string, note: string, featur
       'Unlimited connector tokens',
       '5 users included, $10/user/month after',
       'Full WhatsApp history',
+      `Telegram history: last ${TELEGRAM_FULL_HISTORY_DAYS} days, ${perChat} messages per chat to start, load more any time`,
       'Unlimited requests*',
       'Telemetry optional, off by default',
     ],

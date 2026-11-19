@@ -25,7 +25,7 @@ const schema = z.object({
   TELEGRAM_BRIDGE_DATABASE_URL: z.string().min(1),
   TELEGRAM_READER_ROLE: z.string().regex(/^[a-z_][a-z0-9_]{0,62}$/).optional(),
   TELEGRAM_TEST_SERVERS: z.enum(['true', 'false']).default('false'),
-  TELEGRAM_BACKFILL_MAX_PER_CHAT: z.coerce.number().int().min(0).default(2000),
+  TELEGRAM_BACKFILL_MAX_PER_CHAT: z.coerce.number().int().min(0).default(20000),
   TELEGRAM_BACKFILL_DAYS: z.coerce.number().int().min(0).default(365),
   TELEGRAM_BACKFILL_BROADCAST: z.enum(['true', 'false']).default('false'),
   TELEGRAM_BACKFILL_PAGE_DELAY_MS: z.coerce.number().int().min(0).default(1000),

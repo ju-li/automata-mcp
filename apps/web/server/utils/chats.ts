@@ -2,7 +2,7 @@ import type { AppInstance } from './app-db'
 import type { EvolutionClient } from './evolution'
 import type { MentionDirectory } from './mentions'
 import { applyMentions, authorName, contactsToDirectory, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
-import type { ChatActivityRow } from './evolution-db'
+import type { ChatActivityRow, MessageSender } from './evolution-db'
 import { canReadMessages, lastMessagePayloads, listChatActivity, listMessagesPage, senderOf } from './evolution-db'
 import type { LidLinks } from './whatsapp-identity'
 import { canonicalJid, lidLinks, linkedJidOf, phoneNumberBehind, phoneNumberOf } from './whatsapp-identity'
@@ -72,6 +72,13 @@ export interface ChatMessage {
   id?: string
   fromMe: boolean
   author?: string
+  /**
+   * A stable handle for the sender of a received group message: the same value
+   * means the same person, named or not. Opaque — a LID's digits where known —
+   * so never a phone number to quote or send to. Present even when `author` is,
+   * so two people sharing a display name stay apart (#263).
+   */
+  authorId?: string
   timestamp?: string
   type?: string
   text?: string
@@ -746,6 +753,7 @@ export async function listMessages(
       id: draft.id,
       fromMe: draft.fromMe,
       author: authorName({ fromMe: draft.fromMe, ...draft.sender }, directory),
+      ...(!draft.fromMe && draft.sender.id && { authorId: draft.sender.id }),
       timestamp: draft.timestamp,
       type: draft.type,
       text: directory ? applyMentions(draft.text, draft.mentioned, directory) : draft.text,
@@ -858,6 +866,7 @@ export async function listAccountMessages(
       chatName: names.chatName(draft.chatJid),
       fromMe: draft.fromMe,
       author: authorName({ fromMe: draft.fromMe, ...draft.sender }, names.directory),
+      ...(!draft.fromMe && draft.sender.id && { authorId: draft.sender.id }),
       timestamp: draft.timestamp,
       type: draft.type,
       text: names.directory ? applyMentions(draft.text, draft.mentioned, names.directory) : draft.text,
@@ -920,7 +929,7 @@ async function accountNames(
 async function nameDirectory(
   instance: AppInstance,
   remoteJid: string,
-  drafts: Array<{ fromMe: boolean, sender: { identity?: string }, mentioned: string[] }>,
+  drafts: Array<{ fromMe: boolean, sender: MessageSender, mentioned: string[] }>,
 ): Promise<MentionDirectory | undefined> {
   const needed = drafts.some(draft => draft.mentioned.length || (!draft.fromMe && draft.sender.identity))
   if (!needed) return undefined

@@ -34,6 +34,16 @@ const schema = z.object({
   BREVO_API_KEY: z.string().min(1).optional(),
   BREVO_PRODUCT_LIST: z.string().regex(/^\d+$/, 'must be a numeric Brevo list id').optional(),
   BREVO_MARKETING_LIST: z.string().regex(/^\d+$/, 'must be a numeric Brevo list id').optional(),
+  // Self-hosters who asked for update mail (breaking changes, security
+  // advisories) from their install's onboarding — self-host-updates.ts. Optional
+  // even with the key: without it signups are stored and synced once it is set.
+  BREVO_SELF_HOST_LIST: z.string().regex(/^\d+$/, 'must be a numeric Brevo list id').optional(),
+  // Double opt-in for that list: the Brevo template (with the {{ doubleoptin }}
+  // link) that asks each address to confirm. Unset = added directly.
+  BREVO_SELF_HOST_DOI_TEMPLATE: z.string().regex(/^\d+$/, 'must be a numeric Brevo template id').optional(),
+  // Where Brevo sends someone after they confirm. Defaults to this service's
+  // own page on the production domain (GET /self-host/confirmed).
+  BREVO_SELF_HOST_REDIRECT_URL: z.string().url().refine(url => /^https:\/\//i.test(url), 'must be https').optional(),
   // The IP lookup that decides where the signup page's marketing box may start
   // ticked (consent-region.ts). Defaults to RevBull's zip-prepop service.
   IP_LOOKUP_URL: z.string().url().refine(url => /^https?:\/\//i.test(url), 'must be http or https').optional(),
@@ -61,6 +71,13 @@ export interface BrevoSettings {
   productList: number
   /** A contact whose user gave marketing consent at signup is added to it when created. */
   marketingList: number
+  /** Self-hosters who asked for update mail; absent = stored, not synced yet. */
+  selfHostList?: number
+  /**
+   * Double opt-in for `selfHostList`: Brevo mails this template and adds the
+   * address only once its link is clicked. Absent = added directly.
+   */
+  selfHostDoi?: { templateId: number, redirectUrl: string }
 }
 
 export interface CloudConfig {
@@ -82,6 +99,10 @@ export interface CloudConfig {
 
 const STRIPE_VARS = ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'STRIPE_PRICE_BASE', 'STRIPE_PRICE_SEAT'] as const
 const BREVO_VARS = ['BREVO_API_KEY', 'BREVO_PRODUCT_LIST', 'BREVO_MARKETING_LIST'] as const
+/** Optional Brevo settings: ignored (and named at boot) without the key, never required by it. */
+const BREVO_OPTIONAL_VARS = ['BREVO_SELF_HOST_LIST', 'BREVO_SELF_HOST_DOI_TEMPLATE', 'BREVO_SELF_HOST_REDIRECT_URL'] as const
+/** Where Brevo sends a self-hoster who confirmed, unless BREVO_SELF_HOST_REDIRECT_URL says otherwise. */
+export const DEFAULT_SELF_HOST_REDIRECT_URL = 'https://billing.getautomata.app/self-host/confirmed'
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
   // An empty value in a compose file or .env means "unset", not zero.
@@ -95,7 +116,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
   const e = parsed.data
   const set = STRIPE_VARS.filter(name => e[name] !== undefined)
   const stripeOn = e.STRIPE_SECRET_KEY !== undefined
-  const brevoSet = BREVO_VARS.filter(name => e[name] !== undefined)
+  const brevoSet = [...BREVO_VARS, ...BREVO_OPTIONAL_VARS].filter(name => e[name] !== undefined)
   const brevoOn = e.BREVO_API_KEY !== undefined
   const incomplete = [
     ...(stripeOn
@@ -107,8 +128,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
           .map(name => `  ${name}: set it too — BREVO_API_KEY turns the CRM sync on, and the sync needs both list ids (unset BREVO_API_KEY to run without it)`)
       : []),
   ]
-  if (brevoOn && brevoSet.length === BREVO_VARS.length && e.BREVO_PRODUCT_LIST === e.BREVO_MARKETING_LIST) {
+  if (brevoOn && e.BREVO_PRODUCT_LIST !== undefined && e.BREVO_PRODUCT_LIST === e.BREVO_MARKETING_LIST) {
     incomplete.push('  BREVO_MARKETING_LIST: must differ from BREVO_PRODUCT_LIST — everyone goes on the product list, only those who consented on the marketing one')
+  }
+  if (brevoOn && e.BREVO_SELF_HOST_LIST !== undefined
+    && (e.BREVO_SELF_HOST_LIST === e.BREVO_PRODUCT_LIST || e.BREVO_SELF_HOST_LIST === e.BREVO_MARKETING_LIST)) {
+    incomplete.push('  BREVO_SELF_HOST_LIST: must differ from BREVO_PRODUCT_LIST and BREVO_MARKETING_LIST — self-hosters asked for update mail only, not to join either')
+  }
+  if (brevoOn && e.BREVO_SELF_HOST_DOI_TEMPLATE !== undefined && e.BREVO_SELF_HOST_LIST === undefined) {
+    incomplete.push('  BREVO_SELF_HOST_LIST: set it too — BREVO_SELF_HOST_DOI_TEMPLATE asks people to confirm joining that list')
   }
   if (incomplete.length > 0) {
     throw new Error(`cloud cannot start. Fix these environment variables:\n${incomplete.join('\n')}`)
@@ -133,6 +161,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): CloudConfig {
           apiUrl: (e.BREVO_API_URL ?? 'https://api.brevo.com/v3').replace(/\/+$/, ''),
           productList: Number(e.BREVO_PRODUCT_LIST),
           marketingList: Number(e.BREVO_MARKETING_LIST),
+          selfHostList: e.BREVO_SELF_HOST_LIST === undefined ? undefined : Number(e.BREVO_SELF_HOST_LIST),
+          selfHostDoi: e.BREVO_SELF_HOST_DOI_TEMPLATE === undefined
+            ? undefined
+            : {
+                templateId: Number(e.BREVO_SELF_HOST_DOI_TEMPLATE),
+                redirectUrl: e.BREVO_SELF_HOST_REDIRECT_URL ?? DEFAULT_SELF_HOST_REDIRECT_URL,
+              },
         }
       : undefined,
     ignoredBrevoVars: brevoOn ? [] : [...brevoSet],

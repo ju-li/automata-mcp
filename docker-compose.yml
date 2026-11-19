@@ -112,7 +112,7 @@ services:
       retries: 10
 
   evolution:
-    image: evoapicloud/evolution-api:v2.3.7
+    image: ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.1.0@sha256:09a2b03c065c888a9e3b80212ce372a5dae9128cdfbc6f59450b0c71131daea3
     profiles: [whatsapp]
     restart: unless-stopped
     depends_on:

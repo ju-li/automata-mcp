@@ -22,12 +22,14 @@ import type { AppUser } from '~~/server/utils/app-db'
  * no field — so a self-hosted UI never learns plans exist. A read failure is a
  * 503 like the membership read.
  */
-async function planSummary(orgId: string): Promise<{ plan: string, limited: boolean, overLimit: boolean, recentHistoryOnly: boolean } | undefined> {
+async function planSummary(orgId: string): Promise<{ plan: string, limited: boolean, overLimit: boolean, recentHistoryOnly: boolean, telemetry: boolean } | undefined> {
   if (!hostedMode()) return undefined
   try {
     const sql = await appDb()
     const [[org], limits, usage] = await Promise.all([
-      sql<{ plan_label?: string }[]>`SELECT plan_label FROM app.organizations WHERE id = ${orgId}`,
+      sql<{ plan_label?: string, record_tool_calls?: boolean, tool_calls_required?: boolean }[]>`
+        SELECT plan_label, record_tool_calls, tool_calls_required FROM app.organizations WHERE id = ${orgId}
+      `,
       loadOrgLimits(sql, orgId),
       orgUsage(sql, orgId),
     ])
@@ -38,6 +40,11 @@ async function planSummary(orgId: string): Promise<{ plan: string, limited: bool
       // Whether the create form may offer a full WhatsApp history import on
       // this deployment's server. The server refuses it independently.
       recentHistoryOnly: limits?.recent_history_only === true,
+      // Whether the organization records telemetry: required on Free, the
+      // admin's own switch on Pro. Product analytics in the browser follows it
+      // (plugins/posthog.client.ts), so a Pro organization that left it off is
+      // opted out there too. Same rule as getToolCallRecording().
+      telemetry: Boolean(org?.tool_calls_required || org?.record_tool_calls),
     }
   }
   catch (error) {
@@ -56,7 +63,17 @@ export default defineEventHandler(async (event) => {
   return {
     user: { id: user.id, email: user.email, name: user.name },
     membership: actor
-      ? { role: actor.role, org: { id: actor.org.id, name: actor.org.name, ...plan } }
+      ? {
+          role: actor.role,
+          // Whether this person may add connections — the role and the
+          // organization's switch, decided once (`mayCreateConnections`). Read
+          // with the membership, so no extra query.
+          canCreateConnections: mayCreateConnections(actor),
+          // First-run setup, while it is this admin's to do — absent
+          // otherwise. See server/utils/onboarding.ts.
+          onboarding: onboardingFor(actor),
+          org: { id: actor.org.id, name: actor.org.name, ...plan },
+        }
       : null,
   }
 })

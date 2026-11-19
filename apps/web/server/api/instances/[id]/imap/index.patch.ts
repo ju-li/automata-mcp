@@ -3,7 +3,7 @@ import { z } from 'zod'
 const body = z.object({
   host: z.string().trim().min(1).max(253),
   port: z.number().int().min(1).max(65535),
-  security: z.enum(['tls', 'starttls']),
+  security: z.enum(['tls', 'starttls', 'none']),
   user: z.string().trim().min(1).max(320),
   password: z.string().min(1).max(1000),
 })

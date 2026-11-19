@@ -839,4 +839,119 @@ export const APP_MIGRATIONS: AppMigration[] = [
       ALTER TABLE app.instances ADD COLUMN socket_dead_seen_at timestamptz;
     `,
   },
+  {
+    name: '0025_message_autovacuum',
+    sql: /* sql */ `
+      -- Evolution's "Message": vacuum often enough that the visibility map
+      -- stays current, so per-account counts stay index-only (#156). At the
+      -- default 20% insert threshold a freshly imported account paid a table
+      -- read for nearly every row it counted. The values production has run
+      -- since #156 (#208).
+      --
+      -- Not our table, so guarded like 0015 and never allowed to fail the
+      -- boot: skipped when it doesn't exist here (Evolution on a separate
+      -- database), when this role doesn't own it (ALTER TABLE ... SET needs
+      -- ownership), or when its lock isn't free within 5 s — an index build
+      -- or a manual VACUUM holds the same SHARE UPDATE EXCLUSIVE lock, and
+      -- appDb() answers 503 to every tenant until migrations finish. A skip
+      -- is a warning in the boot log; docs/whatsapp.md has the statement.
+      --
+      -- The lock itself blocks neither reads nor writes. lock_timeout is put
+      -- back afterwards because every pending migration shares this
+      -- transaction.
+      DO $$
+      DECLARE
+        previous text := current_setting('lock_timeout');
+      BEGIN
+        IF to_regclass('public."Message"') IS NOT NULL
+           AND pg_has_role((SELECT relowner FROM pg_class WHERE oid = to_regclass('public."Message"')), 'USAGE') THEN
+          PERFORM set_config('lock_timeout', '5s', true);
+          ALTER TABLE public."Message" SET (
+            autovacuum_vacuum_insert_scale_factor = 0.01,
+            autovacuum_vacuum_scale_factor = 0.05
+          );
+          PERFORM set_config('lock_timeout', previous, true);
+        ELSE
+          RAISE WARNING '"Message" vacuum settings skipped: table absent or not owned by %', current_user;
+        END IF;
+      EXCEPTION WHEN OTHERS THEN
+        PERFORM set_config('lock_timeout', previous, true);
+        RAISE WARNING '"Message" vacuum settings skipped: %', SQLERRM;
+      END
+      $$;
+    `,
+  },
+  {
+    name: '0026_members_create_connections',
+    sql: /* sql */ `
+      -- Whether a member (not only an admin) may create connections. The
+      -- organization's own switch, admin PATCH /api/org; on by default, for
+      -- existing organizations too. Gates creation only: a member who created
+      -- a connection keeps managing it when this is turned off, until an admin
+      -- unassigns them (managesInstance in org.ts).
+      ALTER TABLE app.organizations
+        ADD COLUMN members_create_connections boolean NOT NULL DEFAULT true;
+    `,
+  },
+  {
+    name: '0027_token_requests_and_invite_assignments',
+    sql: /* sql */ `
+      -- A member asking for a token on a connection they reach but do not
+      -- manage. The request is an ordinary token row so that revoke,
+      -- unassign and member removal already handle it; pending = requested_at
+      -- set and approved_at NULL, and resolveMcpAuth refuses it. Its token_hash
+      -- is the hash of a secret nobody was shown: the holder gets a usable one
+      -- by rotating after approval (secret_issued says whether they have).
+      -- requested_expiry = the preset asked for; expires_at is written only at
+      -- approval, so the clock starts when the token can work.
+      ALTER TABLE app.mcp_tokens
+        ADD COLUMN requested_at timestamptz,
+        ADD COLUMN approved_at timestamptz,
+        ADD COLUMN approved_by text REFERENCES app.users(id) ON DELETE SET NULL,
+        ADD COLUMN requested_expiry text
+          CHECK (requested_expiry IS NULL OR requested_expiry IN ('30d', '90d', '1y', 'never')),
+        ADD COLUMN secret_issued boolean NOT NULL DEFAULT true;
+
+      -- At most one open request per member per connection.
+      CREATE UNIQUE INDEX mcp_tokens_one_pending_request
+        ON app.mcp_tokens (instance, assigned_to)
+        WHERE requested_at IS NOT NULL AND approved_at IS NULL AND NOT revoked;
+
+      -- Connections an admin gave someone before they accepted the invitation.
+      -- Turned into instance_assignments by acceptInviteInto; both sides
+      -- cascade, and acceptance re-checks the connection's org, so nothing
+      -- outside the inviting organization is ever assigned.
+      CREATE TABLE app.invitation_instances (
+        invitation text NOT NULL REFERENCES app.invitations(id) ON DELETE CASCADE,
+        instance text NOT NULL REFERENCES app.instances(id) ON DELETE CASCADE,
+        created timestamptz NOT NULL DEFAULT now(),
+        PRIMARY KEY (invitation, instance)
+      );
+      CREATE INDEX invitation_instances_instance ON app.invitation_instances (instance);
+    `,
+  },
+  {
+    name: '0028_imap_security_none',
+    sql: /* sql */ `
+      -- A mailbox may be reached with no encryption at all ('none'): IMAP on
+      -- a plain socket, STARTTLS never attempted, password sent in clear. The
+      -- owner's explicit choice on the form; 'starttls' still must upgrade.
+      ALTER TABLE app.instances DROP CONSTRAINT instances_imap_security_check;
+      ALTER TABLE app.instances ADD CONSTRAINT instances_imap_security_check
+        CHECK (imap_security IN ('', 'tls', 'starttls', 'none'));
+    `,
+  },
+  {
+    name: '0029_onboarding',
+    sql: /* sql */ `
+      -- The user the first-run setup (pages/welcome.vue) is for: the admin
+      -- whose signup created this organization. Set by createOrganizationFor,
+      -- cleared when they finish or skip it. Existing organizations stay NULL,
+      -- so nobody who already has an account is walked through it. On the
+      -- organization, not the user: accepting an invitation moves the user to
+      -- an organization that never named them, which ends it by itself.
+      ALTER TABLE app.organizations
+        ADD COLUMN onboarding_for text REFERENCES app.users(id) ON DELETE SET NULL;
+    `,
+  },
 ]

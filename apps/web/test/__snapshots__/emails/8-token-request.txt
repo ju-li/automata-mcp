@@ -1,0 +1,25 @@
+Subject: Sam Lee asked for a connector token on Sales WhatsApp
+Preview: Nothing works until you approve it, and you choose what it can reach.
+
+TOKEN REQUEST
+
+Sam Lee asked for a connector token.
+
+They want to use Sales WhatsApp from Claude. Review the request on the connection’s page: you can change what the token may reach before approving it, or decline it.
+
+From: sam@example.com
+
+Token name: Claude desktop
+
+Review request: https://mcp.getautomata.app/instances/SAMPLE-id
+
+Button not working? Paste this link into your browser:
+https://mcp.getautomata.app/instances/SAMPLE-id
+
+---
+
+Nothing reaches Claude until you approve. Approving doesn’t send them the token: they collect it from the same page afterwards.
+
+--
+You’re getting this because you manage Sales WhatsApp in Acme on Automata.
+Operational Intelligence Inc. · 418 Broadway #6722 · Albany, NY 12207, USA

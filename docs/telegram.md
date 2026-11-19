@@ -77,6 +77,22 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS messages_live_by_session
 If that build fails, it leaves an invalid index under the same name. Drop that
 index and build it again before you deploy.
 
+Migration `0005` sets `telegram.messages` to vacuum more often than Postgres's
+default (`autovacuum_vacuum_insert_scale_factor = 0.01`,
+`autovacuum_vacuum_scale_factor = 0.02`). The per-session counts behind each
+connection's status read only that index, but only for pages the visibility map
+marks all-visible; at the default thresholds a busy table falls behind, and the
+counts read the table instead until the status request times out. It changes
+storage parameters only and blocks neither reads nor writes. To catch up at once
+on a large table that has run without it, vacuum it by hand after deploying:
+
+```sql
+VACUUM (ANALYZE) telegram.messages;
+```
+
+`SELECT relallvisible::float / relpages FROM pg_class WHERE oid = 'telegram.messages'::regclass`
+should then stay close to 1.
+
 ## What syncs
 
 Private chats, bots, groups, supergroups (including forum topics) and channels —
@@ -86,11 +102,22 @@ text rather than staying readable.
 
 Backfill is **slow on purpose**: one page of 100 messages at a time with a pause
 of `TELEGRAM_BACKFILL_PAGE_DELAY_MS` (default 1000) between pages, newest chats
-first, stopping at `TELEGRAM_BACKFILL_MAX_PER_CHAT` messages (default 2000) or
+first, stopping at `TELEGRAM_BACKFILL_MAX_PER_CHAT` messages (default 20000) or
 `TELEGRAM_BACKFILL_DAYS` days (default 365) per chat, and skipping broadcast
 channels unless `TELEGRAM_BACKFILL_BROADCAST=true`. An unofficial client that
 hammers history is how an account gets restricted. The read tools say when a
 chat's history stops at what was synced rather than at its first message.
+
+A chat that stops at `TELEGRAM_BACKFILL_MAX_PER_CHAT` can be given more:
+`POST /sessions/:id/backfill` with `{ "chatId": "…" }` (session key) raises that
+chat's own ceiling (`chats.backfill_limit`) to what it holds plus another
+`TELEGRAM_BACKFILL_MAX_PER_CHAT`, and backfill carries on from where it
+stopped, at the same pace. Only a chat stopped by the count; one stopped by the
+day limit, at its first message, or skipped stays where it is (409
+`backfill_not_stopped`), and an unknown chat is 404 `chat_unknown`. The app
+offers it as **Load more** in a connection's Chats list, to whoever manages the
+connection, and refuses it (402) where the plan syncs recent history only — so
+on the hosted offering it is Pro's, and anywhere else it is always available.
 
 The day limit is a limit on what is stored, not only on how far backfill walks:
 the page that crosses it is cut at it, and a chat whose newest message is older

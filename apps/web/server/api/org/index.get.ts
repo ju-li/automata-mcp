@@ -10,6 +10,9 @@
  * `toolCalls` goes to everyone: a member's calls are recorded too, and whether
  * they are is theirs to know.
  *
+ * `membersCreateConnections` goes to everyone, like `toolCalls`: a member
+ * should see why "Add a connection" is missing.
+ *
  * `passwordReset` tells an admin whether the Team page's "Send password reset"
  * can work here: it needs mail.
  */
@@ -27,6 +30,7 @@ export default defineEventHandler(async (event) => {
     members,
     invites,
     toolCalls,
+    membersCreateConnections: actor.org.members_create_connections !== false,
     passwordReset: actor.role === 'admin' ? passwordResetAvailable() : undefined,
   }
 })

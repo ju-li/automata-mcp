@@ -12,7 +12,10 @@ The hosted offering is two services:
 - **The cloud service** (`apps/cloud`) sells plans. It owns Stripe (Checkout,
   the Customer Portal, the webhook, seat billing) and writes each
   organization's limits. It also keeps a Brevo CRM contact for every user
-  (see [CRM (Brevo)](#crm-brevo)). PostHog product analytics joins it later.
+  (see [CRM (Brevo)](#crm-brevo)).
+
+The web app also sends product analytics from the browser to PostHog (see
+[Product analytics (PostHog)](#product-analytics-posthog)).
 
 Self-hosted deployments never run the cloud service.
 
@@ -27,7 +30,7 @@ Self-hosted deployments never run the cloud service.
 | Requests | unlimited, subject to [rate limits](#rate-limits) | the same |
 | Telemetry | always on, stored 30 days | optional, off by default |
 | WhatsApp history at pairing | recent only | recent, or full if chosen |
-| Telegram history at linking | last 90 days | the deployment's setting (365 days by default) |
+| Telegram history at linking | last 90 days, up to 20,000 messages per chat | the deployment's setting (365 days by default), 20,000 messages per chat to start, more per chat on request |
 
 **WhatsApp history.** Every new WhatsApp connection imports the recent history
 by default: what WhatsApp hands any linked browser, rather than everything the
@@ -49,7 +52,13 @@ in `apps/web/server/utils/instances.ts`, with the number in
 bridge stores it on the session, so it is decided at linking, like WhatsApp's:
 an account linked under Pro keeps its longer history after a move to Free, and
 an account linked under Free fetches further back only once it is unlinked and
-linked again. New messages are kept either way, and a bring-your-own bridge is
+linked again. Every plan also stops each chat at `TELEGRAM_BACKFILL_MAX_PER_CHAT`
+messages (20,000 by default), which a busy group reaches long before 90 days.
+The plan copy quotes that number from `TELEGRAM_HISTORY_MESSAGES_PER_CHAT` in
+`apps/web/shared/history.ts`; change both together. On Pro a manager can load
+another 20,000 for one chat from the connection's Chats list, as often as they
+like (`POST /api/instances/:id/telegram/backfill`); the day limit still ends it.
+Free gets 402 `plan_limit` there, by the same `historyLimited` rule. New messages are kept either way, and a bring-your-own bridge is
 never capped. A bridge too old to store the cap makes linking on Free answer
 503, with the reason in the web log, rather than pair uncapped. See
 [What syncs](telegram.md#what-syncs).
@@ -166,6 +175,16 @@ Each consumer keeps its own position in `cloud.cursors`, and nothing deletes row
 
 Events never contain credentials, connection strings, chat or table names, message content or tool arguments. Email addresses appear only on user events. A self-hosted deployment writes none.
 
+## Product analytics (PostHog)
+
+The web UI loads PostHog's browser library when `NUXT_PUBLIC_POSTHOG_KEY` is set **and** the deployment is hosted (`NUXT_CLOUD_URL` set). A self-hosted deployment never loads it, even with a key. Events go through our reverse proxy at `https://r.getautomata.app` (in front of PostHog US, so ad blockers that list `*.posthog.com` don't drop them); `NUXT_PUBLIC_POSTHOG_HOST` overrides it, `NUXT_PUBLIC_POSTHOG_UI_HOST` (default `https://us.posthog.com`) is only for links PostHog builds. The MCP endpoint sends nothing to PostHog.
+
+- **No cookies.** PostHog keeps its state in memory, so there is no consent banner. A visitor who is not signed in counts as a new person on each page load. The only thing stored in the browser is an opt-out flag, in localStorage, for users whose organization has telemetry off.
+- **Follows the organization's Telemetry switch** (Organization page). Free requires it, so Free users are always captured. On Pro it is the admin's choice, off by default: when a member of a Pro organization with Telemetry off signs in, the browser sends one `telemetry_opted_out` event under their user id (no email), sets `telemetry_opted_out` on their PostHog person, and then stops sending anything. Turning the switch back on resumes capture in that browser.
+- **Identified by user id**, with email and name as person properties, once signed in and only where the organization records telemetry. The organization is a PostHog group (`organization`, with its name and plan).
+- **Product events**, besides pageviews and autocapture: `connection_created` (kind, whether on the user's own server, WhatsApp full-history choice), `connection_deleted` (kind), `token_created` (kind, expiry, tool/chat/table scope as switches and a tool count, whether issued to another member) and `token_revoked` — each with the connection id, sent from the browser once the server has answered. Never labels, chat/folder/table names, hosts or token secrets. Don't bill from them.
+- **What is never sent.** Autocapture masks all element text and attributes, so a click on a message, chat, contact or form field sends no content. Session replay, surveys, heatmaps and exception capture are off. URLs lose their query and hash (verification and password-reset links carry tokens there), and invitation links are sent as `/invite/:code`.
+
 ## CRM (Brevo)
 
 The cloud service keeps one Brevo contact per user. A signup appears in Brevo within about 15 seconds. Later changes to the email address, organization, role and plan update the same contact.
@@ -195,8 +214,51 @@ A contact is keyed on the user's id (Brevo's `ext_id`), so an email change updat
 | `INVITED` | whether they signed up through an invitation |
 | `ORG_ID`, `ORG_NAME`, `ORG_ROLE` | their organization and role (`admin` / `member`) |
 | `PLAN` | the organization's current plan (`Free`, `Pro`, `Pro (trial)`) |
+| `LAST_MCP_USE` | the UTC day of the user's last MCP call on their organization's connections; empty if none, or while Telemetry is off |
+| `ORG_LAST_MCP_USE` | the same for anyone in their organization |
 
-That is the whole list. Nothing about connections, tokens or usage is sent. The service creates any missing attribute when it starts, and refuses to start the sync if one exists with a different type.
+That is the whole list. Nothing about connections or tokens is sent, and of usage only those two dates. They follow the organization's **Telemetry** switch (always on for Free, the admin's choice on Pro): while it is off they are not sent, and a date already in Brevo is cleared. The service creates any missing attribute when it starts, and refuses to start the sync if one exists with a different type.
+
+Promo campaigns for Free users only: filter on `PLAN` equals `Free`. Winback: filter on `ORG_LAST_MCP_USE` older than N days (empty = never used, or Telemetry off).
+
+**Activity dates are synced daily, not per event.** A call writes no outbox event, and neither does turning Telemetry off. Once per UTC day (checked every ten minutes, so a restart or a pause resumes soon) the service compares each member's current dates with what it last sent (`cloud.crm_last_use`) and updates only the contacts that differ, through the same upsert as everything else. `cloud.daily_jobs` holds the finished day and a lease, so replicas run it once. The first run after deploying sends every user who has ever made a call. Event-driven updates carry the current dates too.
+
+**How a date is cleared:** Brevo does not document how to empty an attribute. Tested against a real contact (2026-11-12): an update sending `""` empties a date attribute; `null` is answered 204 and **ignored**. The service sends `""` (`CLEARED` in `crm.ts`). If Brevo's behaviour ever changes, a cleared date would silently stay — re-test by setting `LAST_MCP_USE` on a contact, sending `""`, and reading it back.
+
+### Self-hoster update mail
+
+A self-hosted install's first-run setup (`/welcome`, last step) offers its admin
+update mail: breaking changes and security advisories, explicitly no marketing.
+The install's server posts `{ email, version }` to the cloud service's public
+`POST /self-host/updates` (default target `https://billing.getautomata.app/self-host/updates`,
+`NUXT_SELF_HOST_UPDATES_URL` on the install). The hosted offering never offers it.
+
+- Stored in `cloud.self_host_subscribers` (lower-cased address, version,
+  `synced_at`, `refused_at`). Storing is the promise; the Brevo list is a copy.
+- Added to `BREVO_SELF_HOST_LIST` (optional, needs `BREVO_API_KEY`, must differ
+  from the other two lists) by a create-or-update with only the list id — no
+  attributes, so a hosted user's contact at the same address keeps everything.
+  A failed add is retried every ten minutes; an address Brevo refuses for good
+  gets `refused_at`. `/health` reports `selfHostUpdates: stored-only | syncing | confirming`.
+- **Double opt-in** with `BREVO_SELF_HOST_DOI_TEMPLATE` (a Brevo template id;
+  needs `BREVO_SELF_HOST_LIST`). Instead of adding the address, the service asks
+  Brevo to mail that template; Brevo adds the contact to the list only when its
+  `{{ doubleoptin }}` link is clicked, then sends the browser to
+  `BREVO_SELF_HOST_REDIRECT_URL` (default
+  `https://billing.getautomata.app/self-host/confirmed`, a static page this
+  service serves). `synced_at` then means Brevo accepted the request, not that
+  the address is on the list. At most one confirmation email per address a day
+  (`doi_sent_at`, claimed before the call); resubmitting after that sends a
+  fresh link. A refusal from Brevo while confirming is retried a day later
+  rather than marking the address refused, since a wrong template id looks the
+  same. The setup page says "check your inbox" when the cloud answers
+  `confirm: true`. Production template: id 3, "Self-hosted updates – double opt-in".
+- Public, so throttled in memory: 5 per caller address and 300 in total per
+  hour. The answer is the same whether the address was new. Addresses and IPs
+  are never logged.
+- Without `BREVO_SELF_HOST_DOI_TEMPLATE` there is no double opt-in: anyone can
+  submit any address. Either way, mail sent to this list must stay to what was
+  promised, and carry Brevo's unsubscribe link.
 
 ### Setting it up
 

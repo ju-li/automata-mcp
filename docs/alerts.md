@@ -58,7 +58,10 @@ What it will and will not send:
   out, so a broken SMTP configuration delays an alert rather than losing it.
 - The mail says which fix applies: a dropped session asks for **Reconnect**, an
   unlinked account asks for a QR scan. Sending someone to scan a code they did
-  not need to costs a real phone.
+  not need to costs a real phone. A dropped session Evolution is already
+  retrying (`connecting`, as on an Evolution that records the closes it retries)
+  says so instead, and names restarting the Evolution service if it stays down —
+  Reconnect is refused in that state.
 - A WhatsApp **reconnect loop** counts as an outage too, even though nearly every
   live read finds it `open`. Two sockets on one set of credentials keep
   replacing each other (`conflict: replaced`), and neither the webhook nor the

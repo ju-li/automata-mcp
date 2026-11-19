@@ -3,9 +3,9 @@
  * A mailbox's IMAP login: server, port, security, username, password.
  *
  * The presets fill the server half only — never a password — for the providers
- * people most often mean. There is no "no encryption" choice: a password
- * crossing the network in clear is not an option this app offers, and
- * STARTTLS is enforced (the server refuses a connection that does not upgrade).
+ * people most often mean. STARTTLS is enforced (a server that does not
+ * upgrade is refused). "None" is plaintext — the password crosses the network
+ * in clear — offered for servers on a trusted network, with a warning under it.
  */
 const props = defineProps<{ idPrefix: string }>()
 const model = defineModel<ImapCredentials>({ required: true })
@@ -32,7 +32,7 @@ function applyPreset(choice: Preset) {
 }
 
 function setSecurity(value: unknown) {
-  const security = value === 'starttls' ? 'starttls' : 'tls'
+  const security = value === 'starttls' || value === 'none' ? value : 'tls'
   // Move the port with the mode only while it is still the other mode's default.
   const port = model.value.port === '993' || model.value.port === '143' || !model.value.port
     ? (security === 'tls' ? '993' : '143')
@@ -106,8 +106,15 @@ const id = (name: string) => `${props.idPrefix}-${name}`
           <SelectItem value="starttls">
             STARTTLS — upgraded to encrypted (usually port 143)
           </SelectItem>
+          <SelectItem value="none">
+            None — unencrypted (usually port 143)
+          </SelectItem>
         </SelectContent>
       </Select>
+      <p v-if="model.security === 'none'" class="text-xs text-destructive">
+        Your password and every email read through this connection cross the network unencrypted.
+        Use only for a server on a network you trust.
+      </p>
     </div>
 
     <div class="grid grid-cols-2 gap-3">

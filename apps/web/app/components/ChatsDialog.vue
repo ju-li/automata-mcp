@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ArrowUpDownIcon, ChevronDownIcon, ChevronUpIcon, SearchIcon, UserIcon, UsersIcon } from '@lucide/vue'
+import { TELEGRAM_HISTORY_MESSAGES_PER_CHAT } from '#shared/history'
 
 /**
  * Every conversation on the account, as a paged table.
@@ -25,6 +26,15 @@ const props = defineProps<{
   open: boolean
   /** The dashboard's chat count. Explains a shortfall; never decides whether to fetch. */
   total?: number
+  /**
+   * Telegram only: what a chat whose history stopped at the per-chat message
+   * limit offers. `load` = a button fetching more (a manager, on a plan that
+   * allows it); `upgrade` = the Upgrade link (a manager whose plan does not —
+   * `UpgradeLink` itself hides it from members); `view` = the fact alone.
+   * Decided by the panel from `canManage` and `historyLimitedByPlan`; the
+   * server refuses regardless.
+   */
+  moreHistory?: 'load' | 'upgrade' | 'view'
 }>()
 
 const emit = defineEmits<{ 'update:open': [boolean] }>()
@@ -111,6 +121,51 @@ function lastActivity(chat: ScopedChat): string | undefined {
 }
 
 const count = new Intl.NumberFormat()
+const perChat = count.format(TELEGRAM_HISTORY_MESSAGES_PER_CHAT)
+
+const day = new Intl.DateTimeFormat(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+
+/** "Synced back to 13 Nov 2026", or nothing when history has not stopped short. */
+function historyLine(chat: ScopedChat): string | undefined {
+  if (props.kind !== 'telegram' || !chat.historyStopped) return undefined
+  const ms = chat.historyFrom ? Date.parse(chat.historyFrom) : Number.NaN
+  const from = Number.isNaN(ms) ? undefined : day.format(ms)
+  switch (chat.historyStopped) {
+    case 'count':
+      return from ? `Synced back to ${from} (${perChat} messages)` : `Stopped at ${perChat} older messages`
+    case 'days':
+      return from ? `Synced back to ${from} (this account's history limit)` : undefined
+    case 'skipped':
+      return 'Older posts are not fetched for channels'
+    case 'inaccessible':
+      return 'Telegram does not allow reading older history here'
+  }
+}
+
+/**
+ * Asks the bridge for another page of this chat's history. The row is updated
+ * in place — it is fetching again — rather than reloading the page, which would
+ * move the row if anything arrived meanwhile.
+ */
+const loadingMore = ref(new Set<string>())
+const { run } = useApiAction()
+
+async function loadMore(chat: ScopedChat) {
+  if (loadingMore.value.has(chat.jid)) return
+  loadingMore.value.add(chat.jid)
+  const done = await run(
+    () => $fetch<{ chatId: string, count: number, limit: number }>(`/api/instances/${props.instanceId}/telegram/backfill`, { method: 'POST', body: { chatId: chat.jid } }),
+    {
+      success: `Loading up to ${perChat} more messages for ${chat.name}. They arrive over the next few minutes.`,
+      failure: 'Could not load more history',
+    },
+  )
+  if (done) {
+    chat.historyStopped = undefined
+    chat.historyFrom = undefined
+  }
+  loadingMore.value.delete(chat.jid)
+}
 const stamp = new Intl.DateTimeFormat(undefined, {
   day: '2-digit',
   month: 'short',
@@ -229,7 +284,26 @@ function formatLastActivity(chat: ScopedChat): string {
                       <UsersIcon v-if="chat.isGroup" class="size-3.5 text-muted-foreground" />
                       <UserIcon v-else class="size-3.5 text-muted-foreground" />
                     </span>
-                    <span class="truncate" :title="chat.name">{{ chat.name }}</span>
+                    <div class="min-w-0">
+                      <span class="block truncate" :title="chat.name">{{ chat.name }}</span>
+                      <span v-if="historyLine(chat)" class="block text-xs text-muted-foreground">
+                        {{ historyLine(chat) }}
+                        <template v-if="chat.historyStopped === 'count'">
+                          <button
+                            v-if="moreHistory === 'load'"
+                            type="button"
+                            class="cursor-pointer underline underline-offset-2 disabled:cursor-default disabled:opacity-50"
+                            :disabled="loadingMore.has(chat.jid)"
+                            @click="loadMore(chat)"
+                          >
+                            Load {{ perChat }} more
+                          </button>
+                          <UpgradeLink v-else-if="moreHistory === 'upgrade'">
+                            to load more.
+                          </UpgradeLink>
+                        </template>
+                      </span>
+                    </div>
                   </div>
                 </TableCell>
 

@@ -185,12 +185,28 @@ export default defineNuxtConfig({
     // and docs/billing.md.
     cloudUrl: '',
     cloudAdminKey: '',
+    // Self-hosted only: where onboarding's "email me about breaking changes and
+    // security advisories" signup is posted — our cloud service's public
+    // endpoint (apps/cloud/src/self-host-updates.ts). The admin's address
+    // leaves this install only when they submit it there. `off` hides the
+    // offer. Ignored on the hosted offering. See server/utils/onboarding.ts.
+    selfHostUpdatesUrl: 'https://billing.getautomata.app/self-host/updates',
     // Superseded by cloudUrl. Still read so a hosted deployment that upgrades
     // without setting the new variables keeps its plans on (fail closed).
     billing: '',
 
     public: {
       appUrl: '',
+      // Product analytics in the browser, hosted offering only: the plugin
+      // also asks /api/hosted, so a self-hosted deployment never loads it even
+      // with a key set. Cookieless, follows each organization's telemetry
+      // switch. See app/plugins/posthog.client.ts and docs/billing.md.
+      posthogKey: '',
+      // Our reverse proxy in front of PostHog's US ingestion, so ad blockers
+      // that list *.posthog.com leave it alone. The UI host is only for links
+      // PostHog builds (toolbar), never a request the page makes.
+      posthogHost: 'https://r.getautomata.app',
+      posthogUiHost: 'https://us.posthog.com',
     },
   },
 

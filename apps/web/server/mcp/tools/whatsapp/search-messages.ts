@@ -32,7 +32,10 @@ export default defineKindTool({
     + 'are not searched unless `includeReactions` is set, which also makes a bare '
     + 'emoji findable. A match you sent is marked `fromMe` and carries no '
     + '`author`; on one you received, `author` is the sender\'s name where the '
-    + 'account knows it, and absent where it does not. @-mentions in the text are '
+    + 'account knows it, and absent where it does not. In a group, a received '
+    + 'match also carries `authorId`, a stable handle for its sender: the same '
+    + 'value is the same person, named or not. It is not a phone number and not '
+    + 'something to send to. @-mentions in the text are '
     + 'shown as names where the account knows them, and left as raw numeric ids '
     + 'where it does not — an id is not a name to guess at. An edited message is matched on its new text and comes '
     + 'back with `editOf`, the id of the message it replaces — which may be a '
@@ -113,6 +116,7 @@ export default defineKindTool({
         id: hit.id,
         fromMe: hit.fromMe,
         author: authorName({ fromMe: hit.fromMe, ...hit.sender }, directory),
+        ...(!hit.fromMe && hit.sender.id && { authorId: hit.sender.id }),
         timestamp: hit.timestamp,
         type: hit.type,
         text: applyMentions(hit.text, hit.mentioned, directory) ?? hit.text,

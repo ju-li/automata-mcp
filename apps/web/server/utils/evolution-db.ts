@@ -150,9 +150,9 @@ function messagePool(instance: AppInstance, resolved: { url: string, guard: bool
 }
 
 /**
- * The pool for the two status reads — `readInstanceRecord` and
- * `readInstanceRowWrittenAt`, primary-key lookups the dashboard, MCP status and
- * the alert sweep depend on.
+ * The pool for the status reads — `readInstanceRecord`,
+ * `readInstanceRowWrittenAt` and `readInstanceDisconnectionReason`, primary-key
+ * lookups the dashboard, MCP status and the alert sweep depend on.
  *
  * Separate from `evolutionDbFor` on our own server so that no amount of message
  * reading or searching by any account can queue an outage check behind it
@@ -311,6 +311,35 @@ export async function readInstanceRowWrittenAt(instance: AppInstance): Promise<s
 }
 
 /**
+ * The status code of the last close Evolution recorded on this account's
+ * `"Instance"` row (`"disconnectionReasonCode"`) — or `undefined` when there is
+ * no row or the column is NULL.
+ *
+ * Stock 2.3.7 writes it only on a close it will not retry (401, 403, 402, 406);
+ * the fork (ju-li/evolution-api-v2) also writes it, with `connecting`, on every
+ * close it retries — the one record of a dropped session there, since its
+ * column no longer stays `open` over a dead socket. `sessionLost` in
+ * instances.ts reads it (`recordedRetryableClose`).
+ *
+ * A separate statement for the same reason as `readInstanceRowWrittenAt`: the
+ * least-privilege grant is column by column, and a role granted before this
+ * column was read must lose only this signal, not the whole status row.
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`.
+ */
+export async function readInstanceDisconnectionReason(instance: AppInstance): Promise<number | undefined> {
+  const sql = await evolutionStatusDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const [row] = await sql<Array<{ disconnectionReasonCode: number | null }>>`
+    SELECT "disconnectionReasonCode"
+    FROM "Instance"
+    WHERE id = ${instanceId}
+  `
+  return row?.disconnectionReasonCode ?? undefined
+}
+
+/**
  * This account's `"Instance"` row, by primary key — or `undefined` when there is
  * no such row.
  *
@@ -373,23 +402,51 @@ export async function readInstanceRecord(instance: AppInstance): Promise<Evoluti
  * `@@index([instanceId])`, so this reads one account's rows and nobody else's.
  * Still ~100 ms on an 840k-message account, which is why the caller caches it.
  *
+ * `background` is for a count off the request path (`cachedSqlCounts`, #244):
+ * an account with millions of messages, whose index read from disk can outlast
+ * the 10 s every other read gets. It runs on a pool of its own — one connection,
+ * `BACKGROUND_COUNT_TIMEOUT_MS` — so a cold count neither times out nor holds one
+ * of the three slots readers and searches share for a minute.
+ *
  * Raw driver errors, for the same reason as `readInstanceRecord`.
  */
-export async function countInstanceRows(instance: AppInstance): Promise<{ messages: number, chats: number, contacts: number }> {
-  const { query } = await evolutionDbFor(instance)
+export async function countInstanceRows(
+  instance: AppInstance,
+  options: { background?: boolean } = {},
+): Promise<{ messages: number, chats: number, contacts: number }> {
   const instanceId = await resolveEvolutionInstanceId(instance)
-
-  const [row] = await query(sql => sql<Array<{ messages: number, chats: number, contacts: number }>>`
+  const statement = (sql: Sql) => sql<Array<{ messages: number, chats: number, contacts: number }>>`
     SELECT (SELECT count(*) FROM "Message" WHERE "instanceId" = ${instanceId})::int AS messages,
            (SELECT count(*) FROM "Chat"    WHERE "instanceId" = ${instanceId})::int AS chats,
            (SELECT count(*) FROM "Contact" WHERE "instanceId" = ${instanceId})::int AS contacts
-  `)
+  `
+
+  let row: { messages: number, chats: number, contacts: number } | undefined
+  if (options.background) {
+    const resolved = resolveMessageDb(instance)
+    // Leased: a count that runs for most of a minute must not look idle to the sweep.
+    ;[row] = await withKeyedPool(`${poolKeyFor(instance, resolved)}:counts`, resolved.url, {
+      guard: resolved.guard, max: 1, statementTimeoutMs: BACKGROUND_COUNT_TIMEOUT_MS, readOnly: true, jit: false,
+    }, statement)
+  }
+  else {
+    const { query } = await evolutionDbFor(instance)
+    ;[row] = await query(statement)
+  }
   return {
     messages: Number(row?.messages ?? 0),
     chats: Number(row?.chats ?? 0),
     contacts: Number(row?.contacts ?? 0),
   }
 }
+
+/**
+ * The statement timeout of a background count. The coldest count measured in
+ * production (#244: ~2M index entries, plus `"Chat"`/`"Contact"` heap pages)
+ * took just under 10 s; this leaves room for a slower disk without letting a
+ * count run unbounded.
+ */
+export const BACKGROUND_COUNT_TIMEOUT_MS = 60_000
 
 /**
  * Whether this account has any stored message — the unpaired reaper's question
@@ -406,6 +463,80 @@ export async function hasInstanceMessages(instance: AppInstance): Promise<boolea
     SELECT EXISTS (SELECT 1 FROM "Message" WHERE "instanceId" = ${instanceId}) AS found
   `)
   return row?.found === true
+}
+
+/** How far back `readLastInbound` looks. Past it, "none since" is the answer. */
+export const LAST_INBOUND_WINDOW_MS = 7 * 24 * 60 * 60_000
+
+/**
+ * A row stamped further ahead of now than this is not counted. One message with
+ * a clock far in the future would otherwise stand as "last received" until that
+ * date, hiding every silence after it.
+ */
+const LAST_INBOUND_FUTURE_SLACK_S = 10 * 60
+
+/** What `readLastInbound` found, inside the window it looked at. */
+export interface LastInbound {
+  /** WhatsApp's own timestamp of the newest live inbound message, ISO 8601. Absent: none since `since`. */
+  at?: string
+  /** Start of the window looked at, ISO 8601. */
+  since: string
+}
+
+/**
+ * When this account last received a message (#240): the newest row with
+ * `fromMe = false`, control records left out (`notControl`, the chat listing's
+ * rule) and `status@broadcast` left out (a contact's status post is not a
+ * message to the account), by `"messageTimestamp"`.
+ *
+ * **WhatsApp's timestamp, never insert time.** After a stuck session recovers,
+ * Evolution stores a backlog of messages hours old (#238). Ordering by when the
+ * row was written would read that backlog as live traffic; their own
+ * timestamps leave it in the past, where it belongs.
+ *
+ * **The one read for "is this account still receiving".** The dashboard and
+ * `get-connection-status` show it; an inbound-silence health signal (#238) must
+ * read this too, so the time a user sees and the time an alert judges cannot
+ * drift.
+ *
+ * Bounded so it stays an index probe: it needs `message_instance_ts_idx`
+ * (`("instanceId", "messageTimestamp")`, docs/whatsapp.md), walks it newest
+ * first and stops at the first match. Without that index the same question is a
+ * read of every row the account holds, on every status poll — so it answers
+ * `undefined` (unknown) instead, and the missing index is logged once. An
+ * account whose newest rows are all its own sends walks back until it finds
+ * one, so the walk is capped at `LAST_INBOUND_WINDOW_MS`; finding nothing there
+ * answers `{ since }`, which says "none in this window", not "unknown".
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`.
+ */
+export async function readLastInbound(instance: AppInstance): Promise<LastInbound | undefined> {
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+  if (!await messageIndexPresent(instance, query, INSTANCE_TS_INDEX)) return undefined
+
+  const now = Date.now()
+  const since = Math.floor((now - LAST_INBOUND_WINDOW_MS) / 1000)
+  const until = Math.floor(now / 1000) + LAST_INBOUND_FUTURE_SLACK_S
+
+  const [row] = await query(sql => sql<Array<{ ts: number }>>`
+    SELECT m."messageTimestamp" AS ts
+    FROM "Message" m
+    WHERE m."instanceId" = ${instanceId}
+      AND m."messageTimestamp" >= ${since}
+      AND m."messageTimestamp" <= ${until}
+      AND m.key->>'fromMe' = 'false'
+      AND m.key->>'remoteJid' <> 'status@broadcast'
+      AND ${notControl(sql)}
+    ORDER BY m."messageTimestamp" DESC
+    LIMIT 1
+  `)
+
+  const ts = Number(row?.ts)
+  return {
+    ...(Number.isFinite(ts) && ts > 0 && { at: new Date(ts * 1000).toISOString() }),
+    since: new Date(since * 1000).toISOString(),
+  }
 }
 
 export interface MessageSearchOptions {
@@ -447,7 +578,7 @@ export interface MessageSearchHit {
    * to pay for. `pushName` is never an answer on its own; see `authorName` in
    * `mentions.ts`.
    */
-  sender: { identity?: string, pushName?: string }
+  sender: MessageSender
   timestamp?: string
   type?: string
   text: string
@@ -859,31 +990,11 @@ export async function listChatActivity(
 
 /**
  * `per_jid` from a loose index scan over the per-chat timestamp index — see
- * `listChatActivity`. Two CTEs, `jids` (recursive) then `per_jid`.
- *
- * The jid walk asks the index for the smallest `remoteJid` above the last one,
- * one descent per chat; `IS NOT NULL` on the first step and `>` on the rest keep
- * NULL out. Postgres 17 has no skip scan of its own, hence the recursion.
+ * `listChatActivity`. Two CTEs, `jids` (`distinctJids`) then `per_jid`.
  */
 function perJidBySkipScan(sql: Sql, instanceId: string) {
   return sql`
-    jids AS (
-      (SELECT m.key->>'remoteJid' AS jid
-       FROM "Message" m
-       WHERE m."instanceId" = ${instanceId}
-         AND m.key->>'remoteJid' IS NOT NULL
-       ORDER BY m.key->>'remoteJid'
-       LIMIT 1)
-      UNION ALL
-      SELECT (SELECT m.key->>'remoteJid'
-              FROM "Message" m
-              WHERE m."instanceId" = ${instanceId}
-                AND m.key->>'remoteJid' > j.jid
-              ORDER BY m.key->>'remoteJid'
-              LIMIT 1)
-      FROM jids j
-      WHERE j.jid IS NOT NULL
-    ), per_jid AS (
+    ${distinctJids(sql, instanceId)}, per_jid AS (
       SELECT j.jid,
              last.ts AS last_ts,
              lpad(last.ts::text, 10, '0') || '|' || last.mid || '|' || last.row_id AS last_key
@@ -905,6 +1016,35 @@ function perJidBySkipScan(sql: Sql, instanceId: string) {
       ) last ON true
       WHERE j.jid IS NOT NULL
         AND j.jid <> 'status@broadcast'
+    )
+  `
+}
+
+/**
+ * `jids`: every distinct `remoteJid` of the account, one index descent each,
+ * over any index leading `("instanceId", (key->>'remoteJid'))`. Recursive — the
+ * caller writes `WITH RECURSIVE`. `IS NOT NULL` on the first step and `>` on the
+ * rest keep NULL out; the last row is NULL, so filter `jid` downstream. Postgres
+ * 17 has no skip scan of its own, hence the recursion.
+ */
+function distinctJids(sql: Sql, instanceId: string) {
+  return sql`
+    jids AS (
+      (SELECT m.key->>'remoteJid' AS jid
+       FROM "Message" m
+       WHERE m."instanceId" = ${instanceId}
+         AND m.key->>'remoteJid' IS NOT NULL
+       ORDER BY m.key->>'remoteJid'
+       LIMIT 1)
+      UNION ALL
+      SELECT (SELECT m.key->>'remoteJid'
+              FROM "Message" m
+              WHERE m."instanceId" = ${instanceId}
+                AND m.key->>'remoteJid' > j.jid
+              ORDER BY m.key->>'remoteJid'
+              LIMIT 1)
+      FROM jids j
+      WHERE j.jid IS NOT NULL
     )
   `
 }
@@ -944,17 +1084,43 @@ function perJidByAggregate(sql: Sql, instanceId: string) {
  * `DESC` on the last column matches too (the prefix is the same; a backward
  * scan reads either).
  *
- * Evolution creates no such index; docs/whatsapp.md tells the operator to. So
- * this is per database (`evo:default` or the connection's own), cached ten
- * minutes — an index built while running is picked up without a restart — and
- * a failed check reads as "absent" for a minute, which falls back to the shape
- * that works everywhere rather than gambling on one that needs the index.
- * Absence is logged once per database per process.
+ * Evolution creates no such index; docs/whatsapp.md tells the operator to.
  */
 async function chatTimestampIndexPresent(instance: AppInstance, query: SharedPool['query']): Promise<boolean> {
+  return await messageIndexPresent(instance, query, CHAT_TS_INDEX)
+}
+
+/** What a `"Message"` index must look like for a read to rely on it, and what to log when it is missing. */
+interface MessageIndexSpec {
+  /** `pg_get_indexdef` output, as a `LIKE` pattern. No `_` or `%` inside except as wildcards. */
+  shape: string
+  /** Whether the index carries a `WHERE`. A partial one serves only queries whose predicate implies it. */
+  partial: boolean
+  /** Log prefix, and what the read does instead while the index is missing. */
+  label: string
+  fallback: string
+  missing: string
+  cache: ReturnType<typeof staleWhileFailing<boolean>>
+  reported: Set<string>
+}
+
+/**
+ * Whether this message database has an index of `spec`'s shape: valid, ready,
+ * matched on `pg_get_indexdef` so an operator's own name for it counts. Per
+ * database (`evo:default` or the connection's own), cached ten minutes — an
+ * index built while running is picked up without a restart — and a failed
+ * check reads as "absent" for a minute, which falls back to the read that works
+ * everywhere rather than gambling on one that needs the index. Absence is
+ * logged once per database per process.
+ */
+async function messageIndexPresent(
+  instance: AppInstance,
+  query: SharedPool['query'],
+  spec: MessageIndexSpec,
+): Promise<boolean> {
   const key = messagePoolKey(instance)
 
-  return await chatIndexCache(key, async () => {
+  return await spec.cache(key, async () => {
     let present: boolean
     try {
       const [row] = await query(sql => sql<Array<{ present: boolean }>>`
@@ -964,35 +1130,51 @@ async function chatTimestampIndexPresent(instance: AppInstance, query: SharedPoo
           WHERE i.indrelid = to_regclass('"Message"')
             AND i.indisvalid
             AND i.indisready
-            AND i.indpred IS NULL
-            AND pg_get_indexdef(i.indexrelid) LIKE ${CHAT_TS_INDEX_SHAPE}
+            AND (i.indpred IS NOT NULL) = ${spec.partial}
+            AND pg_get_indexdef(i.indexrelid) LIKE ${spec.shape}
         ) AS present
       `)
       present = row?.present === true
     }
     catch (error) {
-      console.warn('[chats] could not check "Message" for the chat listing index; listing by full scan for now:', error)
+      console.warn(`${spec.label} could not check "Message" for its index; ${spec.fallback} for now:`, error)
       return undefined
     }
 
-    if (!present && !chatIndexMissingReported.has(key)) {
-      chatIndexMissingReported.add(key)
-      console.warn(
-        '[chats] "Message" has no index on ("instanceId", (key->>\'remoteJid\'), "messageTimestamp"), '
-        + 'so every chat listing reads all of an account\'s messages and large accounts time out. '
-        + 'Create message_instance_chat_ts_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
-      )
+    if (!present && !spec.reported.has(key)) {
+      spec.reported.add(key)
+      console.warn(`${spec.label} ${spec.missing}`)
     }
-    if (present) chatIndexMissingReported.delete(key)
+    if (present) spec.reported.delete(key)
     return present
   })
 }
 
-/** What `pg_get_indexdef` prints for that index, up to the last column. No `_` or `%` inside. */
-const CHAT_TS_INDEX_SHAPE = '%USING btree ("instanceId", ((key ->> \'remoteJid\'::text)), "messageTimestamp"%'
+const CHAT_TS_INDEX: MessageIndexSpec = {
+  // Up to the last column, so `DESC` and extra trailing columns count too.
+  shape: '%USING btree ("instanceId", ((key ->> \'remoteJid\'::text)), "messageTimestamp"%',
+  partial: false,
+  label: '[chats]',
+  fallback: 'listing by full scan',
+  missing: '"Message" has no index on ("instanceId", (key->>\'remoteJid\'), "messageTimestamp"), '
+    + 'so every chat listing reads all of an account\'s messages and large accounts time out. '
+    + 'Create message_instance_chat_ts_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
+  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
+  reported: new Set<string>(),
+}
 
-const chatIndexCache = staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false })
-const chatIndexMissingReported = new Set<string>()
+const INSTANCE_TS_INDEX: MessageIndexSpec = {
+  // Up to the second column, so `DESC` and trailing columns count too.
+  shape: '%USING btree ("instanceId", "messageTimestamp"%',
+  partial: false,
+  label: '[last-inbound]',
+  fallback: 'leaving the last received time unknown',
+  missing: '"Message" has no index on ("instanceId", "messageTimestamp"), so the time an account '
+    + 'last received a message is not shown. Create message_instance_ts_idx: see docs/whatsapp.md '
+    + '"Indexes on Evolution\'s tables".',
+  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
+  reported: new Set<string>(),
+}
 
 /**
  * One `(remoteJid, remoteJidAlt)` combination seen on a LID chat's rows.
@@ -1022,13 +1204,52 @@ export interface LidLinkRow {
  * a chat-scoped token's view depend on chats outside its scope — the same reason
  * a phone-number chat's rows are not read for the reverse link.
  *
- * One scan of the account (`instanceId` is the only index), grouped down to
- * distinct combinations, so the result is small — a few rows per person, never
- * per message. Cached by the caller; never on a per-message path.
+ * Small result — a few rows per person, never per message — cached by the
+ * caller, never on a per-message path. **What it costs depends on two indexes
+ * (#222):**
+ *
+ * - **With both** the per-chat timestamp index (`chatTimestampIndexPresent`) and
+ *   `message_lid_alt_idx` (`LID_ALT_INDEX`): proportional to chats plus rows
+ *   carrying an alt, not to messages. The LID chats come from the same loose
+ *   index scan as `listChatActivity` (one descent per distinct `remoteJid`); the
+ *   pairs from the partial index, which holds only rows with `remoteJidAlt` —
+ *   2,131 of 1.96M on the largest production account, every one in a LID chat.
+ *   Each LID chat is returned once with `alt` null, plus once per distinct alt.
+ * - **Otherwise** the old aggregate over every LID chat row: 25 s cold on that
+ *   account (208k LID rows), past the 10 s timeout, so its links never loaded.
+ *
+ * The two answer differently only in `alt`-null rows: the aggregate emits one
+ * where some row of the chat lacks an alt, the index shape for every LID chat.
+ * `shapeLinks` reads a null row only as "this LID chat exists", so the links it
+ * builds are the same. Verified with `EXCEPT` both ways on the non-null pairs and
+ * on the set of LID chats.
+ *
+ * **Keep `key ? 'remoteJidAlt'` a literal, word for word the index's
+ * predicate** — as a bind parameter or reworded, the planner can no longer prove
+ * the partial index applies, and the read scans the account again.
  */
 export async function readLidLinks(instance: AppInstance): Promise<LidLinkRow[]> {
   const { query } = await evolutionDbFor(instance)
-  const instanceId = await resolveEvolutionInstanceId(instance)
+  const [instanceId, skipScan, altIndex] = await Promise.all([
+    resolveEvolutionInstanceId(instance),
+    chatTimestampIndexPresent(instance, query),
+    messageIndexPresent(instance, query, LID_ALT_INDEX),
+  ])
+
+  if (skipScan && altIndex) {
+    return await query(sql => sql<LidLinkRow[]>`
+      WITH RECURSIVE ${distinctJids(sql, instanceId)}
+      SELECT j.jid, NULL::text AS alt
+      FROM jids j
+      WHERE j.jid LIKE '%@lid'
+      UNION
+      SELECT m.key->>'remoteJid', m.key->>'remoteJidAlt'
+      FROM "Message" m
+      WHERE m."instanceId" = ${instanceId}
+        AND m.key ? 'remoteJidAlt'
+        AND m.key->>'remoteJid' LIKE '%@lid'
+    `)
+  }
 
   return await query(sql => sql<LidLinkRow[]>`
     SELECT m.key->>'remoteJid' AS jid, m.key->>'remoteJidAlt' AS alt
@@ -1037,6 +1258,23 @@ export async function readLidLinks(instance: AppInstance): Promise<LidLinkRow[]>
       AND m.key->>'remoteJid' LIKE '%@lid'
     GROUP BY 1, 2
   `)
+}
+
+/**
+ * The partial index `readLidLinks` reads pairs from. Only rows carrying
+ * `remoteJidAlt` — live traffic in LID chats — so it stays tiny. docs/whatsapp.md
+ * has the statement.
+ */
+const LID_ALT_INDEX: MessageIndexSpec = {
+  shape: '%USING btree ("instanceId"%) WHERE (key ? \'remoteJidAlt\'::text)',
+  partial: true,
+  label: '[identity]',
+  fallback: 'reading LID links by full scan',
+  missing: '"Message" has no partial index WHERE key ? \'remoteJidAlt\', '
+    + 'so reading LID links scans every message in an account\'s LID chats and large accounts time out. '
+    + 'Create message_lid_alt_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
+  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
+  reported: new Set<string>(),
 }
 
 /**
@@ -1271,19 +1509,68 @@ function bestNamed(sql: Sql) {
 }
 
 /**
+ * Who sent a message, unresolved.
+ *
+ * `identity` is what the name directory is asked about (it is keyed on the local
+ * part, so either addressing form resolves). `id` is a stable handle for a group
+ * message's sender, for the caller to show when no name resolves: without it, a
+ * group page of unnamed senders reads as one anonymous voice (#263). It is the
+ * LID's local part where one is known, since history rows only ever give us the
+ * LID, and the same person must not read as two between old and new messages.
+ */
+export interface MessageSender {
+  identity?: string
+  id?: string
+  pushName?: string
+}
+
+/**
  * The sender's identity as stored, preferring the group participant.
  *
- * Baileys writes `participant` for a group message on both the live and the
- * history path, and `participantAlt` — the same person's other addressing form —
- * only on the live one. Either resolves, because the directory is keyed on the
- * local part. For a 1:1 chat there is no participant and the chat's own JID *is*
- * the sender, which is why `remoteJid` is the fallback rather than nothing.
+ * Baileys writes `participant` for a group message on the live path, and
+ * `participantAlt` — the same person's other addressing form — beside it. For a
+ * 1:1 chat there is no participant and the chat's own JID *is* the sender, which
+ * is why `remoteJid` is the fallback there.
+ *
+ * **Never for a group.** History-imported group rows often arrive with no
+ * `participant` at all (measured on prod: most accounts' imports, before and
+ * after the evolution-api-reforged switch). Falling back to `remoteJid` there
+ * named the *group* as the sender of every such message. What those rows do
+ * carry is a numeric `pushName`: the sender's LID local part (matched against
+ * live rows' participants in tens of thousands of rows, against a phone local
+ * part in a few dozen). So it is read as the sender's identity — never as a name
+ * — and the directory turns it into one where it can. `@lid` on the recovered
+ * identity is a lookup key, not a claim: the directory matches on digits alone.
  */
-export function senderOf(row: { key: MessageKey | null, pushName: string | null }): { identity?: string, pushName?: string } {
-  return {
-    identity: row.key?.participant ?? row.key?.participantAlt ?? row.key?.remoteJid,
-    pushName: row.pushName ?? undefined,
+export function senderOf(row: { key: MessageKey | null, pushName: string | null }): MessageSender {
+  const { participant, participantAlt, remoteJid } = row.key ?? {}
+  const pushName = row.pushName ?? undefined
+
+  const stated = participant || participantAlt
+  if (stated) {
+    const lid = [participant, participantAlt].find(jid => jid?.endsWith('@lid'))
+    return { identity: stated, id: localPart(lid ?? stated), pushName }
   }
+
+  if (remoteJid?.endsWith('@g.us')) {
+    const recovered = identityFromPushName(pushName)
+    return recovered
+      ? { identity: recovered, id: localPart(recovered) }
+      : { pushName }
+  }
+
+  return { identity: remoteJid, pushName }
+}
+
+/** A bare LID, or a LID JID, standing where a push name should be. */
+function identityFromPushName(pushName: string | undefined): string | undefined {
+  const digits = pushName?.trim().match(/^(\d{6,20})(?:@lid)?$/)?.[1]
+  return digits ? `${digits}@lid` : undefined
+}
+
+/** Local part without a device suffix (`123:4@lid` → `123`), so one person reads as one id. */
+function localPart(jid: string): string {
+  return jid.split('@')[0]?.split(':')[0] ?? ''
 }
 
 /**

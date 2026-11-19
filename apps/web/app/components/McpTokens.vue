@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { PlusIcon } from '@lucide/vue'
+import { toast } from 'vue-sonner'
 import { assertNever } from '#shared/connection'
 
 const props = withDefaults(defineProps<{
@@ -7,9 +8,10 @@ const props = withDefaults(defineProps<{
   kind: InstanceKind
   connected?: boolean
   /**
-   * Whether this viewer administers the connection.
+   * Whether this viewer manages the connection — an admin, or the member who
+   * created it.
    *
-   * An admin mints tokens, edits their scope, and sees every token on the
+   * A manager mints tokens, edits their scope, and sees every token on the
    * connection with who holds it. A member sees only their own and may revoke or
    * rotate them — destroying or replacing your own credential must never need
    * someone else's approval, and widening one must always be theirs.
@@ -19,7 +21,17 @@ const props = withDefaults(defineProps<{
   canManage?: boolean
 }>(), { canManage: false })
 
-const { user } = useSession()
+/**
+ * `created`: a token was minted (its secret is on screen now). `revealClosed`:
+ * the reveal dialog was dismissed. First-run setup (pages/welcome.vue) moves
+ * on from these; it opens the create dialog through `openCreate`.
+ */
+const emit = defineEmits<{ created: [], revealClosed: [] }>()
+// Before the first `await` below: exposed after it, a parent's template ref
+// has already resolved without it. `openCreate` is a hoisted declaration.
+defineExpose({ openCreate })
+
+const { user, isAdmin } = useSession()
 
 /**
  * Whether a new token starts with the read tools only, which is also whether
@@ -102,13 +114,23 @@ interface TokenRow {
   expires_at?: string
   revoked: boolean
   expired: boolean
-  /** The email is present only for an admin; a member's own list carries none. */
+  /** The email is present only for a manager; another member's own list carries none. */
   assignedTo: { id: string, email?: string }
   scope: TokenScope
   send_disclaimer?: string
   /** Absent when the server could not read them; empty when none were seen. */
   clients?: TokenClient[]
+  /** Set when a member asked for this token rather than a manager minting it. */
+  request?: { requestedAt?: string, status: 'pending' | 'approved' | 'declined', requestedExpiry?: ExpiryChoice }
+  /** False until the holder of an approved request has taken its secret. */
+  secretIssued: boolean
 }
+
+type ExpiryChoice = '30d' | '90d' | '1y' | 'never'
+
+const isPending = (token: TokenRow) => token.request?.status === 'pending' && !token.revoked
+/** Approved, but its holder has not collected a secret: "Get token". */
+const awaitsSecret = (token: TokenRow) => !token.secretIssued && !isPending(token) && !token.revoked && !token.expired
 
 const { data, refresh, status } = await useFetch<{ tokens: TokenRow[] }>(
   () => `/api/instances/${props.instanceId}/tokens`,
@@ -116,7 +138,7 @@ const { data, refresh, status } = await useFetch<{ tokens: TokenRow[] }>(
 
 const createOpen = ref(false)
 const newLabel = ref('')
-const newExpiry = ref<'30d' | '90d' | '1y' | 'never'>('90d')
+const newExpiry = ref<ExpiryChoice>('90d')
 const newScope = ref<TokenScope>(openScope())
 /** Off until an admin turns it on; see TokenScopeFields. */
 const newDisclaimer = ref<string | null>(null)
@@ -129,6 +151,9 @@ const editing = ref<TokenRow | null>(null)
 const editLabel = ref('')
 const editScope = ref<TokenScope>(openScope())
 const editDisclaimer = ref<string | null>(null)
+/** Set when the edit dialog is approving a request rather than editing a token. */
+const approving = ref(false)
+const approveExpiry = ref<ExpiryChoice>('90d')
 
 const { busy: creating, run: runCreate } = useApiAction()
 const { busy: saving, run: runSave } = useApiAction()
@@ -139,9 +164,9 @@ const { run: runRotate } = useApiAction()
 const rotating = ref<string | null>(null)
 
 /**
- * Who an admin may issue a token to.
+ * Who a manager may issue a token to.
  *
- * Fetched only for an admin, and only for the create dialog. The server refuses
+ * Fetched only for a manager, and only for the create dialog. The server refuses
  * a token for someone who cannot reach the connection — it would be born dead —
  * so the picker offers exactly the people who can.
  */
@@ -190,7 +215,9 @@ function openCreate() {
   if (props.canManage) refreshAssignable()
 }
 
-function startEdit(token: TokenRow) {
+function startEdit(token: TokenRow, approve = false) {
+  approving.value = approve
+  approveExpiry.value = token.request?.requestedExpiry ?? '90d'
   editing.value = token
   editLabel.value = token.label
   // Copied, not referenced — cancelling must not leave the table showing edits
@@ -204,27 +231,57 @@ async function saveEdit() {
   const token = editing.value
   if (!token) return
 
+  const approve = approving.value
   await runSave(
     async () => {
-      await $fetch(`/api/tokens/${token.id}`, {
-        method: 'PATCH',
-        body: {
-          ...editScope.value,
-          label: editLabel.value,
-          send_disclaimer: disclaimerToSubmit(editScope.value, props.kind, editDisclaimer.value),
-        },
-      })
+      const scope = { ...editScope.value, label: editLabel.value, send_disclaimer: disclaimerToSubmit(editScope.value, props.kind, editDisclaimer.value) }
+      if (approve) {
+        await $fetch(`/api/tokens/${token.id}/approve`, { method: 'POST', body: { ...scope, expiry: approveExpiry.value } })
+        track('token_approved', { connection_id: props.instanceId, kind: props.kind, token_id: token.id, expiry: approveExpiry.value })
+      }
+      else {
+        await $fetch(`/api/tokens/${token.id}`, { method: 'PATCH', body: scope })
+      }
       editing.value = null
       await refresh()
     },
     {
-      success: 'Token updated. The connector keeps working with its existing token.',
+      success: approve
+        ? 'Request approved. They can now get the token from this page.'
+        : 'Token updated. The connector keeps working with its existing token.',
       // The server rejects an empty allowlist or name by name — "Select at
       // least one action", "Give the token a name" — which is the whole point
       // of showing its message here.
-      failure: 'Could not update the token',
+      failure: approve ? 'Could not approve the request' : 'Could not update the token',
     },
   )
+}
+
+/**
+ * Ask a manager for a token. Nothing is revealed: a request authenticates
+ * nothing until approved, and the secret is collected afterwards ("Get token").
+ */
+async function request() {
+  const scope = newScope.value
+  const result = await runCreate(
+    () => $fetch<{ notified: number }>(`/api/instances/${props.instanceId}/token-requests`, {
+      method: 'POST',
+      body: {
+        label: newLabel.value,
+        expiry: newExpiry.value,
+        ...scope,
+        send_disclaimer: disclaimerToSubmit(scope, props.kind, newDisclaimer.value),
+      },
+    }),
+    { failure: 'Could not send the request' },
+  )
+  if (!result) return
+  track('token_requested', { connection_id: props.instanceId, kind: props.kind, expiry: newExpiry.value })
+  toast.success(result.notified
+    ? 'Request sent. You will be able to get the token here once it is approved.'
+    : 'Request saved. Whoever manages this connection will see it here; you can get the token once it is approved.')
+  createOpen.value = false
+  await refresh()
 }
 
 async function create() {
@@ -244,6 +301,16 @@ async function create() {
     { failure: 'Could not create the token' },
   )
   if (!result) return
+  track('token_created', {
+    connection_id: props.instanceId,
+    kind: props.kind,
+    expiry: newExpiry.value,
+    all_tools: scope.all_tools,
+    tool_count: scope.tool_names.length,
+    all_chats: scope.all_chats,
+    all_tables: scope.all_tables,
+    for_other_member: Boolean(newAssignee.value) && newAssignee.value !== user.value?.id,
+  })
 
   // The plaintext exists only in this response, so the reveal dialog is opened
   // from the value in hand rather than from a refetch.
@@ -252,6 +319,7 @@ async function create() {
   createOpen.value = false
   newLabel.value = ''
   newScope.value = openScope()
+  emit('created')
   await refresh()
 }
 
@@ -260,6 +328,7 @@ async function revoke(id: string) {
   await runRevoke(
     async () => {
       await $fetch(`/api/tokens/${id}`, { method: 'DELETE' })
+      track('token_revoked', { connection_id: props.instanceId, kind: props.kind, token_id: id })
       await refresh()
     },
     {
@@ -296,7 +365,10 @@ async function rotate(token: TokenRow) {
 }
 
 function statusOf(token: TokenRow) {
+  if (token.request?.status === 'declined') return { label: 'Declined', variant: 'outline' as const }
+  if (isPending(token)) return { label: 'Awaiting approval', variant: 'secondary' as const }
   if (token.revoked) return { label: 'Revoked', variant: 'outline' as const }
+  if (awaitsSecret(token)) return { label: 'Approved', variant: 'secondary' as const }
   if (token.expired) return { label: 'Expired', variant: 'outline' as const }
   return { label: 'Active', variant: 'default' as const }
 }
@@ -333,12 +405,18 @@ function statusOf(token: TokenRow) {
         </p>
       </div>
 
-      <!-- Minting is admin-only: what a token reaches is an organization
-           decision, and a member who could mint could grant themselves any scope
-           the connection has. -->
+      <!-- Minting is manager-only: what a token reaches is the manager's
+           decision, and any other member who could mint could grant themselves
+           any scope the connection has. -->
       <Button v-if="canManage" size="sm" @click="openCreate()">
         <PlusIcon class="size-4" />
         New token
+      </Button>
+      <!-- Anyone else asks: the request is reviewed, and its scope may be
+           changed, by whoever manages the connection. -->
+      <Button v-else size="sm" variant="outline" @click="openCreate()">
+        <PlusIcon class="size-4" />
+        Request token
       </Button>
     </div>
 
@@ -354,8 +432,8 @@ function statusOf(token: TokenRow) {
             No tokens yet. Create one, then paste its URL into Claude as a custom connector.
           </template>
           <template v-else>
-            You have no connector tokens for this connection yet. An admin of your
-            organization can issue you one.
+            You have no connector tokens for this connection yet. Request one, and
+            whoever manages this connection can approve it.
           </template>
         </p>
 
@@ -377,8 +455,8 @@ function statusOf(token: TokenRow) {
             <TableRow v-for="token in data.tokens" :key="token.id">
               <TableCell class="font-medium">
                 {{ token.label }}
-                <!-- Whose it is, for an admin looking at the whole
-                     organization's tokens. Under the name rather than in its own
+                <!-- Whose it is, for a manager looking at everyone's tokens
+                     on this connection. Under the name rather than in its own
                      column: a seventh column pushes the row actions off the
                      edge at ordinary widths. -->
                 <div v-if="canManage" class="text-xs font-normal text-muted-foreground">
@@ -404,11 +482,12 @@ function statusOf(token: TokenRow) {
                 {{ formatDate(token.created) }}
               </TableCell>
               <TableCell class="text-muted-foreground">
-                <!-- Opens the token's recorded tool calls. On the date rather
-                     than a row button: the actions column is already as wide
-                     as an ordinary screen allows. -->
+                <!-- Opens the token's recorded tool calls — admins only, the
+                     server refuses everyone else. On the date rather than a row
+                     button: the actions column is already as wide as an
+                     ordinary screen allows. -->
                 <button
-                  v-if="token.last_used_at"
+                  v-if="token.last_used_at && isAdmin"
                   type="button"
                   class="underline-offset-2 hover:underline"
                   title="Show recorded tool calls"
@@ -416,12 +495,21 @@ function statusOf(token: TokenRow) {
                 >
                   {{ formatDate(token.last_used_at) }}
                 </button>
+                <template v-else-if="token.last_used_at">
+                  {{ formatDate(token.last_used_at) }}
+                </template>
                 <template v-else>
                   Never
                 </template>
               </TableCell>
               <TableCell class="text-muted-foreground">
-                {{ token.expires_at ? formatDate(token.expires_at) : 'Never' }}
+                <!-- A request's clock starts at approval. -->
+                <template v-if="isPending(token) || token.request?.status === 'declined'">
+                  —
+                </template>
+                <template v-else>
+                  {{ token.expires_at ? formatDate(token.expires_at) : 'Never' }}
+                </template>
               </TableCell>
               <TableCell>
                 <span class="text-sm text-muted-foreground">{{ describeScope(token.scope, kind) }}</span>
@@ -432,70 +520,116 @@ function statusOf(token: TokenRow) {
                 </Badge>
               </TableCell>
               <TableCell class="whitespace-nowrap">
-                <Button
-                  v-if="!token.revoked"
-                  variant="ghost"
-                  size="sm"
-                  @click="howTo = token"
-                >
-                  How to
-                </Button>
-                <!-- Scope is admin-only. A member may replace the secret, never
-                     widen what it reaches. -->
-                <Button
-                  v-if="canManage && !token.revoked"
-                  variant="ghost"
-                  size="sm"
-                  @click="startEdit(token)"
-                >
-                  Edit
-                </Button>
-                <AlertDialog v-if="!token.revoked && !token.expired">
-                  <AlertDialogTrigger as-child>
-                    <Button variant="ghost" size="sm" :disabled="rotating === token.id">
-                      New secret
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Issue a new secret for “{{ token.label }}”?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        The current one stops working immediately and every Claude
-                        connector using it has to be updated. What the token can
-                        reach does not change. Use this if the token may have
-                        leaked.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>Cancel</AlertDialogCancel>
-                      <AlertDialogAction @click="rotate(token)">
-                        Issue a new secret
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-                <AlertDialog v-if="!token.revoked">
-                  <AlertDialogTrigger as-child>
-                    <Button variant="ghost" size="sm" :disabled="revoking === token.id">
-                      Revoke
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent>
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>Revoke “{{ token.label }}”?</AlertDialogTitle>
-                      <AlertDialogDescription>
-                        Any Claude connector using this token stops working immediately.
-                        This cannot be undone — you would need to create a new token.
-                      </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel>Cancel</AlertDialogCancel>
-                      <AlertDialogAction @click="revoke(token.id)">
+                <!-- A request: the manager approves (choosing the scope) or
+                     declines; the requester may withdraw it. -->
+                <template v-if="isPending(token)">
+                  <Button
+                    v-if="canManage"
+                    size="sm"
+                    @click="startEdit(token, true)"
+                  >
+                    Approve
+                  </Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger as-child>
+                      <Button variant="ghost" size="sm" :disabled="revoking === token.id">
+                        {{ canManage ? 'Decline' : 'Withdraw' }}
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>{{ canManage ? 'Decline' : 'Withdraw' }} “{{ token.label }}”?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          {{ canManage
+                            ? 'No token is issued. They can send a new request.'
+                            : 'The request is cancelled. You can send a new one.' }}
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction @click="revoke(token.id)">
+                          {{ canManage ? 'Decline' : 'Withdraw' }}
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </template>
+                <template v-else-if="!token.revoked">
+                  <!-- Approved, secret not collected: only its holder can take
+                       it, and the first secret anyone sees appears here. -->
+                  <Button
+                    v-if="awaitsSecret(token) && token.assignedTo.id === user?.id"
+                    size="sm"
+                    :disabled="rotating === token.id"
+                    @click="rotate(token)"
+                  >
+                    Get token
+                  </Button>
+                  <Button
+                    v-if="!awaitsSecret(token)"
+                    variant="ghost"
+                    size="sm"
+                    @click="howTo = token"
+                  >
+                    How to
+                  </Button>
+                  <!-- Scope is manager-only. A token holder may replace the secret, never
+                       widen what it reaches. -->
+                  <Button
+                    v-if="canManage && !token.revoked"
+                    variant="ghost"
+                    size="sm"
+                    @click="startEdit(token)"
+                  >
+                    Edit
+                  </Button>
+                  <AlertDialog v-if="!token.revoked && !token.expired && !awaitsSecret(token)">
+                    <AlertDialogTrigger as-child>
+                      <Button variant="ghost" size="sm" :disabled="rotating === token.id">
+                        New secret
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Issue a new secret for “{{ token.label }}”?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          The current one stops working immediately and every Claude
+                          connector using it has to be updated. What the token can
+                          reach does not change. Use this if the token may have
+                          leaked.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction @click="rotate(token)">
+                          Issue a new secret
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                  <AlertDialog v-if="!token.revoked">
+                    <AlertDialogTrigger as-child>
+                      <Button variant="ghost" size="sm" :disabled="revoking === token.id">
                         Revoke
-                      </AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Revoke “{{ token.label }}”?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                          Any Claude connector using this token stops working immediately.
+                          This cannot be undone — you would need to create a new token.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction @click="revoke(token.id)">
+                          Revoke
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </template>
               </TableCell>
             </TableRow>
           </TableBody>
@@ -506,9 +640,13 @@ function statusOf(token: TokenRow) {
     <Dialog v-model:open="createOpen">
       <DialogContent class="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-2xl md:max-w-5xl">
         <DialogHeader class="shrink-0">
-          <DialogTitle>New connector token</DialogTitle>
+          <DialogTitle>{{ canManage ? 'New connector token' : 'Request a connector token' }}</DialogTitle>
           <DialogDescription>
             Name it after where you will use it, so you know which to revoke later.
+            <template v-if="!canManage">
+              Whoever manages this connection reviews the request and may change
+              what it can reach. Once approved, get the token from this page.
+            </template>
           </DialogDescription>
         </DialogHeader>
 
@@ -589,8 +727,11 @@ function statusOf(token: TokenRow) {
           <Button variant="ghost" @click="createOpen = false">
             Cancel
           </Button>
-          <Button :disabled="creating" @click="create">
+          <Button v-if="canManage" :disabled="creating" @click="create">
             {{ creating ? 'Creating…' : 'Create token' }}
+          </Button>
+          <Button v-else :disabled="creating" @click="request">
+            {{ creating ? 'Sending…' : 'Send request' }}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -599,8 +740,13 @@ function statusOf(token: TokenRow) {
     <Dialog :open="Boolean(editing)" @update:open="value => { if (!value) editing = null }">
       <DialogContent class="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-2xl md:max-w-5xl">
         <DialogHeader class="shrink-0">
-          <DialogTitle>Edit “{{ editing?.label }}”</DialogTitle>
-          <DialogDescription>
+          <DialogTitle>{{ approving ? 'Approve' : 'Edit' }} “{{ editing?.label }}”</DialogTitle>
+          <DialogDescription v-if="approving">
+            Requested by {{ editing?.assignedTo.email || 'a member' }}. This is the
+            scope they asked for — change anything before approving. They get the
+            token from this page afterwards; you will not see it.
+          </DialogDescription>
+          <DialogDescription v-else>
             Changes apply from the next request. The connector already set up in
             Claude keeps working — the token itself does not change.
           </DialogDescription>
@@ -610,6 +756,29 @@ function statusOf(token: TokenRow) {
           <div class="shrink-0 space-y-2">
             <Label for="edit-token-label">Name</Label>
             <Input id="edit-token-label" v-model="editLabel" />
+          </div>
+
+          <div v-if="approving" class="shrink-0 space-y-2">
+            <Label for="approve-token-expiry">Expires</Label>
+            <Select v-model="approveExpiry">
+              <SelectTrigger id="approve-token-expiry">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="30d">
+                  30 days after approval
+                </SelectItem>
+                <SelectItem value="90d">
+                  90 days after approval
+                </SelectItem>
+                <SelectItem value="1y">
+                  1 year after approval
+                </SelectItem>
+                <SelectItem value="never">
+                  Never
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
 
           <Separator class="shrink-0" />
@@ -627,7 +796,7 @@ function statusOf(token: TokenRow) {
             Cancel
           </Button>
           <Button :disabled="saving" @click="saveEdit">
-            {{ saving ? 'Saving…' : 'Save' }}
+            {{ saving ? 'Saving…' : approving ? 'Approve' : 'Save' }}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -656,6 +825,6 @@ function statusOf(token: TokenRow) {
       @update:open="value => { if (!value) clientsOf = null }"
     />
 
-    <RevealTokenDialog :token="revealed" :kind="kind" :scope="revealedScope" @close="revealed = null" />
+    <RevealTokenDialog :token="revealed" :kind="kind" :scope="revealedScope" @close="revealed = null; emit('revealClosed')" />
   </section>
 </template>

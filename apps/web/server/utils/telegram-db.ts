@@ -333,6 +333,10 @@ export type TelegramPickerChat = {
   participantCount?: number
   lastMessageAt?: string
   telegramType: TelegramChatType
+  /** Why older history stops where it does; absent while it is still being fetched or complete. */
+  historyStopped?: Exclude<TelegramBackfillStop, 'start'>
+  /** The oldest message synced, when older history has stopped short of the chat's start. */
+  historyFrom?: string
 }
 
 export async function listTelegramChatsForPicker(
@@ -351,6 +355,8 @@ export async function listTelegramChatsForPicker(
       ...(chat.participantCount !== undefined && { participantCount: chat.participantCount }),
       ...(chat.lastMessageAt && { lastMessageAt: chat.lastMessageAt }),
       telegramType: chat.type,
+      ...(chat.history.stoppedBecause && { historyStopped: chat.history.stoppedBecause }),
+      ...(chat.history.stoppedBecause && chat.history.oldestSyncedAt && { historyFrom: chat.history.oldestSyncedAt }),
     })),
   }
 }

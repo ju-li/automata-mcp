@@ -39,6 +39,32 @@ export interface PublicToken {
    * read, which is different from an empty list.
    */
   clients?: PublicTokenClient[]
+  /**
+   * Present when a member asked for this token instead of a manager minting
+   * it. `pending` = waiting for a manager; `declined` = revoked before
+   * approval; `approved` = works once the holder has a secret.
+   */
+  request?: { requestedAt?: string, status: 'pending' | 'approved' | 'declined', requestedExpiry?: ExpiryPreset }
+  /**
+   * False for an approved request whose holder has not yet taken a secret
+   * ("Get token" = rotate). Nothing the holder was shown works before that.
+   */
+  secretIssued: boolean
+}
+
+/** A member's request that no manager has approved yet. Never authenticates. */
+export function isPendingRequest(token: Pick<AppMcpToken, 'requested_at' | 'approved_at'>): boolean {
+  return Boolean(token.requested_at) && !token.approved_at
+}
+
+function requestView(token: AppMcpToken): PublicToken['request'] {
+  if (!token.requested_at) return undefined
+  const status = token.approved_at ? 'approved' : token.revoked ? 'declined' : 'pending'
+  return {
+    requestedAt: token.requested_at,
+    status,
+    requestedExpiry: (token.requested_expiry as ExpiryPreset | undefined) || undefined,
+  }
 }
 
 export function toPublicToken(token: AppMcpToken, emails?: Map<string, string>): PublicToken {
@@ -54,6 +80,8 @@ export function toPublicToken(token: AppMcpToken, emails?: Map<string, string>):
     assignedTo: { id: token.assigned_to, email: emails?.get(token.assigned_to) },
     scope: scopeToInput(scopeFromRecord(token)),
     send_disclaimer: token.send_disclaimer || undefined,
+    request: requestView(token),
+    secretIssued: token.secret_issued !== false,
   }
 }
 
@@ -97,7 +125,7 @@ export async function listTokens(
 /** Expiry presets offered by the UI. `never` leaves `expires_at` NULL. */
 export type ExpiryPreset = '30d' | '90d' | '1y' | 'never'
 
-function expiryFromPreset(preset: ExpiryPreset): string | null {
+export function expiryFromPreset(preset: ExpiryPreset): string | null {
   if (preset === 'never') return null
   const days = preset === '30d' ? 30 : preset === '90d' ? 90 : 365
   return new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString()
@@ -111,7 +139,7 @@ function expiryFromPreset(preset: ExpiryPreset): string | null {
  * postgres.js serialises a parameter by the column type the server describes,
  * so a pre-stringified value would be stored as a JSON *string*.
  */
-function scopeFields(scope: McpScope) {
+export function scopeFields(scope: McpScope) {
   return {
     all_chats: scope.allChats,
     chat_jids: scope.allChats ? [] : scope.chatJids,
@@ -184,6 +212,12 @@ export async function createToken(input: CreateTokenInput, db?: Db): Promise<{ t
  * The plaintext is returned here and nowhere else, exactly as at creation.
  */
 export async function rotateToken(token: AppMcpToken): Promise<{ token: string, record: PublicToken }> {
+  if (isPendingRequest(token) && !token.revoked) {
+    throw createError({
+      statusCode: 422,
+      statusMessage: 'This token is still waiting for approval. You can get it once it is approved.',
+    })
+  }
   if (token.revoked) {
     throw createError({
       statusCode: 422,
@@ -199,7 +233,7 @@ export async function rotateToken(token: AppMcpToken): Promise<{ token: string, 
   }
 
   const { token: plaintext, hash } = mintMcpToken()
-  const record = await updateRow<AppMcpToken>('mcp_tokens', token.id, { token_hash: hash })
+  const record = await updateRow<AppMcpToken>('mcp_tokens', token.id, { token_hash: hash, secret_issued: true })
   return { token: plaintext, record: toPublicToken(record) }
 }
 

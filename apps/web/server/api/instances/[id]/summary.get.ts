@@ -15,6 +15,8 @@ export default defineEventHandler(async (event) => {
   const { instance, actor } = await requireReadableInstance(event, getRouterParam(event, 'id'))
   return {
     instance: toPublicInstance(instance),
-    canManage: actor.role === 'admin',
+    // `instance` reached this point through the actor's reach (listing or
+    // `requireReadableInstance`), so only the management half is left to ask.
+    canManage: managesInstance({ role: actor.role, userId: actor.user.id }, instance, true),
   }
 })

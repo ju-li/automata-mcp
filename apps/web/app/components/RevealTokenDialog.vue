@@ -4,11 +4,6 @@ import { TriangleAlertIcon } from '@lucide/vue'
 const props = defineProps<{ token: string | null, kind: InstanceKind, scope?: TokenScope }>()
 const emit = defineEmits<{ close: [] }>()
 
-const { connectorUrl } = useConnectorUrl()
-
-/** The one place the real token is known, so the URL here is never masked. */
-const url = computed(() => (props.token ? connectorUrl(props.token) : ''))
-
 const open = computed({
   get: () => Boolean(props.token),
   set: (value: boolean) => {
@@ -19,7 +14,7 @@ const open = computed({
 
 <template>
   <Dialog v-model:open="open">
-    <DialogContent class="overflow-hidden sm:max-w-lg">
+    <DialogContent class="max-h-[85vh] overflow-x-hidden overflow-y-auto sm:max-w-xl">
       <DialogHeader>
         <DialogTitle>Your connector token</DialogTitle>
         <DialogDescription>
@@ -53,18 +48,7 @@ const open = computed({
         <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope, kind) }}
       </p>
 
-      <div class="min-w-0 space-y-2">
-        <Label>Connector URL — paste this into Claude</Label>
-        <CopyableSnippet :value="url" aria-label="Copy connector URL" />
-      </div>
-
-      <div class="min-w-0 space-y-2">
-        <Label>Token on its own</Label>
-        <CopyableSnippet :value="token || ''" aria-label="Copy token" />
-        <p class="text-xs text-muted-foreground">
-          For clients that can send <code class="font-mono break-all">Authorization: Bearer</code>, point them at <code class="font-mono">/mcp</code> and use this instead.
-        </p>
-      </div>
+      <ConnectInstructions :kind="kind" :token="token" />
 
       <DialogFooter>
         <Button @click="emit('close')">

@@ -31,6 +31,7 @@ import type { Db } from './app-db'
 export type HostedEventType =
   | 'user.signed_up'
   | 'user.email_changed'
+  | 'user.deleted'
   | 'org.created'
   | 'org.deleted'
   | 'member.joined'

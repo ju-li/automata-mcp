@@ -64,7 +64,7 @@ services:
     networks: [app]
 
   evolution:
-    image: evoapicloud/evolution-api:v2.3.7
+    image: ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.1.0@sha256:09a2b03c065c888a9e3b80212ce372a5dae9128cdfbc6f59450b0c71131daea3
     profiles: [whatsapp]
     restart: unless-stopped
     depends_on:
@@ -164,7 +164,7 @@ services:
       # there on first start and keeps every table in it.
       TELEGRAM_BRIDGE_DATABASE_URL: postgresql://${POSTGRES_USER:-evolution}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-evolution}
       TELEGRAM_TEST_SERVERS: ${TELEGRAM_TEST_SERVERS:-false}
-      TELEGRAM_BACKFILL_MAX_PER_CHAT: ${TELEGRAM_BACKFILL_MAX_PER_CHAT:-2000}
+      TELEGRAM_BACKFILL_MAX_PER_CHAT: ${TELEGRAM_BACKFILL_MAX_PER_CHAT:-20000}
       TELEGRAM_BACKFILL_DAYS: ${TELEGRAM_BACKFILL_DAYS:-365}
       TELEGRAM_BACKFILL_BROADCAST: ${TELEGRAM_BACKFILL_BROADCAST:-false}
       TELEGRAM_BACKFILL_PAGE_DELAY_MS: ${TELEGRAM_BACKFILL_PAGE_DELAY_MS:-1000}

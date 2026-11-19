@@ -85,6 +85,18 @@ export async function orgRecentHistoryOnly(db: Db, orgId: string): Promise<boole
 }
 
 /**
+ * The refusal for asking a Telegram chat for more older history on a plan that
+ * fetches recent history only. Same shape as `fullHistoryLimitError`.
+ */
+export function moreHistoryLimitError() {
+  return createError({
+    statusCode: 402,
+    statusMessage: 'Your plan syncs a limited amount of Telegram history. Upgrade to load more of a chat\'s history.',
+    data: { code: 'plan_limit', resource: 'history' },
+  })
+}
+
+/**
  * The refusal for asking for a full-history import on a plan that imports
  * recent history only. Same 402 `plan_limit` shape as `limitError`, so the UI
  * offers the Billing page the same way.
@@ -221,6 +233,8 @@ export async function mcpLimitRefusal(
         SELECT t.id FROM app.mcp_tokens t
         WHERE t.instance IN (SELECT id FROM conns)
           AND NOT t.revoked AND (t.expires_at IS NULL OR t.expires_at > now())
+          -- A pending request never authenticates, so it takes no slot here.
+          AND (t.requested_at IS NULL OR t.approved_at IS NOT NULL)
         ORDER BY t.created, t.id LIMIT ${limits.max_tokens ?? null}
       )
       SELECT EXISTS (SELECT 1 FROM toks WHERE id = ${tokenId}) AS allowed

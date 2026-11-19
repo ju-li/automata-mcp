@@ -27,10 +27,15 @@
    [Email (IMAP) connections](imap.md)).
 4. On the connection's dashboard, press **New token**: a name, an
    expiry (30 days, 90 days — the default — 1 year, or never) and a scope.
-5. Add it to Claude. The **How to connect** dialog has the steps for Claude.ai
-   (Settings → Customize → Connectors → Add → Add custom connector), Claude Code
-   (`claude mcp add --transport http <name> <url>`), clients that send an
-   `Authorization: Bearer` header, and the MCP Inspector.
+5. Add it to your AI assistant. The dialog shown when a token is created, and
+   the **How to connect** dialog, have a tab per assistant: **Claude** (Claude.ai
+   and Desktop: Settings → Customize → Connectors → Add → Add custom connector;
+   Claude Code: `claude mcp add --transport http <name> <url>`), **Grok Bot** and
+   **Meta Muse** (asked in a chat; the token goes into their secure key prompt,
+   sent as `Authorization: Bearer`), **ChatGPT** (Plugins → Add custom MCP
+   server, the token URL, No authentication), and **Other** (token URL,
+   `Authorization: Bearer` header, the MCP Inspector). The browser remembers
+   the last tab picked, so the next token opens on it.
    **Cursor** (hosted server only): install the Automata plugin from
    [cursor.directory](https://cursor.directory), or add this repository's
    `mcp.json` entry to your own. It sends the token from the `AUTOMATA_TOKEN`
@@ -51,10 +56,22 @@ invitation, and an account belongs to exactly one organization.
 - **Admins** manage the organization (**Organization** page): invite people, change
   roles, remove members, create and delete connections, assign them, and mint
   or edit tokens for anyone who can reach the connection.
-- **Members** use the connections assigned to them. They see only their own
-  tokens there, and may revoke a token or rotate its secret but never widen its
-  scope. Reconnecting, re-pairing and deleting are management, so a member is
-  told what is wrong and that an admin can fix it.
+- **Members** use the connections assigned to them, and may create connections
+  of their own — unless an admin turns off **Members can add connections** on
+  the **Organization** page (on by default; turning it off stops only new ones). A member who creates a connection manages it like an admin
+  would — pairs and deletes it, shares it with colleagues (**Who can use this**),
+  and mints or edits tokens on it for them — for as long as they keep access to
+  it; an admin can take it away from them. On connections someone else created,
+  a member sees only their own tokens, and may revoke a token or rotate its
+  secret but never widen its scope. To get a token there, a member presses
+  **Request token** and proposes a name, expiry and scope. Whoever manages the
+  connection is emailed (its creator, or every admin if the creator no longer
+  manages it; needs SMTP). They see the request on the token list, can change
+  anything, and then **Approve** or **Decline** it. Approving reveals nothing: the
+  member collects the secret afterwards with **Get token** on the same row. A
+  pending request never authenticates. Reconnecting, re-pairing and deleting are
+  management, so a member is told what is wrong and who can fix it.
+- Every connection counts against the organization's limits, whoever created it.
 
 An invitation names an email address and can be accepted only by an account
 with that address, so a forwarded link is useless to anyone else. The link is
@@ -62,7 +79,11 @@ shown once when it is created and can also be emailed (see [Connection alerts](a
 for SMTP). Accepting moves you out of your current organization, which is
 refused while that organization still owns connections or while you are its
 only admin with other members left. With email verification on, an invited
-signup must be confirmed in the same browser it was started in.
+signup must be confirmed in the same browser it was started in. An admin can
+give connections to someone before they accept: pending member invitations are
+listed in a connection's **Who can use this**, and ticking one assigns the
+connection the moment the invitation is accepted. Re-sending the invitation keeps
+those assignments.
 
 **Forgot your password?** **Forgot password?** on the sign-in page mails a link
 and a code, valid for 30 minutes (needs SMTP). An admin can send the same mail to
@@ -242,8 +263,9 @@ written by the model, and not the prompt.
 When an organization's telemetry is on, each tool call is stored for **30
 days** with the tool's name, whether it worked, the reason (clipped to 300
 characters, or none if Claude gave none) and the client's user agent. Click a token's **Last
-used** date to see them, newest first. A member sees the calls of their own
-tokens, an admin those of every token in the organization.
+used** date to see them, newest first. Only admins can see them, for every
+token in the organization; members, including the token's holder and whoever
+created the connection, see the date only.
 
 - **Who decides.** An admin turns telemetry on or off under **Organization**. It is off
   by default. On the hosted service's Free plan it is always on and can't be
@@ -255,3 +277,8 @@ tokens, an admin those of every token in the organization.
   for access, limits or billing.
 - **Turning it off** stops collection. What was already stored is deleted
   when its 30 days are up.
+- **On the hosted service**, while telemetry is on, the day of each member's
+  last connector call (and the organization's) is shared with our customer
+  CRM, so we can tell when an account has gone quiet. Only the date — no
+  tools, reasons or counts. Turning telemetry off stops this and removes the
+  dates already shared, within a day.

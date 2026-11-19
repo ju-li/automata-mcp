@@ -5,12 +5,18 @@ import type { Billing } from './billing.ts'
 import type { CloudConfig } from './config.ts'
 import type { ConsentRegions } from './consent-region.ts'
 import type { Crm } from './crm.ts'
+import type { SelfHostUpdates } from './self-host-updates.ts'
+import { CONFIRMED_PAGE, CONFIRMED_PAGE_CSP } from './self-host-confirmed.ts'
 import { HttpError, describeError } from './http-error.ts'
 
 /**
  * The cloud service's HTTP API.
  *
- *   public   GET /health, POST /webhooks/stripe (Stripe-signed)
+ *   public   GET /health, POST /webhooks/stripe (Stripe-signed),
+ *            POST /self-host/updates (a self-hosted install's admin asking
+ *            for update mail; throttled — self-host-updates.ts),
+ *            GET /self-host/confirmed (static page Brevo's double opt-in
+ *            link lands on — self-host-confirmed.ts)
  *   admin    everything under /orgs/:id — called by the web app only, with
  *            CLOUD_ADMIN_KEY as a bearer. The web app has already decided the
  *            caller is an admin of that organization; this service trusts that
@@ -31,6 +37,8 @@ type Access = 'public' | 'admin'
 interface Reply {
   status: number
   body?: unknown
+  /** A static page instead of JSON, served under this CSP. */
+  html?: { page: string, csp: string }
 }
 
 interface Route {
@@ -42,7 +50,7 @@ interface Route {
   raw?: boolean
   /** Refused with 503 until the web app's schema is ready. */
   needsApp?: boolean
-  handle: (request: { id: string, body: unknown, raw?: Buffer, headers: IncomingMessage['headers'] }) => Promise<Reply>
+  handle: (request: { id: string, body: unknown, raw?: Buffer, headers: IncomingMessage['headers'], req: IncomingMessage }) => Promise<Reply>
 }
 
 const checkoutBody = z.object({ email: z.string().email().max(320) })
@@ -59,7 +67,7 @@ const STRIPE_EVENTS = new Set([
   'customer.subscription.trial_will_end',
 ])
 
-export function createCloudServer(billing: Billing, crm: Crm, regions: ConsentRegions, config: CloudConfig, state: { appReady: boolean }): Server {
+export function createCloudServer(billing: Billing, crm: Crm, regions: ConsentRegions, selfHost: SelfHostUpdates, config: CloudConfig, state: { appReady: boolean }): Server {
   const adminDigest = sha256(config.adminKey)
 
   const routes: Route[] = [
@@ -72,6 +80,7 @@ export function createCloudServer(billing: Billing, crm: Crm, regions: ConsentRe
           app: state.appReady ? 'ready' : 'waiting',
           billing: billing.configured ? 'configured' : 'unconfigured',
           crm: crm.status,
+          selfHostUpdates: selfHost.status,
         },
       }),
     },
@@ -114,6 +123,19 @@ export function createCloudServer(billing: Billing, crm: Crm, regions: ConsentRe
         await billing.syncSeats(orgId)
         return { status: 200, body: { received: true } }
       },
+    },
+    {
+      // A self-hosted install has no key of ours, so this is public: shaped,
+      // throttled and answered the same whether or not the address was new.
+      label: 'POST /self-host/updates', method: 'POST', pattern: /^\/self-host\/updates$/, access: 'public',
+      handle: async ({ body, req }) => {
+        const { confirm } = await selfHost.subscribe(body, req)
+        return { status: 200, body: { ok: true, confirm } }
+      },
+    },
+    {
+      label: 'GET /self-host/confirmed', method: 'GET', pattern: /^\/self-host\/confirmed$/, access: 'public',
+      handle: async () => ({ status: 200, html: { page: CONFIRMED_PAGE, csp: CONFIRMED_PAGE_CSP } }),
     },
     {
       // Never fails for want of an answer: `unknown` is an answer, and the web
@@ -179,7 +201,7 @@ export function createCloudServer(billing: Billing, crm: Crm, regions: ConsentRe
       const id = decodeURIComponent(route.pattern.exec(path)?.[1] ?? '')
       const bytes = req.method === 'POST' ? await readBody(req, route.raw ? MAX_WEBHOOK_BYTES : MAX_BODY_BYTES) : undefined
       const body = bytes && !route.raw ? parseJson(bytes) : undefined
-      send(res, await route.handle({ id, body, raw: route.raw ? bytes : undefined, headers: req.headers }))
+      send(res, await route.handle({ id, body, raw: route.raw ? bytes : undefined, headers: req.headers, req }))
     }
     catch (error) {
       if (error instanceof HttpError) {
@@ -239,6 +261,16 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T {
 
 function send(res: ServerResponse, reply: Reply): void {
   if (res.headersSent) return
+  if (reply.html) {
+    res.writeHead(reply.status, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-security-policy': reply.html.csp,
+      'x-content-type-options': 'nosniff',
+      'referrer-policy': 'no-referrer',
+      'cache-control': 'public, max-age=300',
+    }).end(reply.html.page)
+    return
+  }
   if (reply.body === undefined) {
     res.writeHead(reply.status, { 'cache-control': 'no-store' }).end()
     return

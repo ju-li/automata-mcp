@@ -1,3 +1,5 @@
+import type { OrgMember } from '~~/server/utils/org'
+
 /**
  * The connections this user can reach, each with its live state.
  *
@@ -23,6 +25,12 @@
  * `detail` instead. `connectionState()` is what keeps that per-kind shape in one
  * place rather than in every route that needs it.
  *
+ * `createdBy` names who added each connection, for the card's footer and the
+ * creator filter. Read from the organization's roster, which every member can
+ * already see on `/api/org`, so it discloses nothing new. A creator who has
+ * left the organization (or a row from before `created_by` was kept) carries
+ * `former: true` or no `createdBy` at all, never someone else's name.
+ *
  * Tolerant, deliberately: a single half-provisioned connection must not take
  * the whole listing down with it, since the listing is the only way to reach
  * the page that would let you delete it.
@@ -31,13 +39,32 @@ export default defineEventHandler(async (event) => {
   const actor = await requireMembership(event)
   // A row whose kind this build cannot read is left out (and logged) rather than
   // failing the whole listing — see `isSupportedInstance`.
-  const instances = (await listInstancesForActor(actor)).filter(isSupportedInstance)
+  const [listed, members] = await Promise.all([
+    listInstancesForActor(actor),
+    listOrgMembers(actor.org.id),
+  ])
+  const instances = listed.filter(isSupportedInstance)
+  const roster = new Map(members.map(member => [member.userId, member]))
 
   const rows = await Promise.all(instances.map(async instance => ({
     ...toPublicInstance(instance),
-    canManage: actor.role === 'admin',
+    createdBy: creatorOf(instance.created_by, roster),
+    // `instance` reached this point through the actor's reach (listing or
+    // `requireReadableInstance`), so only the management half is left to ask.
+    canManage: managesInstance({ role: actor.role, userId: actor.user.id }, instance, true),
     ...await connectionState(instance, { tolerant: true }),
   })))
 
   return { instances: rows }
 })
+
+/** Who added a connection, as the listing shows it. See the route's comment. */
+function creatorOf(
+  userId: string | undefined,
+  roster: Map<string, OrgMember>,
+): { id: string, name?: string, email?: string, former?: true } | undefined {
+  if (!userId) return undefined
+  const member = roster.get(userId)
+  if (!member) return { id: userId, former: true }
+  return { id: userId, name: member.name || undefined, email: member.email }
+}

@@ -20,10 +20,14 @@ leaving a connection that never syncs.
 - **Microsoft 365 and Outlook.com cannot be connected.** Microsoft no longer
   accepts passwords over IMAP and requires OAuth, which this connection does not
   support.
-- **There is no unencrypted option.** Choose **TLS** (usually port 993) or
-  **STARTTLS** (usually 143). STARTTLS is enforced: a server that does not
-  upgrade the connection is refused, rather than sent the password in clear.
-  Certificates are verified against the host name.
+- **Choose TLS or STARTTLS whenever the server offers either.** **TLS**
+  (usually port 993) or **STARTTLS** (usually 143). STARTTLS is enforced: a
+  server that does not upgrade the connection is refused, rather than sent the
+  password in clear. Certificates are verified against the host name.
+- **None** connects unencrypted (usually port 143) and never attempts
+  STARTTLS: the password and everything read cross the network in clear. Meant
+  for a mail server on a network you trust, such as one beside a self-hosted
+  install.
 
 **Change credentials** on the connection's page replaces them, proved the same
 way. Every connector token keeps working. If the new login is a *different*

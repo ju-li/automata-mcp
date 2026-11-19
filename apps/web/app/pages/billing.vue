@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { CreditCardIcon, SparklesIcon } from '@lucide/vue'
+import { TELEGRAM_FULL_HISTORY_DAYS, TELEGRAM_HISTORY_MESSAGES_PER_CHAT, TELEGRAM_RECENT_HISTORY_DAYS } from '#shared/history'
 
 /**
  * The organization's plan: what it is on, what it holds against the limits,
@@ -32,6 +33,8 @@ interface BillingResponse {
   includedSeats: number
   billedSeats: number
 }
+
+const perChat = TELEGRAM_HISTORY_MESSAGES_PER_CHAT.toLocaleString('en-US')
 
 const route = useRoute()
 const { refresh: refreshSession } = useSession()
@@ -182,6 +185,19 @@ const meters = computed(() => {
             </div>
           </dl>
 
+          <p class="text-sm text-muted-foreground">
+            <template v-if="isPro">
+              Telegram accounts linked now sync the last {{ TELEGRAM_FULL_HISTORY_DAYS }} days of history,
+              {{ perChat }} messages per chat to start. Load {{ perChat }} more for any chat from its
+              connection's Chats list, as many times as you like, back to {{ TELEGRAM_FULL_HISTORY_DAYS }} days.
+            </template>
+            <template v-else>
+              Telegram accounts linked now sync the last {{ TELEGRAM_RECENT_HISTORY_DAYS }} days of history,
+              up to {{ perChat }} messages per chat, so a busy group may not reach back that far.
+            </template>
+            New messages are always kept.
+          </p>
+
           <p v-if="isPro" class="text-sm text-muted-foreground">
             {{ data.includedSeats }} users are included.
             <template v-if="data.billedSeats">
@@ -218,6 +234,11 @@ const meters = computed(() => {
             <li>Unlimited connections and connector tokens</li>
             <li>{{ data.includedSeats }} users included, $10/user/month after</li>
             <li>Full WhatsApp history imported when you link an account</li>
+            <li>
+              Telegram history from the last {{ TELEGRAM_FULL_HISTORY_DAYS }} days
+              (Free: {{ TELEGRAM_RECENT_HISTORY_DAYS }}), with more loaded per chat on request
+              (Free: up to {{ perChat }} messages per chat)
+            </li>
             <li>Unlimited requests*</li>
             <li>Telemetry optional, off by default</li>
           </ul>

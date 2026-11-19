@@ -8,7 +8,9 @@ export default defineKindTool({
     + 'history is still being fetched. `sync.historyDays` is how many days back older '
     + 'history is fetched at all: messages older than that were never synced and cannot '
     + 'be read or searched, so say so rather than treating the oldest synced message as '
-    + 'where a conversation began. Call this before sending: only an account in the '
+    + 'where a conversation began. `stats` is absent when the counts could not be read '
+    + 'just now: that means unknown, not zero, so do not report an empty account; '
+    + '`stats.asOf` is when they were counted. Call this before sending: only an account in the '
     + '`open` state can send. `sessionLost` means the account is still linked and its '
     + 'connection dropped; `revoked` means the session was ended from Telegram, and the '
     + 'account has to be linked again by scanning a QR code in the web app.',
