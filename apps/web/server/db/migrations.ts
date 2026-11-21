@@ -954,4 +954,32 @@ export const APP_MIGRATIONS: AppMigration[] = [
         ADD COLUMN onboarding_for text REFERENCES app.users(id) ON DELETE SET NULL;
     `,
   },
+  {
+    name: '0030_whatsapp_silence',
+    sql: /* sql */ `
+      -- Inbound silence (#238), see server/utils/whatsapp-silence.ts.
+      --
+      -- Each WhatsApp account's own history of gaps between received messages,
+      -- by band (weekday/weekend x four-hour band). Recomputed about daily by
+      -- whatsapp:silence-baselines, leased per row so replicas take turns.
+      -- Numbers only: no chat, no sender, no text.
+      CREATE TABLE app.whatsapp_silence_baselines (
+        instance_id  text PRIMARY KEY REFERENCES app.instances(id) ON DELETE CASCADE,
+        computed_at  timestamptz,
+        lease_until  timestamptz NOT NULL DEFAULT '-infinity',
+        time_zone    text NOT NULL DEFAULT 'UTC',
+        history_days double precision,
+        bands        jsonb NOT NULL DEFAULT '[]'
+      );
+
+      -- The current silence episode: when it was judged silent, and the rule,
+      -- threshold and band that judged it. Written only by whatsapp-silence.ts.
+      -- silence_ops_mailed_at: the operator was mailed about it in shadow mode,
+      -- claimed before sending like ops_alerted_at.
+      ALTER TABLE app.instances
+        ADD COLUMN silent_since timestamptz,
+        ADD COLUMN silent_detail jsonb,
+        ADD COLUMN silence_ops_mailed_at timestamptz;
+    `,
+  },
 ]

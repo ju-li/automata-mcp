@@ -87,6 +87,7 @@ ignored. `PORT` is the one extra; it has no line there.
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Telegram — from <https://my.telegram.org>, both or neither. Without them the app tells an admin what to set. See [Telegram connections](telegram.md). |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS`, `MAIL_FROM`, `MAIL_FROM_NAME` | [connection alerts](alerts.md), invitation, email-verification and password-reset emails. Without `SMTP_HOST`, verification is off (unless `EMAIL_VERIFICATION=required`) and passwords cannot be reset from the app |
 | `OPS_ALERT_EMAIL` | where reconnect loops and stuck sessions on this container's Evolution are reported — see [Telling the operator about a reconnect loop or a stuck session](alerts.md#telling-the-operator-about-a-reconnect-loop-or-a-stuck-session); needs SMTP |
+| `WHATSAPP_SILENCE_ALERTS`, `WHATSAPP_SILENCE_TIME_ZONE` | WhatsApp accounts that read healthy but stop receiving: `off` / `shadow` (default: log + `OPS_ALERT_EMAIL` only) / `on`, and the IANA time zone their traffic is banded in — see [Stopped receiving](whatsapp.md#stopped-receiving-inbound-silence) |
 | `ALLOW_PRIVATE_TARGETS` | `true` lets connections reach private and loopback addresses — see below |
 | `SIGNUP`, `SIGNUP_CODE` | who can create an account — see [Who can sign up](#who-can-sign-up) |
 | `EMAIL_VERIFICATION` | `auto` / `required` / `off` — see [Email verification](#email-verification) |

@@ -83,6 +83,12 @@ What it will and will not send:
   Reconnect. A webhook delivery cannot start it. See
   [whatsapp.md](whatsapp.md) "Stuck with the socket dead".
 
+- With `NUXT_WHATSAPP_SILENCE_ALERTS=on`, so does a WhatsApp account that
+  reads healthy but has **stopped receiving**: nothing has arrived for far longer
+  than its own history allows. The default, `shadow`, records and logs these and
+  mails only `NUXT_OPS_ALERT_EMAIL`. See [whatsapp.md](whatsapp.md) "Stopped
+  receiving".
+
 ### Telling the operator about a reconnect loop or a stuck session
 
 A reconnect loop and a dead socket under a live `open` are the outages nobody

@@ -542,6 +542,118 @@ export async function readLastInbound(instance: AppInstance): Promise<LastInboun
   }
 }
 
+/** One band of an account's inbound gaps, as `readInboundGaps` measured it. */
+export interface InboundGapBand {
+  /** Saturday or Sunday in the time zone asked for. */
+  weekend: boolean
+  /** Four-hour band of the day, 0 (00:00–03:59) to 5 (20:00–23:59). */
+  band: number
+  /** Gaps that started in this band. */
+  gaps: number
+  /** Hours of this band inside the measured window. */
+  hours: number
+  /** 99th and 99.9th percentile gap, seconds. */
+  p99: number
+  p999: number
+}
+
+/** What `readInboundGaps` measured. */
+export interface InboundGaps {
+  bands: InboundGapBand[]
+  /** Days from the oldest inbound message in the window to the end of it; absent when there was none. */
+  historyDays?: number
+}
+
+/**
+ * The statement timeout of a silence baseline. The busiest production account
+ * measured (#238: ~25k inbound a week) took ~9 s for 28 days; this leaves room
+ * for a cold disk without letting one account's history run unbounded.
+ */
+export const INBOUND_GAPS_TIMEOUT_MS = 120_000
+
+/**
+ * The gaps between messages this account received over `[sinceMs, untilMs)`,
+ * by band — weekday or weekend, four-hour band, in `timeZone` — for the
+ * inbound-silence baseline (whatsapp-silence.ts, #238).
+ *
+ * **The same rows as `readLastInbound`**: inbound, not `status@broadcast`, not a
+ * control record (`notControl`), by `"messageTimestamp"` — so the silence an
+ * alert judges and the history it is judged against are one definition. Over
+ * distinct timestamps: one message stored twice is one arrival, not a gap of 0.
+ * A gap belongs to the band it started in, which is the band the live check
+ * looks up (the band of the last message received).
+ *
+ * Off the request path, on a pool of its own — one connection,
+ * `INBOUND_GAPS_TIMEOUT_MS` — like `countInstanceRows`' background count, so a
+ * long history never holds a reader's slot. Needs `message_instance_ts_idx`;
+ * without it answers `undefined` rather than reading the whole account.
+ *
+ * Raw driver errors, for the same reason as `readInstanceRecord`.
+ */
+export async function readInboundGaps(
+  instance: AppInstance,
+  window: { sinceMs: number, untilMs: number, timeZone: string },
+): Promise<InboundGaps | undefined> {
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+  if (!await messageIndexPresent(instance, query, INSTANCE_TS_INDEX)) return undefined
+
+  const since = Math.floor(window.sinceMs / 1000)
+  const until = Math.floor(window.untilMs / 1000)
+  const tz = window.timeZone
+  const resolved = resolveMessageDb(instance)
+
+  const rows = await withKeyedPool(`${poolKeyFor(instance, resolved)}:silence`, resolved.url, {
+    guard: resolved.guard, max: 1, statementTimeoutMs: INBOUND_GAPS_TIMEOUT_MS, readOnly: true, jit: false,
+  }, sql => sql<Array<{ weekend: boolean, band: number, gaps: number, hours: number, p99: number, p999: number, first_ts: number }>>`
+    WITH t AS MATERIALIZED (
+      SELECT DISTINCT m."messageTimestamp" AS ts
+      FROM "Message" m
+      WHERE m."instanceId" = ${instanceId}
+        AND m."messageTimestamp" >= ${since}
+        AND m."messageTimestamp" < ${until}
+        AND m.key->>'fromMe' = 'false'
+        AND m.key->>'remoteJid' <> 'status@broadcast'
+        AND ${notControl(sql)}
+    ), g AS (
+      SELECT ts, lead(ts) OVER (ORDER BY ts) - ts AS gap FROM t
+    ), b AS (
+      SELECT extract(isodow FROM to_timestamp(ts) AT TIME ZONE ${tz}) >= 6 AS weekend,
+             floor(extract(hour FROM to_timestamp(ts) AT TIME ZONE ${tz}) / 4)::int AS band,
+             gap
+      FROM g WHERE gap IS NOT NULL
+    ), first AS (
+      SELECT min(ts) AS ts FROM t
+    ), h AS (
+      SELECT extract(isodow FROM hr AT TIME ZONE ${tz}) >= 6 AS weekend,
+             floor(extract(hour FROM hr AT TIME ZONE ${tz}) / 4)::int AS band,
+             count(*)::int AS hours
+      FROM first, generate_series(to_timestamp(first.ts), to_timestamp(${until}), interval '1 hour') AS hr
+      WHERE first.ts IS NOT NULL
+      GROUP BY 1, 2
+    )
+    SELECT b.weekend, b.band, count(*)::int AS gaps, coalesce(max(h.hours), 0)::int AS hours,
+           percentile_disc(0.99) WITHIN GROUP (ORDER BY b.gap)::int AS p99,
+           percentile_disc(0.999) WITHIN GROUP (ORDER BY b.gap)::int AS p999,
+           (SELECT ts FROM first)::bigint AS first_ts
+    FROM b LEFT JOIN h ON h.weekend = b.weekend AND h.band = b.band
+    GROUP BY b.weekend, b.band
+  `)
+
+  const firstTs = Number(rows[0]?.first_ts)
+  return {
+    bands: rows.map(row => ({
+      weekend: row.weekend === true,
+      band: Number(row.band),
+      gaps: Number(row.gaps),
+      hours: Number(row.hours),
+      p99: Number(row.p99),
+      p999: Number(row.p999),
+    })),
+    ...(Number.isFinite(firstTs) && firstTs > 0 && { historyDays: (until - firstTs) / 86_400 }),
+  }
+}
+
 /** One message this app sent, as `/message/sendText` answered it. */
 export interface SentMessageRef {
   /** `key.id` of the stored row. */

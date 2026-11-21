@@ -157,6 +157,7 @@ NUXT_SMTP_TLS=false          # false = STARTTLS on 587; true = implicit TLS on 4
 NUXT_MAIL_FROM=<a from address the provider will accept>
 NUXT_MAIL_FROM_NAME=Automata MCP
 NUXT_OPS_ALERT_EMAIL=<your address>   # optional; reconnect loops and stuck sessions on this Evolution (alerts.md)
+NUXT_WHATSAPP_SILENCE_TIME_ZONE=<IANA zone>   # optional; where most accounts' traffic lives (whatsapp.md "Stopped receiving")
 
 # Checked on both Evolution's and the Telegram bridge's webhooks
 NUXT_WEBHOOK_SECRET=<openssl rand -hex 32>

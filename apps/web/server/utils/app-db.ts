@@ -2,6 +2,7 @@ import type { InstanceKind } from '#shared/connection'
 import postgres from 'postgres'
 import type { Sql, TransactionSql } from 'postgres'
 import { APP_MIGRATIONS } from '../db/migrations'
+import type { SilenceDetail } from './whatsapp-silence'
 
 /**
  * The app's own database: users, sessions, organizations, connections and their
@@ -421,6 +422,15 @@ export interface AppInstance {
    * judged by `socketStalled()` in instances.ts. Never from a webhook payload.
    */
   socket_dead_seen_at?: string
+  /**
+   * WhatsApp only: the account was judged to have stopped receiving (#238) —
+   * inbound silence well past its own history. Written and cleared only by
+   * whatsapp-silence.ts; `silent_detail` says which rule and threshold.
+   */
+  silent_since?: string
+  silent_detail?: SilenceDetail
+  /** Shadow mode: the operator was mailed about the current silence episode. */
+  silence_ops_mailed_at?: string
   /**
    * WhatsApp only: when this app first saw the account linked. Never cleared —
    * a logout does not make a paired connection an unfinished one. Written by

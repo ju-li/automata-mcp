@@ -43,7 +43,15 @@ export type InstanceStatus = {
    */
   stalled?: boolean
   /**
-   * Set only with `flapping` or `stalled`: the deployment's operator is alerted
+   * The account reads healthy by every other signal, and the alert sweep found
+   * it has received nothing for far longer than its own history allows (#238);
+   * clears on the first live inbound message. Reported only with
+   * `NUXT_WHATSAPP_SILENCE_ALERTS=on` — the row's episode, judged by the sweep,
+   * not re-judged per read. See whatsapp-silence.ts.
+   */
+  silent?: boolean
+  /**
+   * Set only with `flapping`, `stalled` or `silent`: the deployment's operator is alerted
    * by itself and will restart Evolution, so the reader has nothing to do.
    * Hosted offering only — `operatorAlertedAboutLoop` in alerts.ts is the rule,
    * shared with the outage mail so the two cannot disagree.
@@ -1220,13 +1228,16 @@ async function readStatus(
   })
   if (socket.spent && instance.socket_dead_seen_at) forgetSocketEvidence(instance.id, instance.socket_dead_seen_at)
   const stalled = socket.stalled && !flapping
+  const sessionLost = isSessionLost(row, live, retryableClose)
+  const silent = reportsSilent(instance, { state: live ?? 'unknown', sessionLost, flapping, stalled })
 
   return {
     state: live ?? 'unknown',
-    sessionLost: isSessionLost(row, live, retryableClose),
+    sessionLost,
     flapping,
     ...(stalled && { stalled: true }),
-    ...((flapping || stalled) && operatorAlertedAboutLoop(instance) && { operatorAlerted: true }),
+    ...(silent && { silent: true }),
+    ...((flapping || stalled || silent) && operatorAlertedAboutLoop(instance) && { operatorAlerted: true }),
     rowChurn: churn,
     profileName: row.profileName ?? undefined,
     profilePicUrl: row.profilePicUrl ?? undefined,
@@ -1602,7 +1613,7 @@ const lastInboundInFlight = new Map<string, Promise<LastInbound | undefined>>()
  * there is one: an older "last received" is still true, only less fresh.
  * Failures are logged like the other status reads, never cached as an answer.
  */
-async function cachedLastInbound(instance: AppInstance): Promise<LastInbound | undefined> {
+export async function cachedLastInbound(instance: AppInstance): Promise<LastInbound | undefined> {
   const cached = lastInboundCache.get(instance.id)
   if (cached && Date.now() - cached.at < LAST_INBOUND_TTL_MS) return cached.value
   if (sqlDenied('last inbound', instance)) return undefined

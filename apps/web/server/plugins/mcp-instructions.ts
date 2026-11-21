@@ -1,6 +1,7 @@
 import { assertNever } from '#shared/connection'
+import { silenceAlertMode } from '../utils/whatsapp-silence'
 import type { McpAuth } from '../utils/mcp-auth'
-import { IMAP_INSTRUCTIONS, POSTGRES_INSTRUCTIONS, TELEGRAM_INSTRUCTIONS, WHATSAPP_INSTRUCTIONS } from '../utils/mcp-instructions'
+import { IMAP_INSTRUCTIONS, POSTGRES_INSTRUCTIONS, TELEGRAM_INSTRUCTIONS, WHATSAPP_INSTRUCTIONS, WHATSAPP_SILENCE_INSTRUCTIONS } from '../utils/mcp-instructions'
 
 /**
  * Give each connection kind its own MCP server instructions.
@@ -37,7 +38,9 @@ export default defineNitroPlugin((nitro) => {
         config.instructions = POSTGRES_INSTRUCTIONS
         break
       case 'whatsapp':
-        config.instructions = WHATSAPP_INSTRUCTIONS
+        config.instructions = silenceAlertMode() === 'on'
+          ? `${WHATSAPP_INSTRUCTIONS} ${WHATSAPP_SILENCE_INSTRUCTIONS}`
+          : WHATSAPP_INSTRUCTIONS
         break
       case 'telegram':
         config.instructions = TELEGRAM_INSTRUCTIONS

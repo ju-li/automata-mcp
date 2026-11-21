@@ -77,6 +77,18 @@ export const WHATSAPP_INSTRUCTIONS = [
   'counts them.',
 ].join(' ')
 
+/**
+ * Appended to `WHATSAPP_INSTRUCTIONS` only with `NUXT_WHATSAPP_SILENCE_ALERTS=on`
+ * (server/plugins/mcp-instructions.ts): in shadow mode `silent` never appears,
+ * and a model told about a field it never sees learns nothing.
+ */
+export const WHATSAPP_SILENCE_INSTRUCTIONS = [
+  'When `silent` is true the account reads `open` but has received nothing for far longer than its',
+  'own history allows: new messages are not arriving, so do not present the newest stored message as',
+  'the latest in a chat. Reconnect does not fix it; the Evolution service has to be restarted —',
+  'with `operatorAlerted`, the team running this service is already on it.',
+].join(' ')
+
 export const POSTGRES_INSTRUCTIONS = [
   'This server is bound to exactly one PostgreSQL database — the one the connector token was issued for.',
   'There is no database to choose and no tool takes a connection argument.',

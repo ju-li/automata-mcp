@@ -63,6 +63,9 @@ export default defineNuxtConfig({
       // WhatsApp connections never paired within an hour. Leased per row, so
       // replicas are fine. See server/utils/unpaired-reaper.ts.
       '*/10 * * * *': ['instances:reap-unpaired'],
+      // Inbound-silence baselines (#238): a few accounts' four-week history
+      // per run, one at a time. Leased per row, so replicas are fine.
+      '17 * * * *': ['whatsapp:silence-baselines'],
     },
   },
 
@@ -100,6 +103,14 @@ export default defineNuxtConfig({
     // empty sends no operator mail. On the hosted offering, setting it is what
     // lets the customer-facing wording say the fix is on us. See alerts.ts.
     opsAlertEmail: '',
+    // A WhatsApp account that reads healthy and stops receiving (#238), judged
+    // against its own history: off | shadow | on. Shadow (the default) records,
+    // logs and mails the ops address only; on also tells the organization,
+    // the dashboard and MCP. See server/utils/whatsapp-silence.ts.
+    whatsappSilenceAlerts: 'shadow',
+    // The time zone those histories are banded in (weekday/weekend, four-hour
+    // bands): where most accounts' traffic lives. An IANA name; UTC if unset.
+    whatsappSilenceTimeZone: '',
 
     // The *default* Evolution server, used by any WhatsApp connection that did
     // not bring its own. Optional: with these unset the app still runs, and the

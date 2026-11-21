@@ -51,6 +51,14 @@ type ConnectionHealth = {
    */
   stalled: boolean
   /**
+   * WhatsApp only, `NUXT_WHATSAPP_SILENCE_ALERTS=on` only: reads healthy by
+   * every other signal, and has received nothing for far longer than its own
+   * history allows — see whatsapp-silence.ts (#238). Same fix as `stalled`.
+   * In shadow mode the episode is recorded and mailed to the operator, and
+   * this stays false.
+   */
+  silent: boolean
+  /**
    * The connection has been linked at some point, so a bad state is an outage
    * rather than a connection nobody has finished setting up.
    */
@@ -100,12 +108,18 @@ async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 't
       // of the counts, so it must not cause one to be computed.
       const status = await getInstanceHealth(instance)
       await storeRowChurn(instance, status.rowChurn, Boolean(status.flapping))
-      return {
-        kind,
+      const signals = {
         state: status.state,
         sessionLost: Boolean(status.sessionLost),
         flapping: Boolean(status.flapping),
         stalled: Boolean(status.stalled),
+      }
+      // Judged in every mode but `off`; counts toward health only in `on`.
+      const silent = await assessSilence(instance, signals)
+      return {
+        kind,
+        ...signals,
+        silent,
         paired: Boolean(status.ownerJid),
         knownUnlinked: false,
         revoked: false,
@@ -124,6 +138,7 @@ async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 't
         sessionLost: Boolean(status.sessionLost),
         flapping: false,
         stalled: false,
+        silent: false,
         paired: linked || unreachable,
         knownUnlinked: !linked && !unreachable,
         revoked: Boolean(status.revoked),
@@ -293,7 +308,7 @@ async function evaluate(instance: AppInstance): Promise<void> {
   // A loop reads `open` on most live reads — whichever socket just logged in —
   // and a stuck session reads `open` on all of them, so without the last two
   // clauses both are healthy by construction.
-  const healthy = health.state === 'open' && !health.sessionLost && !health.flapping && !health.stalled
+  const healthy = health.state === 'open' && !health.sessionLost && !health.flapping && !health.stalled && !health.silent
 
   if (healthy) {
     if (!instance.down_since && !instance.alerted_at) return
@@ -425,7 +440,7 @@ function opsAlertEmail(): string {
  * organization supplied is theirs to restart, and its loops are not ours to
  * report.
  */
-function operatorMailedAboutLoops(instance: Pick<AppInstance, 'admin_key' | 'base_url'>): boolean {
+export function operatorMailedAboutLoops(instance: Pick<AppInstance, 'admin_key' | 'base_url'>): boolean {
   return Boolean(opsAlertEmail()) && Boolean(useRuntimeConfig().smtpHost) && onDeploymentServer(instance)
 }
 
@@ -472,7 +487,7 @@ export function operatorAlertedAboutLoop(instance: Pick<AppInstance, 'admin_key'
 async function reportLoopToOperator(instance: AppInstance, health: ConnectionHealth): Promise<void> {
   const to = opsAlertEmail()
 
-  if (health.flapping || health.stalled) {
+  if (health.flapping || health.stalled || health.silent) {
     if (instance.ops_alerted_at || !operatorMailedAboutLoops(instance)) return
 
     const sql = await appDb()
@@ -483,7 +498,9 @@ async function reportLoopToOperator(instance: AppInstance, health: ConnectionHea
     `
     if (!claimed.length) return
 
-    const mail = health.flapping ? operatorLoopMail(instance) : operatorStalledMail(instance)
+    const mail = health.flapping
+      ? operatorLoopMail(instance)
+      : health.stalled ? operatorStalledMail(instance) : operatorSilentMail(instance)
     const sent = await sendAppEmail({ to, ...mail })
     if (!sent) {
       await sql`UPDATE app.instances SET ops_alerted_at = NULL WHERE id = ${instance.id}`
@@ -563,13 +580,43 @@ function operatorStalledMail(instance: AppInstance): AlertMail {
   }
 }
 
+/**
+ * Inbound silence under a healthy-looking `open` (#238), `on` mode only. Shadow
+ * mode mails its own wording from whatsapp-silence.ts.
+ */
+function operatorSilentMail(instance: AppInstance): AlertMail {
+  const detail = instance.silent_detail
+  return {
+    subject: `WhatsApp connection ${instance.id} stopped receiving messages`,
+    text: [
+      `WhatsApp connection ${instance.id} `
+      + `(Evolution instance "${instance.name}", organization ${instance.org || 'unknown'}) `
+      + 'reads open, with no reconnect loop and no dead-socket evidence, but has received nothing for far longer '
+      + 'than its own history says is normal.',
+      '',
+      detail
+        ? `Last inbound: ${detail.lastInboundAt ?? 'none in 7 days'}; silent ${Math.round(detail.silenceMs / 60_000)} min `
+          + `against ${Math.round(detail.thresholdMs / 60_000)} min (rule ${detail.rule}, band ${detail.band}).`
+        : `Silent since: ${instance.silent_since ?? 'just now'}`,
+      '',
+      'Fix: restart the Evolution service. No QR scan is needed; every account on it drops briefly and reconnects. '
+      + 'Reconnect in the app cannot help (the state reads open).',
+      ...(hostedMode()
+        ? ['', 'The people using this connection are told it is on our side and that nothing is needed from them.']
+        : []),
+      '',
+      'See docs/whatsapp.md, "Stopped receiving". You will get one more email when it is working again.',
+    ].join('\n'),
+  }
+}
+
 /** Neutral about which it was: by the time it ends, the row no longer says. */
 function operatorLoopEndedMail(instance: AppInstance): AlertMail {
   return {
     subject: `WhatsApp connection ${instance.id} is no longer stuck`,
     text: [
       `WhatsApp connection ${instance.id} (Evolution instance "${instance.name}") is no longer seen reconnecting over and over, `
-      + 'nor with a dead socket under an open state. If Evolution has been unreachable since, this can also mean its row '
+      + 'nor with a dead socket under an open state, nor silent. If Evolution has been unreachable since, this can also mean its row '
       + 'cannot be read; the connection\'s own outage mail covers that.',
     ].join('\n'),
   }
@@ -638,6 +685,22 @@ function outageMail(instance: AppInstance, health: ConnectionHealth, canManage: 
         + 'connected to it — including MCP tools — cannot send, and new messages are not arriving.',
         '',
         whatsappStalledCause(instance, canManage),
+        ...(url ? ['', url] : []),
+        '',
+        'You will get one more email when it is working again.',
+      ].join('\n'),
+    }
+  }
+
+  // Reads connected and nothing fails; what is true is that nothing arrives.
+  if (health.silent) {
+    return {
+      subject: `${label} is not receiving messages`,
+      text: [
+        `${label} reads as connected, but no new messages have arrived for far longer than usual for it, so `
+        + 'anything connected to it — including MCP tools — is not seeing new messages.',
+        '',
+        evolutionStuckCause(instance, canManage, 'Evolution\'s session for this account appears to be stuck.'),
         ...(url ? ['', url] : []),
         '',
         'You will get one more email when it is working again.',

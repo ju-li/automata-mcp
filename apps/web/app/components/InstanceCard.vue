@@ -72,7 +72,7 @@ const secondary = computed(() => {
               <ScrollOnHover :text="secondary" />
             </CardDescription>
           </div>
-          <ConnectionBadge :state="instance.state" :kind="instance.kind" :lost="instance.sessionLost" :flapping="instance.flapping" :stalled="instance.stalled" />
+          <ConnectionBadge :state="instance.state" :kind="instance.kind" :lost="instance.sessionLost" :flapping="instance.flapping" :stalled="instance.stalled" :silent="instance.silent" />
         </div>
       </CardHeader>
       <CardContent class="flex items-baseline justify-between gap-3 text-sm text-muted-foreground">

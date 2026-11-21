@@ -786,6 +786,55 @@ counted, since a healthy socket can answer it too. A webhook delivery never
 records anything (deliveries are unsigned). And it is found only by a call that
 needs the socket: an account nobody sends from waits for its next group lookup.
 
+## Stopped receiving (inbound silence)
+
+The signature: every signal says healthy — **Connected**, no loop, no failed
+send — but no new message has arrived for hours, and the customer notices when
+replies dry up. Seen in production on Nov 14–15 2026 (#238): one busy account
+went fourteen hours without a live inbound message, then received only bursts
+of hours-old backlog after each socket reopen. The fork (see "Which Evolution")
+removes both causes found then; this is the safety net for causes not known yet.
+
+The app judges it from what actually stopped: messages arriving. Every five
+minutes the alert sweep compares the time since the account last received a
+message (`lastInboundAt`, WhatsApp's own timestamp — so a redelivered backlog
+does not count as live) with **the account's own history**:
+
+- Once a day (`whatsapp:silence-baselines`, hourly, a few accounts per run) the
+  app measures each account's gaps between received messages over the past four
+  weeks, split into weekday/weekend × four-hour bands in
+  `NUXT_WHATSAPP_SILENCE_TIME_ZONE`. Quiet nights, weekends and lunch breaks raise
+  their own bands' thresholds. Numbers only are stored
+  (`app.whatsapp_silence_baselines`).
+- **Account rule:** silent when the current silence is longer than the 99.9th
+  percentile gap of the band its last message arrived in, and never under
+  45 minutes.
+- **Fleet rule:** when three or more busy accounts on one Evolution server (and
+  at least a fifth of the busy ones judged there) are each past their own 99th
+  percentile, and past 20 minutes, at once, each of them is silent. That is what
+  a server-wide failure looks like.
+- **Never judged:** a band with fewer than 10 received messages an hour or 200
+  gaps measured, an account with less than two weeks of history, an account that
+  is already dropped, looping or stuck, and any account without the message
+  database URL or `message_instance_ts_idx` (see "Indexes on Evolution's tables").
+  Those accounts still show when they last received a message.
+- **Ends only on a live message** — one stamped within 45 minutes of now. A
+  socket reopen that delivers old backlog does not end it, nor does a send.
+
+`NUXT_WHATSAPP_SILENCE_ALERTS` decides who hears about it:
+
+| Value | What happens |
+|---|---|
+| `shadow` (default) | Episodes are recorded on the connection, logged (`[silence] shadow: …` with the rule, threshold, band and last inbound time, and `… is receiving again` when they end), and mailed to `NUXT_OPS_ALERT_EMAIL` for connections on this deployment's Evolution. Nobody else is told: no customer mail, nothing on the dashboard or over MCP. |
+| `on` | As shadow, plus: unhealthy for alerts (ten-minute grace, then everyone who can reach the connection is mailed that the Evolution service needs restarting), **Not receiving** on the dashboard, `silent: true` from `get-connection-status`, and the operator mail goes out with the other stuck-session mails. |
+| `off` | Nothing is measured; any open episode is cleared quietly. |
+
+Run `shadow` for a couple of weeks before `on`, and compare the episodes in the
+log with what really happened. Unknown values read as `shadow`.
+
+**Fix: restart the Evolution service**, as for the two failures above. No QR
+scan is needed; Reconnect in the app cannot help.
+
 ## Connections never paired are removed after an hour
 
 A WhatsApp connection that nobody pairs within **one hour** of creating it is

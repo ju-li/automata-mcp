@@ -34,7 +34,7 @@ export interface StateDisplay {
 export function describeState(
   state: ConnectionState,
   kind: InstanceKind,
-  options: { lost?: boolean, flapping?: boolean, stalled?: boolean, operatorAlerted?: boolean } = {},
+  options: { lost?: boolean, flapping?: boolean, stalled?: boolean, silent?: boolean, operatorAlerted?: boolean } = {},
 ): StateDisplay {
   switch (kind) {
     case 'postgres':
@@ -69,6 +69,16 @@ export function describeState(
           hint: options.operatorAlerted
             ? 'Evolution\'s session for this account is stuck: nothing is sent or received until we restart the service — we have been alerted, and there is nothing you need to do.'
             : 'Evolution\'s session for this account is stuck: nothing is sent or received until the Evolution service is restarted.',
+        }
+      }
+      // Reads `open`, nothing fails, and nothing arrives (#238). Same fix again.
+      if (options.silent) {
+        return {
+          label: 'Not receiving',
+          variant: 'destructive',
+          hint: options.operatorAlerted
+            ? 'No new messages have arrived for far longer than usual for this account. We have been alerted and will restart the service — there is nothing you need to do.'
+            : 'No new messages have arrived for far longer than usual for this account. Restarting the Evolution service usually fixes it.',
         }
       }
       if (options.lost && state !== 'open') {

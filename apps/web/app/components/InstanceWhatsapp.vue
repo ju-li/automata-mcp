@@ -36,7 +36,9 @@ interface StatusResponse {
   flapping?: boolean
   /** Reads `open`, but a send or group lookup found the socket dead since it last opened. */
   stalled?: boolean
-  /** With `flapping` or `stalled`: the deployment's operator is alerted and will restart Evolution. */
+  /** Reads healthy, but has received nothing for far longer than usual (#238). Server sends it only in `on` mode. */
+  silent?: boolean
+  /** With `flapping`, `stalled` or `silent`: the deployment's operator is alerted and will restart Evolution. */
   operatorAlerted?: boolean
   profileName?: string
   profilePicUrl?: string
@@ -135,12 +137,14 @@ const flapping = computed(() => data.value?.flapping === true)
 // Not `stalled`: that name is taken below by a Reconnect that did not land.
 // The server never sends `stalled` alongside `flapping`.
 const socketStuck = computed(() => data.value?.stalled === true)
-const operatorAlerted = computed(() => (flapping.value || socketStuck.value) && data.value?.operatorAlerted === true)
+const notReceiving = computed(() => data.value?.silent === true)
+const operatorAlerted = computed(() => (flapping.value || socketStuck.value || notReceiving.value) && data.value?.operatorAlerted === true)
 
 const display = computed(() => describeState(state.value, 'whatsapp', {
   lost: mode.value === 'lost',
   flapping: flapping.value,
   stalled: socketStuck.value,
+  silent: notReceiving.value,
   operatorAlerted: operatorAlerted.value,
 }))
 
@@ -457,6 +461,7 @@ const importHistory = () => backToPairing(
       :lost="mode === 'lost'"
       :flapping="flapping"
       :stalled="socketStuck"
+      :silent="notReceiving"
       @renamed="refresh()"
     >
       <!--
@@ -665,6 +670,32 @@ const importHistory = () => backToPairing(
             <template v-else-if="canManage">
               Reconnect cannot end this. Restarting {{ evolutionServer }} does, with
               no new QR scan.
+            </template>
+            <template v-else>
+              Nothing needs scanning. Whoever runs {{ evolutionServer }} has to
+              restart it — an admin of your organization can see to that.
+            </template>
+          </p>
+        </template>
+      </NoticeCard>
+
+      <!--
+        Inbound silence (#238): reads open, nothing fails, nothing arrives.
+        The server sends it only in `on` mode and never beside the two above.
+      -->
+      <NoticeCard v-else-if="notReceiving" title="This account has stopped receiving messages" tone="error">
+        <template #description>
+          <p class="mt-1 text-sm text-muted-foreground">
+            It reads as connected, but no new messages have arrived for far longer
+            than usual for it, so the newest message here may not be the latest.
+            <template v-if="operatorAlerted">
+              This is on our side: we have been alerted and will restart the
+              service. Nothing needs scanning, the phone stays linked, and there
+              is nothing you need to do.
+            </template>
+            <template v-else-if="canManage">
+              Reconnect cannot help. Restarting {{ evolutionServer }} usually does,
+              with no new QR scan.
             </template>
             <template v-else>
               Nothing needs scanning. Whoever runs {{ evolutionServer }} has to

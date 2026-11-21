@@ -88,6 +88,8 @@ services:
       # Where reconnect loops and stuck sessions on this deployment's
       # Evolution are reported.
       NUXT_OPS_ALERT_EMAIL: ${OPS_ALERT_EMAIL:-}
+      NUXT_WHATSAPP_SILENCE_ALERTS: ${WHATSAPP_SILENCE_ALERTS:-}
+      NUXT_WHATSAPP_SILENCE_TIME_ZONE: ${WHATSAPP_SILENCE_TIME_ZONE:-}
 
       # MCP rate limits, per minute; 0 = off. See docs/self-hosting.md
       # "MCP rate limits".
