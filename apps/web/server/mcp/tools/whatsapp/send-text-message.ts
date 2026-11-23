@@ -79,8 +79,10 @@ export default defineKindTool({
       // drops — see relayEvolutionSendError.
       relayEvolutionSendError(error, number, instance.id)
     }
-    // The socket answered: any dead-socket evidence is out of date (#205).
-    noteSocketAlive(instance)
+    // A 200 means Evolution queued the message, not that WhatsApp took it: on
+    // a wedged account sends keep answering 200 and stay PENDING. So it clears
+    // no dead-socket evidence; the ack, read back later, decides (#239).
+    watchSendAck(instance, result)
     return sendDisclaimer ? { ...result, disclaimerAppended: sendDisclaimer } : result
   },
 })

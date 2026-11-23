@@ -1,8 +1,11 @@
 import { assertNever } from '#shared/connection'
 import { randomBytes } from 'node:crypto'
 import { rememberBounded } from './lookup-cache'
+import { durationWords } from '../emails/layout'
 import type { AppInstance } from './app-db'
 import type { EvolutionInstanceRecord, LastInbound } from './evolution-db'
+import { healthDisagreement, healthSignals, parseEvolutionHealth, parseHealthMode } from './evolution-health'
+import type { EvolutionHealth, HealthMode, HealthSignals } from './evolution-health'
 import type { ImapSecurity, ImapTarget } from './imap-client'
 import type { HostedEvent } from './hosted-events'
 import type { Actor } from './org'
@@ -59,6 +62,8 @@ export type InstanceStatus = {
    * that messages are still arriving, which the counts are not (cached, raw
    * rows, moved by a redelivered backlog). See `readLastInbound`. Absent when
    * unknown: no message database, no timestamp index, or the read failed.
+   * With `NUXT_EVOLUTION_HEALTH=use` on a server that reports `health`, the
+   * time Evolution received it instead, while Evolution has one (#306).
    */
   lastInboundAt?: string
   /**
@@ -586,9 +591,13 @@ export async function updateImapCredentials(instance: AppInstance, input: ImapCr
 
   const updated = await updateRow<AppInstance>('instances', instance.id, fields)
   await resetIfIdentityChanged(updated, { host: fields.imap_host, user: fields.imap_user })
-  // New credentials end any stop an old, refused password put on the sync.
+  // New credentials end any stop an old, refused password put on the sync,
+  // and `imapFields` just logged in with them, so they count as having worked.
   const sql = await appDb()
-  await sql`UPDATE app.mail_sync_state SET auth_failed = false WHERE instance_id = ${instance.id}`
+  await sql`
+    UPDATE app.mail_sync_state
+    SET ${loginWorked(sql)}
+    WHERE instance_id = ${instance.id}`
   await closeImapFor(instance)
   await requestImapSync(updated).catch(cause => console.error(`[imap] sync of ${instance.id} did not start`, cause))
   return updated
@@ -627,7 +636,16 @@ export async function getImapHealth(instance: AppInstance): Promise<ConnectionHe
 
   const state = await mailSyncState(instance)
   if (!state?.lastAttemptAt) return { state: 'connecting', detail: 'Waiting for the first sync.' }
-  if (state.authFailed) return { state: 'close', error: imapErrorMessage('auth') }
+  if (state.authFailed) {
+    const retryIn = state.authRetryAt ? Date.parse(state.authRetryAt) - Date.now() : undefined
+    return {
+      state: 'close',
+      error: retryIn === undefined
+        ? `${imapErrorMessage('auth')} Syncing has stopped until the credentials are updated or Sync now is pressed.`
+        : `${imapErrorMessage('auth')} The password worked before, so the sync tries again by itself `
+          + `${retryIn > 60_000 ? `in about ${durationWords(retryIn)}` : 'shortly'}; if it is refused again, update the credentials.`,
+    }
+  }
 
   const failedLast = state.lastErrorAt && (!state.lastSuccessAt || state.lastErrorAt > state.lastSuccessAt)
   if (failedLast) return { state: 'close', error: imapErrorMessage(state.lastErrorCode ?? 'connection failed') }
@@ -667,7 +685,7 @@ export async function getImapHealth(instance: AppInstance): Promise<ConnectionHe
  * dropped session from an account with no session at all. A fresh instance and
  * a logout both leave the column `close`, and a QR on screen leaves it
  * `connecting`; on stock 2.3.7 only a retried close leaves it `open` with
- * nothing live behind it. The fork (ju-li/evolution-api-v2) writes `connecting`
+ * nothing live behind it. The fork (evolution-api-reforged) writes `connecting`
  * for a retried close instead, and records why — `isSessionLost` reads both.
  *
  * **Where the row and the counts come from — and why not `fetchInstances`.**
@@ -1023,6 +1041,11 @@ const STALL_CLOCK_SKEW_MS = 30_000
  *     session from a brief drop that already recovered, and mailing an
  *     organization about the second is the wrong trade — `flapping` makes the
  *     same one.
+ *   - A message received after the evidence (`lastInboundAt`, more than
+ *     `STALL_CLOCK_SKEW_MS` after it): spent. It came in over the socket, and
+ *     a dead socket or a wedged queue stores nothing — so traffic proves the
+ *     socket the evidence condemned is working (Nov 20: a late receipt kept a
+ *     receiving account Stuck for 16 minutes after its next message).
  *   - A message database whose write time this read could not get: the
  *     evidence alone, for `STALL_UNCHECKED_MS`, so one failed read neither
  *     ends an alerted episode (a false "connected again") nor keeps an old one
@@ -1032,7 +1055,7 @@ const STALL_CLOCK_SKEW_MS = 30_000
  */
 export function socketStalled(
   seenAt: string | undefined,
-  read: { live?: ConnectionState, columnOpen: boolean, canReadRow: boolean, rowWrittenAt?: string },
+  read: { live?: ConnectionState, columnOpen: boolean, canReadRow: boolean, rowWrittenAt?: string, lastInboundAt?: string },
   now = Date.now(),
 ): { stalled: boolean, spent: boolean } {
   const seen = seenAt ? Date.parse(seenAt) : Number.NaN
@@ -1042,6 +1065,8 @@ export function socketStalled(
     const knownDown = read.live === 'close' || read.live === 'connecting'
     return { stalled: false, spent: knownDown }
   }
+  const inboundAt = read.lastInboundAt ? Date.parse(read.lastInboundAt) : Number.NaN
+  if (inboundAt > seen + STALL_CLOCK_SKEW_MS) return { stalled: false, spent: true }
   if (!read.canReadRow) return { stalled: false, spent: false }
 
   const writtenAt = read.rowWrittenAt ? Date.parse(read.rowWrittenAt) : Number.NaN
@@ -1076,7 +1101,7 @@ const DISCONNECTION_RECORD_SKEW_MS = 5_000
  *
  * **Why the column is not enough on the fork.** Stock 2.3.7 leaves the column
  * `open` while it retries a close, and `sessionLost` was built on exactly that
- * disagreement. The fork (ju-li/evolution-api-v2 #6, #10, #51) writes
+ * disagreement. The fork (evolution-api-reforged, formerly ju-li/evolution-api-v2 #6, #10, #51) writes
  * `connecting` with `disconnectionAt` and `disconnectionReasonCode` on every
  * close it retries, backs off to every 5 min and never gives up — so a dropped
  * session reads column `connecting`, live `connecting`, the same as a QR
@@ -1155,15 +1180,18 @@ async function readStatus(
   const viaSql = canReadMessages(instance)
   const storedChurn: RowChurn = { since: instance.row_churn_since, seenAt: instance.row_churn_seen_at }
 
-  const [live, record, rowWrittenAt, reasonCode, sqlCounts, lastInbound] = await Promise.all([
-    liveConnectionState(evolution, instance).catch(() => undefined),
+  const [liveRead, record, rowWrittenAt, reasonCode, sqlCounts, lastInbound] = await Promise.all([
+    liveConnection(evolution, instance).catch(() => undefined),
     viaSql ? sqlInstanceRecord(instance) : undefined,
     viaSql ? sqlRowWrittenAt(instance) : undefined,
     viaSql ? sqlDisconnectionReason(instance) : undefined,
     viaSql && options.counts ? cachedSqlCounts(instance, Boolean(options.freshCounts)) : undefined,
-    viaSql && options.counts ? cachedLastInbound(instance) : undefined,
+    // Also whenever there is dead-socket evidence: traffic since spends it
+    // (`socketStalled`). Only then, so the sweep pays nothing on a healthy account.
+    viaSql && (options.counts || instance.socket_dead_seen_at) ? cachedLastInbound(instance) : undefined,
   ])
 
+  const live = liveRead?.state
   let row: EvolutionInstanceRecord | undefined = record
   let stats = sqlCounts?.stats
   // No SQL counts at all (no message database, counts not asked for) or a
@@ -1200,33 +1228,85 @@ async function readStatus(
     retryableClose,
   })
 
-  // A loop is the stronger diagnosis and names the same fix; reporting both
-  // would only say it twice.
   const socket = socketStalled(instance.socket_dead_seen_at, {
     live,
     columnOpen: row.connectionStatus === 'open',
     canReadRow: viaSql,
     rowWrittenAt,
+    lastInboundAt: lastInbound?.at,
   })
   if (socket.spent && instance.socket_dead_seen_at) forgetSocketEvidence(instance.id, instance.socket_dead_seen_at)
-  const stalled = socket.stalled && !flapping
+  const sessionLost = isSessionLost(row, live, retryableClose)
+
+  // Evolution's own report, when the server has one (#306). Compared with the
+  // app's signals on every read; it decides only in `use` mode
+  // (`evolutionHealthMode`), and never `sessionLost` — see `healthSignals`.
+  const health = liveRead?.health
+  const signals = health && healthSignals(health)
+  if (health && signals) {
+    noteHealthComparison(instance.id, { flapping, stalled: socket.stalled && !flapping, sessionLost }, health, signals)
+  }
+  const fromHealth = signals && evolutionHealthMode() === 'use' ? signals : undefined
+
+  const looping = fromHealth ? fromHealth.flapping : flapping
+  // A loop is the stronger diagnosis and names the same fix; reporting both
+  // would only say it twice.
+  const stalled = (fromHealth ? fromHealth.stalled : socket.stalled) && !looping
+  // Arrival time from Evolution's memory when it has one; after an Evolution
+  // restart it has none until something arrives, and the SQL read still knows.
+  const inboundAt = fromHealth?.lastInboundAt ?? lastInbound?.at
 
   return {
     state: live ?? 'unknown',
-    sessionLost: isSessionLost(row, live, retryableClose),
-    flapping,
+    sessionLost,
+    flapping: looping,
     ...(stalled && { stalled: true }),
-    ...((flapping || stalled) && operatorAlertedAboutLoop(instance) && { operatorAlerted: true }),
+    ...((looping || stalled) && operatorAlertedAboutLoop(instance) && { operatorAlerted: true }),
     rowChurn: churn,
     profileName: row.profileName ?? undefined,
     profilePicUrl: row.profilePicUrl ?? undefined,
     number: row.number ?? row.ownerJid?.split('@')[0],
     ownerJid: row.ownerJid ?? undefined,
     disconnectedAt: row.disconnectionAt ?? undefined,
-    ...(lastInbound?.at && { lastInboundAt: lastInbound.at }),
-    ...(lastInbound && !lastInbound.at && { noInboundSince: lastInbound.since }),
+    ...(options.counts && inboundAt && { lastInboundAt: inboundAt }),
+    ...(options.counts && !inboundAt && lastInbound && { noInboundSince: lastInbound.since }),
     stats,
   }
+}
+
+/** `NUXT_EVOLUTION_HEALTH`, read on every call so a changed value needs no code path of its own. */
+function evolutionHealthMode(): HealthMode {
+  return parseHealthMode(useRuntimeConfig().evolutionHealth)
+}
+
+/** Last comparison logged per connection — a disagreement is logged when it starts, changes or ends. */
+const healthComparisonLogged = new Map<string, string>()
+
+/**
+ * Log where the app's own signals and Evolution's report disagree (#306), once
+ * per change rather than once per read: the dashboard polls every 15 s and the
+ * sweep every five minutes. Ids and enum values only. Per process, like every
+ * cache here; several replicas each log once.
+ */
+function noteHealthComparison(
+  instanceId: string,
+  app: { flapping: boolean, stalled: boolean, sessionLost: boolean },
+  health: EvolutionHealth,
+  signals: HealthSignals,
+): void {
+  const line = healthDisagreement(app, health, signals)
+  // The line carries the backoff attempt, which moves on every retry; the key
+  // keeps only the verdicts, so a retry alone logs nothing new.
+  const key = line
+    ? `${app.flapping}${app.stalled}${app.sessionLost}|${signals.flapping}${signals.stalled}${signals.retrying}|${health.verdict}|${health.reasons.join(',')}`
+    : 'agree'
+  const previous = healthComparisonLogged.get(instanceId)
+  if (previous === key || (previous === undefined && key === 'agree')) return
+  rememberBounded(healthComparisonLogged, instanceId, key, MAX_COUNTS_ENTRIES)
+
+  const decides = evolutionHealthMode() === 'use' ? 'Evolution\'s report decides' : 'the app\'s signals decide'
+  if (line) console.warn(`[evolution-health] connection ${instanceId}: ${line}; ${decides}`)
+  else console.info(`[evolution-health] connection ${instanceId}: the app's signals and Evolution's report agree again (verdict ${health.verdict})`)
 }
 
 // ── status caches ──────────────────────────────────────────────────────────
@@ -1601,7 +1681,7 @@ async function cachedLastInbound(instance: AppInstance): Promise<LastInbound | u
   if (!reading) {
     reading = readLastInbound(instance)
       .then((value) => {
-        lastInboundCache.set(instance.id, { at: Date.now(), value })
+        rememberBounded(lastInboundCache, instance.id, { at: Date.now(), value }, MAX_COUNTS_ENTRIES)
         return value
       })
       .finally(() => lastInboundInFlight.delete(instance.id))
@@ -1682,10 +1762,65 @@ function noteSqlFallback(
  * answers with no state, which reads as `unknown`.
  */
 async function liveConnectionState(evolution: EvolutionClient, instance: AppInstance): Promise<ConnectionState> {
-  const response = await evolution<{ instance?: { state?: string } }>(
+  return (await liveConnection(evolution, instance)).state
+}
+
+/**
+ * `liveConnectionState` plus Evolution's own `health` report, from the same
+ * answer — present only on a server that has the capability (the fork from
+ * 3.3.0) and in a shape `parseEvolutionHealth` reads. See evolution-health.ts.
+ */
+async function liveConnection(
+  evolution: EvolutionClient,
+  instance: AppInstance,
+): Promise<{ state: ConnectionState, health?: EvolutionHealth }> {
+  const response = await evolution<{ instance?: { state?: string, health?: unknown } }>(
     `/instance/connectionState/${encodeURIComponent(instance.name)}`,
   )
-  return normalizeState(response?.instance?.state)
+  const state = normalizeState(response?.instance?.state)
+  const raw = response?.instance?.health
+  const health = parseEvolutionHealth(raw)
+  noteHealthCapability(instance, state, raw, health)
+  return { state, ...(health && { health }) }
+}
+
+/** Per Evolution server (keyed on its URL, never logged): which capability line this process already logged. */
+const healthCapabilityLogged = new Map<string, 'read' | 'absent' | 'unreadable'>()
+
+/**
+ * Say once per process and Evolution server whether its `health` report is
+ * being read (#306). The comparison logs only disagreements, so without this
+ * "no `[evolution-health]` lines" could mean agreement or a report never read.
+ * Logged again only when the answer changes — a rollback, or the upgrade.
+ *
+ * An instance Evolution has not loaded answers with no state and no report on
+ * any version, so only an answer with a known state counts as "absent". The
+ * server is named by whether it is the deployment's own and by one connection
+ * id — never by its URL, which a bring-your-own server's owner typed.
+ */
+function noteHealthCapability(
+  instance: AppInstance,
+  state: ConnectionState,
+  raw: unknown,
+  health: EvolutionHealth | undefined,
+): void {
+  const outcome = health ? 'read' : raw !== undefined ? 'unreadable' : state === 'unknown' ? undefined : 'absent'
+  if (!outcome) return
+  const key = instance.base_url ?? ''
+  if (healthCapabilityLogged.get(key) === outcome) return
+  rememberBounded(healthCapabilityLogged, key, outcome, MAX_COUNTS_ENTRIES)
+
+  const server = onDeploymentServer(instance) ? 'the deployment\'s Evolution' : `the Evolution server of connection ${instance.id}`
+  if (health) {
+    console.info(`[evolution-health] reading ${server}'s health report (version ${health.version}); `
+      + `${evolutionHealthMode() === 'use' ? 'it decides' : 'comparing only, the app\'s signals decide'}`)
+  }
+  else if (outcome === 'unreadable') {
+    console.warn(`[evolution-health] ${server} answered a health report this build cannot read; the app's own signals decide`)
+  }
+  else {
+    console.info(`[evolution-health] ${server} reports no health (older than evolution-api-reforged 3.3.0); the app's own signals decide`)
+  }
 }
 
 /**
@@ -1990,10 +2125,12 @@ export async function deleteInstance(
   else if (kind === 'whatsapp') {
     // A connection on its own server may hold a pool onto that server's message
     // database. Keyed on the row, so it outlives the row unless dropped here.
-    await closeKeyedPool(`evo:${instance.id}`)
-    await closeKeyedPool(`evo:${instance.id}:counts`)
+    await Promise.all(
+      [`evo:${instance.id}`, ...BACKGROUND_POOLS.map(pool => `evo:${instance.id}:${pool}`)].map(key => closeKeyedPool(key)),
+    )
     forgetInstanceStatus(instance.id)
     forgetInstanceCounts(instance.id)
+    forgetKnownLids(instance.id)
 
     // Uses the same server the instance was created on, with that server's own
     // global key when it brought one.

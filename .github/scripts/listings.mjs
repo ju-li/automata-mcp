@@ -6,7 +6,7 @@
 //   node .github/scripts/listings.mjs tools <server-card-url>
 //
 // Three files outside the app describe it to directories: server.json (the
-// official MCP Registry, published by release.yml), lhm.plugin.json (the
+// official MCP Registry, published by promote.yml), lhm.plugin.json (the
 // LobeHub Marketplace, published by hand — its CLI has no non-interactive login)
 // and .cursor-plugin/plugin.json (cursor.directory, read from the repo beside
 // mcp.json). Each carries a version and lhm.plugin.json carries the tool list, and either

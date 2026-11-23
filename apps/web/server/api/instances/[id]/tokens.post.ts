@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 const body = z.object({
   label: z.string().max(100).optional(),
-  expiry: z.enum(['30d', '90d', '1y', 'never']).default('90d'),
+  expiry: expirySchema,
   /** The member to issue it to. Defaults to the actor. */
   assignedTo: z.string().min(1).optional(),
 }).and(scopeSchema).and(disclaimerSchema)
@@ -37,10 +37,7 @@ export default defineEventHandler(async (event) => {
 
   if (assignedTo !== actor.user.id) {
     const member = await requireOrgMember(actor.org.id, assignedTo)
-    const reaches = member.role === 'admin'
-      || (await listInstanceAssignees(instance.id)).includes(assignedTo)
-
-    if (!reaches) {
+    if (!await memberReaches(member, actor.org.id, instance)) {
       throw createError({
         statusCode: 422,
         statusMessage: `${member.email} cannot reach this connection, so a token issued to them `

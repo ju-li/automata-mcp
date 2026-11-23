@@ -17,6 +17,6 @@ export default defineEventHandler(async (event) => {
     instance: toPublicInstance(instance),
     // `instance` reached this point through the actor's reach (listing or
     // `requireReadableInstance`), so only the management half is left to ask.
-    canManage: managesInstance({ role: actor.role, userId: actor.user.id }, instance, true),
+    canManage: actorManages(actor, instance),
   }
 })

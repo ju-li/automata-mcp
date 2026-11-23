@@ -647,8 +647,9 @@ const importHistory = () => backToPairing(
 
       <!--
         A dead socket under an `open` that never wavers (#205): a send or a
-        group lookup failed with Connection Closed, and Evolution has not
-        reopened the socket since. Its session is stuck; Reconnect answers 409
+        group lookup failed with Connection Closed, or sends went
+        unacknowledged (send-ack.ts), and Evolution has not reopened the
+        socket since. Its session is stuck; Reconnect answers 409
         from `open`, so again nobody gets a button.
       -->
       <NoticeCard v-else-if="socketStuck" title="This account has stopped sending and receiving" tone="error">

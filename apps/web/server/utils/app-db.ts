@@ -276,6 +276,12 @@ export interface OrgLimits {
   recent_history_only?: boolean
 }
 
+/**
+ * What found a WhatsApp socket dead (`socket_dead_by`, socket-evidence.ts):
+ * Baileys' own error on a call, or sends WhatsApp never acknowledged.
+ */
+export type SocketEvidenceKind = 'socket_error' | 'unacked_sends'
+
 export type OrgRole = 'admin' | 'member'
 
 /**
@@ -421,6 +427,13 @@ export interface AppInstance {
    * judged by `socketStalled()` in instances.ts. Never from a webhook payload.
    */
   socket_dead_seen_at?: string
+  /**
+   * WhatsApp only: what recorded `socket_dead_seen_at` — Baileys' dead-socket
+   * error on a call, or sends WhatsApp never acknowledged. Words the operator
+   * mail; never part of the `stalled` verdict. Empty for evidence recorded
+   * before it existed. Written and cleared with it by socket-evidence.ts.
+   */
+  socket_dead_by?: SocketEvidenceKind
   /**
    * WhatsApp only: when this app first saw the account linked. Never cleared —
    * a logout does not make a paired connection an unfinished one. Written by

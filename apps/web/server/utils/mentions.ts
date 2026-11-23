@@ -85,6 +85,8 @@ export async function mentionDirectory(options: {
   chatJids: Iterable<string>
   /** Contact map from `contactDirectory()`, keyed by JID. Optional. */
   contacts?: Map<string, { name?: string }>
+  /** Identities the caller needs names for; see `addGroupMembers`. */
+  needed?: Iterable<string>
 }): Promise<MentionDirectory> {
   return await addGroupMembers(contactsToDirectory(options.contacts), options)
 }
@@ -113,7 +115,8 @@ export function contactsToDirectory(contacts?: Map<string, { name?: string }>): 
 }
 
 /**
- * The group half: adds every named participant, **overwriting** contacts.
+ * The group half: adds every named participant, **overwriting** contacts, then
+ * names the unnamed ones through the contacts they are linked to.
  *
  * That precedence is the reason this runs second and not first. Evolution's
  * `Contact` table is written from inbound traffic keyed on `key.remoteJid`,
@@ -121,8 +124,25 @@ export function contactsToDirectory(contacts?: Map<string, { name?: string }>): 
  * 1:1 chats and a poor one for group members. Participant metadata comes from
  * the group itself and is the authority on who is in it.
  *
+ * **Most participants arrive unnamed (#279).** Baileys' group metadata carries
+ * no name at all, only identities; Evolution's `findParticipants` adds one from
+ * the `Contact` row whose `remoteJid` equals the participant's `id` — which in a
+ * LID-addressed group is the LID, while the account's contacts are mostly keyed
+ * by phone JID. What the row *does* carry is the pairing: `id` (LID) beside
+ * `phoneNumber` (rc14), or `id` beside `jid`/`lid` (rc.9). So an unnamed
+ * participant takes the name any of its identities already has in the
+ * directory, and that name is then indexed under the others — which is what
+ * lets a history-imported row, whose only identity is the sender's LID digits,
+ * reach the phone-keyed contact. Gaps only: an identity that already has a
+ * name keeps it. Display-only, like the rest of the directory; no JID is built.
+ *
  * Mutates and returns the directory it was given, so a caller can build the
  * contacts once and add to it.
+ *
+ * `needed`, when given, names the identities the caller is about to look up.
+ * A group read for which none of them resolves is logged (once per connection
+ * per few minutes) with the reason, since every hop here degrades silently —
+ * the state #279 sat in unnoticed.
  */
 export async function addGroupMembers(
   directory: MentionDirectory,
@@ -131,19 +151,103 @@ export async function addGroupMembers(
     evolution: EvolutionClient
     /** Chats whose membership to look up. Non-group JIDs are ignored. */
     chatJids: Iterable<string>
+    /** Identities (JIDs or local parts) the caller needs names for. Diagnostics only. */
+    needed?: Iterable<string>
   },
 ): Promise<MentionDirectory> {
   const groupJids = [...new Set(options.chatJids)].filter(jid => jid.endsWith('@g.us'))
+  if (!groupJids.length) return directory
 
   const memberships = await Promise.all(
     groupJids.map(jid => fetchParticipants(options.instance, options.evolution, jid)),
   )
 
-  for (const members of memberships) {
-    for (const [localPart, name] of members) directory.set(localPart, name)
+  // Named first, across every group, so an unnamed participant in one group
+  // can borrow the name WhatsApp reported for the same person in another.
+  for (const { members } of memberships) {
+    for (const member of members) {
+      if (!member.name) continue
+      for (const localPart of member.identities) directory.set(localPart, member.name)
+    }
   }
 
+  let linked = 0
+  for (const { members } of memberships) {
+    for (const member of members) {
+      if (member.name) continue
+      // A contact saved under its own number is a number, not a name; carried
+      // onto a LID it would show that person's phone number as their name.
+      const name = member.identities
+        .map(localPart => directory.get(localPart))
+        .find(candidate => candidate && !looksLikeIdentifier(candidate))
+      if (!name) continue
+      linked++
+      for (const localPart of member.identities) {
+        if (!directory.has(localPart)) directory.set(localPart, name)
+      }
+    }
+  }
+
+  if (options.needed) reportUnresolved(options.instance, directory, options.needed, memberships, linked)
+
   return directory
+}
+
+/**
+ * The log line #279 asked for: a group read needed names and got none.
+ *
+ * Counts only — never a name, a JID or a group id — and at most once per
+ * connection per `UNRESOLVED_LOG_INTERVAL_MS`, since a model paging through a
+ * group would otherwise write it on every page. The reason is the first hop
+ * that came back with nothing: the lookup failed, answered no participants,
+ * answered participants carrying no identity we index, or answered named and
+ * linkable participants that simply are not the senders on this page (people
+ * who have left, or history older than the group's current membership).
+ */
+const UNRESOLVED_LOG_INTERVAL_MS = 5 * 60_000
+const unresolvedLoggedAt = new Map<string, number>()
+
+function reportUnresolved(
+  instance: AppInstance,
+  directory: MentionDirectory,
+  needed: Iterable<string>,
+  memberships: Membership[],
+  linked: number,
+): void {
+  const wanted = new Set([...needed].map(localPartOf).filter(Boolean))
+  if (!wanted.size) return
+  for (const localPart of wanted) if (directory.has(localPart)) return
+
+  const now = Date.now()
+  const last = unresolvedLoggedAt.get(instance.id)
+  if (last !== undefined && now - last < UNRESOLVED_LOG_INTERVAL_MS) return
+  unresolvedLoggedAt.set(instance.id, now)
+  // Bounded by connections in this process; prune the expired on the way.
+  for (const [id, at] of unresolvedLoggedAt) {
+    if (now - at >= UNRESOLVED_LOG_INTERVAL_MS) unresolvedLoggedAt.delete(id)
+  }
+
+  const failed = memberships.filter(m => m.failed).length
+  const answered = memberships.filter(m => !m.failed)
+  const rows = answered.reduce((sum, m) => sum + m.rows, 0)
+  const members = answered.reduce((sum, m) => sum + m.members.length, 0)
+  const named = answered.reduce((sum, m) => sum + m.members.filter(member => member.name).length, 0)
+
+  const reason = failed === memberships.length
+    ? 'participant lookup failed'
+    : rows === 0
+      ? 'participant lookup answered no participants'
+      : members === 0
+        ? 'participants carry no identity we index'
+        : named + linked === 0
+          ? 'no participant named by WhatsApp or linked to a contact'
+          : 'senders are not among the named participants'
+
+  console.warn(
+    `[names] ${instance.id}: group read resolved none of ${wanted.size} identities (${reason}; `
+    + `groups ${memberships.length}, lookups failed ${failed}, participants ${rows}, `
+    + `with identity ${members}, named by WhatsApp ${named}, named via contact ${linked}, directory ${directory.size})`,
+  )
 }
 
 /**
@@ -180,7 +284,8 @@ export function applyMentions(
 // ── participants ───────────────────────────────────────────────────────────
 
 /**
- * Group membership, keyed by local part.
+ * Group membership: one entry per participant, with every identity it carries
+ * and its name where Evolution had one.
  *
  * Cached through `staleWhileFailing`, which explains the three behaviours it
  * buys: Evolution answers this from Baileys rather than its database, so it is a
@@ -191,22 +296,39 @@ export function applyMentions(
  *
  * A participant is indexed under every identity it carries — `id`, `lid`,
  * `phoneNumber`, `jid` — because which one appears in `mentionedJid` depends on
- * the chat's addressing mode, which is WhatsApp's choice and not ours.
+ * the chat's addressing mode, which is WhatsApp's choice and not ours. Unnamed
+ * participants are **kept**, not skipped: their identities are the link from a
+ * LID to the phone-keyed contact that names it (`addGroupMembers`, #279).
  */
 const PARTICIPANT_TIMEOUT_MS = 8_000
-const emptyMembers: MentionDirectory = new Map()
 
-const participantCache = staleWhileFailing<MentionDirectory>({
+interface GroupMember {
+  /** Local parts, deduplicated. Never empty. */
+  identities: string[]
+  name?: string
+}
+
+interface Membership {
+  members: readonly GroupMember[]
+  /** Participant rows Evolution answered with, including ones with no identity we index. */
+  rows: number
+  /** Set only on the shared answer for "lookup failed and nothing was cached". */
+  failed?: true
+}
+
+const failedMembership: Membership = Object.freeze({ members: Object.freeze([]), rows: 0, failed: true as const })
+
+const participantCache = staleWhileFailing<Membership>({
   ttlMs: 5 * 60_000,
   retryTtlMs: 60_000,
-  empty: emptyMembers,
+  empty: failedMembership,
 })
 
 async function fetchParticipants(
   instance: AppInstance,
   evolution: EvolutionClient,
   groupJid: string,
-): Promise<MentionDirectory> {
+): Promise<Membership> {
   return participantCache(`${instance.id}:${groupJid}`, async () => {
     const result = await evolution<EvolutionParticipantsResponse | EvolutionParticipantRow[]>(
       `/group/participants/${encodeURIComponent(instance.name)}?groupJid=${encodeURIComponent(groupJid)}`,
@@ -217,31 +339,33 @@ async function fetchParticipants(
 
     // Reported as a failure, so the cache serves whatever it had — see
     // `staleWhileFailing`. A group whose members simply have no readable names
-    // answers with an empty map instead, and is cached for the full window.
+    // answers with unnamed members instead, and is cached for the full window.
     if (!Array.isArray(rows)) return undefined
 
-    const members: MentionDirectory = new Map()
+    const members: GroupMember[] = []
     for (const row of rows) {
       if (!row || typeof row !== 'object') continue
 
-      const identities = [row.id, row.lid, row.phoneNumber, row.jid]
-        .filter((value): value is string => typeof value === 'string' && value.length > 0)
-        .map(localPartOf)
-        .filter(Boolean)
+      const identities = [...new Set(
+        [row.id, row.lid, row.phoneNumber, row.jid]
+          .filter((value): value is string => typeof value === 'string' && value.length > 0)
+          .map(localPartOf)
+          .filter(Boolean),
+      )]
 
       if (!identities.length) continue
 
       // Same rule as `meaningfulName`, widened to every identity the row carries: a
       // participant labelled with any of its own ids has no name, not a numeric one.
+      // Typed loosely because Evolution passes Baileys' fields through untyped.
       const name = [row.name, row.notify, row.pushName, row.verifiedName]
-        .map(candidate => candidate?.trim())
-        .find(candidate => candidate && !identities.includes(candidate))
+        .map(candidate => typeof candidate === 'string' ? candidate.trim() : undefined)
+        .find(candidate => candidate && !identities.includes(candidate) && !looksLikeIdentifier(candidate))
 
-      if (!name) continue
-      for (const localPart of identities) members.set(localPart, name)
+      members.push(name ? { identities, name } : { identities })
     }
 
-    return members
+    return { members, rows: rows.length }
   })
 }
 

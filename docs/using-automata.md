@@ -29,13 +29,22 @@
    expiry (30 days, 90 days — the default — 1 year, or never) and a scope.
 5. Add it to your AI assistant. The dialog shown when a token is created, and
    the **How to connect** dialog, have a tab per assistant: **Claude** (Claude.ai
-   and Desktop: Settings → Customize → Connectors → Add → Add custom connector;
-   Claude Code: `claude mcp add --transport http <name> <url>`), **Grok Bot** and
+   and Desktop: Settings → Customize → Connectors → Add → Add custom connector,
+   the `/mcp` URL, No sign-in, and an `Authorization: Bearer <token>` request
+   header, or the token URL where Request headers isn't offered yet; Claude
+   Code: `claude mcp add --transport http <name> <app-url>/mcp --header
+   "Authorization: Bearer <token>"`), **Grok Bot** and
    **Meta Muse** (asked in a chat; the token goes into their secure key prompt,
    sent as `Authorization: Bearer`), **ChatGPT** (Plugins → Add custom MCP
-   server, the token URL, No authentication), and **Other** (token URL,
-   `Authorization: Bearer` header, the MCP Inspector). The browser remembers
+   server, the token URL, No authentication), and **Other** (`Authorization:
+   Bearer` header first, then the token URL, the MCP Inspector). The browser remembers
    the last tab picked, so the next token opens on it.
+   The header is the recommended form: the token URL (`/mcp/<token>`) ends up
+   in the assistant's settings, history and logs, so it is the fallback for
+   assistants that cannot send a header — ChatGPT, and Claude.ai organizations
+   that don't have the **Request headers** section yet (it is a beta). In a
+   Claude Team or Enterprise organization, the header's token is shared by
+   every member, so all of them act as the member the token was issued to.
    **Cursor** (hosted server only): install the Automata plugin from
    [cursor.directory](https://cursor.directory), or add this repository's
    `mcp.json` entry to your own. It sends the token from the `AUTOMATA_TOKEN`
@@ -110,11 +119,13 @@ comes back.
 | `read-messages` | WhatsApp | read | One chat, newest first, 1–200 per page (default 50), optional `since` / `until`; reports `hasMore`, `nextPage`, `covered` and `totalMatching`; `recentHistoryOnly: true` when the account's import was partial |
 | `search-messages` | WhatsApp | read | Messages containing every word of `query`, across chats in scope or one `jid`; optional date range and `fromMe`; up to 100 matches (default 20); `recentHistoryOnly: true` when the account's import was partial |
 | `send-text-message` | WhatsApp | **write** | Send text to a chat's full `jid` exactly as `list-chats` / `read-messages` return it (including `…@lid` chats), or to a phone number in international format for someone with no chat yet; bare LID digits are refused; a refusal (e.g. a number not on WhatsApp) comes back with WhatsApp's reason |
+| `send-whatsapp-image` | WhatsApp | **write** | Send one JPEG or PNG (≤ 5 MB) with an optional caption, to the same recipients as `send-text-message`; the image is `imageUrl` (a public link Automata downloads — never handed to Evolution) or `imageBase64` (≤ ~1.5 MB, the request cap) |
 | `get-telegram-status` | Telegram | read | Whether the account is linked and online, who it is signed in as, and how far sync has got |
 | `list-telegram-chats` | Telegram | read | Synced chats in scope — private, groups, supergroups, channels — most recently active first, with the `chatId` other tools take; 1–200 per page (default 100) |
 | `read-telegram-messages` | Telegram | read | One chat, newest first, with the same paging envelope as `read-messages`; optional forum `topicId`; says when older history was never synced |
 | `search-telegram-messages` | Telegram | read | Messages containing every word of `query` (text and captions), across chats in scope or one `chatId` |
 | `send-telegram-message` | Telegram | **write** | Send plain text (≤ 4096 chars) to exactly one of `chatId` or `username` — an @username, a t.me link or a phone number |
+| `send-telegram-image` | Telegram | **write** | Send one JPEG or PNG (≤ 5 MB) as a photo with an optional caption (≤ 1024 chars), addressed like `send-telegram-message`; image as `imageUrl` or `imageBase64`, as for `send-whatsapp-image`. Needs a bridge from this release or later |
 | `get-mailbox-status` | Email | read | Which mailbox, whether its sync works, when it last ran, and which folders are still backfilling |
 | `list-mail-folders` | Email | read | Folders in scope with synced and unread counts; skipped folders (All Mail, Junk, Trash) marked `synced: false` |
 | `list-emails` | Email | read | Headers newest first from one folder or all in scope, 1–100 per page (default 25); filters for date, unread, flagged, attachments |
@@ -219,7 +230,8 @@ isn't asked to add it, so it can't forget it or change the wording. The tool's
 response names the appended text in `disclaimerAppended`. On Telegram the
 disclaimer counts toward the 4096-character limit, and a message that goes over
 it is refused with the number of characters to cut. The disclaimer is per
-token, and admins can edit or remove it in the token's Edit dialog. A token that
+token, and whoever manages the connection can edit or remove it in the token's
+Edit dialog. A token that
 can't send stores none.
 
 The token is shown exactly once — only its SHA-256 hash is stored. Lost tokens
@@ -232,8 +244,8 @@ starts, for example `claude-ai 0.1.0 · Cursor 1.7`. Click the line for each
 client's version, protocol version, user agent, when it was first seen, its last
 session and how many sessions it has started. "Last session" is when a client
 last connected; **Last used** is still the last tool call. The newest 20 clients
-are kept per token. A member sees this for their own tokens, an admin for all of
-them.
+are kept per token. A member sees this for their own tokens; whoever manages the
+connection (an admin, or the member who created it) for all of them.
 
 A client whose name first appears more than a day after the token's first client
 gets a **New client** label for two weeks. If you don't recognise it, issue the

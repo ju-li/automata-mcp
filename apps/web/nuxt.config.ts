@@ -118,6 +118,12 @@ export default defineNuxtConfig({
     // role behind it must be SELECT-only — see server/utils/evolution-db.ts and
     // docs/whatsapp.md "Reading and searching messages".
     evolutionDatabaseUrl: '',
+    // What decides whether a WhatsApp connection is looping or stuck when its
+    // Evolution server reports its own `health` (the fork from 3.3.0):
+    // `compare` (default) keeps the app's own signals and logs every
+    // disagreement with Evolution's report; `use` lets the report decide. See
+    // server/utils/evolution-health.ts and ju-li/automata-mcp#306.
+    evolutionHealth: 'compare',
 
     // The *default* Telegram bridge (apps/telegram-bridge), for Telegram
     // connections that did not bring their own. Optional, like Evolution's.

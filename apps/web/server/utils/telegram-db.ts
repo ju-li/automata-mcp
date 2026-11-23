@@ -363,14 +363,13 @@ export async function listTelegramChatsForPicker(
 
 export interface TelegramPageOptions {
   /**
-   * The one chat to read.
-   *
-   * Absent means every synced chat, which exists for the **session** surface —
-   * the dashboard's message table. Every MCP tool passes one: `chat_id` is the
+   * The one chat to read. Required: every synced chat at once is
+   * `listTelegramAccountMessages`, the **session** surface's own query (the
+   * dashboard's message table). Every MCP tool passes one: `chat_id` is the
    * scope predicate, and a token scoped to a set of chats resolves them through
    * `scopedTelegramChatIds` before it gets here.
    */
-  chatId?: string
+  chatId: string
   /** The only chats this token may reach. Omit for an all-chats token. */
   allowedChatIds?: string[]
   limit: number
@@ -381,10 +380,6 @@ export interface TelegramPageOptions {
   topicId?: number
   includeDeleted: boolean
   includeService: boolean
-  /** Every term must appear in the text. Already split, not yet escaped. */
-  terms?: string[]
-  /** Which end of the range the first page comes from. Defaults to newest first. */
-  order?: 'newest' | 'oldest'
 }
 
 interface MessageDbRow {
@@ -423,31 +418,22 @@ export async function listTelegramMessagesPage(
   instance: AppInstance,
   options: TelegramPageOptions,
 ): Promise<{ messages: TelegramMessage[], hasMore: boolean, total?: number, excluded: { deleted: number, service: number } }> {
-  if (options.chatId !== undefined) assertTelegramChatId(options.chatId)
+  assertTelegramChatId(options.chatId)
   const { query } = await telegramDbFor(instance)
   const sessionId = sessionIdOf(instance)
   const since = parseDateBound(options.since, 'since')
   const until = parseDateBound(options.until, 'until')
-  // Checked again by `textMatchesAll`; here so the 400 comes before any query.
-  if (options.terms) assertSearchTerms(options.terms)
 
   // Everything that bounds the set, shared by the page and the excluded counts
   // so the two describe the same window — the scope predicates included, because
   // a count taken over a wider set than the page is a number about someone
   // else's messages.
   const window = (sql: Sql) => sql`
-    ${options.chatId === undefined ? sql`` : sql`AND m.chat_id = ${options.chatId}`}
+    AND m.chat_id = ${options.chatId}
     ${options.allowedChatIds ? sql`AND m.chat_id = ANY(${options.allowedChatIds}::bigint[])` : sql``}
-    ${options.terms === undefined ? sql`` : textMatchesAll(sql, sql`m.text`, options.terms)}
     ${since ? sql`AND m.date >= ${since}` : sql``}
     ${until ? sql`AND m.date <= ${until}` : sql``}
     ${options.topicId === undefined ? sql`` : sql`AND m.topic_id = ${options.topicId}`}`
-
-  // The tiebreaker travels with the direction; reversing one half of the pair
-  // puts a row sharing a timestamp on two pages or on neither.
-  const ordering = (sql: Sql) => options.order === 'oldest'
-    ? sql`m.date ASC, m.message_id ASC`
-    : sql`m.date DESC, m.message_id DESC`
 
   const [rows, counts] = await Promise.all([
     guarded('read messages', () => query(sql => sql<Array<MessageDbRow & { total: string }>>`
@@ -465,7 +451,8 @@ export async function listTelegramMessagesPage(
         ${window(sql)}
         ${options.includeDeleted ? sql`` : sql`AND m.deleted_at IS NULL`}
         ${options.includeService ? sql`` : sql`AND m.service_action IS NULL`}
-      ORDER BY ${ordering(sql)}
+      -- The tiebreaker puts a row sharing a timestamp on exactly one page.
+      ORDER BY m.date DESC, m.message_id DESC
       LIMIT ${options.limit + 1} OFFSET ${(options.page - 1) * options.limit}`)),
     options.includeDeleted && options.includeService
       ? Promise.resolve([{ deleted: '0', service: '0' }])
@@ -491,6 +478,91 @@ export async function listTelegramMessagesPage(
       service: options.includeService ? 0 : Number(count?.service ?? 0),
     },
   }
+}
+
+export interface TelegramAccountPageOptions {
+  limit: number
+  /** 1-based, counting back from the newest (or forward from the oldest). */
+  page: number
+  /** Every term must appear in the text. Already split, not yet escaped. */
+  terms?: string[]
+  order?: 'newest' | 'oldest'
+}
+
+/**
+ * One page of **every** synced chat — the dashboard's message table — built so
+ * its cost is the page, not the session.
+ *
+ * The chat read (`listTelegramMessagesPage`) counts its whole window twice
+ * (`COUNT(*) OVER ()`, then deleted and service messages); across a session that
+ * is millions of rows, and with no index leading on `(session_id, date)` the
+ * page itself was a sequential scan of the whole table, every tenant's rows,
+ * sorted — production timed out at 10 s. Here:
+ *
+ * - **Ordered off `messages_session_date`** (bridge migration `0007`,
+ *   `(session_id, date DESC, message_id DESC) WHERE deleted_at IS NULL`), so the
+ *   `LIMIT` stops the scan. A bridge older than that migration still answers,
+ *   only slowly.
+ * - **No exact total.** Without terms there is none: the dashboard shows the
+ *   session's cached message count beside the table, labelled approximate.
+ *   The last page knows its total for free. With terms and more pages, a
+ *   capped count (`MATCH_COUNT_CAP`) after the page, under its own short timeout
+ *   (`MATCH_COUNT_TIMEOUT_MS`): exact below the cap, `totalAtLeast` at it. A
+ *   failed count leaves `total` absent, never fails the page.
+ * - **Deleted and service messages left out, not counted.** Counting them means
+ *   reading every row of the session again (no index finds deleted rows);
+ *   `messages.get.ts` names both classes as excluded instead, so the table
+ *   still says it is not the whole store.
+ */
+export async function listTelegramAccountMessages(
+  instance: AppInstance,
+  options: TelegramAccountPageOptions,
+): Promise<{ messages: TelegramMessage[], hasMore: boolean, total?: number, totalAtLeast?: boolean }> {
+  if (options.terms) assertSearchTerms(options.terms)
+  const { query } = await telegramDbFor(instance)
+  const sessionId = sessionIdOf(instance)
+  const terms = options.terms?.length ? options.terms : undefined
+
+  // Exactly the index's predicate, plus the service filter it cannot carry.
+  const filters = (sql: Sql) => sql`
+    m.session_id = ${sessionId}
+    AND m.deleted_at IS NULL
+    AND m.service_action IS NULL
+    ${terms === undefined ? sql`` : textMatchesAll(sql, sql`m.text`, terms)}`
+
+  const ordering = (sql: Sql) => options.order === 'oldest'
+    ? sql`m.date ASC, m.message_id ASC`
+    : sql`m.date DESC, m.message_id DESC`
+
+  const skip = (options.page - 1) * options.limit
+  const rows = await guarded('read messages', () => query(sql => sql<MessageDbRow[]>`
+    SELECT m.chat_id::text AS chat_id, c.title AS chat_title,
+           m.message_id::text AS message_id, m.sender_id::text AS sender_id, m.from_me, m.date, m.edit_date,
+           m.text, m.media_type, m.reply_to_id::text AS reply_to_id, m.topic_id::text AS topic_id,
+           m.fwd_from, m.service_action, m.grouped_id::text AS grouped_id, m.reactions, m.deleted_at,
+           u.first_name, u.last_name, u.username AS user_username, sc.title AS sender_chat_title
+    FROM telegram.messages m
+    LEFT JOIN telegram.chats c ON c.session_id = m.session_id AND c.chat_id = m.chat_id
+    LEFT JOIN telegram.users u ON u.session_id = m.session_id AND u.user_id = m.sender_id
+    LEFT JOIN telegram.chats sc ON sc.session_id = m.session_id AND sc.chat_id = m.sender_id AND m.sender_id < 0
+    WHERE ${filters(sql)}
+    ORDER BY ${ordering(sql)}
+    LIMIT ${options.limit + 1} OFFSET ${skip}`))
+
+  const hasMore = rows.length > options.limit
+  const page = rows.slice(0, options.limit)
+
+  const totals = await pageTotal(
+    { page: options.page, skip, length: page.length, hasMore, searching: terms !== undefined },
+    query,
+    (tx, sql, limit) => tx<Array<{ n: number }>>`
+      SELECT count(*)::int AS n FROM (
+        SELECT 1 FROM telegram.messages m WHERE ${filters(sql)} LIMIT ${limit}
+      ) matched`,
+    `[telegram-db] account message count for connection ${instance.id}`,
+  )
+
+  return { messages: page.map(toMessage), hasMore, ...totals }
 }
 
 export interface TelegramSearchOptions {

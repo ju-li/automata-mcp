@@ -72,7 +72,10 @@ export function staleSyncNote(sync: MailSyncState | undefined): string | undefin
   }
   if (sync.authFailed) {
     return `The mail server is refusing this connection's password, so nothing newer than ${sync.lastSuccessAt} `
-      + 'has been synced. The account owner needs to update the credentials in the web app.'
+      + (sync.authRetryAt
+        ? `has been synced. The password worked before, so the sync tries again by itself at ${sync.authRetryAt}; `
+          + 'if it keeps being refused, the account owner needs to update the credentials in the web app.'
+        : 'has been synced. The account owner needs to update the credentials in the web app.')
   }
   const age = Date.now() - Date.parse(sync.lastSuccessAt)
   if (age > STALE_MS) {

@@ -333,19 +333,23 @@ export class Crm {
     }
     catch (error) {
       if (!(error instanceof BrevoError) || error.kind !== 'permanent') throw error
-      const { eventId } = options
-      await this.sql`
-        INSERT INTO cloud.crm_skipped (event_id, user_id, status, code)
-        VALUES (${eventId === undefined ? null : eventId.toString()}, ${user.id}, ${error.status}, ${error.code ?? null})
-      `
-      console.warn(
-        `[crm] Brevo refused the contact for user ${user.id}${eventId === undefined ? '' : ` (event ${eventId})`}: `
-        + `${error.message}; recorded in cloud.crm_skipped`,
-      )
+      await this.recordSkipped('the contact', user.id, options.eventId, error)
       return 'skipped'
     }
     await this.recordActivitySent(user)
     return result
+  }
+
+  /** A permanent Brevo refusal, kept in `cloud.crm_skipped` for replaying by hand. */
+  private async recordSkipped(what: string, userId: string, eventId: bigint | undefined, error: BrevoError): Promise<void> {
+    await this.sql`
+      INSERT INTO cloud.crm_skipped (event_id, user_id, status, code)
+      VALUES (${eventId === undefined ? null : eventId.toString()}, ${userId}, ${error.status}, ${error.code ?? null})
+    `
+    console.warn(
+      `[crm] Brevo refused ${what} for user ${userId}${eventId === undefined ? '' : ` (event ${eventId})`}: `
+      + `${error.message}; recorded in cloud.crm_skipped`,
+    )
   }
 
   /**
@@ -369,11 +373,7 @@ export class Crm {
       if (!(error instanceof BrevoError)) throw error
       if (error.status !== 404) {
         if (error.kind !== 'permanent') throw error
-        await this.sql`
-          INSERT INTO cloud.crm_skipped (event_id, user_id, status, code)
-          VALUES (${eventId.toString()}, ${userId}, ${error.status}, ${error.code ?? null})
-        `
-        console.warn(`[crm] Brevo refused to delete the contact for user ${userId} (event ${eventId}): ${error.message}; recorded in cloud.crm_skipped`)
+        await this.recordSkipped('to delete the contact', userId, eventId, error)
         return 'skipped'
       }
     }

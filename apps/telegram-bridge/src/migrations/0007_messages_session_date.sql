@@ -1,0 +1,23 @@
+-- One session's live messages in time order, for the app's account-wide message
+-- table (the dashboard's Messages card, `listTelegramAccountMessages`).
+--
+-- Every other index on messages leads with chat_id after session_id, so "this
+-- session, newest first" had none: the query was a sequential scan of the whole
+-- table — every session's rows — sorted, and timed out in production on a
+-- 2M-message session. With this the LIMIT stops the scan after one page.
+-- Partial on the predicate that query always carries (deleted messages are
+-- never shown there).
+--
+-- Not CONCURRENTLY: migrations run in one transaction (db.ts), where it is not
+-- allowed, so this holds a write lock on messages while it builds — sync writes
+-- wait (the live queue sheds channel updates and catches them up afterwards),
+-- reads do not. On a large table, create it by hand first and this becomes a
+-- no-op:
+--
+--   CREATE INDEX CONCURRENTLY IF NOT EXISTS messages_session_date
+--     ON telegram.messages (session_id, date DESC, message_id DESC) WHERE deleted_at IS NULL;
+--
+-- A CONCURRENTLY build that fails leaves an INVALID index under this name, which
+-- IF NOT EXISTS would then keep: drop it and build again before deploying.
+CREATE INDEX IF NOT EXISTS messages_session_date
+  ON messages (session_id, date DESC, message_id DESC) WHERE deleted_at IS NULL;

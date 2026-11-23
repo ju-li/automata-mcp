@@ -15,7 +15,7 @@
 export default defineEventHandler(async (event) => {
   const { instance, actor } = await requireReadableInstance(event, getRouterParam(event, 'id'))
 
-  if (!managesInstance({ role: actor.role, userId: actor.user.id }, instance, true)) {
+  if (!actorManages(actor, instance)) {
     return { tokens: await listTokens(instance.id, { assignedTo: actor.user.id }) }
   }
 

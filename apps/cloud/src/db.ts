@@ -15,8 +15,9 @@ export type Db = postgres.Sql | postgres.TransactionSql
  *           credentials.
  *   cloud   this service's own state — consumer cursors on the event outbox,
  *           CRM updates Brevo refused for good, the activity dates each
- *           contact last received, daily job leases, and the self-hosters who
- *           asked for update mail. Created here at boot.
+ *           contact last received, daily job leases, the self-hosters who
+ *           asked for update mail, every Stripe subscription read and the
+ *           daily revenue snapshot. Created here at boot.
  */
 export const CLOUD_SCHEMA = 'cloud'
 
@@ -132,6 +133,78 @@ export async function ensureCloudSchema(sql: Sql): Promise<void> {
   // submitted. `synced_at` then means "Brevo accepted the request", not "on the
   // list": only the click puts it there.
   await sql`ALTER TABLE cloud.self_host_subscribers ADD COLUMN IF NOT EXISTS doi_sent_at timestamptz`
+
+  // Every Stripe subscription `syncOrg` has read (billing.ts), upserted on
+  // each read: webhook and hourly reconcile. Never deleted — a canceled
+  // subscription is what trial conversion and churn are counted from. No FK
+  // to app.organizations: the row outlives a deleted organization. Holds no
+  // address or name; join through app.organizations / app.users for those.
+  // Amounts are Stripe's minor units (cents). `period_amount` = every item's
+  // unit_amount × quantity for one billing period, before discounts; the
+  // discount columns describe the subscription-level discount (Stripe allows
+  // several; only the first is stored, the sync logs when there are more).
+  await sql`
+    CREATE TABLE IF NOT EXISTS cloud.stripe_subscriptions (
+      id                 text PRIMARY KEY,
+      customer_id        text NOT NULL,
+      organization_id    text,
+      status             text NOT NULL,
+      created            timestamptz NOT NULL,
+      start_date         timestamptz NOT NULL,
+      trial_start        timestamptz,
+      trial_end          timestamptz,
+      cancel_at          timestamptz,
+      canceled_at        timestamptz,
+      ended_at           timestamptz,
+      current_period_end timestamptz,
+      currency           text NOT NULL,
+      "interval"         text NOT NULL,
+      interval_count     integer NOT NULL,
+      base_price_id      text,
+      base_unit_amount   bigint,
+      seat_price_id      text,
+      seat_unit_amount   bigint,
+      seat_quantity      integer NOT NULL DEFAULT 0,
+      period_amount      bigint NOT NULL,
+      items              jsonb NOT NULL,
+      coupon_id          text,
+      percent_off        numeric,
+      amount_off         bigint,
+      discount_start     timestamptz,
+      discount_end       timestamptz,
+      updated_at         timestamptz NOT NULL DEFAULT now()
+    )
+  `
+  await sql`CREATE INDEX IF NOT EXISTS stripe_subscriptions_customer_idx ON cloud.stripe_subscriptions (customer_id)`
+
+  // One row per Eastern-time day, from cloud.stripe_subscriptions (revenue.ts).
+  // `backfilled` rows were reconstructed from subscription dates once, when the
+  // table was first filled: past_due is unknown for them (NULL), and they use
+  // each subscription's current price and discount.
+  await sql`
+    CREATE TABLE IF NOT EXISTS cloud.revenue_daily (
+      day                    date PRIMARY KEY,
+      mrr_cents              bigint NOT NULL,
+      paying                 integer NOT NULL,
+      trialing               integer NOT NULL,
+      past_due               integer,
+      canceled_today         integer NOT NULL,
+      trials_canceled_today  integer NOT NULL,
+      trials_converted_today integer NOT NULL,
+      backfilled             boolean NOT NULL DEFAULT false,
+      computed_at            timestamptz NOT NULL DEFAULT now()
+    )
+  `
+
+  // When a recurring job last finished a whole pass. The revenue snapshot for
+  // a day waits for a Stripe reconcile that finished after the day ended, so
+  // every subscription row it reads is at least that fresh.
+  await sql`
+    CREATE TABLE IF NOT EXISTS cloud.job_runs (
+      job         text PRIMARY KEY,
+      finished_at timestamptz NOT NULL
+    )
+  `
 }
 
 /**

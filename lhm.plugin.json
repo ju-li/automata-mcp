@@ -1,7 +1,7 @@
 {
   "identifier": "ju-li-automata-mcp",
   "name": "Automata",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Scoped, revocable access to your WhatsApp, Telegram, IMAP email and PostgreSQL for AI agents. Read, search and summarise chats and mail, query databases in plain English; sending messages and writing rows only when granted. Each connector token is bound to one connection. Hosted at mcp.getautomata.app (free tier) or self-hosted.",
   "author": "Ju Li",
   "authorUrl": "https://github.com/ju-li",
@@ -792,6 +792,50 @@
       }
     },
     {
+      "name": "send-telegram-image",
+      "title": "Send Telegram image",
+      "description": "[Telegram] Send one image (JPEG or PNG, at most 5 MB) as a photo from the connected Telegram account, with an optional caption (Telegram's limit is 1024 characters). Pass the image as `imageUrl` (a public link this server downloads) or as `imageBase64` — exactly one. Address it like send-telegram-message: a `chatId` from list-telegram-chats or a `username`, exactly one of the two. The caption is sent exactly as written — formatting marks are not interpreted. The account must be in the `open` state; check with get-telegram-status first. Messages cannot be unsent from here. The account owner may have set a disclaimer line that is appended to every caption automatically (and counts toward the limit); when one was, the response names it in `disclaimerAppended`.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "chatId": {
+            "description": "Chat id from list-telegram-chats, as a string",
+            "type": "string",
+            "pattern": "^-?\\d{1,20}$"
+          },
+          "username": {
+            "description": "Instead of chatId: a public @username, a t.me link, or a phone number",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "imageUrl": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048,
+            "description": "Public http(s) URL of a JPEG or PNG image (at most 5 MB). It is downloaded by this server, so it must be reachable without signing in."
+          },
+          "imageBase64": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 6991532,
+            "description": "Instead of imageUrl: the JPEG or PNG file itself, base64-encoded (a data: URL prefix is accepted). Requests are capped at 2 MB, so this suits images up to about 1.5 MB."
+          },
+          "caption": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Text shown under the photo, sent exactly as written (at most 1024 characters)"
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
       "name": "send-telegram-message",
       "title": "Send Telegram message",
       "description": "[Telegram] Send a plain-text Telegram message from the connected account, to a `chatId` from list-telegram-chats or to a `username` (a public @username or t.me link; a phone number works only where that person's privacy settings allow it). Pass exactly one of the two. The text is sent exactly as written — formatting marks such as ** are not interpreted. The account must be in the `open` state; check with get-telegram-status first. Messages cannot be unsent from here. The account owner may have set a disclaimer line that is appended to every message automatically (and counts toward the 4096-character limit); when one was, the response names it in `disclaimerAppended`. Do not add a sign-off of your own.",
@@ -848,6 +892,47 @@
         "required": [
           "number",
           "text"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "send-whatsapp-image",
+      "title": "Send WhatsApp image",
+      "description": "[WhatsApp] Send one image (JPEG or PNG, at most 5 MB) from the connected WhatsApp account, with an optional caption. Pass the image as `imageUrl` (a public link this server downloads) or as `imageBase64` — exactly one. Recipient rules are those of send-text-message: to reply in an existing conversation, pass its `jid` from list-chats or read-messages as `number`, exactly as returned; never strip an `@lid` suffix or send to its digits alone. The account must be in the `open` state — check with get-connection-status first. Messages cannot be unsent once delivered. The account owner may have set a disclaimer line that is appended to every caption automatically; when one was, the response names it in `disclaimerAppended`.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Recipient: a chat's full jid exactly as list-chats or read-messages return it, or, for someone with no existing chat, a phone number in international format — country code included, digits only, e.g. 5511999999999"
+          },
+          "imageUrl": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048,
+            "description": "Public http(s) URL of a JPEG or PNG image (at most 5 MB). It is downloaded by this server, so it must be reachable without signing in."
+          },
+          "imageBase64": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 6991532,
+            "description": "Instead of imageUrl: the JPEG or PNG file itself, base64-encoded (a data: URL prefix is accepted). Requests are capped at 2 MB, so this suits images up to about 1.5 MB."
+          },
+          "caption": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "Text shown under the image"
+          }
+        },
+        "required": [
+          "number"
         ]
       },
       "annotations": {

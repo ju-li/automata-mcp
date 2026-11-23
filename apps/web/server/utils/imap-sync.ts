@@ -1,4 +1,5 @@
 import type { ImapFlow, FetchMessageObject, ListResponse, MessageAddressObject } from 'imapflow'
+import type { Sql } from 'postgres'
 import type { AppInstance } from './app-db'
 import type { ImapTarget } from './imap-client'
 
@@ -22,9 +23,15 @@ import type { ImapTarget } from './imap-client'
  *   them would attach one message's headers to another's body.
  * - **Identity is checked before every run.** New credentials naming another
  *   mailbox delete everything synced from the old one.
- * - **An authentication failure stops the sync** (`auth_failed`) until the
- *   credentials change. Retrying a refused password every two minutes is how
- *   providers lock accounts.
+ * - **A refused login backs off, then stops the sync** (`auth_failed`) until
+ *   the credentials change or Sync now. Retrying a refused password every two
+ *   minutes is how providers lock accounts. But providers also refuse a good
+ *   password now and then (Zoho: one `AUTHENTICATIONFAILED` between two runs
+ *   that logged in), so credentials that have logged in before (`login_ok_at`)
+ *   get `AUTH_RETRY_DELAYS` — a handful of logins spread over a day — before
+ *   the stop is final. Credentials that never logged in stop at the first
+ *   refusal. Only a refusal counts: a timeout proves nothing about the
+ *   password, so it neither adds to nor clears `auth_failures`.
  * - **Every write is an idempotent upsert**, so a run that dies halfway leaves
  *   nothing a later run cannot redo.
  * - **Gmail's All Mail, Junk and Trash are listed but not synced.** All Mail
@@ -54,11 +61,27 @@ const CONCURRENCY = 4
 /** A full UID listing to find expunged messages, every Nth run — and always when counts disagree. */
 const EXPUNGE_EVERY = 5
 
+/**
+ * After the Nth consecutive refused login, the scheduled sync waits this long
+ * before trying again; past the last entry it stops until the credentials
+ * change or Sync now. Postgres intervals, indexed 1-based by `auth_failures`.
+ */
+const AUTH_RETRY_DELAYS = ['15 minutes', '1 hour', '6 hours', '24 hours']
+
 const SKIPPED_SPECIAL_USE = new Set(['\\All', '\\Junk', '\\Trash'])
 
 export interface MailSyncLimits {
   days: number
   max: number
+}
+
+/**
+ * The `SET` columns for credentials that just logged in: any refusal streak
+ * and retry wait cleared, and `login_ok_at` marking them as having worked —
+ * which is what earns a later refusal the retry schedule rather than a stop.
+ */
+export function loginWorked(sql: Sql) {
+  return sql`auth_failed = false, auth_failures = 0, auth_retry_at = NULL, login_ok_at = now()`
 }
 
 export function mailSyncLimits(): MailSyncLimits {
@@ -135,7 +158,7 @@ async function claimLease(instance: AppInstance, options: { ignoreAuthFailure: b
         runs = runs + 1
     WHERE instance_id = ${instance.id}
       AND lease_until < now()
-      ${options.ignoreAuthFailure ? sql`` : sql`AND NOT auth_failed`}
+      ${options.ignoreAuthFailure ? sql`` : sql`AND (NOT auth_failed OR auth_retry_at <= now())`}
     RETURNING runs`
   return row ? { runs: row.runs, target } : undefined
 }
@@ -145,6 +168,8 @@ async function runClaimed(instance: AppInstance, lease: Lease): Promise<SyncOutc
   const deadline = Date.now() + RUN_BUDGET_MS
   let client: ImapFlow | undefined
   let cutOff = false
+  /** Past the login: these credentials work, whatever the run does next. */
+  let loggedIn = false
   // Closing the socket rejects whatever command is waiting on it, so the run
   // unwinds through the ordinary failure path below. Before `openImap` has
   // returned there is no client here to close, so the abort reaches it there
@@ -159,6 +184,7 @@ async function runClaimed(instance: AppInstance, lease: Lease): Promise<SyncOutc
     await resetIfIdentityChanged(instance, lease.target)
     client = await openImap(lease.target, undefined, { signal: abort.signal })
     if (cutOff) throw new DeadlineExceededError(`syncing mailbox ${instance.id}`, RUN_HARD_LIMIT_MS)
+    loggedIn = true
     const folderFailed = await syncFolders(instance, client, lease, deadline)
     if (folderFailed) {
       // Not a success: last_success_at is what `syncedAt`, `staleSyncNote`
@@ -167,13 +193,13 @@ async function runClaimed(instance: AppInstance, lease: Lease): Promise<SyncOutc
       // progress is kept in their own rows.
       await sql`
         UPDATE app.mail_sync_state
-        SET last_error_code = ${folderFailed}, last_error_at = now(), auth_failed = false, lease_until = now()
+        SET last_error_code = ${folderFailed}, last_error_at = now(), lease_until = now(), ${loginWorked(sql)}
         WHERE instance_id = ${instance.id}`
       return 'failed'
     }
     await sql`
       UPDATE app.mail_sync_state
-      SET last_success_at = now(), last_error_code = NULL, auth_failed = false, lease_until = now()
+      SET last_success_at = now(), last_error_code = NULL, lease_until = now(), ${loginWorked(sql)}
       WHERE instance_id = ${instance.id}`
     return 'synced'
   }
@@ -184,11 +210,25 @@ async function runClaimed(instance: AppInstance, lease: Lease): Promise<SyncOutc
     // Logged with the cause: a handled failure is otherwise invisible, and the
     // stored code is all the dashboard shows.
     console.error(`[imap-sync] connection ${instance.id} failed (${described.code})`, cause)
-    await sql`
+    // SET reads the row as it was, so `auth_failures + 1` indexes the delay
+    // for this refusal; past the array's end the index answers NULL, and so
+    // does the sum: no retry. NULL `login_ok_at` = never logged in = none.
+    const [state] = await sql<Array<{ auth_failures: number, auth_retry_at?: string }>>`
       UPDATE app.mail_sync_state
-      SET last_error_code = ${described.code}, last_error_at = now(),
-          auth_failed = ${described.auth}, lease_until = now()
-      WHERE instance_id = ${instance.id}`.catch(() => {})
+      SET last_error_code = ${described.code}, last_error_at = now(), lease_until = now(),
+          auth_failed = ${described.auth},
+          auth_failures = CASE WHEN ${described.auth} THEN auth_failures + 1
+                               WHEN ${loggedIn} THEN 0 ELSE auth_failures END,
+          auth_retry_at = CASE WHEN ${described.auth} AND login_ok_at IS NOT NULL
+                               THEN now() + (${AUTH_RETRY_DELAYS}::interval[])[auth_failures + 1] END,
+          login_ok_at = CASE WHEN ${loggedIn} THEN now() ELSE login_ok_at END
+      WHERE instance_id = ${instance.id}
+      RETURNING auth_failures, auth_retry_at`.catch(() => [])
+    if (described.auth && state) {
+      console.error(state.auth_retry_at
+        ? `[imap-sync] connection ${instance.id}: login refused ${state.auth_failures} time(s) in a row, next try at ${state.auth_retry_at}`
+        : `[imap-sync] connection ${instance.id}: login refused ${state.auth_failures} time(s) in a row, sync stopped until the credentials change or Sync now`)
+    }
     return 'failed'
   }
   finally {
@@ -213,7 +253,8 @@ export async function resetIfIdentityChanged(instance: Pick<AppInstance, 'id'>, 
     await tx`
       INSERT INTO app.mail_sync_state (instance_id, identity) VALUES (${instance.id}, ${identity})
       ON CONFLICT (instance_id) DO UPDATE
-      SET identity = EXCLUDED.identity, auth_failed = false, last_error_code = NULL,
+      SET identity = EXCLUDED.identity, last_error_code = NULL,
+          auth_failed = false, auth_failures = 0, auth_retry_at = NULL, login_ok_at = NULL,
           last_success_at = NULL`
   })
 }

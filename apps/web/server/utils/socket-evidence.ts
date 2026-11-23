@@ -1,4 +1,4 @@
-import type { AppInstance } from './app-db'
+import type { AppInstance, SocketEvidenceKind } from './app-db'
 import { rememberBounded } from './lookup-cache'
 
 /**
@@ -15,7 +15,8 @@ import { rememberBounded } from './lookup-cache'
  * tell; only a call that needs the socket finds out, and the two such calls we
  * make — a send and a group lookup — used to log the failure and drop it.
  *
- * So those two record it here, and `readStatus` judges it (`socketStalled` in
+ * So those two record it here — a send also when WhatsApp never acks it
+ * (send-ack.ts, #239) — and `readStatus` judges it (`socketStalled` in
  * instances.ts) into `stalled`, which alerts like `flapping`: the fix is a
  * restart of the Evolution service, never Reconnect (which answers 409 from
  * `open`) and never `/instance/restart` (#103).
@@ -30,14 +31,19 @@ import { rememberBounded } from './lookup-cache'
  *     healthy socket would otherwise become an outage mail on an idle account,
  *     where no later success comes along to clear it. A dead socket answers
  *     `Connection Closed` straight away, which is what production showed.
+ *     The one other source is a send's ack staying `PENDING` — twice in a row,
+ *     never once (send-ack.ts).
  *   - **At most one write a minute per connection** (conditional UPDATE, plus an
  *     in-memory gate so a burst of failures costs one statement), and the value
  *     written is truncated to milliseconds, so the ISO string a row read hands
  *     back compares equal to what is stored (`forgetSocketEvidence`).
- *   - **Cleared by any socket call that succeeds** — a send, a group lookup
- *     WhatsApp answered (including "not a member" and "rate-overlimit": both
- *     came over the socket). Also superseded by Evolution reopening the socket,
- *     which `readStatus` sees from the row's write time.
+ *   - **Cleared by any socket call WhatsApp answered** — a group lookup
+ *     (including "not a member" and "rate-overlimit": both came over the
+ *     socket), or a send whose ack was stored (send-ack.ts). **Not by a send
+ *     Evolution answered 200** (#239): that only means Evolution queued it; on
+ *     a wedged account sends keep answering 200 and stay `PENDING` for good.
+ *     Also superseded by Evolution reopening the socket, which `readStatus`
+ *     sees from the row's write time.
  *   - Best effort: a failed write is logged, never thrown into the request that
  *     found the evidence — that request is already failing for its own reason.
  */
@@ -64,29 +70,53 @@ const MAX_LAST_WRITTEN = 10_000
 
 /**
  * Record that a call needing the socket found it dead. Fire and forget.
- * `what` is for the log only — "send", "group lookup".
+ * `kind` is stored beside the time (`socket_dead_by`) so the operator mail can
+ * say what was seen — a `Connection Closed`, or sends nobody acknowledged
+ * (#305: an account whose receipts were only late was mailed as failing with
+ * `Connection Closed`, and the investigation went the wrong way). It never
+ * decides `stalled`. `what` is for the log only — "send", "group lookup".
+ *
+ * `at` is when the failing call was made, for evidence found after the fact —
+ * a send whose ack never came (send-ack.ts). It is what `socketStalled` judges
+ * against Evolution's last reopen, so a miss made after that reopen counts even
+ * when the run of misses began before it (#239). Such evidence only moves the
+ * stored value forward, and skips the once-a-minute gate: it comes at most once
+ * per send, two minutes late, and dropping it would leave an older time a
+ * reopen has already spent.
  */
-export function noteSocketDead(instance: Pick<AppInstance, 'id'>, what: string): void {
+export function noteSocketDead(instance: Pick<AppInstance, 'id'>, kind: SocketEvidenceKind, what: string, at?: Date): void {
   const now = Date.now()
-  const last = lastWritten.get(instance.id)
-  if (last !== undefined && now - last < EVIDENCE_WRITE_INTERVAL_MS) return
+  if (!at) {
+    const last = lastWritten.get(instance.id)
+    if (last !== undefined && now - last < EVIDENCE_WRITE_INTERVAL_MS) return
+  }
   rememberBounded(lastWritten, instance.id, now, MAX_LAST_WRITTEN)
 
-  storeSocketDead(instance.id, what).catch((error) => {
+  storeSocketDead(instance.id, kind, what, at).catch((error) => {
     lastWritten.delete(instance.id)
     console.error(`[socket] could not record the dead socket seen on connection ${instance.id}:`, error)
   })
 }
 
-async function storeSocketDead(instanceId: string, what: string): Promise<void> {
+async function storeSocketDead(instanceId: string, kind: SocketEvidenceKind, what: string, at: Date | undefined): Promise<void> {
   const sql = await appDb()
-  const written = await sql`
-    UPDATE app.instances
-    SET socket_dead_seen_at = date_trunc('milliseconds', now())
-    WHERE id = ${instanceId}
-      AND (socket_dead_seen_at IS NULL OR socket_dead_seen_at < now() - interval '1 minute')
-    RETURNING id
-  `
+  const written = at
+    ? await sql`
+        UPDATE app.instances
+        SET socket_dead_seen_at = date_trunc('milliseconds', ${at.toISOString()}::timestamptz),
+            socket_dead_by = ${kind}
+        WHERE id = ${instanceId}
+          AND (socket_dead_seen_at IS NULL
+            OR socket_dead_seen_at < date_trunc('milliseconds', ${at.toISOString()}::timestamptz))
+        RETURNING id
+      `
+    : await sql`
+        UPDATE app.instances
+        SET socket_dead_seen_at = date_trunc('milliseconds', now()), socket_dead_by = ${kind}
+        WHERE id = ${instanceId}
+          AND (socket_dead_seen_at IS NULL OR socket_dead_seen_at < now() - interval '1 minute')
+        RETURNING id
+      `
   if (written.length) {
     console.warn(`[socket] connection ${instanceId}: a ${what} found the WhatsApp socket dead; recorded for the health check`)
   }
@@ -95,7 +125,7 @@ async function storeSocketDead(instanceId: string, what: string): Promise<void> 
 /**
  * Record that a call needing the socket got an answer. Fire and forget, and a
  * no-op unless there is evidence to clear — the row as loaded says so, or this
- * process wrote some since — so a healthy account's sends cost no write.
+ * process wrote some since — so a healthy account's calls cost no write.
  */
 export function noteSocketAlive(instance: Pick<AppInstance, 'id' | 'socket_dead_seen_at'>): void {
   if (!instance.socket_dead_seen_at && !lastWritten.has(instance.id)) return
@@ -106,14 +136,35 @@ export function noteSocketAlive(instance: Pick<AppInstance, 'id' | 'socket_dead_
   })
 }
 
-async function clearSocketDead(instanceId: string): Promise<void> {
+/**
+ * Record that WhatsApp acknowledged a message sent at `sentAt` (send-ack.ts).
+ * Clears only evidence from before that send: the ack proves the socket worked
+ * after it, not that a later failure — a group lookup a minute on — is wrong.
+ * Not gated on the row as loaded, which is two minutes old by now and may
+ * predate evidence another replica wrote; an UPDATE matching nothing writes
+ * nothing. Fire and forget.
+ */
+export function noteSocketAcknowledged(instanceId: string, sentAt: Date): void {
+  clearSocketDead(instanceId, sentAt).catch((error) => {
+    console.error(`[socket] could not clear the dead-socket evidence of connection ${instanceId}:`, error)
+  })
+}
+
+async function clearSocketDead(instanceId: string, before?: Date): Promise<void> {
   const sql = await appDb()
-  const cleared = await sql`
-    UPDATE app.instances SET socket_dead_seen_at = NULL
-    WHERE id = ${instanceId} AND socket_dead_seen_at IS NOT NULL
-    RETURNING id
-  `
+  const cleared = before
+    ? await sql`
+        UPDATE app.instances SET socket_dead_seen_at = NULL, socket_dead_by = NULL
+        WHERE id = ${instanceId} AND socket_dead_seen_at <= ${before.toISOString()}::timestamptz
+        RETURNING id
+      `
+    : await sql`
+        UPDATE app.instances SET socket_dead_seen_at = NULL, socket_dead_by = NULL
+        WHERE id = ${instanceId} AND socket_dead_seen_at IS NOT NULL
+        RETURNING id
+      `
   if (cleared.length) {
+    lastWritten.delete(instanceId)
     console.info(`[socket] connection ${instanceId}: a socket call succeeded; dead-socket evidence cleared`)
   }
 }
@@ -128,7 +179,7 @@ export function forgetSocketEvidence(instanceId: string, seenAt: string): void {
   lastWritten.delete(instanceId)
   appDb()
     .then(sql => sql`
-      UPDATE app.instances SET socket_dead_seen_at = NULL
+      UPDATE app.instances SET socket_dead_seen_at = NULL, socket_dead_by = NULL
       WHERE id = ${instanceId} AND socket_dead_seen_at <= ${seenAt}::timestamptz
     `)
     .catch((error) => {

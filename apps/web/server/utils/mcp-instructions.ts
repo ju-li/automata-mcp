@@ -49,7 +49,7 @@ export const WHATSAPP_INSTRUCTIONS = [
   'in `@g.us` is a group; one ending in `@lid` is a LID, WhatsApp\'s privacy alias for a person.',
   'A LID\'s digits are not a phone number and carry no country code: never present them as one,',
   'and never send to them as one, which would reach whoever owns that number. To reply in a chat,',
-  'pass its full `jid` to `send-text-message`. The person\'s phone number may be unknown to this',
+  'pass its full `jid` to `send-text-message` (or `send-whatsapp-image` for a picture). The person\'s phone number may be unknown to this',
   'connector; say so rather than guessing it from the digits. `list-chats` gives a LID chat a',
   '`phoneNumber` only when WhatsApp has revealed it; quote that when present, and still reply by',
   'the `jid`.',
@@ -143,6 +143,8 @@ export const TELEGRAM_INSTRUCTIONS = [
   'proof a message does not exist. Secret chats are never visible to this connector.',
   '`send-telegram-message` sends plain text exactly as written — formatting marks are not',
   'interpreted — and cannot be undone from here. Confirm with the user before sending.',
+  '`send-telegram-image` sends one JPEG or PNG as a photo, from a public `imageUrl` or from',
+  '`imageBase64`; its caption is limited to 1024 characters.',
 ].join(' ')
 
 export const IMAP_INSTRUCTIONS = [

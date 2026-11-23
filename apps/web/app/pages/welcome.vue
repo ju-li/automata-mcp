@@ -66,24 +66,24 @@ function pairs(k: InstanceKind): boolean {
 
 // Read once: the flag is cleared as soon as a connector is picked, and the
 // session refresh that follows must not take the last step away mid-run.
-const offersUpdates = ref(onboarding.value?.updates === true)
+const offersUpdates = onboarding.value?.updates === true
 
 /** Live for this page load once setup has started; see the header comment. */
 const active = useState<boolean>('welcome:active', () => false)
 const { run: runStart } = useApiAction()
 
+/** Clear the organization's onboarding flag, and the session's copy of it. */
+async function clearOnboarding() {
+  await $fetch('/api/onboarding/finish', { method: 'POST' })
+  await refreshSession()
+  return true
+}
+
 /** Clear the flag the first time a connector is picked. Failure only means a later visit lands here again. */
 async function start() {
   if (active.value) return
   active.value = true
-  await runStart(
-    async () => {
-      await $fetch('/api/onboarding/finish', { method: 'POST' })
-      await refreshSession()
-      return true
-    },
-    { failure: 'Could not save setup progress' },
-  )
+  await runStart(clearOnboarding, { failure: 'Could not save setup progress' })
 }
 watch(kind, (picked) => { if (picked) void start() })
 
@@ -91,7 +91,7 @@ const step = computed<Step>(() => {
   const k = connectionKind.value
   if (!connectionId.value || !k) return kind.value ? 'details' : 'pick'
   const asked = route.query.step
-  if (asked === 'updates' && offersUpdates.value) return 'updates'
+  if (asked === 'updates' && offersUpdates) return 'updates'
   if (asked === 'token') return 'token'
   return pairs(k) ? 'pair' : 'token'
 })
@@ -104,7 +104,7 @@ const steps = computed(() => {
     { id: 'details' as const, title: 'Name and credentials' },
     ...(!k || pairs(k) ? [{ id: 'pair' as const, title: 'Scan the QR code' }] : []),
     { id: 'token' as const, title: 'Create a token' },
-    ...(offersUpdates.value ? [{ id: 'updates' as const, title: 'Stay informed' }] : []),
+    ...(offersUpdates ? [{ id: 'updates' as const, title: 'Stay informed' }] : []),
   ]
 })
 const currentIndex = computed(() => steps.value.findIndex(s => s.id === step.value))
@@ -135,7 +135,7 @@ const tokens = ref<{ openCreate: () => void } | null>(null)
 const tokenCreated = ref(false)
 
 function afterToken() {
-  if (offersUpdates.value) return goTo('updates')
+  if (offersUpdates) return goTo('updates')
   return finish()
 }
 
@@ -161,14 +161,7 @@ const { busy: finishing, run: runFinish } = useApiAction()
 
 /** Finish or skip: either way setup is over, and the connection's page (or the list) is next. */
 async function finish() {
-  const done = await runFinish(
-    async () => {
-      await $fetch('/api/onboarding/finish', { method: 'POST' })
-      await refreshSession()
-      return true
-    },
-    { failure: 'Could not finish setup' },
-  )
+  const done = await runFinish(clearOnboarding, { failure: 'Could not finish setup' })
   if (!done) return
   await navigateTo(connectionKind.value && connectionId.value ? `/instances/${connectionId.value}` : '/instances/new')
 }

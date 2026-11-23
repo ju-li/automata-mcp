@@ -216,7 +216,13 @@ async function resolveNames(instance: AppInstance, hits: MessageSearchHit[]): Pr
       .slice(0, MENTION_GROUP_LOOKUPS)
       .map(([jid]) => jid)
 
-    return await addGroupMembers(directory, { instance, evolution, chatJids })
+    const looked = new Set(chatJids)
+    const needed = hits
+      .filter(hit => looked.has(hit.jid))
+      .flatMap(identitiesOf)
+      .filter(jid => !directory.has(localPartOf(jid)))
+
+    return await addGroupMembers(directory, { instance, evolution, chatJids, needed })
   }
   catch (error) {
     console.error('[search] could not resolve names:', error)

@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 const body = z.object({
   label: z.string().max(100).optional(),
-  expiry: z.enum(['30d', '90d', '1y', 'never']).default('90d'),
+  expiry: expirySchema,
 }).and(scopeSchema).and(disclaimerSchema)
 
 /**
@@ -22,7 +22,7 @@ export default defineEventHandler(async (event) => {
   const { instance, actor } = await requireReadableInstance(event, getRouterParam(event, 'id'))
   const parsed = await parseBody(event, body)
 
-  if (managesInstance({ role: actor.role, userId: actor.user.id }, instance, true)) {
+  if (actorManages(actor, instance)) {
     throw createError({
       statusCode: 409,
       statusMessage: 'You manage this connection, so you can create a token yourself.',

@@ -22,11 +22,11 @@ const props = withDefaults(defineProps<{
 }>(), { canManage: false })
 
 /**
- * `created`: a token was minted (its secret is on screen now). `revealClosed`:
- * the reveal dialog was dismissed. First-run setup (pages/welcome.vue) moves
- * on from these; it opens the create dialog through `openCreate`.
+ * `created`: a token was minted (its secret is on screen now). First-run
+ * setup (pages/welcome.vue) moves on from it; it opens the create dialog
+ * through `openCreate`.
  */
-const emit = defineEmits<{ created: [], revealClosed: [] }>()
+const emit = defineEmits<{ created: [] }>()
 // Before the first `await` below: exposed after it, a parent's template ref
 // has already resolved without it. `openCreate` is a hoisted declaration.
 defineExpose({ openCreate })
@@ -576,14 +576,14 @@ function statusOf(token: TokenRow) {
                   <!-- Scope is manager-only. A token holder may replace the secret, never
                        widen what it reaches. -->
                   <Button
-                    v-if="canManage && !token.revoked"
+                    v-if="canManage"
                     variant="ghost"
                     size="sm"
                     @click="startEdit(token)"
                   >
                     Edit
                   </Button>
-                  <AlertDialog v-if="!token.revoked && !token.expired && !awaitsSecret(token)">
+                  <AlertDialog v-if="!token.expired && !awaitsSecret(token)">
                     <AlertDialogTrigger as-child>
                       <Button variant="ghost" size="sm" :disabled="rotating === token.id">
                         New secret
@@ -607,7 +607,7 @@ function statusOf(token: TokenRow) {
                       </AlertDialogFooter>
                     </AlertDialogContent>
                   </AlertDialog>
-                  <AlertDialog v-if="!token.revoked">
+                  <AlertDialog>
                     <AlertDialogTrigger as-child>
                       <Button variant="ghost" size="sm" :disabled="revoking === token.id">
                         Revoke
@@ -825,6 +825,6 @@ function statusOf(token: TokenRow) {
       @update:open="value => { if (!value) clientsOf = null }"
     />
 
-    <RevealTokenDialog :token="revealed" :kind="kind" :scope="revealedScope" @close="revealed = null; emit('revealClosed')" />
+    <RevealTokenDialog :token="revealed" :kind="kind" :scope="revealedScope" @close="revealed = null" />
   </section>
 </template>

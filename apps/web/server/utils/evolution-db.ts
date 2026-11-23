@@ -120,6 +120,25 @@ function messageDbUrlFor(instance: AppInstance): { url: string, guard: boolean }
  * account is a sequential scan. A slow query has to surface as an error the
  * caller can report, not as an MCP call that never returns.
  */
+/** Background jobs that each read on their own one-connection pool, beside the readers' shared one. */
+export const BACKGROUND_POOLS = ['counts', 'lids'] as const
+
+/**
+ * Run a background job's statement on its own one-connection pool, under the
+ * background timeout, so it never takes one of the readers' slots. Leased: a
+ * statement that runs for most of a minute must not look idle to the sweep.
+ */
+async function onBackgroundPool<R>(
+  instance: AppInstance,
+  pool: typeof BACKGROUND_POOLS[number],
+  statement: (sql: Sql) => Promise<R>,
+): Promise<R> {
+  const resolved = resolveMessageDb(instance)
+  return await withKeyedPool(`${poolKeyFor(instance, resolved)}:${pool}`, resolved.url, {
+    guard: resolved.guard, max: 1, statementTimeoutMs: BACKGROUND_COUNT_TIMEOUT_MS, readOnly: true, jit: false,
+  }, statement)
+}
+
 async function evolutionDbFor(instance: AppInstance): Promise<SharedPool> {
   const resolved = resolveMessageDb(instance)
   const sql = await messagePool(instance, resolved)
@@ -316,7 +335,7 @@ export async function readInstanceRowWrittenAt(instance: AppInstance): Promise<s
  * no row or the column is NULL.
  *
  * Stock 2.3.7 writes it only on a close it will not retry (401, 403, 402, 406);
- * the fork (ju-li/evolution-api-v2) also writes it, with `connecting`, on every
+ * the fork (evolution-api-reforged) also writes it, with `connecting`, on every
  * close it retries — the one record of a dropped session there, since its
  * column no longer stays `open` over a dead socket. `sessionLost` in
  * instances.ts reads it (`recordedRetryableClose`).
@@ -421,18 +440,9 @@ export async function countInstanceRows(
            (SELECT count(*) FROM "Contact" WHERE "instanceId" = ${instanceId})::int AS contacts
   `
 
-  let row: { messages: number, chats: number, contacts: number } | undefined
-  if (options.background) {
-    const resolved = resolveMessageDb(instance)
-    // Leased: a count that runs for most of a minute must not look idle to the sweep.
-    ;[row] = await withKeyedPool(`${poolKeyFor(instance, resolved)}:counts`, resolved.url, {
-      guard: resolved.guard, max: 1, statementTimeoutMs: BACKGROUND_COUNT_TIMEOUT_MS, readOnly: true, jit: false,
-    }, statement)
-  }
-  else {
-    const { query } = await evolutionDbFor(instance)
-    ;[row] = await query(statement)
-  }
+  const [row] = options.background
+    ? await onBackgroundPool(instance, 'counts', statement)
+    : await (await evolutionDbFor(instance)).query(statement)
   return {
     messages: Number(row?.messages ?? 0),
     chats: Number(row?.chats ?? 0),
@@ -512,8 +522,11 @@ export interface LastInbound {
  */
 export async function readLastInbound(instance: AppInstance): Promise<LastInbound | undefined> {
   const { query } = await evolutionDbFor(instance)
-  const instanceId = await resolveEvolutionInstanceId(instance)
-  if (!await messageIndexPresent(instance, query, INSTANCE_TS_INDEX)) return undefined
+  const [instanceId, indexed] = await Promise.all([
+    resolveEvolutionInstanceId(instance),
+    messageIndexPresent(instance, query, INSTANCE_TS_INDEX),
+  ])
+  if (!indexed) return undefined
 
   const now = Date.now()
   const since = Math.floor((now - LAST_INBOUND_WINDOW_MS) / 1000)
@@ -537,6 +550,106 @@ export async function readLastInbound(instance: AppInstance): Promise<LastInboun
     ...(Number.isFinite(ts) && ts > 0 && { at: new Date(ts * 1000).toISOString() }),
     since: new Date(since * 1000).toISOString(),
   }
+}
+
+/** One message this app sent, as `/message/sendText` answered it. */
+export interface SentMessageRef {
+  /** `key.id` of the stored row. */
+  id: string
+  /** `key.remoteJid` of the stored row — the chat Evolution stored it under. */
+  remoteJid: string
+  /** `messageTimestamp` Evolution answered, unix seconds. */
+  timestamp: number
+}
+
+/**
+ * How far before the answered `messageTimestamp` the lookup still looks. The
+ * row carries the value Evolution answered with, so this only covers a clock
+ * read twice; it keeps the probe a short index range.
+ */
+const SENT_LOOKUP_SLACK_S = 5 * 60
+
+/**
+ * Receipt statuses in `"MessageUpdate"`, best first. The first one a sent
+ * message has is what `readSentMessageStatus` reports for a row whose own
+ * status still reads `PENDING`.
+ */
+export const RECEIPT_RANK = ['PLAYED', 'READ', 'DELIVERY_ACK', 'SERVER_ACK'] as const
+
+const RECEIPT_DENIED_LOG_QUIET_MS = 5 * 60_000
+let receiptDeniedLoggedAt = 0
+
+/**
+ * The acknowledgement state of a message this app sent — `PENDING` until
+ * WhatsApp's server ack is processed, then `SERVER_ACK`, `DELIVERY_ACK`, … — or
+ * `undefined` when no row matches or the answer cannot be known (#239).
+ *
+ * **`"Message".status` alone is not the answer.** Evolution writes every
+ * receipt as a `"MessageUpdate"` row, but does not reliably move the message's
+ * own `status` with it: production, Nov 19, 9 of 16 sends whose `"Message"`
+ * row still read `PENDING` had `SERVER_ACK`/`DELIVERY_ACK`/`READ` updates —
+ * some read by the recipient — and each pair of them raised a false "stuck"
+ * alert on a healthy account. So a row that reads `PENDING` is looked up in
+ * `"MessageUpdate"` (indexed on `"messageId"`) and the best receipt there wins.
+ * Only a row pending in both places is reported `PENDING`.
+ *
+ * A role that cannot read `"MessageUpdate"` (42501, older grant recipe) makes
+ * a pending row **unknown**, never a miss: reporting the bare `"Message"`
+ * status there is the false alarm this fixes. Logged at most every 5 minutes.
+ *
+ * Bounded like `readLastInbound`: needs `message_instance_ts_idx`, walks one
+ * account's rows from the send's timestamp on, and answers `undefined` without
+ * it rather than reading every row the account holds after every send.
+ * `remoteJid` and `fromMe` narrow the range further (and match the fork's
+ * unique index when the planner prefers it).
+ *
+ * Raw driver errors otherwise, for the same reason as `readInstanceRecord`.
+ */
+export async function readSentMessageStatus(
+  instance: AppInstance,
+  sent: SentMessageRef,
+): Promise<string | undefined> {
+  const { query } = await evolutionDbFor(instance)
+  const [instanceId, indexed] = await Promise.all([
+    resolveEvolutionInstanceId(instance),
+    messageIndexPresent(instance, query, INSTANCE_TS_INDEX),
+  ])
+  if (!indexed) return undefined
+
+  const [row] = await query(sql => sql<Array<{ id: string, status: string | null }>>`
+    SELECT m.id, m.status
+    FROM "Message" m
+    WHERE m."instanceId" = ${instanceId}
+      AND m."messageTimestamp" >= ${sent.timestamp - SENT_LOOKUP_SLACK_S}
+      AND m.key->>'remoteJid' = ${sent.remoteJid}
+      AND m.key->>'id' = ${sent.id}
+      AND (m.key->>'fromMe')::boolean = true
+    LIMIT 1
+  `)
+  if (!row) return undefined
+  if (row.status !== 'PENDING') return row.status ?? undefined
+
+  let receipts: Array<{ status: string | null }>
+  try {
+    receipts = await query(sql => sql<Array<{ status: string | null }>>`
+      SELECT DISTINCT u.status
+      FROM "MessageUpdate" u
+      WHERE u."messageId" = ${row.id}
+        AND u."instanceId" = ${instanceId}
+    `)
+  }
+  catch (error) {
+    if ((error as { code?: unknown } | undefined)?.code !== '42501') throw error
+    if (Date.now() - receiptDeniedLoggedAt > RECEIPT_DENIED_LOG_QUIET_MS) {
+      receiptDeniedLoggedAt = Date.now()
+      console.warn('[socket] the Evolution database role cannot read "MessageUpdate", so unacknowledged sends are not '
+        + 'counted as dead-socket evidence. Add the "MessageUpdate" grant in docs/whatsapp.md "Reading and searching messages".')
+    }
+    return undefined
+  }
+
+  const seen = new Set(receipts.map(r => r.status))
+  return RECEIPT_RANK.find(status => seen.has(status)) ?? 'PENDING'
 }
 
 export interface MessageSearchOptions {
@@ -719,30 +832,20 @@ export interface MessagePageOptions {
    * under a LID and a phone number (`whatsapp-identity.ts`), already cut to the
    * token's scope. A predicate in the SQL, never a filter over rows read.
    *
-   * Absent means the whole account, which exists for the **session** surface —
-   * the dashboard's message table — and is unreachable from MCP: every tool goes
-   * through `listMessages()` in `chats.ts`, which takes a non-empty tuple of
-   * JIDs as a required positional argument, so no tool can widen to every chat
-   * by omitting a field. The predicate is emitted whenever this is present, so
-   * an empty array matches nothing rather than everything. `instanceId` below
-   * is unconditional either way.
+   * Required: the whole account has its own query, `listAccountMessagesPage`,
+   * which exists for the **session** surface — the dashboard's message table —
+   * and is unreachable from MCP: every tool goes through `listMessages()` in
+   * `chats.ts`, which takes a non-empty tuple of JIDs as a required positional
+   * argument. An empty array matches nothing rather than everything.
+   * `instanceId` below is unconditional either way.
    */
-  jids?: readonly string[]
+  jids: readonly string[]
   limit: number
   /** 1-based, counting back from the newest. */
   page: number
   since?: string
   until?: string
   includeReactions?: boolean
-  /**
-   * Every term must appear in the message body. Already split, not yet escaped —
-   * matched by the same `bodyMatchesAll` over the same `messageBody` expression
-   * `searchMessages` uses, so a listing and a search agree on what the text of a
-   * message is, and both can use the trigram index.
-   */
-  terms?: string[]
-  /** Which end of the range the first page comes from. Defaults to newest first. */
-  order?: 'newest' | 'oldest'
 }
 
 /**
@@ -788,7 +891,6 @@ export async function listMessagesPage(
   instance: AppInstance,
   options: MessagePageOptions,
 ): Promise<{ records: MessageRecord[], hasMore: boolean, total?: number }> {
-  if (options.terms) assertSearchTerms(options.terms)
   // Database first, deliberately. `resolveEvolutionInstanceId` may call the
   // account's Evolution API, and its 409/503 would otherwise mask the clearer
   // "add your database connection string" refusal for a connection that can
@@ -805,17 +907,6 @@ export async function listMessagesPage(
   const take = options.limit + 1
   const skip = (options.page - 1) * options.limit
 
-  // Matched only when there is something to match, so an ordinary read pays
-  // nothing for it. The body expression is shared with `searchMessages`.
-  const terms = options.terms?.length ? options.terms : undefined
-
-  // The tiebreaker travels with the direction. Evolution's own ordering has
-  // none, and rows sharing a timestamp then land on two pages or on neither —
-  // reversing one half of the pair would reintroduce exactly that.
-  const ordering = (sql: Sql) => options.order === 'oldest'
-    ? sql`"messageTimestamp" ASC, key->>'id' ASC`
-    : sql`"messageTimestamp" DESC, key->>'id' DESC`
-
   let rows: MessagePageRow[]
   try {
     rows = await query(sql => sql<MessagePageRow[]>`
@@ -826,8 +917,7 @@ export async function listMessagesPage(
                ${bestNamed(sql)} AS named, m.id AS "rowId"
         FROM "Message" m
         WHERE m."instanceId" = ${instanceId}
-          ${options.jids === undefined ? sql`` : sql`AND m.key->>'remoteJid' = ANY(${[...options.jids]}::text[])`}
-          ${terms === undefined ? sql`` : bodyMatchesAll(sql, terms)}
+          AND m.key->>'remoteJid' = ANY(${[...options.jids]}::text[])
           ${since === undefined ? sql`` : sql`AND m."messageTimestamp" >= ${since}`}
           ${until === undefined ? sql`` : sql`AND m."messageTimestamp" <= ${until}`}
           ${options.includeReactions ? sql`` : sql`AND m.message->'reactionMessage' IS NULL`}
@@ -836,7 +926,9 @@ export async function listMessagesPage(
       SELECT key, "pushName", "messageType", "messageTimestamp", message, mentioned,
              COUNT(*) OVER () AS total
       FROM deduped
-      ORDER BY ${ordering(sql)}
+      -- The tiebreaker matters: Evolution's own ordering has none, and rows
+      -- sharing a timestamp then land on two pages or on neither.
+      ORDER BY "messageTimestamp" DESC, key->>'id' DESC
       LIMIT ${take} OFFSET ${skip}
     `)
   }
@@ -855,6 +947,104 @@ export async function listMessagesPage(
     hasMore: rows.length > options.limit,
     total: Number.isFinite(total) ? total : undefined,
   }
+}
+
+export interface AccountMessagePageOptions {
+  limit: number
+  /** 1-based, counting back from the newest (or forward from the oldest). */
+  page: number
+  /** Every term must appear in the body — `bodyMatchesAll`, as `searchMessages`. */
+  terms?: string[]
+  order?: 'newest' | 'oldest'
+}
+
+/**
+ * One page of **every** chat on the account — the dashboard's message table —
+ * built so its cost is the page, not the account (the chat-scoped
+ * `listMessagesPage` reads a chat's whole window to dedupe and count it, which
+ * across a 2M-message account is every row on every page).
+ *
+ * Two differences from the chat read, both deliberate:
+ *
+ * - **Duplicates collapse in time order.** `DISTINCT ON ("messageTimestamp",
+ *   key->>'id')` matches the leading `ORDER BY`, so `message_instance_ts_idx`
+ *   streams rows newest first (incremental sort on the rest) and the `LIMIT`
+ *   stops it — verified on production: page 6 of a 200k-message account in
+ *   ~0.2 s. It relies on copies of one message sharing `messageTimestamp`,
+ *   which is WhatsApp's own timestamp carried in the payload, not insert time.
+ *   Production holds no duplicates left to measure against (the fork's unique
+ *   index removed them); a stock server whose copies disagreed would show such
+ *   a message twice on this table. Display only — MCP never reads through here,
+ *   and the chat read keeps its full dedupe.
+ * - **No exact total.** `COUNT(*) OVER ()` would read the whole window again.
+ *   Without terms there is no total here at all: the dashboard already shows the
+ *   account's cached message count beside this table, and labels it as
+ *   approximate — unless the page reached the end, which knows its total for
+ *   free. With terms and more pages, `total` is a capped count
+ *   (`MATCH_COUNT_CAP`) under its own short timeout (`MATCH_COUNT_TIMEOUT_MS`),
+ *   run after the page: exact below the cap, `totalAtLeast: true` at it. A count
+ *   that fails or times out leaves `total` absent — "not measured" — and never
+ *   fails the page.
+ *
+ * `hasMore` still comes from fetching one row more than the page, as everywhere.
+ */
+export async function listAccountMessagesPage(
+  instance: AppInstance,
+  options: AccountMessagePageOptions,
+): Promise<{ records: MessageRecord[], hasMore: boolean, total?: number, totalAtLeast?: boolean }> {
+  if (options.terms) assertSearchTerms(options.terms)
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  const take = options.limit + 1
+  const skip = (options.page - 1) * options.limit
+  const terms = options.terms?.length ? options.terms : undefined
+
+  const filters = (sql: Sql) => sql`
+    ${terms === undefined ? sql`` : bodyMatchesAll(sql, terms)}
+    AND m.message->'reactionMessage' IS NULL`
+
+  // The DISTINCT ON keys lead the ORDER BY in the same order; directions may
+  // differ, and the tiebreaker travels with the direction.
+  const ordering = (sql: Sql) => options.order === 'oldest'
+    ? sql`m."messageTimestamp" ASC, m.key->>'id' ASC`
+    : sql`m."messageTimestamp" DESC, m.key->>'id' DESC`
+
+  let rows: MessageRecord[]
+  try {
+    rows = await query(sql => sql<MessageRecord[]>`
+      SELECT DISTINCT ON (m."messageTimestamp", m.key->>'id')
+             m.key, m."pushName", m."messageType", m."messageTimestamp", m.message,
+             m."contextInfo"->'mentionedJid' AS mentioned
+      FROM "Message" m
+      WHERE m."instanceId" = ${instanceId}
+        ${filters(sql)}
+      ORDER BY ${ordering(sql)}, ${bestNamed(sql)} DESC, m.id
+      LIMIT ${take} OFFSET ${skip}
+    `)
+  }
+  catch (error) {
+    throw readFailure('[read]', 'Reading messages is temporarily unavailable', error)
+  }
+  const hasMore = rows.length > options.limit
+  const records = rows.slice(0, options.limit)
+
+  // Distinct keys among the rows read: copies of one message count once.
+  const totals = await pageTotal(
+    { page: options.page, skip, length: records.length, hasMore, searching: terms !== undefined },
+    query,
+    (tx, sql, limit) => tx<Array<{ n: number, rows: number }>>`
+      SELECT count(DISTINCT k)::int AS n, count(*)::int AS rows FROM (
+        SELECT m.key->>'id' AS k
+        FROM "Message" m
+        WHERE m."instanceId" = ${instanceId}
+          ${filters(sql)}
+        LIMIT ${limit}
+      ) matched`,
+    `[read] account message count for connection ${instance.id}`,
+  )
+
+  return { records, hasMore, ...totals }
 }
 
 /**
@@ -1100,9 +1290,11 @@ interface MessageIndexSpec {
   label: string
   fallback: string
   missing: string
-  cache: ReturnType<typeof staleWhileFailing<boolean>>
-  reported: Set<string>
 }
+
+/** Keyed `<message pool>|<spec.shape>`: one entry per database per index. */
+const indexPresence = staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false })
+const indexMissingReported = new Set<string>()
 
 /**
  * Whether this message database has an index of `spec`'s shape: valid, ready,
@@ -1118,9 +1310,9 @@ async function messageIndexPresent(
   query: SharedPool['query'],
   spec: MessageIndexSpec,
 ): Promise<boolean> {
-  const key = messagePoolKey(instance)
+  const key = `${messagePoolKey(instance)}|${spec.shape}`
 
-  return await spec.cache(key, async () => {
+  return await indexPresence(key, async () => {
     let present: boolean
     try {
       const [row] = await query(sql => sql<Array<{ present: boolean }>>`
@@ -1141,11 +1333,11 @@ async function messageIndexPresent(
       return undefined
     }
 
-    if (!present && !spec.reported.has(key)) {
-      spec.reported.add(key)
+    if (!present && !indexMissingReported.has(key)) {
+      indexMissingReported.add(key)
       console.warn(`${spec.label} ${spec.missing}`)
     }
-    if (present) spec.reported.delete(key)
+    if (present) indexMissingReported.delete(key)
     return present
   })
 }
@@ -1159,8 +1351,6 @@ const CHAT_TS_INDEX: MessageIndexSpec = {
   missing: '"Message" has no index on ("instanceId", (key->>\'remoteJid\'), "messageTimestamp"), '
     + 'so every chat listing reads all of an account\'s messages and large accounts time out. '
     + 'Create message_instance_chat_ts_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
-  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
-  reported: new Set<string>(),
 }
 
 const INSTANCE_TS_INDEX: MessageIndexSpec = {
@@ -1172,8 +1362,6 @@ const INSTANCE_TS_INDEX: MessageIndexSpec = {
   missing: '"Message" has no index on ("instanceId", "messageTimestamp"), so the time an account '
     + 'last received a message is not shown. Create message_instance_ts_idx: see docs/whatsapp.md '
     + '"Indexes on Evolution\'s tables".',
-  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
-  reported: new Set<string>(),
 }
 
 /**
@@ -1273,8 +1461,6 @@ const LID_ALT_INDEX: MessageIndexSpec = {
   missing: '"Message" has no partial index WHERE key ? \'remoteJidAlt\', '
     + 'so reading LID links scans every message in an account\'s LID chats and large accounts time out. '
     + 'Create message_lid_alt_idx: see docs/whatsapp.md "Indexes on Evolution\'s tables".',
-  cache: staleWhileFailing<boolean>({ ttlMs: 10 * 60_000, retryTtlMs: 60_000, empty: false }),
-  reported: new Set<string>(),
 }
 
 /**
@@ -1332,6 +1518,12 @@ export interface LidLocalPartOptions {
   since?: number
   /** Only this local part: answers with it, or with an empty set. */
   localPart?: string
+  /**
+   * Run on the background pool (`evo:…:lids`): one connection, the background
+   * count's minute-long statement timeout, never the slots readers share.
+   * For `lid-guard.ts`' set builds, which must not wait on, or hold up, a send.
+   */
+  background?: boolean
 }
 
 /**
@@ -1347,21 +1539,24 @@ export interface LidLocalPartOptions {
  * A device suffix (`79972425314508:12@lid`) is cut along with the domain, so the
  * answer is the digits a caller would see.
  *
- * Cost: one scan of the account's rows (`@@index([instanceId])` is the only
- * index). The lateral yields only short text values, so the `DISTINCT` hashes a
- * few thousand strings rather than sorting jsonb — none of `listChatActivity`'s
- * spill. `since` and `localPart` narrow what is extracted, not what is read; with
- * `localPart` the query stops at the first hit. `mentionedJid` is checked to be
+ * Cost: without `since`, one scan of the account's rows, spread through the
+ * shared table among other accounts' — 0.5 s warm, up to 9 s cold measured on a
+ * 172k-message account (#319), so never on a send's path. The lateral yields
+ * only short text values, so the `DISTINCT` hashes a few thousand strings rather
+ * than sorting jsonb — none of `listChatActivity`'s spill. With `since`,
+ * `message_instance_ts_idx` reads only the rows from then on; without that
+ * index, `since` narrows what is extracted, not what is read, and the cost is a
+ * full scan again — the answer is the same either way. With `localPart` the
+ * query stops at the first hit. `mentionedJid` is checked to be
  * an array before it is expanded, since `jsonb_array_elements_text` throws on
  * anything else and one odd row must not fail the whole read.
  *
  * Raw driver errors: the caller decides what an unreadable answer means.
  */
 export async function lidLocalParts(instance: AppInstance, options: LidLocalPartOptions = {}): Promise<Set<string>> {
-  const { query } = await evolutionDbFor(instance)
   const instanceId = await resolveEvolutionInstanceId(instance)
 
-  const rows = await query(sql => sql<Array<{ lid: string }>>`
+  const statement = (sql: Sql) => sql<Array<{ lid: string }>>`
     SELECT DISTINCT split_part(split_part(ids.jid, '@', 1), ':', 1) AS lid
     FROM "Message" m
     CROSS JOIN LATERAL (
@@ -1380,7 +1575,11 @@ export async function lidLocalParts(instance: AppInstance, options: LidLocalPart
       ${options.localPart !== undefined
         ? sql`AND split_part(split_part(ids.jid, '@', 1), ':', 1) = ${options.localPart} LIMIT 1`
         : sql``}
-  `)
+  `
+
+  const rows = options.background
+    ? await onBackgroundPool(instance, 'lids', statement)
+    : await (await evolutionDbFor(instance)).query(statement)
 
   return new Set(rows.map(row => row.lid).filter(Boolean))
 }

@@ -83,7 +83,14 @@ in clear in the app database and its backups.
 The dashboard shows the sync's state: when it last succeeded, how far each folder
 has got, and why it is failing if it is. **A refused password stops the sync**
 until the credentials are changed or **Sync now** is pressed, since retrying a
-refused login every two minutes is how providers lock accounts. Listings say when
+refused login every two minutes is how providers lock accounts. Providers also
+refuse a good password now and then, so a password that has logged in before is
+retried a few times first — after 15 minutes, 1 hour, 6 hours and 24 hours —
+and the dashboard says when the next try is; only after that does the sync stop.
+A password that never logged in stops at the first refusal. A refusal the server
+marks as temporary (`NO [UNAVAILABLE]` or `NO [INUSE]`, RFC 5530 — its login
+backend is down, not the password wrong) is not counted as a refused password:
+the sync keeps retrying every two minutes. Listings say when
 the sync is behind, so Claude does not present a stale inbox as current.
 
 The mail server's replies are size-capped (1 MiB per line, literals just above

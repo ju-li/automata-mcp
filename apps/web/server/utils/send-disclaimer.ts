@@ -11,3 +11,8 @@
 export function withSendDisclaimer(text: string, disclaimer: string | undefined): string {
   return disclaimer ? `${text}\n\n${disclaimer}` : text
 }
+
+/** A photo caption with the disclaimer: the disclaimer alone when there is no caption, nothing when neither. */
+export function captionWithDisclaimer(caption: string | undefined, disclaimer: string | undefined): string | undefined {
+  return caption?.trim() ? withSendDisclaimer(caption, disclaimer) : disclaimer || undefined
+}

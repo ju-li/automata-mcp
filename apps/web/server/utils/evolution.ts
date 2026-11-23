@@ -250,7 +250,7 @@ export function relayEvolutionSendError(error: unknown, number: string, instance
       // The evidence a dead socket under a live `open` leaves (#205) — the
       // status read turns it into `stalled`. Not on `Timed Out`, which a
       // healthy socket can answer too; see socket-evidence.ts.
-      if (namesDeadSocket(texts)) noteSocketDead({ id: instanceId }, 'send')
+      if (namesDeadSocket(texts)) noteSocketDead({ id: instanceId }, 'socket_error', 'send')
       throw createError({
         statusCode: 503,
         message: 'The WhatsApp connection is down, so the message was not sent. Check get-connection-status: when sessionLost is true the phone is still linked and nothing needs scanning — from state close the account owner can press Reconnect on the connection\'s page in the web app, and in connecting Evolution is already retrying by itself; when stalled is true the Evolution service has to be restarted, and retrying the send will not help until it is.',

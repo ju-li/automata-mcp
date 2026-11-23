@@ -33,6 +33,19 @@ export const scopeSchema = z.object({
 export type ScopeInput = z.infer<typeof scopeSchema>
 
 /**
+ * Expiry presets offered by the UI. `never` leaves `expires_at` NULL.
+ *
+ * Defined here, not in tokens.ts, on purpose: Nitro bundles server utils into
+ * one chunk, and a runtime import from tokens.ts read this before tokens.ts
+ * had initialised it (TDZ crash at boot). Only type imports cross that way.
+ */
+export const EXPIRY_PRESETS = ['30d', '90d', '1y', 'never'] as const
+export type ExpiryPreset = typeof EXPIRY_PRESETS[number]
+
+/** A token's lifetime, as minted, requested or approved. */
+export const expirySchema = z.enum(EXPIRY_PRESETS).default('90d')
+
+/**
  * The line a messaging token's send tools append to every message. Not scope —
  * it changes what a send says, not what the token reaches — so it is its own
  * schema, merged into the create and edit bodies beside `scopeSchema`.

@@ -132,13 +132,22 @@ export interface ToolCallSetting {
   required: boolean
 }
 
+/**
+ * The one Telemetry rule: required on Free, the admin's own switch otherwise.
+ * MCP recording, the Organization page and PostHog's opt-out all read it.
+ */
+export function telemetryOn(
+  org: { tool_calls_required?: boolean, record_tool_calls?: boolean } | undefined,
+): boolean {
+  return Boolean(org?.tool_calls_required || org?.record_tool_calls)
+}
+
 export async function loadToolCallSetting(orgId: string): Promise<ToolCallSetting> {
   const sql = await appDb()
   const [row] = await sql<{ record_tool_calls: boolean, tool_calls_required: boolean }[]>`
     SELECT record_tool_calls, tool_calls_required FROM app.organizations WHERE id = ${orgId}
   `
-  const required = row?.tool_calls_required ?? false
-  return { recording: required || (row?.record_tool_calls ?? false), required }
+  return { recording: telemetryOn(row), required: row?.tool_calls_required ?? false }
 }
 
 /**
@@ -162,7 +171,7 @@ export async function setToolCallRecording(orgId: string, on: boolean): Promise<
       data: { code: 'plan_limit', resource: 'tool_calls' },
     })
   }
-  return { recording: row.tool_calls_required || row.record_tool_calls, required: row.tool_calls_required }
+  return { recording: telemetryOn(row), required: row.tool_calls_required }
 }
 
 /** Delete calls older than `RETENTION`. Idempotent, so safe on every replica. */

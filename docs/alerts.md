@@ -4,8 +4,8 @@ A WhatsApp or Telegram connection that stops working emails everyone who can
 reach it, and emails them again once it recovers. Always on, no setting; it needs SMTP
 on the web service (`NUXT_SMTP_*` and `NUXT_MAIL_FROM`). With `NUXT_PUBLIC_APP_URL`
 set, each mail links to the connection. Without `NUXT_WEBHOOK_URL` no
-per-connection webhook is registered and alerts arrive only as fast as the
-five-minute sweep; set `NUXT_WEBHOOK_SECRET` too, which both the Evolution and
+per-connection Evolution webhook is registered and WhatsApp alerts arrive only
+as fast as the five-minute sweep (Telegram's URL is set separately, below); set `NUXT_WEBHOOK_SECRET` too, which both the Evolution and
 the Telegram webhook send as `x-webhook-secret`.
 
 The same SMTP settings deliver organization invitations: the invitation-link
@@ -18,10 +18,10 @@ new one to copy — the old one no longer works.
 **Who gets it:** every admin of the owning organization, plus the members the
 connection is assigned to — the same set that can reach it in the app, decided by
 the same predicate. One message each rather than one message addressed to all of
-them, so nobody's alert discloses the roster. The two roles get different advice:
-reconnecting and re-pairing are management, so a member is told what happened and
-that an admin can fix it rather than being sent to press a button they do not
-have.
+them, so nobody's alert discloses the roster. Managers and the rest get different
+advice: reconnecting and re-pairing are management, so a member who does not
+manage the connection (did not create it) is told what happened and that an
+admin can fix it rather than being sent to press a button they do not have.
 
 Two things feed it, and they are not redundant.
 
@@ -50,7 +50,8 @@ What it will and will not send:
   in `close` until somebody scans its QR code, and `ownerJid` is the only thing
   that tells that apart from a logout.
 - Nothing is mailed until a connection has been down for **10 minutes**, in any
-  state, `close` included. A drop that recovers inside that window mails nobody,
+  state, `close` included (a connection that is only **stuck** waits two hours,
+  below). A drop that recovers inside that window mails nobody,
   so a short blip no longer produces an outage mail followed seconds later by a
   recovery mail. The sweep runs every five minutes, so a real outage is reported
   10–15 minutes after it starts.
@@ -74,9 +75,13 @@ What it will and will not send:
   "Stuck reconnecting".
 - So does a WhatsApp account whose **socket is dead under a live `open`**:
   every read says connected, but a send or a group lookup failed with
-  `Connection Closed` and Evolution has not reopened the socket since. The
-  connection is marked stuck from the next read, and the 10-minute grace runs
-  from there. The mail says the Evolution service needs restarting, never
+  `Connection Closed`, or two sends in a row to a person were never
+  acknowledged by WhatsApp, and Evolution has not reopened the socket (nor
+  received a message) since. The
+  connection is marked stuck from the next read. Being stuck is inferred, not
+  read off Evolution, so the organization is mailed only after it has lasted
+  **two hours** (any other fault at the same time keeps the 10-minute grace);
+  the operator, below, hears at once. The mail says the Evolution service needs restarting, never
   Reconnect. A webhook delivery cannot start it. See
   [whatsapp.md](whatsapp.md) "Stuck with the socket dead".
 
@@ -153,8 +158,9 @@ http://localhost:3000/_nitro/tasks/alerts:sweep`.
 The same SMTP settings send the account emails: signup verification (with or
 without an invitation), "you already have an account", the code for an address
 change, the notice to the old address once it changes, invitations, password
-resets (asked for by the account's owner or sent by an admin), and the notice
-that a password was changed. Unlike
+resets (asked for by the account's owner or sent by an admin), the notice
+that a password was changed, a member's token request to whoever approves it,
+and the notice that an account was deleted. Unlike
 the alerts, which are plain text, these are HTML with a plain-text alternative,
 written by the templates in `apps/web/server/emails/`.
 
@@ -162,8 +168,8 @@ written by the templates in `apps/web/server/emails/`.
   through `NUXT_PUBLIC_APP_URL`. Without that URL the header shows the name as
   text, and the mails carry the code but no links.
 - The footer says why the mail was sent. On the hosted service it also carries
-  the company's postal address, and the address-change and password-changed
-  notices offer "Contact us"; a self-hosted deployment sends neither, and tells the reader to contact
+  the company's postal address, and the address-change, password-changed and
+  account-deleted notices offer "Contact us"; a self-hosted deployment sends neither, and tells the reader to contact
   an admin of their organization instead.
 - The sender is `NUXT_MAIL_FROM` / `NUXT_MAIL_FROM_NAME` for every mail,
   invitations included.

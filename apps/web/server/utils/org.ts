@@ -88,6 +88,28 @@ export function managesInstance(
 }
 
 /**
+ * `managesInstance` for a signed-in actor whose reach the caller already
+ * established (`requireReadableInstance`, or a listing that only returns
+ * reachable rows).
+ */
+export function actorManages(actor: Actor, instance: Pick<AppInstance, 'created_by'>): boolean {
+  return managesInstance({ role: actor.role, userId: actor.user.id }, instance, true)
+}
+
+/**
+ * Does this member of `orgId` reach the connection? `authorizesInstance` over
+ * a freshly read assignment — skipped for an admin, who holds none.
+ */
+export async function memberReaches(
+  member: { role: OrgRole, userId: string },
+  orgId: string,
+  instance: Pick<AppInstance, 'id' | 'org'>,
+): Promise<boolean> {
+  const assigned = member.role !== 'admin' && await hasAssignment(member.userId, instance.id)
+  return authorizesInstance({ role: member.role, orgId }, instance.org, assigned)
+}
+
+/**
  * The acting user's organization and role.
  *
  * Memoized on `event.context.orgMembership` — deliberately NOT resolved in
@@ -267,16 +289,18 @@ export async function unassignInstance(
 }
 
 /**
- * How many live tokens an unassignment would revoke, without doing it, so the
- * confirmation can say what it costs rather than asking "are you sure".
+ * Live tokens on a connection per holder: what an unassignment would revoke,
+ * without doing it, so the confirmation can say what it costs rather than
+ * asking "are you sure". One grouped read, not one per member.
  */
-export async function countTokensOn(userId: string, instanceId: string): Promise<number> {
+export async function countTokensByHolder(instanceId: string): Promise<Map<string, number>> {
   const sql = await appDb()
-  const [row] = await sql<{ count: number }[]>`
-    SELECT count(*)::int AS count FROM app.mcp_tokens
-    WHERE assigned_to = ${userId} AND instance = ${instanceId} AND NOT revoked
+  const rows = await sql<{ assigned_to: string, count: number }[]>`
+    SELECT assigned_to, count(*)::int AS count FROM app.mcp_tokens
+    WHERE instance = ${instanceId} AND NOT revoked
+    GROUP BY assigned_to
   `
-  return row?.count ?? 0
+  return new Map(rows.map(row => [row.assigned_to, row.count]))
 }
 
 export async function hasAssignment(userId: string, instanceId: string): Promise<boolean> {
@@ -380,7 +404,7 @@ export async function requireManagedInstance(
 ): Promise<{ instance: AppInstance, actor: Actor }> {
   const found = await requireReadableInstance(event, instanceId)
   // Readable already established reach; this is the management half only.
-  if (!managesInstance({ role: found.actor.role, userId: found.actor.user.id }, found.instance, true)) {
+  if (!actorManages(found.actor, found.instance)) {
     throw createError({
       statusCode: 403,
       statusMessage: 'Only an organization admin or the member who created this connection can manage it.',

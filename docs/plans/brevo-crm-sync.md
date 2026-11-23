@@ -160,8 +160,8 @@ There is one exception. The plan chosen at signup (`payload.plan`) and
 `user.signed_up` payload and sent only when that event is in the batch.
 Consent does not need this exception, because it now has its own column.
 
-A user id that no longer matches a row is skipped and logged. The app has no
-account deletion today, so this should not happen.
+A user id that no longer matches a row is skipped and logged. Account deletion
+now exists; its `user.deleted` event deletes the contact (table above).
 
 ### What goes to Brevo
 
@@ -425,7 +425,18 @@ Where the build differs from, or adds to, the design above:
 - **The backfill also replays skips.** Rerunning it upserts every account, so
   it is how a `cloud.crm_skipped` entry is retried once its cause is fixed.
 - **Attributes a user does not have are left out**, rather than sent empty, so
-  an update never clears `SIGNUP_PLAN` or `INVITED`.
+  an update never clears `SIGNUP_PLAN` or `INVITED`. The activity dates are the
+  exception: sent as `""` (`CLEARED`) when absent, so a date never outlives
+  Telemetry being turned off.
+- **No `upsertContacts` function.** The Brevo calls live on the `Crm` class in
+  `crm.ts` (`upsert`, `upsertOrSkip`, `deleteContactOrSkip`); the consumer and the
+  backfill both call `upsertOrSkip`.
+- **The signup box may start ticked.** On the signup page (not the invitation
+  form) it starts ticked for a visitor placed outside the EU/EEA, UK,
+  Switzerland, Canada and Brazil (`marketingOptIn.ts`, `consent-region.ts`); see
+  "Marketing consent" in `docs/billing.md`. The checkbox is its own component,
+  so its wording history is in `apps/web/app/components/MarketingConsent.vue`,
+  not `signup.vue`.
 
 Tested locally against Postgres 16, a stand-in for Brevo's `/v3` API built from
 its API reference, and a local SMTP sink:

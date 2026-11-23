@@ -64,7 +64,7 @@ services:
     networks: [app]
 
   evolution:
-    image: ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.1.0@sha256:09a2b03c065c888a9e3b80212ce372a5dae9128cdfbc6f59450b0c71131daea3
+    image: ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.1@sha256:885b05339de10f7b9880101d1a48e12a77eaadf947235cf8f6fcdd1d843508c6
     profiles: [whatsapp]
     restart: unless-stopped
     depends_on:

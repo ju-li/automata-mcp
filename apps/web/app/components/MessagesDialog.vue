@@ -14,6 +14,10 @@ import { ChevronDownIcon, ChevronUpIcon, SearchIcon } from '@lucide/vue'
  * the raw id — and a name sort that silently ordered one page would be worse
  * than no sort at all.
  *
+ * **The total is cheap, so not always exact** (`messages.get.ts`). Without a
+ * search the server sends none, and the dashboard's cached count (`total`
+ * prop) is shown as "≈". With one, it is capped: "10,000+" at the cap.
+ *
  * The counts along the bottom are not decoration. A page that drops a class of
  * row — a reaction, a deletion, a control record — reads as a complete one
  * unless it says otherwise.
@@ -22,7 +26,10 @@ const props = defineProps<{
   instanceId: string
   kind: InstanceKind
   open: boolean
-  /** The dashboard's message count. Explains a shortfall; never decides whether to fetch. */
+  /**
+   * The dashboard's cached message count. Shown, as approximate, when the table
+   * has no search; never decides whether to fetch.
+   */
   total?: number
 }>()
 
@@ -69,6 +76,7 @@ interface WhatsappResponse {
   messages: WhatsappMessage[]
   hasMore: boolean
   total?: number
+  totalAtLeast?: boolean
   protocolMessagesExcluded: number
   reactionsExcluded: boolean
 }
@@ -77,12 +85,15 @@ interface TelegramResponse {
   messages: TelegramMessageRow[]
   hasMore: boolean
   total?: number
-  deletedExcluded: number
-  serviceMessagesExcluded: number
+  totalAtLeast?: boolean
+  /** Classes left out of the table, named rather than counted. */
+  excludes: Array<'deleted' | 'service'>
 }
 
 /** What this page left out, in the words of whichever backend answered. */
 const excluded = ref<string[]>([])
+/** The last page's count was capped (`MATCH_COUNT_CAP`). */
+const totalAtLeast = ref(false)
 
 const table = useTablePage<MessageRow, SortKey>({
   sort: 'time',
@@ -94,10 +105,8 @@ const table = useTablePage<MessageRow, SortKey>({
 
     if (props.kind === 'telegram') {
       const response = await $fetch<TelegramResponse>(url, { query })
-      excluded.value = [
-        ...(response.deletedExcluded ? [`${count.format(response.deletedExcluded)} deleted`] : []),
-        ...(response.serviceMessagesExcluded ? [`${count.format(response.serviceMessagesExcluded)} service`] : []),
-      ]
+      excluded.value = response.excludes.map(name => name === 'deleted' ? 'deleted messages' : 'service messages')
+      totalAtLeast.value = Boolean(response.totalAtLeast)
       return {
         hasMore: response.hasMore,
         total: response.total,
@@ -114,6 +123,7 @@ const table = useTablePage<MessageRow, SortKey>({
     }
 
     const response = await $fetch<WhatsappResponse>(url, { query })
+    totalAtLeast.value = Boolean(response.totalAtLeast)
     excluded.value = [
       ...(response.reactionsExcluded ? ['reactions'] : []),
       ...(response.protocolMessagesExcluded
@@ -146,7 +156,22 @@ function unreadableLabel(message: WhatsappMessage): string | undefined {
 watch(() => props.open, (open) => {
   if (!open) return
   excluded.value = []
+  totalAtLeast.value = false
   table.reset()
+})
+
+/**
+ * What the pagination line counts against. A server total (searches only) wins;
+ * with no search, the dashboard's cached count, marked approximate. A search
+ * whose count was skipped shows none — the cached count is about every message,
+ * not the matches.
+ */
+const shown = computed<{ total?: number, kind: 'exact' | 'approx' | 'atLeast' }>(() => {
+  if (table.total.value !== undefined) {
+    return { total: table.total.value, kind: totalAtLeast.value ? 'atLeast' : 'exact' }
+  }
+  if (!table.q.value?.trim() && props.total !== undefined) return { total: props.total, kind: 'approx' }
+  return { kind: 'exact' }
 })
 
 const count = new Intl.NumberFormat()
@@ -273,7 +298,8 @@ function formatTimestamp(iso?: string): string {
           :page="table.page.value"
           :page-size="table.pageSize"
           :row-count="table.rows.value.length"
-          :total="table.total.value"
+          :total="shown.total"
+          :total-kind="shown.kind"
           :has-more="table.hasMore.value"
           :loading="table.loading.value"
           noun="messages"
@@ -284,7 +310,7 @@ function formatTimestamp(iso?: string): string {
           That page could not be loaded. Try again.
         </p>
         <p v-else-if="excluded.length" class="text-xs text-muted-foreground">
-          Left out of this count: {{ excluded.join(', ') }}.
+          Not shown here: {{ excluded.join(', ') }}.
         </p>
       </div>
     </DialogContent>

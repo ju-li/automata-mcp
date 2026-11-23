@@ -77,6 +77,14 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS messages_live_by_session
 If that build fails, it leaves an invalid index under the same name. Drop that
 index and build it again before you deploy.
 
+Migration `0007` does the same for the dashboard's Messages table, which lists
+every chat newest first. Build it by hand beforehand on a large table too:
+
+```sql
+CREATE INDEX CONCURRENTLY IF NOT EXISTS messages_session_date
+  ON telegram.messages (session_id, date DESC, message_id DESC) WHERE deleted_at IS NULL;
+```
+
 Migration `0005` sets `telegram.messages` to vacuum more often than Postgres's
 default (`autovacuum_vacuum_insert_scale_factor = 0.01`,
 `autovacuum_vacuum_scale_factor = 0.02`). The per-session counts behind each

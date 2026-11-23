@@ -1,4 +1,4 @@
-import type { PendingQuery, Row, Sql } from 'postgres'
+import type { PendingQuery, Row, Sql, TransactionSql } from 'postgres'
 import { escapeLike } from './sql-text'
 
 /**
@@ -91,3 +91,55 @@ export function textMatchesAll(
 
 /** Three letters or digits in a row: a term `pg_trgm` takes at least one trigram from. */
 export const TRIGRAM_RUN = /[\p{L}\p{N}]{3}/u
+
+/**
+ * Where an account-wide count of search matches stops: the dashboard's message
+ * table shows "10,000+" past it. Exact below it, so a narrow search reads as an
+ * answer; capped above it, so a common word costs at most this many rows read
+ * rather than every matching row in a multi-million-message account — which ran
+ * past the statement timeout on a cold cache in production. Counted as
+ * `count(*)` over a `LIMIT cap + 1` subquery, never over the whole match set.
+ */
+export const MATCH_COUNT_CAP = 10_000
+
+/**
+ * The capped count's own statement timeout. It runs only after its page, and
+ * only when the page did not already reach the end; on a common word it costs
+ * what the page's search did, so a short bound turns a slow count into "not
+ * measured" rather than doubling a slow search on the slot the account shares.
+ * Applied with `SET LOCAL` inside the count's own read-only transaction.
+ */
+export const MATCH_COUNT_TIMEOUT_MS = 3_000
+
+/**
+ * The total an account-wide message page can report cheaply. The last page
+ * knows it for free (offset + rows). Before it, only a search is counted: after
+ * the page, capped at `MATCH_COUNT_CAP`, in its own read-only transaction under
+ * `MATCH_COUNT_TIMEOUT_MS`. `count` answers `n` matches among at most `limit`
+ * rows read (`rows`; omit it when every row is a match). A failed count is
+ * "not measured" — logged, since a handled miss is otherwise invisible — never
+ * a failed page.
+ */
+export async function pageTotal(
+  page: { page: number, skip: number, length: number, hasMore: boolean, searching: boolean },
+  query: <T>(build: (sql: Sql) => Promise<T>) => Promise<T>,
+  count: (tx: TransactionSql, sql: Sql, limit: number) => Promise<Array<{ n: number, rows?: number }>>,
+  what: string,
+): Promise<{ total?: number, totalAtLeast?: true }> {
+  if (!page.hasMore) {
+    return page.length > 0 || page.page === 1 ? { total: page.skip + page.length } : {}
+  }
+  if (!page.searching) return {}
+  try {
+    const [row] = await query(sql => sql.begin('read only', async (tx) => {
+      await tx`SELECT set_config('statement_timeout', ${String(MATCH_COUNT_TIMEOUT_MS)}, true)`
+      return await count(tx, sql, MATCH_COUNT_CAP + 1)
+    }))
+    if (!row) return {}
+    return (row.rows ?? row.n) > MATCH_COUNT_CAP ? { total: MATCH_COUNT_CAP, totalAtLeast: true } : { total: row.n }
+  }
+  catch (error) {
+    console.error(`${what} skipped: ${(error as Error).message}`)
+    return {}
+  }
+}

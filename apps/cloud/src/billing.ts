@@ -1,6 +1,7 @@
+import type postgres from 'postgres'
 import Stripe from 'stripe'
 import type { StripeSettings } from './config.ts'
-import type { Sql } from './db.ts'
+import type { Db, Sql } from './db.ts'
 import { HttpError, billingNotConfigured, describeError } from './http-error.ts'
 import {
   INCLUDED_SEATS,
@@ -236,11 +237,17 @@ export class Billing {
 
     let subs: Stripe.Subscription[]
     try {
-      subs = (await stripe.subscriptions.list({ customer: org.stripe_customer_id, status: 'all', limit: 100 })).data
+      subs = (await stripe.subscriptions.list({
+        customer: org.stripe_customer_id,
+        status: 'all',
+        limit: 100,
+        expand: ['data.discounts'],
+      })).data
     }
     catch (error) {
       stripeFailed('list subscriptions', error)
     }
+    const rows = await this.#subscriptionRows(subs, orgId)
 
     const rank = (sub: Stripe.Subscription) => {
       const index = STATUS_RANK.indexOf(sub.status)
@@ -263,7 +270,52 @@ export class Billing {
         WHERE id = ${orgId}
       `
       await recordPlanChanges(tx, await applyPlanEntitlements(tx, orgId), current?.status ?? null)
+      await upsertSubscriptions(tx, rows)
     })
+  }
+
+  /**
+   * What `cloud.stripe_subscriptions` stores for each subscription just read.
+   * A discount's coupon arrives as an id unless Stripe expanded it; it is then
+   * fetched (once per coupon per call), since the percent or amount off is
+   * what tells a 100%-off comp from a paying customer.
+   *
+   * Best effort: a failed lookup stores the discount without its coupon's
+   * terms, logged, and never fails the sync. These rows are reporting; the
+   * sync around them is what writes the organization's plan, and a restricted
+   * key without `coupon_read` once failed every discounted organization's
+   * sync — a customer paying with a promotion code would have stayed on Free.
+   */
+  async #subscriptionRows(subs: Stripe.Subscription[], orgId: string): Promise<SubscriptionRow[]> {
+    const { stripe, settings } = this.#client()
+    const coupons = new Map<string, Stripe.Coupon | undefined>()
+    const couponOf = async (discount: Stripe.Discount): Promise<Stripe.Coupon | undefined> => {
+      const coupon = discount.source?.coupon
+      if (!coupon) return undefined
+      if (typeof coupon !== 'string') return coupon
+      if (coupons.has(coupon)) return coupons.get(coupon)
+      let found: Stripe.Coupon | undefined
+      try {
+        found = await stripe.coupons.retrieve(coupon)
+      }
+      catch (error) {
+        console.warn(`[billing] could not read coupon ${coupon} for subscription reporting; stored without its terms: ${describeError(error)}`)
+      }
+      coupons.set(coupon, found)
+      return found
+    }
+
+    const rows: SubscriptionRow[] = []
+    for (const sub of subs) {
+      const discounts = sub.discounts.filter((d): d is Stripe.Discount => typeof d !== 'string')
+      if (sub.discounts.length > 1) {
+        console.warn(`[billing] subscription ${sub.id} carries ${sub.discounts.length} discounts; cloud.stripe_subscriptions stores the first`)
+      }
+      const discount = discounts[0]
+      const coupon = discount ? await couponOf(discount) : undefined
+      rows.push(subscriptionRow(sub, orgId, settings, discount, coupon))
+    }
+    return rows
   }
 
   /**
@@ -362,6 +414,155 @@ export class Billing {
       SELECT id FROM app.organizations WHERE stripe_customer_id IS NOT NULL ORDER BY id
     `
     return rows.map(row => row.id)
+  }
+}
+
+/** One entry of `items`: every item on the subscription, as Stripe holds it. */
+interface StoredItem {
+  price_id: string
+  product_id: string
+  unit_amount: number | null
+  quantity: number
+}
+
+/** One row of `cloud.stripe_subscriptions`; see db.ts for the columns. */
+interface SubscriptionRow {
+  id: string
+  customer_id: string
+  organization_id: string
+  status: string
+  created: string
+  start_date: string
+  trial_start: string | null
+  trial_end: string | null
+  cancel_at: string | null
+  canceled_at: string | null
+  ended_at: string | null
+  current_period_end: string | null
+  currency: string
+  interval: string
+  interval_count: number
+  base_price_id: string | null
+  base_unit_amount: number | null
+  seat_price_id: string | null
+  seat_unit_amount: number | null
+  seat_quantity: number
+  period_amount: number
+  items: StoredItem[]
+  coupon_id: string | null
+  percent_off: number | null
+  amount_off: number | null
+  discount_start: string | null
+  discount_end: string | null
+}
+
+/**
+ * Map a subscription to its stored row. The seat item is the one on the
+ * configured seat price; the base is the configured base price, else the first
+ * other item (a subscription made on an older base price still has one).
+ * Stripe requires every item of a subscription to share one interval, so the
+ * base item's is the subscription's. A price without `unit_amount` (tiered or
+ * metered — none sold today) counts as 0.
+ */
+function subscriptionRow(
+  sub: Stripe.Subscription,
+  orgId: string,
+  settings: StripeSettings,
+  discount: Stripe.Discount | undefined,
+  coupon: Stripe.Coupon | undefined,
+): SubscriptionRow {
+  const items = sub.items.data
+  const seat = items.find(item => item.price.id === settings.priceSeat)
+  const base = items.find(item => item.price.id === settings.priceBase) ?? items.find(item => item !== seat)
+  const recurring = (base ?? items[0])?.price.recurring
+  const periodEnd = items.reduce((latest, item) => Math.max(latest, item.current_period_end ?? 0), 0)
+  const customer = typeof sub.customer === 'string' ? sub.customer : sub.customer.id
+
+  return {
+    id: sub.id,
+    customer_id: customer,
+    organization_id: orgId,
+    status: sub.status,
+    created: isoFromUnix(sub.created)!,
+    start_date: isoFromUnix(sub.start_date) ?? isoFromUnix(sub.created)!,
+    trial_start: isoFromUnix(sub.trial_start),
+    trial_end: isoFromUnix(sub.trial_end),
+    cancel_at: isoFromUnix(sub.cancel_at),
+    canceled_at: isoFromUnix(sub.canceled_at),
+    ended_at: isoFromUnix(sub.ended_at),
+    current_period_end: isoFromUnix(periodEnd),
+    currency: sub.currency,
+    interval: recurring?.interval ?? 'month',
+    interval_count: recurring?.interval_count ?? 1,
+    base_price_id: base?.price.id ?? null,
+    base_unit_amount: base?.price.unit_amount ?? null,
+    seat_price_id: seat?.price.id ?? null,
+    seat_unit_amount: seat?.price.unit_amount ?? null,
+    seat_quantity: seat?.quantity ?? 0,
+    period_amount: items.reduce((sum, item) => sum + (item.price.unit_amount ?? 0) * (item.quantity ?? 1), 0),
+    items: items.map(item => ({
+      price_id: item.price.id,
+      product_id: typeof item.price.product === 'string' ? item.price.product : item.price.product.id,
+      unit_amount: item.price.unit_amount,
+      quantity: item.quantity ?? 1,
+    })),
+    coupon_id: coupon?.id ?? null,
+    percent_off: coupon?.percent_off ?? null,
+    amount_off: coupon?.amount_off ?? null,
+    discount_start: discount ? isoFromUnix(discount.start) : null,
+    discount_end: discount ? isoFromUnix(discount.end) : null,
+  }
+}
+
+/**
+ * Upsert what `syncOrg` just read, in its transaction. Keyed on the Stripe
+ * id, so any number of reads converge; rows are never deleted.
+ */
+async function upsertSubscriptions(tx: Db, rows: SubscriptionRow[]): Promise<void> {
+  for (const row of rows) {
+    await tx`
+      INSERT INTO cloud.stripe_subscriptions (
+        id, customer_id, organization_id, status, created, start_date, trial_start, trial_end,
+        cancel_at, canceled_at, ended_at, current_period_end, currency, "interval", interval_count,
+        base_price_id, base_unit_amount, seat_price_id, seat_unit_amount, seat_quantity,
+        period_amount, items, coupon_id, percent_off, amount_off, discount_start, discount_end
+      ) VALUES (
+        ${row.id}, ${row.customer_id}, ${row.organization_id}, ${row.status}, ${row.created},
+        ${row.start_date}, ${row.trial_start}, ${row.trial_end}, ${row.cancel_at}, ${row.canceled_at},
+        ${row.ended_at}, ${row.current_period_end}, ${row.currency}, ${row.interval}, ${row.interval_count},
+        ${row.base_price_id}, ${row.base_unit_amount}, ${row.seat_price_id}, ${row.seat_unit_amount},
+        ${row.seat_quantity}, ${row.period_amount}, ${tx.json(row.items as unknown as postgres.JSONValue)}, ${row.coupon_id},
+        ${row.percent_off}, ${row.amount_off}, ${row.discount_start}, ${row.discount_end}
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        customer_id        = EXCLUDED.customer_id,
+        organization_id    = EXCLUDED.organization_id,
+        status             = EXCLUDED.status,
+        created            = EXCLUDED.created,
+        start_date         = EXCLUDED.start_date,
+        trial_start        = EXCLUDED.trial_start,
+        trial_end          = EXCLUDED.trial_end,
+        cancel_at          = EXCLUDED.cancel_at,
+        canceled_at        = EXCLUDED.canceled_at,
+        ended_at           = EXCLUDED.ended_at,
+        current_period_end = EXCLUDED.current_period_end,
+        currency           = EXCLUDED.currency,
+        "interval"         = EXCLUDED."interval",
+        interval_count     = EXCLUDED.interval_count,
+        base_price_id      = EXCLUDED.base_price_id,
+        base_unit_amount   = EXCLUDED.base_unit_amount,
+        seat_price_id      = EXCLUDED.seat_price_id,
+        seat_unit_amount   = EXCLUDED.seat_unit_amount,
+        seat_quantity      = EXCLUDED.seat_quantity,
+        period_amount      = EXCLUDED.period_amount,
+        items              = EXCLUDED.items,
+        coupon_id          = EXCLUDED.coupon_id,
+        percent_off        = EXCLUDED.percent_off,
+        amount_off         = EXCLUDED.amount_off,
+        discount_start     = EXCLUDED.discount_start,
+        discount_end       = EXCLUDED.discount_end,
+        updated_at         = now()
+    `
   }
 }
 

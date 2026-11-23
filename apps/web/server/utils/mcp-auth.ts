@@ -263,7 +263,7 @@ export async function resolveMcpAuth(event: H3Event): Promise<McpAuth | undefine
     scope: scopeFromRecord(record),
     sendDisclaimer: record.send_disclaimer || undefined,
     limits: { max_connections: record.max_connections, max_tokens: record.max_tokens },
-    recordToolCalls: Boolean(record.tool_calls_required || record.record_tool_calls),
+    recordToolCalls: telemetryOn(record),
   }
 
   let auth: McpAuth

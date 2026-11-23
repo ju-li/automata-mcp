@@ -134,21 +134,21 @@ export function describeScope(scope: TokenScope, kind: InstanceKind): string {
 export const DEFAULT_SEND_DISCLAIMER = 'Sent using Automata'
 
 /**
- * The tool that sends messages on this kind of connection, if it has one.
+ * The tools that send messages on this kind of connection, if it has any.
  *
  * Named rather than inferred from "any write tool": the disclaimer is applied
  * inside these handlers specifically, so a future write tool is not covered by
  * it until it applies the disclaimer itself and is named here.
  */
-function sendToolOf(kind: InstanceKind): string | undefined {
+function sendToolsOf(kind: InstanceKind): readonly string[] {
   switch (kind) {
     case 'whatsapp':
-      return 'send-text-message'
+      return ['send-text-message', 'send-whatsapp-image']
     case 'telegram':
-      return 'send-telegram-message'
+      return ['send-telegram-message', 'send-telegram-image']
     case 'postgres':
     case 'imap':
-      return undefined
+      return []
     default:
       return assertNever(kind, 'connection kind')
   }
@@ -156,9 +156,9 @@ function sendToolOf(kind: InstanceKind): string | undefined {
 
 /** Whether a token with this scope may send messages from the account. */
 export function allowsSending(scope: TokenScope, kind: InstanceKind): boolean {
-  const tool = sendToolOf(kind)
-  if (!tool) return false
-  return scope.all_tools || scope.tool_names.includes(tool)
+  const tools = sendToolsOf(kind)
+  if (tools.length === 0) return false
+  return scope.all_tools || tools.some(tool => scope.tool_names.includes(tool))
 }
 
 /**

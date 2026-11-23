@@ -342,7 +342,7 @@ async function refreshGroups(instance: AppInstance, evolution: EvolutionClient):
     // account is not in it, or that it is counting. Evidence of a dead socket
     // is out of date; a dead one is evidence (#205, socket-evidence.ts).
     if (found || failure?.kind === 'gone' || failure?.kind === 'throttled') noteSocketAlive(instance)
-    else if (failure?.deadSocket) noteSocketDead(instance, 'group lookup')
+    else if (failure?.deadSocket) noteSocketDead(instance, 'socket_error', 'group lookup')
 
     if (found) {
       await storeLookup(instance.id, jid, found)

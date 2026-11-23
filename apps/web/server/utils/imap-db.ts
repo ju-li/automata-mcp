@@ -32,6 +32,8 @@ export interface MailSyncState {
   lastErrorCode?: string
   lastErrorAt?: string
   authFailed: boolean
+  /** While `authFailed`: when the sync tries the password again by itself. Absent = it won't. */
+  authRetryAt?: string
 }
 
 export interface MailFolder {
@@ -136,8 +138,9 @@ export async function mailSyncState(instance: Pick<AppInstance, 'id'>): Promise<
     last_error_code?: string
     last_error_at?: string
     auth_failed: boolean
+    auth_retry_at?: string
   }>>`
-    SELECT identity, last_attempt_at, last_success_at, last_error_code, last_error_at, auth_failed
+    SELECT identity, last_attempt_at, last_success_at, last_error_code, last_error_at, auth_failed, auth_retry_at
     FROM app.mail_sync_state WHERE instance_id = ${instance.id}`
   if (!row) return undefined
   return {
@@ -147,6 +150,7 @@ export async function mailSyncState(instance: Pick<AppInstance, 'id'>): Promise<
     lastErrorCode: row.last_error_code,
     lastErrorAt: row.last_error_at,
     authFailed: row.auth_failed,
+    ...(row.auth_failed && row.auth_retry_at && { authRetryAt: row.auth_retry_at }),
   }
 }
 

@@ -9,7 +9,7 @@ connections alone is **Postgres** and **web**.
 |---|---|---|---|
 | **Postgres** | Railway template | — | managed |
 | **Redis** *(WhatsApp only)* | Railway template | — | managed |
-| **evolution** *(WhatsApp only)* | image `ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.1.0` (pin the digest: see below) | 8080 | `/evolution/instances` |
+| **evolution** *(WhatsApp only)* | image `ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.1` (pin the digest: see below) | 8080 | `/evolution/instances` |
 | **telegram-bridge** *(Telegram only)* | image `ghcr.io/ju-li/automata-mcp-telegram-bridge:1`, or this repo, root directory `/`, Dockerfile path `/apps/telegram-bridge/Dockerfile` | 8095 | — |
 | **web** | image `ghcr.io/ju-li/automata-mcp-web:1`, or this repo, root directory `/`, Dockerfile path `apps/web/Dockerfile` | Railway's `PORT` (8080 unless you set it) | — |
 
@@ -67,6 +67,9 @@ propagates instead of drifting out of sync.
 SERVER_PORT=8080
 SERVER_URL=https://<evolution-domain>
 AUTHENTICATION_API_KEY=<openssl rand -hex 16>
+AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=true
+DEL_INSTANCE=false
+QRCODE_LIMIT=30
 DATABASE_PROVIDER=postgresql
 DATABASE_CONNECTION_URI=${{Postgres.DATABASE_URL}}?schema=public
 DATABASE_CONNECTION_CLIENT_NAME=evolution_exchange
@@ -79,6 +82,7 @@ DATABASE_SAVE_DATA_HISTORIC=true
 CACHE_REDIS_ENABLED=true
 CACHE_REDIS_URI=${{Redis.REDIS_URL}}/6
 CACHE_REDIS_PREFIX_KEY=evolution
+CACHE_REDIS_SAVE_INSTANCES=false
 CACHE_LOCAL_ENABLED=false
 WEBHOOK_GLOBAL_ENABLED=false
 TELEMETRY_ENABLED=false
@@ -88,7 +92,7 @@ TELEMETRY_ENABLED=false
 ([repo](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged)),
 not stock `evoapicloud/evolution-api`. Pin it by digest. The one this release is
 tested with is
-`ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.1.0@sha256:09a2b03c065c888a9e3b80212ce372a5dae9128cdfbc6f59450b0c71131daea3`,
+`ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.1@sha256:885b05339de10f7b9880101d1a48e12a77eaadf947235cf8f6fcdd1d843508c6`,
 the same reference as `docker-compose.yml`. The fork **refuses to start** when
 `AUTHENTICATION_API_KEY` is empty or one of the example values published in
 Evolution's docs (`429683C4C977415CAAFCCE10F7D57E11`, `BQYHJGJHJ`), and warns
@@ -244,8 +248,8 @@ To undo one, run `ALTER SYSTEM RESET <name>;` and restart.
 - **`effective_cache_size` 6 GB** is a hint to the planner and allocates
   nothing.
 - **`max_connections` 150, not 100.** Count the connection budget before you
-  lower it or add a pool. Each process's pool ceiling: web 18 (app 10, Evolution
-  reads 3 + 2, Telegram reads 3), Telegram bridge 11 (10 + 1 for its lock
+  lower it or add a pool. Each process's pool ceiling: web 19 (app 10, Evolution
+  reads 3 + 2 + 1 for background counts, Telegram reads 3), Telegram bridge 11 (10 + 1 for its lock
   connection), cloud 5. Evolution sets no `connection_limit`, so Prisma uses its
   default of `2 × vCPU + 1`. Add each Postgres connection pointed at this
   database (up to 3 each), double the ceiling of whichever service is mid-deploy,

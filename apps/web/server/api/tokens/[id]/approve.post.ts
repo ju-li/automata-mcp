@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 const body = scopeSchema.and(disclaimerSchema).and(z.object({
   label: z.string().trim().min(1, 'Give the token a name').max(100).optional(),
-  expiry: z.enum(['30d', '90d', '1y', 'never']).default('90d'),
+  expiry: expirySchema,
 }))
 
 /**

@@ -1,3 +1,4 @@
+import type { InstanceKind } from '#shared/connection'
 import type { AppInstance, AppUser, Db, OrgRole } from './app-db'
 import type { Actor } from './org'
 import { accountDeletedNoticeEmail } from '../emails/account'
@@ -50,7 +51,7 @@ export interface DeletionPreview {
   /** Absent for an account with no organization. */
   org?: { name: string, role: OrgRole }
   /** The connections deleted with the organization (`account-and-org` only). */
-  connections: { id: string, label: string, kind: string }[]
+  connections: { id: string, label: string, kind: InstanceKind }[]
   /** Live connector tokens issued to this account; they stop working. */
   liveTokens: number
   /** Why `blocked`, in words for the person reading it. */

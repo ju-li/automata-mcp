@@ -44,9 +44,16 @@ const known = computed(() => Boolean(props.token))
 const url = computed(() => connectorUrl(props.token))
 const tokenValue = computed(() => props.token || MASKED_TOKEN)
 const authHeader = computed(() => `Authorization: Bearer ${tokenValue.value}`)
+/**
+ * What Claude.ai's Request headers field takes: it sends the value exactly as
+ * typed, adding no scheme, so the value carries `Bearer ` itself.
+ */
+const headerValue = computed(() => `Bearer ${tokenValue.value}`)
 // The CLI needs a name for the server. The kind itself, so no connector is added
-// to Claude Code under another kind's name.
-const cliCommand = computed(() => `claude mcp add --transport http ${props.kind} ${url.value}`)
+// to Claude Code under another kind's name. Header, not the token URL: the URL
+// ends up in client config, history and logs.
+const cliCommand = computed(() =>
+  `claude mcp add --transport http ${props.kind} ${bearerUrl.value} --header "Authorization: Bearer ${tokenValue.value}"`)
 
 /**
  * What the connector is called in the assistant, and the read-only first prompt
@@ -133,10 +140,32 @@ const localOrigin = computed(() => {
               <p class="mb-2">
                 Name it <strong class="font-semibold">{{ kindCopy.name }}</strong> and paste this URL:
               </p>
-              <CopyableSnippet :value="url" :copyable="known" aria-label="Copy connector URL" />
+              <CopyableSnippet :value="bearerUrl" aria-label="Copy connector URL" />
+            </li>
+            <li>
+              <p class="mb-2">
+                Set authentication to <strong class="font-semibold">No sign-in</strong>. Under
+                <strong class="font-semibold">Request headers</strong>, add one header:
+              </p>
+              <Label>Name</Label>
+              <CopyableSnippet value="Authorization" aria-label="Copy header name" class="mb-2" />
+              <Label>Value</Label>
+              <CopyableSnippet :value="headerValue" :copyable="known" aria-label="Copy header value" />
             </li>
             <li>Click <strong class="font-semibold">Add</strong>, then turn the connector on from the tools menu in a chat.</li>
           </ol>
+          <p class="text-xs text-muted-foreground">
+            In a Team or Enterprise organization, an Owner adds the connector and every member
+            uses this one token, so they all act as its holder.
+          </p>
+          <div class="min-w-0 space-y-2 rounded-md border bg-muted/40 p-3">
+            <p class="text-sm">
+              <strong class="font-semibold">No Request headers section?</strong> Claude is still
+              rolling it out. Paste this URL in step 3 instead and skip step 4 — the token
+              travels in the URL:
+            </p>
+            <CopyableSnippet :value="url" :copyable="known" aria-label="Copy connector URL with token" />
+          </div>
         </div>
         <Separator />
         <div class="min-w-0 space-y-2">
@@ -226,16 +255,11 @@ const localOrigin = computed(() => {
       <TabsContent value="other" class="min-w-0 space-y-4">
         <div class="min-w-0 space-y-2">
           <h3 class="text-sm font-semibold">
-            Clients that take only a URL
-          </h3>
-          <CopyableSnippet :value="url" :copyable="known" aria-label="Copy connector URL" />
-        </div>
-        <div class="min-w-0 space-y-2">
-          <h3 class="text-sm font-semibold">
-            Clients that can set request headers
+            Clients that can set request headers (recommended)
           </h3>
           <p class="text-sm">
-            The token travels in the header instead of the URL, so point them at the plain endpoint.
+            The token travels in the header, so it stays out of the URL, the client's settings
+            and its logs. Point the client at the plain endpoint.
           </p>
           <Label>Endpoint</Label>
           <CopyableSnippet :value="bearerUrl" aria-label="Copy endpoint URL" />
@@ -243,6 +267,15 @@ const localOrigin = computed(() => {
           <CopyableSnippet :value="authHeader" :copyable="known" aria-label="Copy authorization header" />
           <Label>Token on its own</Label>
           <CopyableSnippet :value="tokenValue" :copyable="known" aria-label="Copy token" />
+        </div>
+        <div class="min-w-0 space-y-2">
+          <h3 class="text-sm font-semibold">
+            Clients that take only a URL
+          </h3>
+          <p class="text-sm">
+            The token is part of this URL, so treat the whole URL as a password.
+          </p>
+          <CopyableSnippet :value="url" :copyable="known" aria-label="Copy connector URL" />
         </div>
         <div class="min-w-0 space-y-2">
           <h3 class="text-sm font-semibold">

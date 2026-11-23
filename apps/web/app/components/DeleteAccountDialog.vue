@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { toast } from 'vue-sonner'
+import type { InstanceKind } from '#shared/connection'
 
 /**
  * Delete your own account, from the profile page.
@@ -19,12 +20,12 @@ import { toast } from 'vue-sonner'
 interface DeletionPreview {
   mode: 'account' | 'account-and-org' | 'blocked'
   org?: { name: string, role: 'admin' | 'member' }
-  connections: { id: string, label: string, kind: string }[]
+  connections: { id: string, label: string, kind: InstanceKind }[]
   liveTokens: number
   blockedReason?: string
 }
 
-const KIND_NAMES: Record<string, string> = {
+const KIND_NAMES: Record<InstanceKind, string> = {
   whatsapp: 'WhatsApp',
   telegram: 'Telegram',
   postgres: 'PostgreSQL',
@@ -142,7 +143,7 @@ async function destroy() {
               <ul v-if="preview.connections.length" class="list-disc space-y-0.5 pl-5">
                 <li v-for="connection in preview.connections" :key="connection.id">
                   {{ connection.label }}
-                  <span class="text-muted-foreground">({{ KIND_NAMES[connection.kind] ?? connection.kind }})</span>
+                  <span class="text-muted-foreground">({{ KIND_NAMES[connection.kind] }})</span>
                 </li>
               </ul>
               <p v-if="preview.connections.length">

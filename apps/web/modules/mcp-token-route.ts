@@ -5,8 +5,11 @@ import { addServerHandler, defineNuxtModule, resolvePath } from '@nuxt/kit'
 /**
  * Registers `/mcp/:token` alongside the module's own `/mcp`.
  *
- * Claude and several other MCP clients cannot attach an `Authorization` header
- * to a custom connector, so the token has to be able to ride in the URL.
+ * Many MCP clients cannot attach an `Authorization` header to a connector they
+ * add by URL — ChatGPT, and Claude.ai unless the organization has its Request
+ * headers beta — so the token has to be able to ride in the URL. This is the
+ * legacy fallback: bearer is preferred wherever the client can send it, since a
+ * URL ends up in client config, history and logs.
  *
  * Why a second route rather than rewriting the URL in middleware: h3 1.15.x
  * captures the request path once at app entry and re-assigns `event._path`

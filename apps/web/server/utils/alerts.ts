@@ -202,6 +202,29 @@ function alertableKind(instance: AppInstance): 'whatsapp' | 'telegram' | undefin
 const GRACE_MS = 10 * 60 * 1000
 
 /**
+ * The grace for a connection whose only fault is `stalled`, before its
+ * organization is mailed.
+ *
+ * Longer, because `stalled` is an inference — sends WhatsApp did not
+ * acknowledge, or a `Connection Closed` from one call — while every other
+ * state is read straight off Evolution. On Nov 19–20 it mailed four
+ * organizations about healthy accounts (#289, #290). The operator is still
+ * mailed at once (`reportLoopToOperator`), so a real stall gets looked at
+ * within minutes; the organization hears only once it has held for two hours
+ * — two of the five false mails came from stalls of 59 and 62 minutes, so an
+ * hour would not have been enough. Any other fault alongside it
+ * (`close`, a lost session, `flapping`, `unknown`) is fact, and keeps the
+ * ordinary grace.
+ */
+const STALLED_GRACE_MS = 2 * 60 * 60 * 1000
+
+/** How long `health` must last before the organization is told. */
+export function graceFor(health: Pick<ConnectionHealth, 'state' | 'sessionLost' | 'flapping' | 'stalled'>): number {
+  const onlyStalled = health.stalled && health.state === 'open' && !health.sessionLost && !health.flapping
+  return onlyStalled ? STALLED_GRACE_MS : GRACE_MS
+}
+
+/**
  * Decide, for one connection, whether anything needs to be said.
  *
  * Idempotent, and safe to call as often as you like — the two date fields on the
@@ -292,7 +315,7 @@ async function evaluate(instance: AppInstance): Promise<void> {
   if (instance.alerted_at) return
 
   const downSince = instance.down_since ? Date.parse(instance.down_since) : Date.now()
-  if (Date.now() - downSince < GRACE_MS) return
+  if (Date.now() - downSince < graceFor(health)) return
 
   const sent = await notifyWatchers(instance, canManage => outageMail(instance, health, canManage))
   if (sent) await updateRow('instances', instance.id, { alerted_at: new Date() })
@@ -511,32 +534,78 @@ function operatorLoopMail(instance: AppInstance): AlertMail {
 }
 
 /**
- * A dead socket under a live `open` (#205): every call that needs the socket
- * fails with `Connection Closed` while `connectionState` and the column both say
- * `open`. Most likely the account's `eventProcessingQueue` is stuck — seen after
- * a Postgres restart failed Evolution's writes mid-event.
+ * A dead socket under a live `open` (#205): `connectionState` and the column
+ * both say `open` while calls that need the socket fail. Most likely the
+ * account's `eventProcessingQueue` is stuck — seen after a Postgres restart
+ * failed Evolution's writes mid-event.
+ *
+ * Worded by what was seen (`socket_dead_by`, #305). `Connection Closed` from
+ * Baileys is direct proof; sends left `PENDING` are an inference that a server
+ * dropping or delaying receipts also produces — Evolution before fork 3.3.0,
+ * and stock 2.3.7 — so that mail says how to tell the two apart before anyone
+ * restarts every account on the server.
  */
 function operatorStalledMail(instance: AppInstance): AlertMail {
+  const kind = instance.socket_dead_by
   return {
-    subject: `WhatsApp connection ${instance.id} is stuck: socket dead, state open`,
+    subject: kind === 'unacked_sends'
+      ? `WhatsApp connection ${instance.id} may be stuck: sends not acknowledged, state open`
+      : `WhatsApp connection ${instance.id} is stuck: socket dead, state open`,
     text: [
       `WhatsApp connection ${instance.id} `
       + `(Evolution instance "${instance.name}", organization ${instance.org || 'unknown'}) `
-      + 'reads open — live and stored — but its sends or group lookups fail with "Connection Closed", '
-      + 'and Evolution has not reopened its socket since. Its session in Evolution is stuck: '
-      + 'nothing is sent or received.',
+      + `reads open — live and stored — but ${operatorStalledEvidence(kind)}, `
+      + 'and Evolution has not reopened its socket since.',
       '',
-      `Last failed socket call: ${instance.socket_dead_seen_at ?? 'just now'}`,
+      `${kind === 'unacked_sends' ? 'Latest unacknowledged send' : 'Last failed socket call'}: `
+      + `${instance.socket_dead_seen_at ?? 'just now'}`,
       '',
-      'Fix: restart the Evolution service. No QR scan is needed; every account on it drops briefly and reconnects. '
-      + 'Reconnect in the app cannot help (the state reads open), and /instance/restart must not be used. '
-      + 'If Postgres was restarted recently, that is the likely cause.',
+      ...operatorStalledFix(kind),
       ...(hostedMode()
         ? ['', 'The people using this connection are told it is on our side and that nothing is needed from them.']
         : []),
       '',
       'See docs/whatsapp.md, "Stuck with the socket dead". You will get one more email when it is working again.',
     ].join('\n'),
+  }
+}
+
+function operatorStalledEvidence(kind: AppInstance['socket_dead_by']): string {
+  switch (kind) {
+    case 'socket_error':
+      return 'a send or group lookup failed with "Connection Closed" (Baileys\' dead-socket error)'
+    case 'unacked_sends':
+      return 'two sends in a row to a person were still PENDING two minutes on, with no receipt recorded in '
+        + '"MessageUpdate" either — nothing failed outright'
+    case undefined:
+      return 'its sends or group lookups failed with "Connection Closed", or its sends went unacknowledged'
+    default:
+      return assertNever(kind)
+  }
+}
+
+function operatorStalledFix(kind: AppInstance['socket_dead_by']): string[] {
+  const restart = 'restart the Evolution service. No QR scan is needed; every account on it drops briefly and reconnects. '
+    + 'Reconnect in the app cannot help (the state reads open), and /instance/restart must not be used.'
+  switch (kind) {
+    case 'socket_error':
+    case undefined:
+      return [
+        'Its session in Evolution is stuck: nothing is sent or received.',
+        '',
+        `Fix: ${restart} If Postgres was restarted recently, that is the likely cause.`,
+      ]
+    case 'unacked_sends':
+      return [
+        'This is an inference, not a failure: receipts that arrive late or are never stored look the same. '
+        + 'Before restarting, check that the Evolution server is the fork at 3.3.0 or later (older ones and stock 2.3.7 '
+        + 'drop early receipts and never update a sent row\'s status), and look at those sends\' rows in "Message" and '
+        + '"MessageUpdate": a receipt written since means the account works and this clears on its next acknowledged send.',
+        '',
+        `If nothing was acknowledged, ${restart}`,
+      ]
+    default:
+      return assertNever(kind)
   }
 }
 
@@ -683,7 +752,7 @@ function evolutionStuckCause(instance: AppInstance, canManage: boolean, diagnosi
 
 /**
  * A dropped session in `connecting` is Evolution retrying by itself — the fork
- * (ju-li/evolution-api-v2) every few minutes until it lands, stock 2.3.7 on a
+ * (evolution-api-reforged) every few minutes until it lands, stock 2.3.7 on a
  * socket that hung while connecting. Reconnect answers 409 there
  * (`reconnectInstance`) and the dashboard offers no button, so the mail must
  * not send anyone to press one: it says Evolution is on it, and who restarts
@@ -808,7 +877,7 @@ async function recipientsFor(instance: AppInstance): Promise<AlertRecipient[]> {
     .map(member => ({
       email: member.email,
       // Already filtered to those who reach it, so only the management half is asked.
-      canManage: managesInstance({ role: member.role, userId: member.userId }, instance, true),
+      canManage: managesInstance(member, instance, true),
     }))
 }
 

@@ -21,6 +21,10 @@ import type { CountsMode, SessionManager } from './sessions.ts'
 
 const MAX_BODY_BYTES = 16 * 1024
 
+/** The app's image cap (5 MiB, `MAX_SEND_IMAGE_BYTES`) as base64, plus the caption and JSON around it. */
+const MAX_PHOTO_IMAGE_BYTES = 5 * 1024 * 1024
+const MAX_PHOTO_BODY_BYTES = Math.ceil(MAX_PHOTO_IMAGE_BYTES / 3) * 4 + 64 * 1024
+
 type Access = 'public' | 'admin' | 'session'
 
 interface Reply {
@@ -39,6 +43,8 @@ interface Route {
    * unauthenticated caller learns nothing about the configuration from it.
    */
   needsTelegram?: boolean
+  /** Body cap for this route, when it needs more than `MAX_BODY_BYTES`. Read only after authentication. */
+  maxBody?: number
   handle: (request: { id: string, body: unknown, query: URLSearchParams }) => Promise<Reply>
 }
 
@@ -70,6 +76,15 @@ const sendBody = z.object({
   chatId: z.string().regex(/^-?\d{1,20}$/, 'a chat id as a string of digits'),
   // Telegram's own limit for one text message.
   text: z.string().min(1).max(4096),
+})
+
+const sendPhotoBody = z.object({
+  chatId: z.string().regex(/^-?\d{1,20}$/, 'a chat id as a string of digits'),
+  // Telegram's caption limit for an ordinary account; empty = no caption.
+  caption: z.string().max(1024).default(''),
+  // Only what the app sends after checking the bytes: both go as a photo.
+  mimeType: z.enum(['image/jpeg', 'image/png']),
+  image: z.string().min(1).max(Math.ceil(MAX_PHOTO_IMAGE_BYTES / 3) * 4).regex(/^[A-Za-z0-9+/]*={0,2}$/, 'base64'),
 })
 
 export function createBridgeServer(manager: SessionManager, config: BridgeConfig): Server {
@@ -160,6 +175,16 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
         return { status: 200, body: await manager.send(id, chatId, text) }
       },
     },
+    {
+      label: 'POST /sessions/:id/send-photo', method: 'POST', pattern: /^\/sessions\/([^/]+)\/send-photo$/, access: 'session', needsTelegram: true,
+      maxBody: MAX_PHOTO_BODY_BYTES,
+      handle: async ({ id, body }) => {
+        const { chatId, caption, mimeType, image } = parse(sendPhotoBody, body)
+        const bytes = Buffer.from(image, 'base64')
+        if (bytes.length === 0 || bytes.length > MAX_PHOTO_IMAGE_BYTES) throw new HttpError(400, 'image: empty or too large')
+        return { status: 200, body: await manager.sendPhoto(id, chatId, bytes, mimeType, caption) }
+      },
+    },
   ]
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -200,7 +225,7 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
         throw telegramNotConfigured()
       }
 
-      const body = req.method === 'POST' || req.method === 'PUT' ? await readJson(req) : undefined
+      const body = req.method === 'POST' || req.method === 'PUT' ? await readJson(req, route.maxBody ?? MAX_BODY_BYTES) : undefined
       send(res, await route.handle({ id, body, query: url.searchParams }))
     }
     catch (error) {
@@ -239,12 +264,12 @@ function clampInt(raw: string | null, fallback: number, min: number, max: number
   return Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
+async function readJson(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   const chunks: Buffer[] = []
   let size = 0
   for await (const chunk of req) {
     size += (chunk as Buffer).length
-    if (size > MAX_BODY_BYTES) throw new HttpError(413, 'Request body too large.')
+    if (size > maxBytes) throw new HttpError(413, 'Request body too large.')
     chunks.push(chunk as Buffer)
   }
   if (size === 0) return {}

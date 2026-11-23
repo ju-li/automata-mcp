@@ -9,6 +9,10 @@ import { ChevronLeftIcon, ChevronRightIcon } from '@lucide/vue'
  * page count is the one place that distinction shows up. With no total the
  * control falls back to `hasMore` alone rather than inventing a page count.
  *
+ * `totalKind` says how far to trust `total`: `approx` (a cached count, "≈")
+ * and `atLeast` (a capped count, "10,000+") show no page count, since a page
+ * count derived from either would be invented precision.
+ *
  * Hand-written rather than shadcn's `pagination`: this shows a range and two
  * buttons, not a numbered strip, and it is built from `Button`, which carries
  * the focus and disabled styling anyway.
@@ -18,6 +22,8 @@ const props = defineProps<{
   pageSize: number
   rowCount: number
   total?: number
+  /** Defaults to `exact`. */
+  totalKind?: 'exact' | 'approx' | 'atLeast'
   hasMore: boolean
   loading?: boolean
   /** What the rows are, for the summary line: "chats", "messages", "contacts". */
@@ -32,8 +38,18 @@ const first = computed(() => (props.page - 1) * props.pageSize + 1)
 const last = computed(() => (props.page - 1) * props.pageSize + props.rowCount)
 
 const pages = computed(() =>
-  props.total === undefined ? undefined : Math.max(1, Math.ceil(props.total / props.pageSize)),
+  props.total === undefined || (props.totalKind ?? 'exact') !== 'exact'
+    ? undefined
+    : Math.max(1, Math.ceil(props.total / props.pageSize)),
 )
+
+const totalText = computed(() => {
+  if (props.total === undefined) return undefined
+  const n = format.format(props.total)
+  if (props.totalKind === 'approx') return `≈ ${n}`
+  if (props.totalKind === 'atLeast') return `${n}+`
+  return n
+})
 </script>
 
 <template>
@@ -47,7 +63,7 @@ const pages = computed(() =>
       </template>
       <template v-else-if="total !== undefined">
         Showing {{ format.format(first) }}–{{ format.format(last) }} of
-        {{ format.format(total) }} {{ noun }}.
+        {{ totalText }} {{ noun }}.
       </template>
       <template v-else>
         Showing {{ format.format(first) }}–{{ format.format(last) }}.

@@ -193,8 +193,7 @@ watch(kind, async (picked) => {
     telegramReadiness.value = deploymentBridge
   }
   catch {
-    // Unknown is not a refusal: the create call still answers for itself.
-    telegramReadiness.value = undefined
+    // Unknown (left undefined) is not a refusal: the create call still answers for itself.
   }
 })
 
@@ -218,7 +217,8 @@ const canSubmit = computed(() => {
 })
 
 async function create() {
-  if (!canSubmit.value) return
+  const picked = kind.value
+  if (!canSubmit.value || !picked) return
   busy.value = true
 
   const body = kind.value === 'postgres'
@@ -243,17 +243,15 @@ async function create() {
       method: 'POST',
       body,
     })
-    if (kind.value) {
-      track('connection_created', {
-        connection_id: instance.id,
-        kind: kind.value,
-        own_server: ownServer.value,
-        ...(kind.value === 'whatsapp' && { full_history: fullHistory.value }),
-      })
-    }
+    track('connection_created', {
+      connection_id: instance.id,
+      kind: picked,
+      own_server: ownServer.value,
+      ...(picked === 'whatsapp' && { full_history: fullHistory.value }),
+    })
     // Still busy: the parent moves on from here (a navigation, or the next
     // setup step), and the button must not take a second click meanwhile.
-    if (kind.value) emit('created', { id: instance.id, kind: kind.value })
+    emit('created', { id: instance.id, kind: picked })
   }
   catch (err: any) {
     // The server's message is the useful part here — it names the bad host, the
@@ -452,7 +450,7 @@ async function create() {
               </p>
               <!-- Pro on the hosted bridge, whose settings these numbers describe;
                    a self-hosted operator may have set others. -->
-              <p v-else-if="hosted && !ownServer" class="text-xs text-muted-foreground">
+              <p v-else-if="hosted" class="text-xs text-muted-foreground">
                 Your plan syncs the last {{ TELEGRAM_FULL_HISTORY_DAYS }} days of
                 history when the account is linked, {{ perChat }} messages per chat to
                 start. Everything after that is kept, and you can load {{ perChat }}

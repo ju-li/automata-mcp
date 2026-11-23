@@ -57,21 +57,7 @@ export default defineKindTool({
     }
 
     const bridge = useTelegramBridge()
-
-    let target: string
-    if (chatId) {
-      target = chatId
-    }
-    else {
-      try {
-        target = (await bridge.resolve(username!)).chatId
-      }
-      catch (error) {
-        relayBridgeError(error, 'look up that recipient, so the message was not sent')
-      }
-    }
-
-    assertChatAllowed(scope, target)
+    const target = await resolveTelegramSendTarget(bridge, scope, { chatId, username }, 'message')
 
     try {
       const result = await bridge.send(target, body)

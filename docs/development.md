@@ -38,7 +38,7 @@ until you do.
 ```
 apps/web/                    Nuxt 4 + TypeScript. Own Dockerfile, built from the repo root.
   app/pages/                 index, login, signup, verify-email, forgot-password,
-                             reset-password, team, profile, billing,
+                             reset-password, team, welcome, profile, billing,
                              no-organization, invite/[code], instances/{index,new,[id]}
   app/components/            app components + ui/ (shadcn-vue)
   app/composables/           session, organization, connection state, token scope,
@@ -48,15 +48,17 @@ apps/web/                    Nuxt 4 + TypeScript. Own Dockerfile, built from the
   public/email/              the account emails' header logo
   test/                      account-email snapshots and rules (`pnpm test:emails`)
   server/api/                auth (incl. two-factor and email verification), org,
-                             invites, instances, tokens, billing, hosted flag,
-                             Telegram readiness, Evolution and Telegram webhooks
+                             invites, instances, tokens, billing, onboarding,
+                             hosted flag, Telegram readiness, Evolution and
+                             Telegram webhooks
   server/middleware/         request body cap (00-body-limit.ts), session cookie
   server/emails/             account-email templates (HTML + plain text)
   server/mcp/index.ts        MCP handler + auth middleware
   server/mcp/tools/<group>/  one file per tool: whatsapp/, telegram/, sql/, imap/
   server/plugins/            app database, token redaction, per-kind instructions,
-                             Evolution and Telegram database, cloud and email
-                             verification startup checks, hosted usage rollups
+                             Evolution and Telegram database, cloud, email
+                             verification and Redis startup checks, hosted usage
+                             rollups
   server/tasks/              scheduled: alert sweep, webhook re-registration,
                              IMAP sync, unpaired WhatsApp reaper, tool-call pruning
   server/db/migrations.ts    the app schema, applied at boot

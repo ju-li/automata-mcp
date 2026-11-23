@@ -18,8 +18,10 @@ export function useConnectorUrl() {
   )
 
   /**
-   * The path form is what most people need: Claude's custom connectors cannot
-   * attach an Authorization header, so the token has to ride in the URL.
+   * The path form is what most people still need: ChatGPT's connectors cannot
+   * attach an Authorization header, and Claude.ai's can only in organizations
+   * with its Request headers beta, so the token has to ride in the URL. Legacy
+   * fallback — `bearerUrl` is preferred where the client can send a header.
    *
    * Falls back to the mask when the token is unknown, which is every case but
    * the reveal dialog.

@@ -28,10 +28,8 @@ export default defineEventHandler(async (event) => {
     return await bridge.backfill(chatId)
   }
   catch (error) {
-    // A bridge from before this route answers its generic 404 with no `code`,
-    // which would otherwise pass through as "Not found." — read as the chat
-    // missing. Every 404 this route really sends carries `chat_unknown`.
-    if (httpStatusOf(error) === 404 && (error as { data?: { code?: unknown } }).data?.code === undefined) {
+    // Would otherwise pass through as "Not found." — read as the chat missing.
+    if (isBridgeRouteMissing(error)) {
       console.error(`[telegram] could not load more history for connection ${instance.id}: the Telegram bridge is too old to extend a chat's history. Update the bridge to the same release as the app.`)
       throw createError({ statusCode: 503, statusMessage: 'Loading more history is not available yet on this deployment. Try again later.' })
     }

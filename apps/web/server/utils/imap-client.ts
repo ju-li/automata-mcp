@@ -236,7 +236,11 @@ export async function probeImapConnection(target: ImapTarget): Promise<{ folders
     if ((cause as { statusCode?: number })?.statusCode) throw cause
     const described = describeImapError(cause)
     console.error(`[imap] probe of ${target.host}:${target.port} failed (${described.code})`, cause)
-    throw createError({ statusCode: 422, message: described.message, data: { code: described.code } })
+    // Nothing is stored yet, so there is no sync to retry: say try again.
+    const message = described.code === 'unavailable'
+      ? 'The mail server reported a temporary login failure. It did not reject the password; try again in a few minutes.'
+      : described.message
+    throw createError({ statusCode: 422, message, data: { code: described.code } })
   }
   finally {
     if (client) await closeImap(client)
@@ -262,7 +266,7 @@ export function describeImapError(cause: unknown): DescribedImapError {
     return { code: 'internal', auth: false, message: imapErrorMessage('internal') }
   }
   const code = error.authenticationFailed
-    ? 'auth'
+    ? (loginTemporarilyRefused(error) ? 'unavailable' : 'auth')
     : error.tlsFailed || /CERT|SSL|TLS/i.test(error.code ?? '')
       ? 'tls'
       : /TIMEOUT/i.test(error.code ?? '')
@@ -276,6 +280,23 @@ export function describeImapError(cause: unknown): DescribedImapError {
 }
 
 /**
+ * A refused login the server itself calls temporary: RFC 5530's `UNAVAILABLE`
+ * (auth backend down — mailbox.org answers it now and then, #313) or `INUSE`.
+ * imapflow sets `authenticationFailed` on any tagged NO to LOGIN/AUTHENTICATE,
+ * so without this a server saying "try again later" stopped the sync as if
+ * the password were wrong. Read from `serverResponseCode` or, since the
+ * AUTHENTICATE path can leave that unset, from the response code position of
+ * the tagged line only (`<tag> NO [CODE]`) — never from free text, where a
+ * server could quote anything.
+ */
+function loginTemporarilyRefused(error: ImapFlowError): boolean {
+  const code = error.serverResponseCode ?? (typeof error.response === 'string'
+    ? /^\S+\s+NO\s+\[([A-Z-]+)[\]\s]/i.exec(error.response)?.[1]
+    : undefined)
+  return /^(UNAVAILABLE|INUSE)$/i.test(code ?? '')
+}
+
+/**
  * The words for a stored error code. Kept apart from `describeImapError` so
  * the dashboard can explain a code the sync stored minutes ago.
  */
@@ -285,6 +306,9 @@ export function imapErrorMessage(code: string): string {
       return 'The mail server refused the username or password. Gmail, iCloud, Fastmail, Yahoo and Zoho '
         + 'need an app password here rather than the account password; Microsoft 365 and Outlook.com no '
         + 'longer accept passwords over IMAP at all.'
+    case 'unavailable':
+      return 'The mail server reported a temporary login failure. It did not reject the password; '
+        + 'the sync retries by itself every two minutes.'
     case 'tls':
       return 'Could not establish TLS with the mail server. Check the port and security setting '
         + '(993 with TLS, or 143 with STARTTLS), and that the server\'s certificate is valid for this host name.'

@@ -13,6 +13,14 @@ import { assertNever } from '#shared/connection'
  * Ordering is by time alone, and that is a limit rather than an omission —
  * `listAccountMessages` explains why a name column cannot be sorted here.
  *
+ * **Totals are cheap, so not always exact.** The last page carries an exact
+ * `total` for free. Before it, a page without a search has none — the dialog
+ * shows the dashboard's cached message count, marked as approximate — and a
+ * search's `total` is a capped count (`MATCH_COUNT_CAP`, short timeout): exact
+ * below the cap, `totalAtLeast: true` at it, absent if it ran out of time. Exact counts across a multi-million-message
+ * account read every row and ran past the statement timeout (see
+ * `listAccountMessagesPage`, `listTelegramAccountMessages`).
+ *
  * A connection with no database URL is refused by the same precedence rule the
  * MCP read path uses, and with the same two answers it gives: a 500 naming the
  * missing deployment-wide setting, or a 501 for a connection on a server of the
@@ -50,25 +58,17 @@ export default defineEventHandler(async (event) => {
         ...(terms?.length && { terms }),
       })
     case 'telegram': {
-      const { messages, hasMore, total, excluded } = await listTelegramMessagesPage(instance, {
+      const result = await listTelegramAccountMessages(instance, {
         limit: params.limit,
         page: params.page,
         order: params.order,
-        includeDeleted: false,
-        includeService: false,
         ...(terms?.length && { terms }),
       })
 
       // Named rather than left to the reader: a table that silently drops a
-      // class of row reads as a complete one, and these two are counted over the
-      // whole window rather than over this page.
-      return {
-        messages,
-        hasMore,
-        total,
-        deletedExcluded: excluded.deleted,
-        serviceMessagesExcluded: excluded.service,
-      }
+      // class of row reads as a complete one. Named, not counted — counting
+      // them reads every row of the session (`listTelegramAccountMessages`).
+      return { ...result, excludes: ['deleted', 'service'] as const }
     }
     default:
       return assertNever(kind, 'connection kind')

@@ -29,7 +29,7 @@ const updateAttempts = new Map<string, number[]>()
 
 /** What `/api/auth/me` says about setup: present only while it is this user's to do. */
 export function onboardingFor(actor: Actor): { updates: boolean } | undefined {
-  if (actor.role !== 'admin' || !actor.org.onboarding_for || actor.org.onboarding_for !== actor.user.id) return undefined
+  if (actor.role !== 'admin' || actor.org.onboarding_for !== actor.user.id) return undefined
   return { updates: selfHostUpdatesUrl() !== undefined }
 }
 
@@ -61,8 +61,7 @@ export function selfHostUpdatesUrl(): string | undefined {
  * cloud service throttles per install too). Relays the cloud's 4xx message,
  * which is written for the person in the browser; anything else is logged
  * (without the address) and answered 503.
- */
-/**
+ *
  * Answers whether the address must confirm by email first (the cloud's double
  * opt-in), so the page can say so; an older cloud that doesn't say = no.
  */

@@ -17,13 +17,20 @@
 export default defineEventHandler(async (event) => {
   const { instance, actor } = await requireManagedInstance(event, getRouterParam(event, 'id'))
 
-  const members = await listOrgMembers(actor.org.id)
-  const assigned = new Set(await listInstanceAssignees(instance.id))
+  // `tokens`: live tokens each person holds here, so the unassign confirmation
+  // can name what it costs — they stop working the moment the assignment goes.
+  // `invites`: pending member invitations, admins only — who has been invited
+  // is an admin's view of the organization (`/api/org` carries it for them
+  // alone), and a member who created this connection manages it, not the roster.
+  const [members, assignees, tokens, invites] = await Promise.all([
+    listOrgMembers(actor.org.id),
+    listInstanceAssignees(instance.id),
+    countTokensByHolder(instance.id),
+    actor.role === 'admin' ? listInviteAssignments(actor.org.id, instance.id) : [],
+  ])
+  const assigned = new Set(assignees)
 
-  // How many live tokens each person holds on this connection, so the
-  // unassign confirmation can name what it costs rather than asking "are you
-  // sure" — those tokens stop working the moment the assignment goes.
-  const rows = await Promise.all(members.map(async member => ({
+  const rows = members.map(member => ({
     userId: member.userId,
     email: member.email,
     role: member.role,
@@ -32,13 +39,8 @@ export default defineEventHandler(async (event) => {
     implicit: member.role === 'admin',
     /** Created this connection: manages it for as long as they keep access. */
     creator: Boolean(instance.created_by) && instance.created_by === member.userId,
-    tokens: await countTokensOn(member.userId, instance.id),
-  })))
-
-  // Pending member invitations, for admins only: who has been invited is an
-  // admin's view of the organization (`/api/org` carries it for them alone),
-  // and a member who created this connection manages it, not the roster.
-  const invites = actor.role === 'admin' ? await listInviteAssignments(actor.org.id, instance.id) : []
+    tokens: tokens.get(member.userId) ?? 0,
+  }))
 
   return { members: rows, invites }
 })
