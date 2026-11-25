@@ -2,7 +2,7 @@
 
 ## Which Evolution
 
-The deployment's own Evolution server runs **`evolution-api-reforged` 3.3.1**,
+The deployment's own Evolution server runs **`evolution-api-reforged` 3.3.3**,
 our fork of Evolution API
 ([repo](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged),
 formerly `ju-li/evolution-api-v2`). Every file that names it pins its digest:
@@ -114,6 +114,18 @@ What the fork changes, and why we run it:
   update, so the session read as online even with `alwaysOnline: false`, and
   WhatsApp held back push notifications on the phone until the number was
   unlinked. Those updates no longer send a presence.
+- **Media is downloaded from the right message** (3.3.2,
+  [#86](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/86)).
+  `getBase64FromMediaMessage` reloads the stored message by its full key
+  (chat, id, direction) instead of the id alone, which could return another
+  chat's file when a message id repeated. The same release acks contacts'
+  top-level `<status>` stanzas again (upstream 2.3.8), which stopped sessions
+  that read `open` from going quiet or dropping about every 50 minutes.
+- **Album items download** (3.3.3,
+  [#91](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/91)).
+  Photos and videos sent several at a time sit inside an
+  `associatedChildMessage` wrapper, which the media route now unwraps, in any
+  nesting order. Edited messages are still not unwrapped.
 
 ### Moving from stock Evolution 2.3.7
 
@@ -650,6 +662,81 @@ Worth knowing before you go looking for a bug:
 On Railway, Evolution's Postgres is its own service — use its private URL, and
 note the port there is whatever that service actually listens on (see [Pin the
 ports](deploy-railway.md#pin-the-ports)).
+
+## Downloading media
+
+`read-messages` marks a message that carries a file with `hasMedia: true`,
+`mediaType` (`image`, `video`, `video-note`, `audio`, `voice`, `document` or
+`sticker`), `mimetype`, and — when the sender's device said — `fileName` and
+`fileSize`. These keys are additive: a message without a file carries none of
+them. `download-whatsapp-media` fetches the file by the chat's `jid` and the message `id`.
+
+- **Opt-in per token.** Not included in "All actions", so no existing token gains
+  it on an upgrade: tick it under *Opt-in actions* in the token's scope, in
+  either mode. Chat scope applies as for every read — the chat is checked, then
+  the message is looked up **inside** that chat.
+- **Never stored.** Each call downloads the file through Evolution's
+  `/chat/getBase64FromMediaMessage` and hands it straight back; nothing is
+  written to disk. That route answers with the whole file as base64 inside one
+  JSON body, so the file is held in memory while it passes through — bounded,
+  below — rather than streamed as Telegram's is. The app decodes the base64 as
+  the answer streams in, so one download holds the file about once (measured
+  peak about 60 MB for a 25 MiB file, including short-lived buffers; briefly
+  about twice the file when Evolution's answer arrives compressed or without a
+  length, since the pieces are then joined at the end); with
+  three downloads at once, plan for about 200 MB of headroom in the web
+  process, or lower `NUXT_MEDIA_MAX_BYTES`. An inline result (5 MiB at most)
+  also holds the base64 copy MCP sends. Evolution's
+  answer is read with a byte cap, so a file larger than its sender claimed is
+  cut off rather than buffered, and at most three downloads run at once per web
+  process, one per connection (more answer 429). A download keeps its slot
+  while the file is fetched from Evolution (at most 90 seconds) and then until
+  it has reached the caller — by link, or inside the tool result — at most five
+  more minutes, a link cut off sooner if the caller takes under 64 KiB in any
+  30 seconds — so the three bound the files held too. Evolution itself is not bounded by this: it
+  downloads and base64-encodes the whole file before answering, whatever its
+  size (WhatsApp documents go up to 2 GB, and the sender's stated size may be
+  missing or wrong), so size Evolution's memory for the largest files your
+  accounts receive.
+- **Small files inline, larger ones by link.** Up to `NUXT_MEDIA_INLINE_MAX_BYTES`
+  (5 MiB) the file is in the tool result — images as images, anything else as an
+  embedded file. Up to `NUXT_MEDIA_MAX_BYTES` (25 MiB) the tool returns a `url`
+  under `/mcp-media/` instead: signed, valid ten minutes, and followed only with
+  the **same** connector token in the `Authorization` header, after the same
+  scope checks run again. It holds no bytes; following it downloads the file
+  then. Larger files are refused, quoting the size when it is known. The link needs a client that can send that header: one that puts the token in
+  the URL path (`/mcp/<token>`) cannot follow it and should ask for
+  `delivery: "inline"`. Links need `NUXT_PUBLIC_APP_URL`; they are sealed with
+  `NUXT_MEDIA_URL_SECRET`, or a random key per process when it is unset (links
+  then end on restart; set it for several replicas). The hosted offering issues
+  no links without it. Behind a proxy that only
+  forwards `/mcp`, forward `/mcp-media/` too.
+- **Costly.** Each call counts against the token's and organization's
+  budgets and the per-connection budget for costly tools
+  (`NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE`); each followed link counts against the
+  costly-tools budget again, since that is when the file is fetched. Both are
+  recorded in tool-call history like any call.
+- **Message ids that repeat.** A message id is the sender's choice, so two
+  chats can hold messages with the same id. The app finds the message inside
+  the token's chats and sends Evolution its full key (chat, id and direction).
+  Stock 2.3.7 downloads from the message the app sends, and
+  evolution-api-reforged from 3.3.2 reloads the message by that full key. Older
+  reforged releases (3.0–3.3.1) reload by the id alone and can fetch another
+  chat's file; the app compares the file's SHA-256 with the one WhatsApp
+  recorded on the message and refuses a mismatch (409) without returning
+  anything. Update to 3.3.2 or later.
+- **Not downloadable:** view-once media; a message whose file reference
+  points somewhere other than WhatsApp's media servers (the stored message is
+  the sender's, and Evolution would fetch whatever address it names — refused
+  with 422); a message that records no file location at all (seen on messages
+  from WhatsApp's own account, `0@s.whatsapp.net` — not marked `hasMedia`); on
+  evolution-api-reforged, a wrapped message such as a photo sent as part of an
+  album or an edited message (it reloads the stored row and does not unwrap it,
+  where stock 2.3.7 downloads the unwrapped node the app sends — 422; album
+  items: [reforged#91](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged/issues/91));
+  and old media WhatsApp no longer holds — Evolution asks the phone to re-upload
+  expired media, which works only while the phone is online and still has it.
+  In testing, most media more than a couple of weeks old had expired.
 
 ## Chats addressed by LID (`…@lid`)
 

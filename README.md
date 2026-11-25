@@ -137,7 +137,7 @@ Details: <https://www.getautomata.app/docs/permissions>.
 
 ## MCP tools
 
-Automata has 24 MCP tools; a connection only exposes the tools for its kind. Full reference: <https://www.getautomata.app/docs/reference/mcp-tools>.
+Automata has 26 MCP tools; a connection only exposes the tools for its kind. Full reference: <https://www.getautomata.app/docs/reference/mcp-tools>.
 
 | Connector | Tool | What it does |
 |---|---|---|
@@ -147,12 +147,14 @@ Automata has 24 MCP tools; a connection only exposes the tools for its kind. Ful
 | | `search-messages` | Messages containing every word of a query |
 | | `send-text-message` | Send a text message (**write**) |
 | | `send-whatsapp-image` | Send a JPEG or PNG image with an optional caption (**write**) |
+| | `download-whatsapp-media` | The photo, video, voice note or file a message carries (opt-in) |
 | Telegram | `get-telegram-status` | Whether the account is linked and online, and sync progress |
 | | `list-telegram-chats` | Synced chats in scope: private chats, groups, supergroups, channels |
 | | `read-telegram-messages` | One chat's messages, newest first, paged |
 | | `search-telegram-messages` | Messages and captions containing every word of a query |
 | | `send-telegram-message` | Send plain text to a chat, @username or phone number (**write**) |
 | | `send-telegram-image` | Send a JPEG or PNG photo with an optional caption (**write**) |
+| | `download-telegram-media` | The photo, video, voice message or file a message carries (opt-in) |
 | Email | `get-mailbox-status` | Which mailbox, whether sync works, when it last ran |
 | | `list-mail-folders` | Folders in scope with synced and unread counts |
 | | `list-emails` | Email headers, newest first, with filters |
@@ -378,3 +380,7 @@ automated checks.
 ## License
 
 [MIT](LICENSE)
+
+## Links
+
+[![ju-li/automata-mcp MCP server](https://glama.ai/mcp/servers/ju-li/automata-mcp/badges/score.svg)](https://glama.ai/mcp/servers/ju-li/automata-mcp)

@@ -5,6 +5,8 @@ export interface McpToolInfo {
   title: string
   description: string
   readOnly: boolean
+  /** Not covered by "All actions": granted only when ticked by name (`optIn` on the server's `defineKindTool`). */
+  optIn?: boolean
 }
 
 export interface ScopedChat {
@@ -103,8 +105,12 @@ export function readOnlyScope(readToolNames: string[]): TokenScope {
  * Only the axis that applies to this connection's kind is mentioned: a Postgres
  * token leaves `all_chats` at its default `true`, and reporting "All chats" for
  * a database would be noise at best.
+ *
+ * `tools` is the connection's tool catalogue, for its opt-in actions: "All
+ * actions" leaves those out, so a token without them is not "Full access".
+ * Without it, opt-in names held under "All actions" are counted, unnamed.
  */
-export function describeScope(scope: TokenScope, kind: InstanceKind): string {
+export function describeScope(scope: TokenScope, kind: InstanceKind, tools?: readonly McpToolInfo[]): string {
   let dataOpen: boolean
   let data: string
   switch (kind) {
@@ -126,8 +132,32 @@ export function describeScope(scope: TokenScope, kind: InstanceKind): string {
       return assertNever(kind, 'connection kind')
   }
 
-  if (scope.all_tools && dataOpen) return 'Full access'
-  return [data, scope.all_tools ? 'all actions' : plural(scope.tool_names.length, 'action')].join(' · ')
+  if (!scope.all_tools) return [data, plural(scope.tool_names.length, 'action')].join(' · ')
+
+  // Under "All actions" the names held are opt-in actions (`scopeForSubmit`).
+  const optIn = tools?.filter(tool => tool.optIn)
+  const granted = optIn ? optIn.filter(tool => scope.tool_names.includes(tool.name)) : []
+  const withheld = optIn ? optIn.length - granted.length : 0
+  if (dataOpen && optIn && withheld === 0) return 'Full access'
+  const actions = !optIn
+    ? (scope.tool_names.length ? `all actions + ${plural(scope.tool_names.length, 'opt-in action')}` : 'all actions')
+    : granted.length
+      ? `all actions + ${granted.map(tool => tool.title).join(', ')}`
+      : withheld ? 'all actions except opt-in ones' : 'all actions'
+  return [data, actions].join(' · ')
+}
+
+/**
+ * The scope as it is sent to the server. Under "All actions" only opt-in names
+ * are kept: they are the only ones that grant anything there, and the ordinary
+ * names left over from "Only selected actions" would otherwise be stored and
+ * counted. Without the catalogue it is sent as it is; the server's gate decides
+ * either way.
+ */
+export function scopeForSubmit<T extends TokenScope>(scope: T, tools?: readonly McpToolInfo[]): T {
+  if (!scope.all_tools || !tools) return scope
+  const optIn = new Set(tools.filter(tool => tool.optIn).map(tool => tool.name))
+  return { ...scope, tool_names: scope.tool_names.filter(name => optIn.has(name)) }
 }
 
 /** What the disclaimer field holds when an admin turns it on. Editable from there. */
@@ -154,11 +184,15 @@ function sendToolsOf(kind: InstanceKind): readonly string[] {
   }
 }
 
-/** Whether a token with this scope may send messages from the account. */
-export function allowsSending(scope: TokenScope, kind: InstanceKind): boolean {
+/**
+ * Whether a token with this scope may send messages from the account. A send
+ * tool marked opt-in in `catalogue` is granted by name only, "All actions" or not.
+ */
+export function allowsSending(scope: TokenScope, kind: InstanceKind, catalogue?: readonly McpToolInfo[]): boolean {
   const tools = sendToolsOf(kind)
   if (tools.length === 0) return false
-  return scope.all_tools || tools.some(tool => scope.tool_names.includes(tool))
+  const optIn = new Set((catalogue ?? []).filter(tool => tool.optIn).map(tool => tool.name))
+  return tools.some(tool => scope.tool_names.includes(tool) || (scope.all_tools && !optIn.has(tool)))
 }
 
 /**
@@ -166,8 +200,13 @@ export function allowsSending(scope: TokenScope, kind: InstanceKind): boolean {
  * turning sending off and back on later does not revive a disclaimer nobody
  * could see while it was hidden; a blank field is off, not an empty line.
  */
-export function disclaimerToSubmit(scope: TokenScope, kind: InstanceKind, disclaimer: string | null): string | null {
-  if (!allowsSending(scope, kind)) return null
+export function disclaimerToSubmit(
+  scope: TokenScope,
+  kind: InstanceKind,
+  disclaimer: string | null,
+  catalogue?: readonly McpToolInfo[],
+): string | null {
+  if (!allowsSending(scope, kind, catalogue)) return null
   return disclaimer?.trim() || null
 }
 

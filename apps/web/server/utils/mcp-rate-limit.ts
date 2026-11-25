@@ -242,7 +242,7 @@ function logRefusal(charge: ScopedCharge): void {
 const SCOPE_WORDING: Record<RateScope, string> = {
   token: 'This connector has used its request budget',
   organization: 'This organization\'s connectors have used their shared request budget',
-  connection: 'Searches and queries on this connection have used their budget',
+  connection: 'Costly calls on this connection (searches, queries, media downloads) have used their budget',
 }
 
 /**

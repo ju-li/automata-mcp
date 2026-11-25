@@ -26,6 +26,8 @@ const contactUrl = computed(() => {
 
 <template>
   <div class="flex min-h-screen flex-col bg-background text-foreground">
+    <PromoBanner />
+
     <header v-if="user" class="border-b">
       <div class="mx-auto flex h-14 max-w-5xl items-center justify-between gap-4 px-6">
         <div class="flex min-w-0 items-center gap-3">

@@ -7,6 +7,8 @@ const props = defineProps<{
   /** The token's name, so the dialog says which one it is describing. */
   label?: string
   scope?: TokenScope
+  /** The connection's tool catalogue, so the scope line accounts for opt-in actions. */
+  tools?: readonly McpToolInfo[]
   /**
    * The plaintext token, known only in the moment it is minted. Everywhere else
    * the list endpoint has no token material to give, so the URL is masked.
@@ -32,7 +34,7 @@ const known = computed(() => Boolean(props.token))
       </DialogHeader>
 
       <p v-if="scope" class="text-sm">
-        <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope, kind) }}
+        <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope, kind, tools) }}
       </p>
 
       <div v-if="!known" class="space-y-3 rounded-md border bg-muted/40 p-3 text-sm">

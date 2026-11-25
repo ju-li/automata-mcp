@@ -1,7 +1,7 @@
 {
   "identifier": "ju-li-automata-mcp",
   "name": "Automata",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Scoped, revocable access to your WhatsApp, Telegram, IMAP email and PostgreSQL for AI agents. Read, search and summarise chats and mail, query databases in plain English; sending messages and writing rows only when granted. Each connector token is bound to one connection. Hosted at mcp.getautomata.app (free tier) or self-hosted.",
   "author": "Ju Li",
   "authorUrl": "https://github.com/ju-li",
@@ -107,6 +107,100 @@
         },
         "required": [
           "name"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "download-whatsapp-media",
+      "title": "Download WhatsApp media",
+      "description": "[WhatsApp] Download the file a WhatsApp message carries — a photo, video, voice note, audio file, document or sticker. Pass the chat `jid` and the message `id`, exactly as read-messages returned them; read-messages marks such messages with `hasMedia`, `mediaType`, `mimetype` and, when known, `fileName` and `fileSize`. Images come back as images and other files as embedded files, when small enough; a larger file comes back as a `url` that works for ten minutes when fetched with this connection's Authorization header, and only for this token (a client that puts the token in the URL path cannot follow it: use `inline`). `delivery` chooses: `auto` (default) inlines small files, `url` always returns a link (the file is fetched when the link is followed), `inline` never does. View-once media is not downloadable. Old media may have expired on WhatsApp's servers; it can then be fetched only while the phone is online. Fetch only what the task needs: each download — inline, or a link followed — fetches the file again.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "jid": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Chat identifier from list-chats or read-messages, exactly as returned"
+          },
+          "messageId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "description": "The message `id` from read-messages"
+          },
+          "delivery": {
+            "default": "auto",
+            "description": "auto: inline when small, else a signed URL. inline: never a URL. url: always a URL.",
+            "type": "string",
+            "enum": [
+              "auto",
+              "inline",
+              "url"
+            ]
+          },
+          "reason": {
+            "description": "One sentence: why you are calling this tool, i.e. what the user asked for. Do not include names, contact details, message text or other personal data.",
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "jid",
+          "messageId"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "download-telegram-media",
+      "title": "Download Telegram media",
+      "description": "[Telegram] Download the file a Telegram message carries — a photo, video, video note, voice message, audio file, sticker or document. Pass the `chatId` and the message `id` exactly as read-telegram-messages returned them; messages with a file carry `media`. Images come back as images and other files as embedded files, when small enough; a larger file comes back as a `url` that works for ten minutes when fetched with this connection's Authorization header, and only for this token (a client that puts the token in the URL path cannot follow it: use `inline`). `delivery` chooses: `auto` (default) inlines small files, `url` always returns a link without fetching the file first (a file that turns out too large or not downloadable is refused when the link is followed), `inline` never does. Self-destructing media is not downloadable, and the account must be online (get-telegram-status). Fetch only what the task needs: each download — inline, or a link followed — fetches the file again.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "chatId": {
+            "type": "string",
+            "pattern": "^-?\\d{1,20}$",
+            "description": "Chat id from list-telegram-chats or read-telegram-messages, as a string"
+          },
+          "messageId": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 2147483647,
+            "description": "The message `id` from read-telegram-messages"
+          },
+          "delivery": {
+            "default": "auto",
+            "description": "auto: inline when small, else a signed URL. inline: never a URL. url: always a URL.",
+            "type": "string",
+            "enum": [
+              "auto",
+              "inline",
+              "url"
+            ]
+          },
+          "reason": {
+            "description": "One sentence: why you are calling this tool, i.e. what the user asked for. Do not include names, contact details, message text or other personal data.",
+            "type": "string",
+            "maxLength": 2000
+          }
+        },
+        "required": [
+          "chatId",
+          "messageId"
         ]
       },
       "annotations": {

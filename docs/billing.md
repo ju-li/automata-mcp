@@ -402,6 +402,21 @@ people type, the coupon on its own has none. A code applied at Checkout stays on
 the subscription, so a 100%-off-forever code keeps invoices at $0 while the
 organization reads as Pro.
 
+To advertise a code, set `NUXT_PROMO` on the **web** service:
+
+```
+NUXT_PROMO=Thanksgiving,2026-12-01,THANKSGIVING2026,50% off Pro for 6 months
+```
+
+Holiday, last day (inclusive, US Eastern), code, details — the details may
+contain commas. Organizations on Free get a banner at the top of every page
+(not on the first-run setup) reading "Thanksgiving offer: 50% off Pro for 6
+months with code THANKSGIVING2026", with an Upgrade link for admins. It
+disappears after the end date by itself; clear the variable to stop it sooner.
+The banner only advertises the code: create the code in Stripe first, and give
+it its own expiry there if it should stop working too. A malformed value shows
+no banner and logs `[promo]` at the first page load.
+
 ### 6. Deploy the cloud service
 
 On Railway, add a service from this repository:

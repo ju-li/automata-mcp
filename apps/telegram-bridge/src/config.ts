@@ -29,6 +29,7 @@ const schema = z.object({
   TELEGRAM_BACKFILL_DAYS: z.coerce.number().int().min(0).default(365),
   TELEGRAM_BACKFILL_BROADCAST: z.enum(['true', 'false']).default('false'),
   TELEGRAM_BACKFILL_PAGE_DELAY_MS: z.coerce.number().int().min(0).default(1000),
+  TELEGRAM_MEDIA_DOWNLOADS: z.coerce.number().int().min(1).max(64).default(4),
   TELEGRAM_BRIDGE_PORT: z.coerce.number().int().min(1).max(65535).optional(),
   // Railway injects PORT into every service; following it is what makes the
   // bridge listen where the platform routes to.
@@ -52,6 +53,8 @@ export interface BridgeConfig {
   readerRole?: string
   testServers: boolean
   backfill: BackfillOptions
+  /** Media downloads this bridge streams at once, across every session (each session: one). */
+  mediaDownloads: number
   port: number
 }
 
@@ -97,6 +100,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): BridgeConfig {
       includeBroadcast: e.TELEGRAM_BACKFILL_BROADCAST === 'true',
       pageDelayMs: e.TELEGRAM_BACKFILL_PAGE_DELAY_MS,
     },
+    mediaDownloads: e.TELEGRAM_MEDIA_DOWNLOADS,
     port: e.TELEGRAM_BRIDGE_PORT ?? e.PORT ?? 8095,
   }
 }

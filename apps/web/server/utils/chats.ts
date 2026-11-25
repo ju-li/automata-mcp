@@ -96,6 +96,19 @@ export interface ChatMessage {
    * blank. `text` is absent whenever this is set.
    */
   unreadable?: UnreadableReason
+  /**
+   * Set only on a message carrying a file — photo, video, voice note, audio,
+   * document or sticker — so a caller knows what `download-whatsapp-media` can fetch.
+   * Absent on everything else: these keys are additive and never `false`.
+   */
+  hasMedia?: true
+  /** `image`, `video`, `video-note`, `audio`, `voice`, `document` or `sticker`. */
+  mediaType?: string
+  mimetype?: string
+  /** A document's file name, as the sender gave it. */
+  fileName?: string
+  /** Bytes, as the sender's device reported them. */
+  fileSize?: number
 }
 
 /**
@@ -735,6 +748,7 @@ export async function listMessages(
       text: previewOf(content.payload),
       editOf: content.editOf,
       unreadable: content.unreadable,
+      media: mediaOfPayload(content.payload),
       // The `contextInfo` column stays authoritative — see `MessageRow.mentioned`
       // in `evolution-db.ts`. But 2.3.7's `extendedTextMessage` rewrite only
       // touches the *top level*, so a message nested inside an edit or a wrapper
@@ -759,6 +773,13 @@ export async function listMessages(
       text: directory ? applyMentions(draft.text, draft.mentioned, directory) : draft.text,
       ...(draft.editOf && { editOf: draft.editOf }),
       ...(draft.unreadable && { unreadable: draft.unreadable }),
+      ...(draft.media && {
+        hasMedia: true as const,
+        mediaType: draft.media.mediaType,
+        ...(draft.media.mimetype && { mimetype: draft.media.mimetype }),
+        ...(draft.media.fileName && { fileName: draft.media.fileName }),
+        ...(draft.media.fileSize !== undefined && { fileSize: draft.media.fileSize }),
+      }),
     })),
     // Comes from the query's over-fetch, and is measured on the deduplicated rows
     // it returned — never on `drafts`. Measuring the list after the control
@@ -1267,6 +1288,118 @@ function classifyContent(message: unknown, messageType?: string): NormalizedMess
       ? { editOf: idOf(secret.targetMessageKey) ?? editOf, unreadable: secretEncReason(secret.secretEncType) }
       : { editOf }),
   }
+}
+
+/** A file a WhatsApp message carries, as its payload describes it. */
+export interface WhatsappMediaInfo {
+  mediaType: string
+  mimetype?: string
+  fileName?: string
+  fileSize?: number
+}
+
+/** Payload key → the `mediaType` callers see. Baileys' media message types. */
+const MEDIA_KINDS: ReadonlyArray<readonly [string, string]> = [
+  ['imageMessage', 'image'],
+  ['videoMessage', 'video'],
+  ['ptvMessage', 'video-note'],
+  ['audioMessage', 'audio'],
+  ['documentMessage', 'document'],
+  ['stickerMessage', 'sticker'],
+]
+
+/** The media node a payload carries: its payload key, its kind, and the node itself. */
+export interface WhatsappMediaNode {
+  key: string
+  kind: string
+  node: Record<string, any>
+  /** The sender marked it view-once, on the node itself rather than with a wrapper. */
+  viewOnce: boolean
+}
+
+/**
+ * The media node in a payload `classifyContent` already unwrapped, plus one
+ * level of `ephemeralMessage` — a disappearing-chat message is still the photo
+ * it wraps, and only the media fields are read through it (its `type` stays as
+ * it was). The `viewOnceMessage*` family is deliberately not looked into, for
+ * the reason `WRAPPER_KEYS` gives.
+ */
+function mediaNodeOf(payload: Record<string, any> | undefined): WhatsappMediaNode | undefined {
+  const inner = asRecord(asRecord(payload?.ephemeralMessage)?.message) ?? payload
+  if (!inner) return undefined
+  for (const [key, kind] of MEDIA_KINDS) {
+    const node = asRecord(inner[key])
+    if (node) return { key, kind, node, viewOnce: node.viewOnce === true }
+  }
+  return undefined
+}
+
+/**
+ * The file a WhatsApp message carries, or undefined.
+ *
+ * Only a node that can be downloaded counts: one with a `mediaKey` (a caption
+ * edit nests an `imageMessage` without one) and a place to fetch it from
+ * (`mediaLocated`), that is not view-once — newer clients flag view-once on the
+ * node itself as well as with a wrapper, and a view-once photo presented as an
+ * ordinary downloadable one is not what the sender chose.
+ *
+ * Every value is the sender's claim — `fileLength` included — so it describes,
+ * and the download re-checks the bytes.
+ */
+function mediaOfNode(media: WhatsappMediaNode | undefined): WhatsappMediaInfo | undefined {
+  if (!media || media.viewOnce || !media.node.mediaKey || !mediaLocated(media.node)) return undefined
+  const { key, kind, node } = media
+  const mimetype = typeof node.mimetype === 'string' ? cleanMimeType(node.mimetype) : undefined
+  return {
+    mediaType: key === 'audioMessage' && node.ptt === true ? 'voice' : kind,
+    ...(mimetype && mimetype !== 'application/octet-stream' && { mimetype }),
+    ...(key === 'documentMessage' && cleanFileName(node.fileName) && { fileName: cleanFileName(node.fileName) }),
+    ...(fileLengthOf(node.fileLength) !== undefined && { fileSize: fileLengthOf(node.fileLength) }),
+  }
+}
+
+/**
+ * Whether a media node says where its file is: a non-empty `directPath` or
+ * `url`. Some stored nodes carry a `mediaKey` and neither — seen on messages
+ * from WhatsApp's own account (`0@s.whatsapp.net`) — and nothing can fetch
+ * those, so they are not marked `hasMedia`. Whether a location is *safe* to
+ * fetch is a separate check, at download time (`mediaReferenceIsSafe`).
+ */
+export function mediaLocated(node: Record<string, unknown>): boolean {
+  const filled = (value: unknown) => typeof value === 'string' && value.length > 0
+  return filled(node.directPath) || filled(node.url)
+}
+
+function mediaOfPayload(payload: Record<string, any> | undefined): WhatsappMediaInfo | undefined {
+  return mediaOfNode(mediaNodeOf(payload))
+}
+
+/**
+ * The media a stored WhatsApp message carries, through the same unwrapping
+ * `read-messages` applies: `info` when it is downloadable, and the raw `node`
+ * either way (undefined for a control record or a message with no file).
+ */
+export function whatsappMediaOf(message: unknown, messageType?: string): { info?: WhatsappMediaInfo, node?: WhatsappMediaNode } {
+  const content = classifyContent(message, messageType)
+  if (content.noise) return {}
+  const node = mediaNodeOf(content.payload)
+  return { info: mediaOfNode(node), node }
+}
+
+/**
+ * `fileLength` is a protobuf uint64: a number, a digit string, or a Long
+ * `{ low, high }` depending on how the row was serialised. Undefined for
+ * anything else, never a guess.
+ */
+function fileLengthOf(raw: unknown): number | undefined {
+  if (typeof raw === 'number') return Number.isSafeInteger(raw) && raw >= 0 ? raw : undefined
+  if (typeof raw === 'string') return /^\d{1,15}$/.test(raw) ? Number(raw) : undefined
+  const long = asRecord(raw)
+  if (long && typeof long.low === 'number' && typeof long.high === 'number') {
+    const value = (long.high >>> 0) * 2 ** 32 + (long.low >>> 0)
+    return Number.isSafeInteger(value) ? value : undefined
+  }
+  return undefined
 }
 
 function asRecord(value: unknown): Record<string, any> | undefined {

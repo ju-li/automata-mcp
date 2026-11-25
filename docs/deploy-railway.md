@@ -9,7 +9,7 @@ connections alone is **Postgres** and **web**.
 |---|---|---|---|
 | **Postgres** | Railway template | — | managed |
 | **Redis** *(WhatsApp only)* | Railway template | — | managed |
-| **evolution** *(WhatsApp only)* | image `ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.1` (pin the digest: see below) | 8080 | `/evolution/instances` |
+| **evolution** *(WhatsApp only)* | image `ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.3` (pin the digest: see below) | 8080 | `/evolution/instances` |
 | **telegram-bridge** *(Telegram only)* | image `ghcr.io/ju-li/automata-mcp-telegram-bridge:1`, or this repo, root directory `/`, Dockerfile path `/apps/telegram-bridge/Dockerfile` | 8095 | — |
 | **web** | image `ghcr.io/ju-li/automata-mcp-web:1`, or this repo, root directory `/`, Dockerfile path `apps/web/Dockerfile` | Railway's `PORT` (8080 unless you set it) | — |
 
@@ -92,7 +92,7 @@ TELEMETRY_ENABLED=false
 ([repo](https://github.com/Operational-Intelligence-Inc/evolution-api-reforged)),
 not stock `evoapicloud/evolution-api`. Pin it by digest. The one this release is
 tested with is
-`ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.1@sha256:885b05339de10f7b9880101d1a48e12a77eaadf947235cf8f6fcdd1d843508c6`,
+`ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.3@sha256:77481ced8c62488b1f150a9630b392baf3ed6d2586635cab30ec542bc1d7f330`,
 the same reference as `docker-compose.yml`. The fork **refuses to start** when
 `AUTHENTICATION_API_KEY` is empty or one of the example values published in
 Evolution's docs (`429683C4C977415CAAFCCE10F7D57E11`, `BQYHJGJHJ`), and warns

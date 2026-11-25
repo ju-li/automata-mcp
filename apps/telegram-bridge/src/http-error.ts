@@ -1,13 +1,24 @@
-/** An error whose message is safe to send to the caller, with the status to send it with. */
+/**
+ * An error whose message is safe to send to the caller, with the status to send it with.
+ *
+ * **Every deliberate 404 carries a `code`** (`chat_unknown`, `message_not_found`,
+ * `session_unknown`, `not_found`). The one 404 without a code is the router's
+ * own answer to a route this bridge does not have, and the app reads exactly
+ * that as "bridge too old for this feature" (`isBridgeRouteMissing`). A 404
+ * thrown here without a code would be reported to users as an outdated bridge.
+ */
 export class HttpError extends Error {
   readonly status: number
   /** A stable, machine-readable reason for callers that must branch on it. */
   readonly code?: string
+  /** Extra fields for the answer body, for callers that act on them (e.g. a file's `size`). */
+  readonly details?: Record<string, unknown>
 
-  constructor(status: number, message: string, code?: string) {
+  constructor(status: number, message: string, code?: string, details?: Record<string, unknown>) {
     super(message)
     this.status = status
     this.code = code
+    this.details = details
   }
 }
 

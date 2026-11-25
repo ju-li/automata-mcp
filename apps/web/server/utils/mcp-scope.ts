@@ -133,16 +133,31 @@ function toStringArray(value: unknown): string[] {
  * Keep this synchronous. The toolkit evaluates `enabled` twice per request per
  * tool — once in `filterRawDefinitions`, once again in its own `filterByEnabled`.
  */
-export function isToolAllowed(event: H3Event, toolName: string, kind: InstanceKind): boolean {
+export function isToolAllowed(
+  event: H3Event,
+  toolName: string,
+  kind: InstanceKind,
+  options: { optIn?: boolean } = {},
+): boolean {
   const auth = event.context.mcpAuth as McpAuth | undefined
   if (!auth) return false
   // `auth.kind` and not `instanceKind(auth.instance)`: the discriminant is
   // resolved once in `resolveMcpAuth`, and reading it here is what makes the
   // union the single post-resolution reader of `instance.kind`.
   if (auth.kind !== kind) return false
+  return scopeGrantsTool(auth.scope, toolName, options.optIn === true)
+}
 
-  const scope = auth.scope
-  if (scope.allTools) return true
+/**
+ * Whether a token's scope reaches `toolName`, the kind aside. An opt-in tool
+ * (`optIn` on `defineKindTool`) is never covered by "All actions": only its
+ * name in `tool_names` grants it, so an existing all-actions token does not
+ * gain it on upgrade. `optIn` is passed by the caller that knows the tool —
+ * `defineKindTool`'s own closure — rather than looked up, so a registry that
+ * has not loaded cannot open it.
+ */
+export function scopeGrantsTool(scope: McpScope, toolName: string, optIn = false): boolean {
+  if (!optIn && scope.allTools) return true
   return scope.toolNames.includes(toolName)
 }
 

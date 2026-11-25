@@ -160,6 +160,47 @@ part in them and cannot be synced by any client.
 dashboard or by deleting the connection. A session ended from Telegram → Devices
 keeps them, because the likeliest next step is linking the same account again.
 
+## Downloading media
+
+`read-telegram-messages` reports `media` (`photo`, `document`, …) on a message
+that carries something. `download-telegram-media` fetches the file by `chatId`
+and message `id`, through the bridge's `GET /sessions/:id/media`.
+
+- **Opt-in per token**, like WhatsApp's `download-whatsapp-media`: never included in "All
+  actions"; tick it under *Opt-in actions* in the token's scope.
+- **Scope first.** The app refuses a chat outside the token's scope, then the
+  bridge fetches the message through that chat and refuses one that belongs to
+  another — private chats and basic groups share one message-id counter per
+  account, so an id alone could name a message elsewhere.
+- **Streamed, never stored.** The bridge downloads the file from Telegram in
+  chunks (`iterDownload`) and sends each chunk on as it arrives, as raw bytes;
+  nothing is written to disk or to the `telegram` schema. A download link pipes
+  that stream straight to the caller, so no layer holds the whole file. Only an
+  inline tool result is read into memory, capped at the inline limit, because
+  MCP carries the file inside the result.
+- **Sizes.** Same as WhatsApp: up to `NUXT_MEDIA_INLINE_MAX_BYTES` (5 MiB) inline,
+  up to `NUXT_MEDIA_MAX_BYTES` (25 MiB) as a 10-minute signed `/mcp-media/` link
+  that only the same token can follow. The bridge also refuses anything over
+  50 MiB, checked from the size Telegram reports before downloading and again
+  while downloading, gives each download a deadline, stops it when the app
+  disconnects, and runs at most `TELEGRAM_MEDIA_DOWNLOADS` (default 4) at once,
+  one per account. A cancelled download's last Telegram request keeps its
+  account's place until it has finished (it does not count toward the
+  bridge-wide limit) — so a link followed right after an `auto` download turned
+  out too large for inline can briefly get 429 for that account while the
+  cut-off request settles; try again a moment later. If Telegram leaves it unanswered for 10 minutes, the bridge
+  disconnects that account's Telegram client, which ends the request, and
+  reconnects the account; the place then comes back. A request still pending
+  after that keeps its place and is logged as an error (restart the bridge).
+- **Not downloadable:** self-destructing media, and anything while the account
+  is not online (`get-telegram-status`).
+- **A link download must finish within 120 seconds** (the bridge's deadline;
+  the app allows it a few seconds more). The stream follows the reader's pace,
+  so a reader slower than about 210 KB/s cannot fetch a 25 MiB file and gets a
+  broken download, never a short one.
+- **Needs a bridge from this release or later.** An older bridge has no media
+  route; the tool then says the bridge is too old (503) rather than "not found".
+
 ## One bridge process at a time
 
 Two processes using the same Telegram session make Telegram kill it, which costs

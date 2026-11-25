@@ -60,7 +60,9 @@ export const disclaimerSchema = z.object({
 export function scopeFromInput(input: ScopeInput): McpScope {
   return {
     allTools: input.all_tools,
-    toolNames: input.all_tools ? [] : dedupe(input.tool_names),
+    // Kept with "all actions" too, where a name can only add an opt-in tool
+    // (see `scopeFields` in tokens.ts).
+    toolNames: dedupe(input.tool_names),
     allChats: input.all_chats,
     chatJids: input.all_chats ? [] : dedupe(input.chat_jids),
     allTables: input.all_tables,

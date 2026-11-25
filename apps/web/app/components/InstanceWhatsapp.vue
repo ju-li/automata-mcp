@@ -366,7 +366,8 @@ function restartPairing() {
 
 /**
  * "Scan not working?" under the QR (#258). A scan that fails on the phone —
- * camera app instead of WhatsApp, device limit, WhatsApp refusing the link —
+ * camera app instead of WhatsApp, device limit, VPN or network, WhatsApp's
+ * cooldown on linking —
  * sends us nothing, so the page cannot tell the user what went wrong; all it
  * can do is list the usual causes. Collapsed at first so the code stays the
  * focus, opened once by itself after a couple of minutes with no scan. Opened
@@ -550,6 +551,10 @@ const importHistory = () => backToPairing(
             </li>
             <li>Make sure WhatsApp is up to date and the phone is online.</li>
             <li>
+              Turn off any VPN or data saver on the phone, or switch between Wi-Fi
+              and mobile data.
+            </li>
+            <li>
               WhatsApp allows a limited number of linked devices. If Linked devices
               already lists several, remove one you don't use and scan again.
             </li>
@@ -558,8 +563,9 @@ const importHistory = () => backToPairing(
               Scan the one on screen now.
             </li>
             <li>
-              If WhatsApp says it couldn't link the device, wait a few minutes before
-              trying again. Many attempts in a row can get a number flagged.
+              If WhatsApp says it couldn't link the device, stop and try again in a few
+              hours. WhatsApp limits how often a number can link devices, and more
+              attempts can extend the wait.
             </li>
           </ul>
         </details>

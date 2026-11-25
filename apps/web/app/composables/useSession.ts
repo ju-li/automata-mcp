@@ -6,6 +6,15 @@ export interface SessionUser {
 
 export type OrgRole = 'admin' | 'member'
 
+/** server/utils/promo.ts `Promo`, as `/api/auth/me` sends it. */
+export interface SessionPromo {
+  holiday: string
+  /** Last day shown, `YYYY-MM-DD`, US Eastern. */
+  endsOn: string
+  code: string
+  details: string
+}
+
 export interface SessionMembership {
   role: OrgRole
   /** Admins always; members while the organization allows it. Server-decided. */
@@ -19,9 +28,10 @@ export interface SessionMembership {
   /**
    * `plan` (a display name such as "Free" or "Pro (trial)"), `limited`,
    * `overLimit`, `recentHistoryOnly` and `telemetry` are present only on the
-   * hosted deployment; see usePlan() and plugins/posthog.client.ts.
+   * hosted deployment; see usePlan() and plugins/posthog.client.ts. `promo`
+   * is the running promotion (NUXT_PROMO), on Free only — see PromoBanner.vue.
    */
-  org: { id: string, name: string, plan?: string, limited?: boolean, overLimit?: boolean, recentHistoryOnly?: boolean, telemetry?: boolean }
+  org: { id: string, name: string, plan?: string, limited?: boolean, overLimit?: boolean, recentHistoryOnly?: boolean, telemetry?: boolean, promo?: SessionPromo }
 }
 
 interface MeResponse {

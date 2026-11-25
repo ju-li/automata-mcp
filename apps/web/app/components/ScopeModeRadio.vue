@@ -18,7 +18,15 @@ defineProps<{
   name: string
   allLabel: string
   someLabel: string
+  /**
+   * Check all / Uncheck all beside "only selected", shown while picking. What
+   * they act on is the caller's decision (`bulkState()` in `TokenScopeFields`);
+   * `filtered` only changes the hint, so the buttons can say a search narrows them.
+   */
+  bulk?: { canCheck: boolean, canUncheck: boolean, filtered: boolean }
 }>()
+
+const emit = defineEmits<{ bulk: [on: boolean] }>()
 </script>
 
 <template>
@@ -33,6 +41,28 @@ defineProps<{
     <div class="flex items-center gap-2">
       <RadioGroupItem :id="`${name}-some`" value="some" />
       <Label :for="`${name}-some`" class="font-normal">{{ someLabel }}</Label>
+      <div v-if="bulk && !open" class="ml-auto flex shrink-0 gap-1">
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          :disabled="!bulk.canCheck"
+          :title="bulk.filtered ? 'Check every one matching the search' : undefined"
+          @click="emit('bulk', true)"
+        >
+          Check all
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="xs"
+          :disabled="!bulk.canUncheck"
+          :title="bulk.filtered ? 'Uncheck every one matching the search; others stay checked' : undefined"
+          @click="emit('bulk', false)"
+        >
+          Uncheck all
+        </Button>
+      </div>
     </div>
   </RadioGroup>
 </template>

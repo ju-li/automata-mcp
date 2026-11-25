@@ -147,6 +147,17 @@ export default defineNuxtConfig({
     imapBackfillMax: '50000',
     imapAttachmentMaxBytes: String(10 * 1024 * 1024),
 
+    // WhatsApp / Telegram media downloads (download-whatsapp-media,
+    // download-telegram-media): the largest file fetched at all, and the
+    // largest returned inline in the tool result. Between the two, the tool
+    // hands back a short-lived signed URL instead. Never stored. See
+    // server/utils/media.ts.
+    mediaMaxBytes: String(25 * 1024 * 1024),
+    mediaInlineMaxBytes: String(5 * 1024 * 1024),
+    // Seals the signed download URLs. Unset = a random key per process (links
+    // then end with the process); set it for several replicas.
+    mediaUrlSecret: '',
+
     // Per-minute budgets on /mcp, so one runaway agent loop cannot slow the
     // shared backends for everyone: every request per token and per
     // organization, and calls to costly tools (searches, run-query) per
@@ -197,6 +208,10 @@ export default defineNuxtConfig({
     // leaves this install only when they submit it there. `off` hides the
     // offer. Ignored on the hosted offering. See server/utils/onboarding.ts.
     selfHostUpdatesUrl: 'https://billing.getautomata.app/self-host/updates',
+    // Hosted offering only: a promotion banner for organizations on Free, as
+    // `Holiday,YYYY-MM-DD,CODE,details` (end date inclusive, US Eastern). Empty
+    // = no banner. See server/utils/promo.ts.
+    promo: '',
     // Superseded by cloudUrl. Still read so a hosted deployment that upgrades
     // without setting the new variables keeps its plans on (fail closed).
     billing: '',

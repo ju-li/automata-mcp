@@ -46,6 +46,8 @@ export default defineEventHandler(async (event) => {
         title: tool.title || tool.name!,
         description: tool.description || '',
         readOnly: tool.annotations?.readOnlyHint === true,
+        // Not covered by "All actions"; granted only when ticked by name.
+        optIn: isOptInTool(tool.name!),
       }))
       .sort((a, b) => Number(b.readOnly) - Number(a.readOnly) || a.title.localeCompare(b.title)),
   }

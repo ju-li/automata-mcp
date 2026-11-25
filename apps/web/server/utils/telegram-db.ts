@@ -321,6 +321,28 @@ export async function telegramChat(instance: AppInstance, chatId: string): Promi
 }
 
 /**
+ * The media kind of one synced message in one chat (`photo`, `document`, …), or
+ * `null` for a message without media; undefined when no such live message is
+ * synced in that chat. For `download-telegram-media` to answer clearly before
+ * asking the bridge; the bridge re-checks the message against the chat itself.
+ */
+export async function telegramMessageMedia(
+  instance: AppInstance,
+  chatId: string,
+  messageId: number,
+): Promise<string | null | undefined> {
+  assertTelegramChatId(chatId)
+  const { query } = await telegramDbFor(instance)
+  const sessionId = sessionIdOf(instance)
+  const [row] = await guarded('read a message', () => query(sql => sql<Array<{ media_type: string | null }>>`
+    SELECT media_type FROM telegram.messages
+    WHERE session_id = ${sessionId} AND chat_id = ${chatId} AND message_id = ${messageId}
+      AND deleted_at IS NULL
+    LIMIT 1`))
+  return row ? row.media_type : undefined
+}
+
+/**
  * One chat as the token scope picker and the chats dialog render it — the shape
  * they already use for WhatsApp, with the Telegram chat id in `jid`. One shape
  * rather than a second pair of components that drift apart.

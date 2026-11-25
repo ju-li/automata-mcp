@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { TriangleAlertIcon } from '@lucide/vue'
 
-const props = defineProps<{ token: string | null, kind: InstanceKind, scope?: TokenScope }>()
+const props = defineProps<{ token: string | null, kind: InstanceKind, scope?: TokenScope, tools?: readonly McpToolInfo[] }>()
 const emit = defineEmits<{ close: [] }>()
 
 const open = computed({
@@ -45,7 +45,7 @@ const open = computed({
       </div>
 
       <p v-if="scope" class="text-sm">
-        <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope, kind) }}
+        <span class="text-muted-foreground">Scope:</span> {{ describeScope(scope, kind, tools) }}
       </p>
 
       <ConnectInstructions :kind="kind" :token="token" />

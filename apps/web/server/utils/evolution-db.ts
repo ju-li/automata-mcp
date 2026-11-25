@@ -1513,6 +1513,54 @@ export async function lastMessagePayloads(instance: AppInstance, rowIds: string[
   return new Map(rows.map(row => [row.id, row.message]))
 }
 
+/** One stored message, as `download-whatsapp-media` needs it: the key and payload Evolution downloads from. */
+export interface StoredMessage {
+  key: MessageKey | null
+  message: unknown
+  messageType: string | null
+}
+
+/**
+ * One message by its WhatsApp id, **only if it sits in one of `jids`** — the
+ * chats the caller's token reaches, already scope-checked by `expandChat`.
+ *
+ * The chat predicate is the point. Evolution's own media route finds a message
+ * by `key.id` alone, account-wide, so a token scoped to one chat that named a
+ * message id from another would otherwise download that chat's photo. Here the
+ * id is resolved inside the allowed chats or not at all, and the row handed to
+ * Evolution is this one.
+ *
+ * Copies of one message (see `listMessagesPage`) carry the same payload; the
+ * newest is taken, deterministically. Its full key (`remoteJid`, `id`,
+ * `fromMe`) is what goes to Evolution: stock 2.3.7 downloads from the payload
+ * sent with it, and evolution-api-reforged from 3.3.2 reloads by that key.
+ */
+export async function findMessageInChats(
+  instance: AppInstance,
+  jids: readonly [string, ...string[]],
+  messageId: string,
+): Promise<StoredMessage | undefined> {
+  const { query } = await evolutionDbFor(instance)
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  let rows: StoredMessage[]
+  try {
+    rows = await query(sql => sql<StoredMessage[]>`
+      SELECT key, message, "messageType"
+      FROM "Message"
+      WHERE "instanceId" = ${instanceId}
+        AND key->>'remoteJid' = ANY(${[...jids]}::text[])
+        AND key->>'id' = ${messageId}
+      ORDER BY "messageTimestamp" DESC, id
+      LIMIT 1
+    `)
+  }
+  catch (error) {
+    throw readFailure('[media]', 'Reading the message is temporarily unavailable', error)
+  }
+  return rows[0]
+}
+
 export interface LidLocalPartOptions {
   /** Only messages with `messageTimestamp` (unix seconds) at or after this. */
   since?: number

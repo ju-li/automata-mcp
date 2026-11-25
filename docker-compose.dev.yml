@@ -64,7 +64,7 @@ services:
     networks: [app]
 
   evolution:
-    image: ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.1@sha256:885b05339de10f7b9880101d1a48e12a77eaadf947235cf8f6fcdd1d843508c6
+    image: ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.3@sha256:77481ced8c62488b1f150a9630b392baf3ed6d2586635cab30ec542bc1d7f330
     profiles: [whatsapp]
     restart: unless-stopped
     depends_on:
@@ -168,6 +168,7 @@ services:
       TELEGRAM_BACKFILL_DAYS: ${TELEGRAM_BACKFILL_DAYS:-365}
       TELEGRAM_BACKFILL_BROADCAST: ${TELEGRAM_BACKFILL_BROADCAST:-false}
       TELEGRAM_BACKFILL_PAGE_DELAY_MS: ${TELEGRAM_BACKFILL_PAGE_DELAY_MS:-1000}
+      TELEGRAM_MEDIA_DOWNLOADS: ${TELEGRAM_MEDIA_DOWNLOADS:-4}
     networks: [app]
 
 volumes:

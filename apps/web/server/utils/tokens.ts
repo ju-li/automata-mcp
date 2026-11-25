@@ -143,7 +143,11 @@ export function scopeFields(scope: McpScope) {
     all_tables: scope.allTables,
     table_names: scope.allTables ? [] : scope.tableNames,
     all_tools: scope.allTools,
-    tool_names: scope.allTools ? [] : scope.toolNames,
+    // Kept under all_tools too: there they can only add opt-in tools, which
+    // all_tools does not cover (`TOOL_OPT_IN` in mcp-kind-tool.ts), and the
+    // gate decides what each name grants — not this write, which runs where
+    // the tool registry may not have loaded.
+    tool_names: scope.toolNames,
   }
 }
 

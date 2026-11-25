@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { z } from 'zod'
 import type { BridgeConfig } from './config.ts'
 import { digestsEqual, hashKey } from './crypto.ts'
@@ -30,6 +32,12 @@ type Access = 'public' | 'admin' | 'session'
 interface Reply {
   status: number
   body?: unknown
+  /**
+   * A raw byte answer, written chunk by chunk as it is produced and never held
+   * whole (media). Errors before the first chunk still answer as JSON; one after
+   * it can only end the connection, which the caller reads as a broken download.
+   */
+  stream?: { headers: Record<string, string>, chunks: AsyncIterable<Buffer>, signal?: AbortSignal }
 }
 
 interface Route {
@@ -45,7 +53,8 @@ interface Route {
   needsTelegram?: boolean
   /** Body cap for this route, when it needs more than `MAX_BODY_BYTES`. Read only after authentication. */
   maxBody?: number
-  handle: (request: { id: string, body: unknown, query: URLSearchParams }) => Promise<Reply>
+  /** `signal` aborts when the caller disconnects before the answer is written. */
+  handle: (request: { id: string, body: unknown, query: URLSearchParams, signal: AbortSignal }) => Promise<Reply>
 }
 
 const createBody = z.object({
@@ -85,6 +94,19 @@ const sendPhotoBody = z.object({
   // Only what the app sends after checking the bytes: both go as a photo.
   mimeType: z.enum(['image/jpeg', 'image/png']),
   image: z.string().min(1).max(Math.ceil(MAX_PHOTO_IMAGE_BYTES / 3) * 4).regex(/^[A-Za-z0-9+/]*={0,2}$/, 'base64'),
+})
+
+/**
+ * The bridge's own ceiling on one media download, whatever the caller asks
+ * for. The file is streamed, not held, but a download still occupies one of
+ * the few media slots of a process every linked account shares.
+ */
+const MEDIA_MAX_BYTES = 50 * 1024 * 1024
+
+const mediaQuery = z.object({
+  chatId: z.string().regex(/^-?\d{1,20}$/, 'a chat id as a string of digits'),
+  messageId: z.coerce.number().int().positive().max(2 ** 31 - 1),
+  maxBytes: z.coerce.number().int().positive().max(MEDIA_MAX_BYTES).default(MEDIA_MAX_BYTES),
 })
 
 export function createBridgeServer(manager: SessionManager, config: BridgeConfig): Server {
@@ -185,6 +207,13 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
         return { status: 200, body: await manager.sendPhoto(id, chatId, bytes, mimeType, caption) }
       },
     },
+    {
+      label: 'GET /sessions/:id/media', method: 'GET', pattern: /^\/sessions\/([^/]+)\/media$/, access: 'session', needsTelegram: true,
+      handle: async ({ id, query, signal }) => {
+        const { chatId, messageId, maxBytes } = parse(mediaQuery, Object.fromEntries(query))
+        return { status: 200, stream: await manager.media(id, chatId, messageId, maxBytes, signal) }
+      },
+    },
   ]
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -207,6 +236,11 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       return send(res, matching.length > 0 ? { status: 405, body: { error: 'Method not allowed.' } } : { status: 404, body: { error: 'Not found.' } })
     }
 
+    // Lets a long route (media) stop work nobody is waiting for any more. Armed
+    // before the first await, so a caller gone during authorization counts too.
+    const gone = new AbortController()
+    res.once('close', () => { if (!res.writableEnded) gone.abort() })
+
     try {
       const id = route.pattern.exec(path)?.[1] ?? ''
       const bearer = bearerOf(req)
@@ -226,11 +260,13 @@ export function createBridgeServer(manager: SessionManager, config: BridgeConfig
       }
 
       const body = req.method === 'POST' || req.method === 'PUT' ? await readJson(req, route.maxBody ?? MAX_BODY_BYTES) : undefined
-      send(res, await route.handle({ id, body, query: url.searchParams }))
+      const reply = await route.handle({ id, body, query: url.searchParams, signal: gone.signal })
+      if (reply.stream) await sendStream(res, reply.status, reply.stream)
+      else send(res, reply)
     }
     catch (error) {
       if (error instanceof HttpError) {
-        return send(res, { status: error.status, body: { error: error.message, ...(error.code && { code: error.code }) } })
+        return send(res, { status: error.status, body: { ...error.details, error: error.message, ...(error.code && { code: error.code }) } })
       }
       console.error(`[http] ${route.label} failed: ${describeError(error)}`)
       send(res, { status: 500, body: { error: 'Internal error.' } })
@@ -286,6 +322,48 @@ function parse<T>(schema: z.ZodType<T>, body: unknown): T {
   if (result.success) return result.data
   const detail = result.error.issues.map(issue => `${issue.path.join('.') || 'body'}: ${issue.message}`).join('; ')
   throw new HttpError(400, detail)
+}
+
+/**
+ * Write a streamed answer through `pipeline`, which waits on backpressure,
+ * stops when the socket closes, and ends the producer either way (so its
+ * `finally` — the media slot — always runs). The first chunk is pulled before
+ * the headers are written, so a failure to start still answers as JSON; a
+ * failure after it can only destroy the connection, which the caller reads as
+ * a broken download, never a complete one.
+ */
+async function sendStream(res: ServerResponse, status: number, stream: NonNullable<Reply['stream']>): Promise<void> {
+  const iterator = stream.chunks[Symbol.asyncIterator]()
+  let headersOut = false
+  try {
+    const first = await iterator.next()
+    res.writeHead(status, { ...stream.headers, 'cache-control': 'no-store' })
+    headersOut = true
+    const all = (async function* () {
+      if (first.done) return
+      yield first.value
+      for (;;) {
+        const step = await iterator.next()
+        if (step.done) return
+        yield step.value
+      }
+    })()
+    // The producer's own signal bounds delivery too, so a reader that stalls
+    // under backpressure cannot outlive the bridge's deadline.
+    await pipeline(Readable.from(all), res, ...(stream.signal ? [{ signal: stream.signal }] : []))
+  }
+  catch (error) {
+    // Before the headers: an ordinary error answer. After: only the connection
+    // can say the download broke.
+    if (!headersOut) throw error
+    console.error(`[http] stream ended early: ${describeError(error)}`)
+    res.destroy()
+  }
+  finally {
+    // Not awaited: it queues behind a chunk request that may still be pending;
+    // the producer gives its slot back on its own abort.
+    iterator.return?.(undefined).catch(() => {})
+  }
 }
 
 function send(res: ServerResponse, reply: Reply): void {

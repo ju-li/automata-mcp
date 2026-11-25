@@ -163,6 +163,16 @@ export type BridgeResolved = {
   known: boolean
 }
 
+/**
+ * End-to-end deadline on one media request to the bridge, body included
+ * (`applyRequestDeadline`). The bridge gives a download 120 s
+ * (`MEDIA_DOWNLOAD_DEADLINE_MS` in apps/telegram-bridge/src/sessions.ts); this
+ * allows that plus a margin, so a download the bridge would finish is never cut
+ * by the app first, and one the bridge gives up on ends here with the bridge's
+ * own answer. Change both together.
+ */
+const BRIDGE_MEDIA_DEADLINE_MS = 130_000
+
 export type BridgeSent = {
   chatId: string
   messageId: number
@@ -228,6 +238,13 @@ export function createTelegramBridge(creds: TelegramCredentials) {
       method: 'POST',
       body: { chatId, caption, mimeType: image.mimeType, image: image.bytes.toString('base64') },
       timeout: 90_000,
+    }),
+    // The file as a byte stream, never read here: callers pipe it or read it
+    // capped (telegram-media.ts). Metadata comes in the bridge's x-media-* headers.
+    media: (chatId: string, messageId: number, maxBytes: number, signal?: AbortSignal) => openMediaStream(client, `${session}/media`, {
+      query: { chatId, messageId, maxBytes },
+      timeout: BRIDGE_MEDIA_DEADLINE_MS,
+      ...(signal && { signal }),
     }),
     webhook: (url: string, headers: Record<string, string>) => client(`${session}/webhook`, { method: 'PUT', body: { url, headers } }),
   }

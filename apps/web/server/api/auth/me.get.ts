@@ -1,4 +1,5 @@
 import type { AppUser } from '~~/server/utils/app-db'
+import type { Promo } from '~~/server/utils/promo'
 
 /**
  * Current session, or `{ user: null }`. Deliberately not a 401: the client
@@ -22,7 +23,7 @@ import type { AppUser } from '~~/server/utils/app-db'
  * no field — so a self-hosted UI never learns plans exist. A read failure is a
  * 503 like the membership read.
  */
-async function planSummary(orgId: string): Promise<{ plan: string, limited: boolean, overLimit: boolean, recentHistoryOnly: boolean, telemetry: boolean } | undefined> {
+async function planSummary(orgId: string): Promise<{ plan: string, limited: boolean, overLimit: boolean, recentHistoryOnly: boolean, telemetry: boolean, promo?: Promo } | undefined> {
   if (!hostedMode()) return undefined
   try {
     const sql = await appDb()
@@ -33,8 +34,13 @@ async function planSummary(orgId: string): Promise<{ plan: string, limited: bool
       loadOrgLimits(sql, orgId),
       orgUsage(sql, orgId),
     ])
+    const plan = org?.plan_label ?? 'Free'
+    // The running promotion (NUXT_PROMO), for organizations on Free only —
+    // a Pro organization has nothing to redeem it on. See utils/promo.ts.
+    const promo = plan === 'Free' ? activePromo() : undefined
     return {
-      plan: org?.plan_label ?? 'Free',
+      plan,
+      ...(promo && { promo }),
       limited: hasLimits(limits),
       overLimit: overLimit(limits, usage),
       // Whether the create form may offer a full WhatsApp history import on

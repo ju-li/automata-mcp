@@ -44,5 +44,12 @@ export function redactHeaders(headers: Record<string, unknown> | undefined): Rec
 export function isMcpPath(path: string | undefined): boolean {
   if (!path) return false
   const [pathname] = path.split('?')
-  return pathname === '/mcp' || pathname!.startsWith('/mcp/')
+  return pathname === '/mcp' || pathname!.startsWith('/mcp/') || pathname!.startsWith(MEDIA_ROUTE_PREFIX)
 }
+
+/**
+ * Signed media downloads (`server/routes/mcp-media/[blob].get.ts`). On the MCP
+ * side of the auth split: bearer token only, never a cookie, and the path
+ * carries a signature, so it is redacted like `/mcp/<token>`.
+ */
+export const MEDIA_ROUTE_PREFIX = '/mcp-media/'

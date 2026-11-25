@@ -68,14 +68,16 @@ const startsReadOnly = computed(() => {
  *
  * The read tools come from the server, since only it knows which exist.
  */
-// Only a read-only-by-default token needs this, and only to seed its default
-// scope — a WhatsApp dashboard was fetching it on every load and discarding the answer.
+// Read on every load: it seeds a read-only token's default scope, and it names
+// the opt-in actions the token list's scope summaries must account for ("All
+// actions" leaves them out). An in-memory read on the server, no backend call.
 // The explicit key is shared with TokenScopeFields, which renders the same list:
 // Nuxt keys per call site by default, so the two were fetching it twice.
 const { data: toolCatalogue } = await useFetch<{ tools: McpToolInfo[] }>(
   () => `/api/instances/${props.instanceId}/mcp-tools`,
-  { key: `mcp-tools-${props.instanceId}`, lazy: true, immediate: startsReadOnly.value },
+  { key: `mcp-tools-${props.instanceId}`, lazy: true },
 )
+const catalogueTools = computed(() => toolCatalogue.value?.tools)
 
 function initialScope(): TokenScope {
   switch (props.kind) {
@@ -84,7 +86,8 @@ function initialScope(): TokenScope {
       return openScope()
     case 'postgres':
     case 'imap': {
-      const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly).map(t => t.name)
+      // Opt-in tools stay unticked: a preset must never grant what "All actions" withholds.
+      const readTools = (toolCatalogue.value?.tools ?? []).filter(t => t.readOnly && !t.optIn).map(t => t.name)
       return readOnlyScope(readTools)
     }
     default:
@@ -234,7 +237,8 @@ async function saveEdit() {
   const approve = approving.value
   await runSave(
     async () => {
-      const scope = { ...editScope.value, label: editLabel.value, send_disclaimer: disclaimerToSubmit(editScope.value, props.kind, editDisclaimer.value) }
+      const edited = scopeForSubmit(editScope.value, catalogueTools.value)
+      const scope = { ...edited, label: editLabel.value, send_disclaimer: disclaimerToSubmit(edited, props.kind, editDisclaimer.value, catalogueTools.value) }
       if (approve) {
         await $fetch(`/api/tokens/${token.id}/approve`, { method: 'POST', body: { ...scope, expiry: approveExpiry.value } })
         track('token_approved', { connection_id: props.instanceId, kind: props.kind, token_id: token.id, expiry: approveExpiry.value })
@@ -262,7 +266,7 @@ async function saveEdit() {
  * nothing until approved, and the secret is collected afterwards ("Get token").
  */
 async function request() {
-  const scope = newScope.value
+  const scope = scopeForSubmit(newScope.value, catalogueTools.value)
   const result = await runCreate(
     () => $fetch<{ notified: number }>(`/api/instances/${props.instanceId}/token-requests`, {
       method: 'POST',
@@ -270,7 +274,7 @@ async function request() {
         label: newLabel.value,
         expiry: newExpiry.value,
         ...scope,
-        send_disclaimer: disclaimerToSubmit(scope, props.kind, newDisclaimer.value),
+        send_disclaimer: disclaimerToSubmit(scope, props.kind, newDisclaimer.value, catalogueTools.value),
       },
     }),
     { failure: 'Could not send the request' },
@@ -285,7 +289,7 @@ async function request() {
 }
 
 async function create() {
-  const scope = newScope.value
+  const scope = scopeForSubmit(newScope.value, catalogueTools.value)
 
   const result = await runCreate(
     () => $fetch<{ token: string }>(`/api/instances/${props.instanceId}/tokens`, {
@@ -295,7 +299,7 @@ async function create() {
         expiry: newExpiry.value,
         assignedTo: newAssignee.value || undefined,
         ...scope,
-        send_disclaimer: disclaimerToSubmit(scope, props.kind, newDisclaimer.value),
+        send_disclaimer: disclaimerToSubmit(scope, props.kind, newDisclaimer.value, catalogueTools.value),
       },
     }),
     { failure: 'Could not create the token' },
@@ -306,7 +310,8 @@ async function create() {
     kind: props.kind,
     expiry: newExpiry.value,
     all_tools: scope.all_tools,
-    tool_count: scope.tool_names.length,
+    // Ordinary actions only: under "All actions" tool_names holds just opt-in tools.
+    tool_count: scope.all_tools ? 0 : scope.tool_names.length,
     all_chats: scope.all_chats,
     all_tables: scope.all_tables,
     for_other_member: Boolean(newAssignee.value) && newAssignee.value !== user.value?.id,
@@ -512,7 +517,7 @@ function statusOf(token: TokenRow) {
                 </template>
               </TableCell>
               <TableCell>
-                <span class="text-sm text-muted-foreground">{{ describeScope(token.scope, kind) }}</span>
+                <span class="text-sm text-muted-foreground">{{ describeScope(token.scope, kind, catalogueTools) }}</span>
               </TableCell>
               <TableCell>
                 <Badge :variant="statusOf(token).variant">
@@ -807,6 +812,7 @@ function statusOf(token: TokenRow) {
       :kind="kind"
       :label="howTo?.label"
       :scope="howTo?.scope"
+      :tools="catalogueTools"
       @update:open="value => { if (!value) howTo = null }"
       @create="createFromHowTo"
     />
@@ -825,6 +831,6 @@ function statusOf(token: TokenRow) {
       @update:open="value => { if (!value) clientsOf = null }"
     />
 
-    <RevealTokenDialog :token="revealed" :kind="kind" :scope="revealedScope" @close="revealed = null" />
+    <RevealTokenDialog :token="revealed" :kind="kind" :scope="revealedScope" :tools="catalogueTools" @close="revealed = null" />
   </section>
 </template>

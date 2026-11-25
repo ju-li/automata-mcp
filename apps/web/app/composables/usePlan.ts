@@ -19,6 +19,8 @@ export function usePlan() {
     overLimit: computed(() => Boolean(membership.value?.org.overLimit)),
     /** WhatsApp connections on this deployment's server may not import full history. */
     recentHistoryOnly: computed(() => Boolean(membership.value?.org.recentHistoryOnly)),
+    /** The running promotion, sent only to organizations on Free while it runs. */
+    promo: computed(() => membership.value?.org.promo),
   }
 }
 

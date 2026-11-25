@@ -41,7 +41,7 @@ export default defineKindTool({
       port: instance.db_port,
       allTables: scope.allTables,
       ...(!scope.allTables && { tablesInScope: scope.tableNames }),
-      canWrite: scope.allTools || scope.toolNames.includes('run-statement'),
+      canWrite: scopeGrantsTool(scope, 'run-statement'),
     }
   },
 })

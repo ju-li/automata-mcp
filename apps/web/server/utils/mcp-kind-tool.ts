@@ -57,6 +57,29 @@ export type ExpensiveMarker = true | ((args: Record<string, unknown>) => boolean
 const TOOL_COST = new Map<string, ExpensiveMarker>()
 
 /**
+ * Tools "All actions" (`all_tools`) does not cover: a token reaches one only
+ * when it names it in `tool_names`, in either scope mode.
+ *
+ * "All actions" means every tool this build ships, including tools added after
+ * the token was minted. That is the right default for ordinary reads and sends,
+ * and the wrong one for a tool that hands out a different class of data or
+ * action — downloading the bytes of a photo or a document, sending a file — so
+ * an existing token never starts doing one because the server was upgraded.
+ *
+ * **Enforced without this set.** `defineKindTool` passes its own `optIn` into
+ * `isToolAllowed` from the closure, so the gate cannot be opened by a lookup
+ * that missed. The set is for listings — the scope picker
+ * (`api/instances/[id]/mcp-tools.get.ts`) and anything else that imports the
+ * tool registry first — and is filled like `TOOL_KINDS`.
+ */
+const TOOL_OPT_IN = new Set<string>()
+
+/** Whether `name` is an opt-in tool. Only meaningful where the tool registry has loaded (see `TOOL_OPT_IN`). */
+export function isOptInTool(name: string): boolean {
+  return TOOL_OPT_IN.has(name)
+}
+
+/**
  * Whether this call to `name` with these arguments is an expensive one. A
  * marker that throws counts as expensive; an unknown tool does not, since the
  * toolkit refuses it before anything runs.
@@ -143,13 +166,19 @@ export function defineKindTool<
      * raw arguments — unvalidated, so it must tolerate anything.
      */
     expensive?: ExpensiveMarker
+    /**
+     * Not covered by "All actions": granted only when the token names it (see
+     * `TOOL_OPT_IN`). For tools that hand out a new class of data or action.
+     */
+    optIn?: true
   },
 ): ToolDefinition<InputSchema, OutputSchema> {
-  const { kind, group, available, expensive, ...rest } = definition
+  const { kind, group, available, expensive, optIn, ...rest } = definition
   const kinds: readonly InstanceKind[] = Array.isArray(kind) ? kind : [kind as InstanceKind]
 
   TOOL_KINDS.set(rest.name, kinds)
   if (expensive) TOOL_COST.set(rest.name, expensive)
+  if (optIn) TOOL_OPT_IN.add(rest.name)
 
   // A tool argument of the same name would be shadowed by the injected one and
   // then stripped before its handler ran — fail at load instead.
@@ -174,7 +203,7 @@ export function defineKindTool<
     // Kept synchronous: the toolkit evaluates `enabled` twice per request per
     // tool.
     enabled: event =>
-      kinds.some(k => isToolAllowed(event, rest.name, k)) && (available?.() ?? true),
+      kinds.some(k => isToolAllowed(event, rest.name, k, { optIn: optIn === true })) && (available?.() ?? true),
   })
 }
 

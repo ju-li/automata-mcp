@@ -94,6 +94,12 @@ services:
       NUXT_MCP_RATE_TOKEN_PER_MINUTE: ${MCP_RATE_TOKEN_PER_MINUTE:-120}
       NUXT_MCP_RATE_ORG_PER_MINUTE: ${MCP_RATE_ORG_PER_MINUTE:-600}
       NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE: ${MCP_RATE_EXPENSIVE_PER_MINUTE:-30}
+      # Media downloads (download-whatsapp-media, download-telegram-media). Empty = the
+      # defaults (25 MiB, 5 MiB inline, a random link key per process). See
+      # docs/whatsapp.md "Downloading media".
+      NUXT_MEDIA_MAX_BYTES: ${MEDIA_MAX_BYTES:-}
+      NUXT_MEDIA_INLINE_MAX_BYTES: ${MEDIA_INLINE_MAX_BYTES:-}
+      NUXT_MEDIA_URL_SECRET: ${MEDIA_URL_SECRET:-}
       # Optional Redis for rate-limit counts and short-lived caches shared
       # across replicas. Empty = kept in-process.
       NUXT_REDIS_URL: ${REDIS_URL:-}
@@ -112,7 +118,7 @@ services:
       retries: 10
 
   evolution:
-    image: ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.1@sha256:885b05339de10f7b9880101d1a48e12a77eaadf947235cf8f6fcdd1d843508c6
+    image: ghcr.io/operational-intelligence-inc/evolution-api-reforged:3.3.3@sha256:77481ced8c62488b1f150a9630b392baf3ed6d2586635cab30ec542bc1d7f330
     profiles: [whatsapp]
     restart: unless-stopped
     depends_on:
