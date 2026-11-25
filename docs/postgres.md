@@ -43,9 +43,14 @@ What the checks do enforce, on every statement:
   (`pg_stats`, `pg_stats_ext`), large objects, user mappings or
   `pg_stat_activity`'s query text.
 - **No functions that reach outside the query.** Calls are resolved against
-  `pg_proc` from both the statement text and the plan. Anything outside
-  `pg_catalog`, anything `SECURITY DEFINER`, and a denylist of builtins such as
-  `pg_read_file`, `lo_import`, `dblink` and `pg_sleep` are refused. The text is
+  `pg_proc` from both the statement text and the plan, read by a SQL tokenizer
+  (quoted, mixed-case and commented spellings included). Operators and casts
+  backed by a user-defined SQL or PL function are refused the same way. Anything outside
+  `pg_catalog`, anything `SECURITY DEFINER`, and builtins that reach outside the
+  query are refused: `pg_read_file`, `lo_import`, `dblink`, `pg_sleep`, the
+  whole SQL/XML export family (`table_to_xml`, `schema_to_xml`, `query_to_xml`,
+  …) and `ts_stat` / `ts_rewrite`, which read tables or run SQL text inside the
+  function where the plan cannot see it. The text is
   scanned *before* `EXPLAIN` because Postgres folds an `IMMUTABLE` function with
   constant arguments during planning, leaving only its result in the plan.
 - **Writes only through `run-statement`**, and only `INSERT`/`UPDATE`/`DELETE`/

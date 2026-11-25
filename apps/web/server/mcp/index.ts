@@ -47,7 +47,7 @@ export default defineMcpHandler({
     // NUXT_REDIS_URL is set, in-process otherwise. See mcp-rate-limit.ts.
     // Decoded once here and handed to both readers below.
     const body = event.method === 'POST' ? await readRawBody(event, 'utf8') : undefined
-    const throttled = await takeMcpBudget(chargesFor(auth, toolCallsIn(body)))
+    const throttled = await takeMcpBudget(chargesFor(auth, rpcBodyOf(body)))
     if (throttled) return mcpRateLimited(throttled)
 
     // Which client this token is used from, recorded on `initialize` only and

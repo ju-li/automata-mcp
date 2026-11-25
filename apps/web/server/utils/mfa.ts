@@ -376,32 +376,33 @@ export async function afterFactorRemoved(tx: Db, userId: string): Promise<void> 
  */
 const FAILURE_WINDOW_MS = 15 * 60 * 1000
 const FAILURE_LIMIT = 10
-const failures = new Map<string, number[]>()
 
-function recentFailures(key: string, now: number): number[] {
-  const recent = (failures.get(key) ?? []).filter(at => now - at < FAILURE_WINDOW_MS)
-  if (recent.length) failures.set(key, recent)
-  else failures.delete(key)
-  return recent
+// Same structure as login-throttle.ts's caps (bounded, never flushable), built
+// on first use: a top-level `new AttemptLog` is the #287 boot-order TDZ shape.
+let failureLog: AttemptLog | undefined
+function failures(): AttemptLog {
+  return failureLog ??= new AttemptLog({
+    windowMs: FAILURE_WINDOW_MS,
+    limit: FAILURE_LIMIT,
+    softCap: 50_000,
+    hardCap: 200_000,
+  })
 }
 
 /** Check and count an attempt, with no `await` between the two. Returns its timestamp. */
 export function claimAuthAttempt(key: string): number {
   const now = Date.now()
-  // Prune everything now and then so keys for addresses tried once do not pile up.
-  if (failures.size > 10_000) for (const k of failures.keys()) recentFailures(k, now)
-  const recent = recentFailures(key, now)
-  if (recent.length >= FAILURE_LIMIT) {
+  if (failures().blockedUntil(key, now)) {
     console.warn(`[mfa] throttled sign-in attempts for ${key.split(':')[0]}`)
     throw createError({ statusCode: 429, statusMessage: 'Too many failed attempts. Try again in a few minutes.' })
   }
-  failures.set(key, [...recent, now])
+  failures().add(key, now)
   return now
 }
 
 /** The attempt claimed at `at` succeeded: it no longer counts against the account. */
 export function forgiveAuthAttempt(key: string, at: number): void {
-  dropAttempt(failures, key, at)
+  failures().drop(key, at)
 }
 
 /**

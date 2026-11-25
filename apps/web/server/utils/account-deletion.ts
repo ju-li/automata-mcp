@@ -42,6 +42,16 @@ import { accountDeletedNoticeEmail } from '../emails/account'
  * - **Hosted outbox in the same transaction:** `member.removed` re-syncs a Pro
  *   organization's seats, `org.deleted` cancels its subscription, `user.deleted`
  *   removes the CRM contact. Each event exists exactly when its change does.
+ * - **Earlier outbox rows scrubbed, same transaction** (`scrubPersonalData`):
+ *   the account's signup and email-change payloads lose their addresses and
+ *   name, and with `account-and-org` the organization's `org.created` loses its
+ *   name. The rows stay for the consumers' cursors.
+ *
+ * Not reached, by decision (`docs/billing.md` "Data deletion requests"):
+ * Evolution's `"IsOnWhatsapp"` cache is server-wide with no `instanceId`, so
+ * nothing ties its rows to a connection, and the message-DB connection is
+ * read-only — writing to Evolution's tables from here would break that rule for
+ * one cache row. PostHog persons, backups and logs are outside the app too.
  */
 
 export type DeletionMode = 'account' | 'account-and-org' | 'blocked'
@@ -127,7 +137,7 @@ export async function deleteAccount(user: AppUser): Promise<{ orgDeleted: boolea
       // would otherwise leave a membership to cascade away unannounced.
       const [membership] = await tx`SELECT 1 FROM app.memberships WHERE user_id = ${user.id} FOR UPDATE`
       if (membership) throw createError({ statusCode: 409, statusMessage: CHANGED })
-      await deleteUserRow(tx, user, false)
+      await deleteUserRow(tx, user)
       return false
     }
 
@@ -145,7 +155,7 @@ export async function deleteAccount(user: AppUser): Promise<{ orgDeleted: boolea
     await recordHostedEvent(tx, { type: 'member.removed', org: orgId, userId: user.id, payload: { role: mine.role, reason: 'account_deleted' } })
 
     if (mode === 'account') {
-      await deleteUserRow(tx, user, false)
+      await deleteUserRow(tx, user)
       return false
     }
 
@@ -158,7 +168,7 @@ export async function deleteAccount(user: AppUser): Promise<{ orgDeleted: boolea
     `
     if (remaining?.count) throw createError({ statusCode: 409, statusMessage: CHANGED })
 
-    await deleteUserRow(tx, user, true)
+    await deleteUserRow(tx, user, orgId)
     await tx`DELETE FROM app.organizations WHERE id = ${orgId}`
     await recordHostedEvent(tx, { type: 'org.deleted', org: orgId, userId: user.id, payload: { reason: 'account_deleted' } })
     return true
@@ -167,9 +177,11 @@ export async function deleteAccount(user: AppUser): Promise<{ orgDeleted: boolea
   return { orgDeleted, connectionsDeleted }
 }
 
-async function deleteUserRow(tx: Db, user: AppUser, orgDeleted: boolean): Promise<void> {
+/** `deletedOrg`: the organization going with the account (`account-and-org`). */
+async function deleteUserRow(tx: Db, user: AppUser, deletedOrg?: string): Promise<void> {
   await tx`DELETE FROM app.users WHERE id = ${user.id}`
-  await recordHostedEvent(tx, { type: 'user.deleted', userId: user.id, payload: { orgDeleted } })
+  await scrubPersonalData(tx, { userId: user.id, orgId: deletedOrg })
+  await recordHostedEvent(tx, { type: 'user.deleted', userId: user.id, payload: { orgDeleted: Boolean(deletedOrg) } })
 }
 
 /**

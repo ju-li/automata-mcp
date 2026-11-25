@@ -50,7 +50,6 @@ export default defineKindTool({
     const auth = useMcpAuth()
     if (auth.kind !== 'telegram') throw createError({ statusCode: 401, statusMessage: 'Unauthorized' })
 
-    assertChatAllowed(auth.scope, chatId)
     const mediaKind = await findTelegramMedia(auth, chatId, messageId)
     const inlineMax = mediaInlineMaxBytes()
     const link = (over?: { size?: number }) => {

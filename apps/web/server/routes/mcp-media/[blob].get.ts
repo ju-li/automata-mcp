@@ -1,5 +1,5 @@
 // Tool modules register their kinds and costs as they load (`defineKindTool`);
-// `isToolAllowed` and `chargesFor` read those. This route is not `/mcp`, so on a
+// `isToolAllowed` and `costlyChargeFor` read those. This route is not `/mcp`, so on a
 // fresh process the first followed link could arrive before anything loaded
 // them: load them here too, as `mcp-tools.get.ts` does.
 import '#nuxt-mcp-toolkit/tools.mjs'
@@ -54,7 +54,7 @@ export default defineEventHandler(async (event) => {
   // when the backend actually fetches the file, so only the per-connection
   // costly-tools budget is charged again: it protects that connection's
   // Evolution or bridge, whoever follows.
-  const throttled = await takeMcpBudget(chargesFor(auth, [{ name: tool, args: {} }]).filter(charge => charge.scope === 'connection'))
+  const throttled = await takeMcpBudget(costlyChargeFor(auth, [{ name: tool, args: {} }]))
   if (throttled) return mcpRateLimited(throttled)
 
   // Counted and recorded like a call of the tool (name and outcome only), so a
@@ -113,7 +113,6 @@ export default defineEventHandler(async (event) => {
       let release: (() => void) | undefined
       let opened: Awaited<ReturnType<typeof openTelegramMedia>>
       try {
-        assertChatAllowed(auth.scope, ref.c)
         await findTelegramMedia(auth, ref.c, messageId)
         release = acquireMediaSlot(auth.instance.id)
         opened = await openTelegramMedia(auth, ref.c, messageId, maxBytes, requestAbortSignal())

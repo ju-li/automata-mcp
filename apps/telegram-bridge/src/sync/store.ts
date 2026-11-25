@@ -102,6 +102,13 @@ const INT4 = 23
 const INT8 = 20
 const TIMESTAMPTZ = 1184
 
+/**
+ * Rows per statement in `wipe`. Deleting a row only marks it (the indexes are
+ * cleaned by vacuum), so a batch this size takes a fraction of a second and
+ * stays far inside the 15 s statement_timeout on a loaded database.
+ */
+const WIPE_BATCH_ROWS = 5_000
+
 /** Postgres's answers for a transaction that lost to another and is worth running again. */
 const RETRYABLE = new Set(['40P01', '40001'])
 
@@ -529,16 +536,77 @@ export class SyncStore {
       WHERE id = ${this.sessionId}`
   }
 
-  /** Everything synced for this session. Messages go with their chats. */
+  /**
+   * Everything synced for this session.
+   *
+   * **Messages and users go first, in batches (#303).** One `DELETE FROM chats`
+   * cascading to every message ran as a single statement under the pool's 15 s
+   * `statement_timeout`, and on an account with a lot of history it ran out —
+   * the connection could not be deleted. Each batch is its own statement and
+   * commits on its own, so no statement holds the timeout however large the
+   * account, and a wipe cut short (the database going away) is finished by the
+   * caller's retry rather than started over. What is left for the closing
+   * transaction is the chat rows and whatever arrived meanwhile.
+   *
+   * **Each batch starts after the last one's key**, never from the start of the
+   * session's range: deleted rows stay in the index until vacuum, so a batch
+   * asking for "the first N" walks past every row deleted before it — measured
+   * on 1.5M messages, batches grew from ~50 ms to ~130 ms by the end, so the
+   * whole wipe was quadratic in the account's size; from the last key they stay
+   * flat (~35 ms).
+   *
+   * Still one `write`: nothing else of this session's writes in between, and
+   * a batch never meets a live upsert for the same rows (#220).
+   */
   async wipe(): Promise<void> {
-    await this.write(() => this.sql.begin(async (tx) => {
-      await tx`DELETE FROM chats WHERE session_id = ${this.sessionId}`
-      await tx`DELETE FROM users WHERE session_id = ${this.sessionId}`
-      await tx`
-        UPDATE sessions SET data_user_id = NULL, dialogs_synced_at = NULL,
-          update_pts = NULL, update_qts = NULL, update_date = NULL, update_seq = NULL
-        WHERE id = ${this.sessionId}`
-    }))
+    await this.write(async () => {
+      let message: { chat_id: string, message_id: string } | undefined
+      for (;;) {
+        const [batch] = await this.sql<{ n: number, chat_id: string | null, message_id: string | null }[]>`
+          WITH batch AS (
+            SELECT chat_id, message_id FROM messages
+            WHERE session_id = ${this.sessionId}
+              ${message ? this.sql`AND (chat_id, message_id) > (${message.chat_id}, ${message.message_id})` : this.sql``}
+            ORDER BY chat_id, message_id
+            LIMIT ${WIPE_BATCH_ROWS}
+          ), gone AS (
+            DELETE FROM messages m USING batch b
+            WHERE m.session_id = ${this.sessionId} AND m.chat_id = b.chat_id AND m.message_id = b.message_id
+          ), last AS (
+            SELECT chat_id, message_id FROM batch ORDER BY chat_id DESC, message_id DESC LIMIT 1
+          )
+          SELECT (SELECT count(*)::int FROM batch) AS n, last.chat_id, last.message_id
+          FROM (SELECT 1) one LEFT JOIN last ON true`
+        if (!batch || batch.n < WIPE_BATCH_ROWS || batch.chat_id === null || batch.message_id === null) break
+        message = { chat_id: batch.chat_id, message_id: batch.message_id }
+      }
+
+      let user: string | undefined
+      for (;;) {
+        const [batch] = await this.sql<{ n: number, user_id: string | null }[]>`
+          WITH batch AS (
+            SELECT user_id FROM users
+            WHERE session_id = ${this.sessionId} ${user ? this.sql`AND user_id > ${user}` : this.sql``}
+            ORDER BY user_id
+            LIMIT ${WIPE_BATCH_ROWS}
+          ), gone AS (
+            DELETE FROM users u USING batch b
+            WHERE u.session_id = ${this.sessionId} AND u.user_id = b.user_id
+          )
+          SELECT (SELECT count(*)::int FROM batch) AS n, (SELECT max(user_id) FROM batch) AS user_id`
+        if (!batch || batch.n < WIPE_BATCH_ROWS || batch.user_id === null) break
+        user = batch.user_id
+      }
+
+      await this.sql.begin(async (tx) => {
+        await tx`DELETE FROM chats WHERE session_id = ${this.sessionId}`
+        await tx`DELETE FROM users WHERE session_id = ${this.sessionId}`
+        await tx`
+          UPDATE sessions SET data_user_id = NULL, dialogs_synced_at = NULL,
+            update_pts = NULL, update_qts = NULL, update_date = NULL, update_seq = NULL
+          WHERE id = ${this.sessionId}`
+      })
+    })
   }
 
   async listChats(take: number, skip: number): Promise<{ chats: ChatListing[], hasMore: boolean }> {

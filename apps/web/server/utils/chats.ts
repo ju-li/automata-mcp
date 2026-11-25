@@ -748,7 +748,7 @@ export async function listMessages(
       text: previewOf(content.payload),
       editOf: content.editOf,
       unreadable: content.unreadable,
-      media: mediaOfPayload(content.payload),
+      media: mediaOfNode(mediaNodeOf(content.payload)),
       // The `contextInfo` column stays authoritative — see `MessageRow.mentioned`
       // in `evolution-db.ts`. But 2.3.7's `extendedTextMessage` rewrite only
       // touches the *top level*, so a message nested inside an edit or a wrapper
@@ -1350,11 +1350,13 @@ function mediaOfNode(media: WhatsappMediaNode | undefined): WhatsappMediaInfo | 
   if (!media || media.viewOnce || !media.node.mediaKey || !mediaLocated(media.node)) return undefined
   const { key, kind, node } = media
   const mimetype = typeof node.mimetype === 'string' ? cleanMimeType(node.mimetype) : undefined
+  const fileName = key === 'documentMessage' ? cleanFileName(node.fileName) : undefined
+  const fileSize = fileLengthOf(node.fileLength)
   return {
     mediaType: key === 'audioMessage' && node.ptt === true ? 'voice' : kind,
     ...(mimetype && mimetype !== 'application/octet-stream' && { mimetype }),
-    ...(key === 'documentMessage' && cleanFileName(node.fileName) && { fileName: cleanFileName(node.fileName) }),
-    ...(fileLengthOf(node.fileLength) !== undefined && { fileSize: fileLengthOf(node.fileLength) }),
+    ...(fileName && { fileName }),
+    ...(fileSize !== undefined && { fileSize }),
   }
 }
 
@@ -1368,10 +1370,6 @@ function mediaOfNode(media: WhatsappMediaNode | undefined): WhatsappMediaInfo | 
 export function mediaLocated(node: Record<string, unknown>): boolean {
   const filled = (value: unknown) => typeof value === 'string' && value.length > 0
   return filled(node.directPath) || filled(node.url)
-}
-
-function mediaOfPayload(payload: Record<string, any> | undefined): WhatsappMediaInfo | undefined {
-  return mediaOfNode(mediaNodeOf(payload))
 }
 
 /**

@@ -11,9 +11,8 @@ export interface MediaInfo {
   mediaType: 'photo' | 'video' | 'video-note' | 'audio' | 'voice' | 'sticker' | 'document'
   mimeType: string
   fileName?: string
+  /** Exact length of what is downloaded (a document's, or the photo size's), never an estimate; absent when unknown. */
   size?: number
-  /** `size` is the exact length of what is downloaded (a document's, or the photo size's), not an estimate. */
-  exactSize?: boolean
 }
 
 export function mediaInfoOf(media: Api.TypeMessageMedia | undefined): MediaInfo | undefined {
@@ -23,7 +22,7 @@ export function mediaInfoOf(media: Api.TypeMessageMedia | undefined): MediaInfo 
     return {
       mediaType: 'photo',
       mimeType: 'image/jpeg',
-      ...(size !== undefined && Number.isSafeInteger(size) && size >= 0 && { size, exactSize: true }),
+      ...(size !== undefined && Number.isSafeInteger(size) && size >= 0 && { size }),
     }
   }
 
@@ -43,7 +42,7 @@ export function mediaInfoOf(media: Api.TypeMessageMedia | undefined): MediaInfo 
       mediaType,
       mimeType: cleanMimeType(document.mimeType),
       ...(fileName && { fileName }),
-      ...(Number.isSafeInteger(size) && size >= 0 && { size, exactSize: true }),
+      ...(Number.isSafeInteger(size) && size >= 0 && { size }),
     }
   }
 

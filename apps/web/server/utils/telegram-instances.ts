@@ -183,6 +183,10 @@ export async function registerTelegramWebhook(instance: AppInstance): Promise<vo
  * at a live session — the ordering `deleteInstance` insists on. A missing admin
  * key is not a reason to refuse, for the reason given there: a connection nobody
  * can delete is worse than a logged orphan.
+ *
+ * The refusal is a handled 503 that says the connection was kept, never the
+ * bridge's raw error (#303: an unhandled 500 with nothing for the user to go
+ * on). Handled errors never reach Nitro's log, so the cause is logged here.
  */
 export async function deleteTelegramSession(instance: AppInstance): Promise<void> {
   await closeKeyedPool(`tg:${instance.id}`)
@@ -200,7 +204,19 @@ export async function deleteTelegramSession(instance: AppInstance): Promise<void
     await createTelegramAdminBridge(creds).deleteSession(instance.instance_id)
   }
   catch (error) {
+    const status = httpStatusOf(error)
     // Already gone on the bridge; carry on and remove the row.
-    if (httpStatusOf(error) !== 404) throw error
+    if (status === 404) return
+    const said = (error as { data?: { error?: unknown } } | undefined)?.data?.error
+    console.error(
+      `[telegram] could not delete the bridge session of ${instance.id}, so the connection was kept: `
+      + `bridge answered ${status ?? (error as Error | undefined)?.message ?? 'nothing'}`
+      + (typeof said === 'string' ? ` (${said})` : ''),
+    )
+    throw createError({
+      statusCode: 503,
+      message: 'The Telegram bridge could not remove the session behind this connection, so the connection was kept. '
+        + 'Try again in a few minutes.',
+    })
   }
 }

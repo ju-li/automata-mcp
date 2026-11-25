@@ -22,7 +22,11 @@ export interface BucketCharge {
   key: string
   /** Capacity and refill per minute. Never 0 here: a disabled bucket is not charged. */
   perMinute: number
-  /** How many tokens this request takes. Clamped to capacity, so it can always fit eventually. */
+  /**
+   * How many tokens this request takes. Never clamped: a cost above
+   * `perMinute` can never fit and is refused (the caller refuses it first,
+   * with its own answer; this is the second line).
+   */
   cost: number
 }
 
@@ -48,8 +52,11 @@ export function decideBuckets(
   charges: readonly BucketCharge[],
   now: number,
 ): BucketDecision {
+  const oversized = charges.findIndex(charge => charge.cost > charge.perMinute)
+  if (oversized !== -1) return { waitMs: 60_000, limiting: oversized }
+
   const available = charges.map((charge, i) => tokensAt(states[i], charge.perMinute, now))
-  const costs = charges.map(charge => Math.min(charge.cost, charge.perMinute))
+  const costs = charges.map(charge => charge.cost)
 
   let waitMs = 0
   let limiting: number | undefined

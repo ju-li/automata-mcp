@@ -63,13 +63,18 @@ function configuredPromo(): Promo | undefined {
 }
 
 /** Today in US Eastern, `YYYY-MM-DD` (en-CA formats dates that way). */
+// Built on first use and kept: it runs on every session read of a Free org
+// while a promotion is set. Not at module load (the #287 boot-order TDZ shape).
+let easternDate: Intl.DateTimeFormat | undefined
+
 function easternToday(now: Date): string {
-  return new Intl.DateTimeFormat('en-CA', {
+  easternDate ??= new Intl.DateTimeFormat('en-CA', {
     timeZone: PROMO_TIME_ZONE,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-  }).format(now)
+  })
+  return easternDate.format(now)
 }
 
 /** The configured promotion while it runs, else `undefined`. */

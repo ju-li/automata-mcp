@@ -190,6 +190,16 @@ export type BridgeBackfill = {
 const BRIDGE_REQUEST_DEADLINE_MS = 20_000
 
 /**
+ * Unlinking and deleting a session wipe everything synced for it, after a
+ * Telegram-side logout the bridge allows 20 s to connect and 20 s to answer.
+ * The wipe runs in batches (#303) and takes as long as the account's history
+ * does — tens of seconds for a few million messages — so the ordinary deadline
+ * would give up on a delete that was going to succeed. Cut short anyway, the
+ * bridge carries on and the batches it committed stay done: a retry finishes it.
+ */
+const BRIDGE_SESSION_WIPE_DEADLINE_MS = 180_000
+
+/**
  * A `$fetch` bound to one bridge and one bearer key. Same check-not-pin caveat
  * as `createEvolutionClient`: `$fetch` resolves DNS itself, so the guard narrows
  * the rebinding window rather than closing it.
@@ -225,7 +235,7 @@ export function createTelegramBridge(creds: TelegramCredentials) {
     // logged here, and the bridge never stores it.
     password: (password: string) => client<BridgeSessionState>(`${session}/password`, { method: 'POST', body: { password } }),
     reconnect: () => client<BridgeSessionState>(`${session}/reconnect`, { method: 'POST' }),
-    logout: () => client<BridgeSessionState>(`${session}/logout`, { method: 'POST' }),
+    logout: () => client<BridgeSessionState>(`${session}/logout`, { method: 'POST', timeout: BRIDGE_SESSION_WIPE_DEADLINE_MS }),
     resolve: (query: string) => client<BridgeResolved>(`${session}/resolve`, { method: 'POST', body: { query } }),
     // More older history for one chat whose backfill stopped at its message
     // count. The bridge stores it and fetches at backfill's own pace.
@@ -265,7 +275,7 @@ export function createTelegramAdminBridge(creds: TelegramAdminCredentials) {
   const client = bridgeFetch(creds.baseUrl, creds.adminKey, creds.userSupplied)
   return {
     createSession: (name: string) => client<{ id: string, name: string, apiKey: string }>('/sessions', { method: 'POST', body: { name } }),
-    deleteSession: (id: string) => client(`/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    deleteSession: (id: string) => client(`/sessions/${encodeURIComponent(id)}`, { method: 'DELETE', timeout: BRIDGE_SESSION_WIPE_DEADLINE_MS }),
   }
 }
 

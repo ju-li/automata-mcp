@@ -274,14 +274,28 @@ export async function openMediaStream(
   url: string,
   options: Record<string, unknown>,
 ): Promise<{ headers: Headers, body: ReadableStream<Uint8Array> }> {
+  const { headers, stream } = await openRaw(client, url, options)
+  if (!stream) throw new MediaFetchError(502, undefined)
+  return { headers, body: stream }
+}
+
+/**
+ * The streamed answer, or `MediaFetchError` carrying the backend's own error
+ * body (first 64 KiB) — the one place both media fetches turn a refusal into
+ * the status their callers map.
+ */
+async function openRaw(
+  client: typeof $fetch,
+  url: string,
+  options: Record<string, unknown>,
+): Promise<{ headers: Headers, stream: ReadableStream<Uint8Array> | undefined }> {
   const response = await client.raw(url, { ...options, responseType: 'stream', ignoreResponseError: true })
   const stream = response._data as ReadableStream<Uint8Array> | undefined
   if (!response.ok) {
-    const text = stream ? (await readCapped(stream, 64 * 1024)).text : ''
+    const text = stream ? await readCapped(stream, 64 * 1024) : ''
     throw new MediaFetchError(response.status, safeJson(text))
   }
-  if (!stream) throw new MediaFetchError(502, undefined)
-  return { headers: response.headers, body: stream }
+  return { headers: response.headers, stream }
 }
 
 /**
@@ -469,17 +483,12 @@ export async function fetchBase64Media<T>(
   field: string,
   maxFileBytes: number,
 ): Promise<{ fields: T | null, data: Buffer | undefined }> {
-  const response = await client.raw(url, { ...options, responseType: 'stream', ignoreResponseError: true })
-  const stream = response._data as ReadableStream<Uint8Array> | undefined
-  if (!response.ok) {
-    const text = stream ? (await readCapped(stream, 64 * 1024)).text : ''
-    throw new MediaFetchError(response.status, safeJson(text))
-  }
+  const { headers, stream } = await openRaw(client, url, options)
   const tooLarge = () => createError({ statusCode: 413, message: `This file is larger than the ${formatBytes(maxFileBytes)} this connector fetches.` })
   if (!stream) return { fields: null, data: undefined }
 
   const bodyLimit = cappedBodyBytes(maxFileBytes)
-  const declared = Number(response.headers.get('content-length') ?? '')
+  const declared = Number(headers.get('content-length') ?? '')
   const known = Number.isSafeInteger(declared) && declared > 0
   if (known && declared > bodyLimit) {
     await stream.cancel().catch(() => {})
@@ -487,7 +496,7 @@ export async function fetchBase64Media<T>(
   }
   // Content-Length sizes the output only for an uncompressed answer: compressed,
   // it counts the compressed bytes, not the base64 this reads after decoding.
-  const sized = known && !response.headers.get('content-encoding')
+  const sized = known && !headers.get('content-encoding')
   const reader = new Base64FieldReader(field, maxFileBytes, sized ? Math.floor(declared * 3 / 4) : undefined)
   const source = stream.getReader()
   let size = 0
@@ -510,7 +519,8 @@ export async function fetchBase64Media<T>(
 }
 
 /** At most `limit` bytes of a stream as text; past it, the stream is cancelled and `truncated` set. */
-async function readCapped(stream: ReadableStream<Uint8Array>, limit: number): Promise<{ text: string, truncated: boolean }> {
+/** At most `limit` bytes of `stream` as text; the rest is cancelled, not read. */
+async function readCapped(stream: ReadableStream<Uint8Array>, limit: number): Promise<string> {
   const reader = stream.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
@@ -520,14 +530,12 @@ async function readCapped(stream: ReadableStream<Uint8Array>, limit: number): Pr
     if (size + value.byteLength > limit) {
       chunks.push(value.subarray(0, limit - size))
       await reader.cancel().catch(() => {})
-      return { text: Buffer.concat(chunks).toString('utf8'), truncated: true }
+      break
     }
     size += value.byteLength
     chunks.push(value)
   }
-  const whole = Buffer.concat(chunks)
-  chunks.length = 0
-  return { text: whole.toString('utf8'), truncated: false }
+  return Buffer.concat(chunks).toString('utf8')
 }
 
 function safeJson(text: string): unknown {

@@ -27,46 +27,15 @@ import type { CaptureResult, PostHog } from 'posthog-js'
  *   `mask_all_element_attributes`: autocapture would otherwise send the text of
  *   a clicked message row, chat name or DSN field. No session replay, surveys,
  *   heatmaps or exception capture.
- * - **URLs scrubbed in `before_send`**: query and hash dropped (the
- *   verification and password-reset links carry `?token=`), and the invitation
- *   code in `/invite/<code>` — a bearer credential for joining an org —
- *   replaced. Any new page with a secret in its path joins `scrubPath`.
+ * - **Secrets in URLs never leave**: feature flags off (their request carried
+ *   the raw first-page URL past `before_send`), `token`/`code` masked where
+ *   the URL is recorded, and every URL scrubbed in `before_send`. All of it in
+ *   `utils/analyticsPrivacy.ts`, with its rules; a new page with a secret in
+ *   its path joins `SECRET_PATHS` there.
  *
  * Product events (connection and token created/removed) go through `track()`
  * in `composables/analytics.ts`, never `posthog.capture` directly.
  */
-
-const SECRET_PATHS: RegExp[] = [/^\/invite\/[^/]+/]
-
-function scrubPath(path: string): string {
-  for (const pattern of SECRET_PATHS) {
-    if (pattern.test(path)) return path.replace(pattern, m => `${m.slice(0, m.lastIndexOf('/'))}/:code`)
-  }
-  return path
-}
-
-function scrubUrl(value: string): string {
-  if (value.startsWith('/')) return scrubPath(value.split(/[?#]/, 1)[0] ?? '')
-  try {
-    const url = new URL(value)
-    // Only our own pages carry our secrets; a referrer from elsewhere still
-    // loses its query, which may carry someone else's.
-    return `${url.origin}${url.origin === location.origin ? scrubPath(url.pathname) : url.pathname}`
-  }
-  catch {
-    return value
-  }
-}
-
-function scrubProperties(properties: Record<string, unknown> | undefined): void {
-  if (!properties) return
-  for (const [key, value] of Object.entries(properties)) {
-    if (typeof value === 'string' && /url|pathname|referrer/i.test(key)) properties[key] = scrubUrl(value)
-    else if (value && typeof value === 'object' && (key === '$set' || key === '$set_once')) {
-      scrubProperties(value as Record<string, unknown>)
-    }
-  }
-}
 
 /**
  * True until the session has been read once. `init` captures the first
@@ -82,9 +51,9 @@ function beforeSend(event: CaptureResult | null): CaptureResult | null {
     if (event.event === '$pageview') heldPageview = true
     return null
   }
-  scrubProperties(event.properties)
-  scrubProperties(event.$set)
-  scrubProperties(event.$set_once)
+  scrubProperties(event.properties, location.origin)
+  scrubProperties(event.$set, location.origin)
+  scrubProperties(event.$set_once, location.origin)
   return event
 }
 
@@ -124,6 +93,7 @@ export default defineNuxtPlugin(async () => {
     capture_heatmaps: false,
     capture_dead_clicks: false,
     capture_exceptions: false,
+    ...PRIVACY_OPTIONS,
     before_send: beforeSend,
   })
   setAnalyticsClient(posthog)

@@ -26,6 +26,14 @@ import type { Db } from './app-db'
  *   `app.users` rather than trusting this copy; telemetry may use it.)
  * - **The type is a closed union** (`HostedEventType`), so a consumer can match
  *   exhaustively and a typo fails to compile.
+ * - **A payload key holding personal data joins `scrubPersonalData()`.** Rows
+ *   outlive the account they describe (no foreign keys, never deleted), so an
+ *   account deletion strips those keys from the account's earlier rows rather
+ *   than deleting them. Today: `user.signed_up` `email`/`name`,
+ *   `user.email_changed` `from`/`to`, `org.created` `name`. A new key carrying
+ *   an address, a name or anything else about a person that is not scrubbed
+ *   there survives every deletion request (GDPR Art. 17) until someone finds it
+ *   by hand.
  */
 
 export type HostedEventType =
@@ -81,6 +89,43 @@ export function recordHostedEventQuietly(event: HostedEvent): void {
     .catch((error) => {
       console.error(`[hosted-events] could not record ${event.type}:`, error)
     })
+}
+
+/**
+ * Strip personal data from the outbox rows of a deleted account, and of its
+ * organization when that goes too. Runs in the deletion's transaction, so the
+ * scrub and the deletion commit together.
+ *
+ * Scrub, not delete: rows and ids stay, so a consumer behind on its cursor
+ * still sees every event, and one added later still starts from the whole
+ * backlog. What consumers read survives — the CRM takes only `plan` and
+ * `invited` from `user.signed_up` and reads everything else live, billing reads
+ * none of these keys.
+ *
+ * Keys are removed per event type, never "these keys from every row of the
+ * user": `member.role_changed` also has `from`/`to`, holding roles, and must
+ * keep them. Types are literals in the SQL, not binds, so the planner can match
+ * the partial indexes from migration `0033` — the table is never pruned and a
+ * scan of it would sit inside the deletion's locks.
+ *
+ * Not gated on `hostedEventsEnabled()`: rows written while a deployment was
+ * hosted stay after it stops being, and deserve the same scrub.
+ */
+export async function scrubPersonalData(db: Db, target: { userId: string, orgId?: string }): Promise<void> {
+  await db`
+    UPDATE app.hosted_events SET payload = payload - 'email' - 'name'
+    WHERE user_id = ${target.userId} AND type = 'user.signed_up' AND payload ?| array['email', 'name']
+  `
+  await db`
+    UPDATE app.hosted_events SET payload = payload - 'from' - 'to'
+    WHERE user_id = ${target.userId} AND type = 'user.email_changed' AND payload ?| array['from', 'to']
+  `
+  if (target.orgId) {
+    await db`
+      UPDATE app.hosted_events SET payload = payload - 'name'
+      WHERE org = ${target.orgId} AND type = 'org.created' AND payload ? 'name'
+    `
+  }
 }
 
 // ── MCP usage rollups ──────────────────────────────────────────────────────

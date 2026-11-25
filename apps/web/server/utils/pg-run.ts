@@ -249,15 +249,16 @@ async function withGuardedStatement<T>(
 
     // Before the EXPLAIN, not after: Postgres folds an IMMUTABLE function with
     // constant arguments *during* planning, so a plan that came back has already
-    // run it and no longer names it. See `functionNamesInText`.
-    await assertFunctionsSafe(tx, functionNamesInText(statement))
+    // run it and no longer names it. Operators and casts fold the same way.
+    const textRefs = sqlRefs(statement)
+    await assertFunctionsSafe(tx, textRefs)
 
     const facts = await planFacts(exec, statement)
 
     options.assertKind(facts)
     // Again from the plan, which catches what the text cannot — a function
     // reached through a view.
-    await assertFunctionsSafe(tx, facts.functions)
+    await assertFunctionsSafe(tx, facts.refs, textRefs)
     await assertRelationsInScope(tx, facts, scope)
 
     return await body(exec, startedAt)

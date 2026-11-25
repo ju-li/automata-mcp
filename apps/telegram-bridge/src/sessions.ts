@@ -764,7 +764,7 @@ export class SessionManager {
             }
             // Past an exact size is as wrong as short of it, and must fail
             // before the extra bytes go out, not after.
-            if (info.exactSize && sent > info.size!) {
+            if (info.size !== undefined && sent > info.size) {
               throw new HttpError(502, 'Telegram sent more than the file\'s size.')
             }
             yield step.value
@@ -774,7 +774,7 @@ export class SessionManager {
           if (stop.aborted) throw stopped()
           // Nor may a short read: teleproto takes any short chunk as the end of
           // the file. A document's size, and a photo size's, is exact: hold it to it.
-          if (info.exactSize && sent !== info.size) {
+          if (info.size !== undefined && sent !== info.size) {
             throw new HttpError(502, 'Telegram ended the file early.')
           }
         }

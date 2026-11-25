@@ -4,6 +4,7 @@ import { decideBuckets, type BucketCharge, type BucketState } from './token-buck
 import { REDIS_KEY_PREFIX, logRedisError, readyRedis } from './redis'
 import { rememberBounded } from './lookup-cache'
 import { isExpensiveCall } from './mcp-kind-tool'
+import type { RpcBody, ToolCallInBody } from './mcp-rpc-body'
 
 /**
  * Per-minute budgets on `/mcp`, so one runaway agent loop cannot hammer
@@ -14,7 +15,7 @@ import { isExpensiveCall } from './mcp-kind-tool'
  *
  * | scope | key | charged | env (default) |
  * |---|---|---|---|
- * | `token` | `tok:<token id>` | every POST, cost = max(1, tools/call in body) | `NUXT_MCP_RATE_TOKEN_PER_MINUTE` (120) |
+ * | `token` | `tok:<token id>` | every POST, cost = JSON-RPC messages in body (mcp-rpc-body.ts) | `NUXT_MCP_RATE_TOKEN_PER_MINUTE` (120) |
  * | `organization` | `org:<org id>` | same | `NUXT_MCP_RATE_ORG_PER_MINUTE` (600) |
  * | `connection` | `exp:<instance id>` | each call to a tool marked `expensive` | `NUXT_MCP_RATE_EXPENSIVE_PER_MINUTE` (30) |
  *
@@ -26,6 +27,9 @@ import { isExpensiveCall } from './mcp-kind-tool'
  *
  * - **All or nothing.** A request either fits every bucket or takes from none,
  *   so a token over its own budget never drains its organization's.
+ * - **Never clamp a cost to the bucket.** A request costing more than a whole
+ *   bucket is refused outright (400, `mcpRequestTooLarge`), never charged the
+ *   bucket's size: clamping let one batch of 20 000 calls cost 120.
  * - **429 with `Retry-After`, never 401.** A 401 tells an MCP client to throw
  *   the token away; this one works again in seconds.
  * - **State in Redis when `NUXT_REDIS_URL` is set (hosted), else in-process.**
@@ -77,65 +81,39 @@ function mcpRateLimits(): Limits {
   return limits
 }
 
-/** One `tools/call` in a request body. */
-interface ToolCallInBody {
-  name: string
-  args: Record<string, unknown>
-}
-
-/**
- * The tool calls a JSON-RPC body asks for — one object or a batch. Substring
- * test first so `initialize` and `tools/list` bodies are not parsed here.
- * Anything unreadable is `[]`; the toolkit answers it with its own error.
- */
-export function toolCallsIn(raw: string | undefined): ToolCallInBody[] {
-  if (!raw || !raw.includes('tools/call')) return []
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  }
-  catch {
-    return []
-  }
-  const messages = Array.isArray(parsed) ? parsed : [parsed]
-  const calls: ToolCallInBody[] = []
-  for (const message of messages) {
-    if (!message || typeof message !== 'object') continue
-    const { method, params } = message as { method?: unknown, params?: unknown }
-    if (method !== 'tools/call' || !params || typeof params !== 'object') continue
-    const { name, arguments: args } = params as { name?: unknown, arguments?: unknown }
-    if (typeof name !== 'string') continue
-    calls.push({
-      name,
-      args: args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {},
-    })
-  }
-  return calls
-}
-
 interface ScopedCharge extends BucketCharge { scope: RateScope }
 
 /** The buckets this request is charged against, leaving out any turned off. */
-export function chargesFor(auth: Pick<McpAuth, 'tokenId' | 'instance'>, calls: readonly ToolCallInBody[]): ScopedCharge[] {
+export function chargesFor(auth: Pick<McpAuth, 'tokenId' | 'instance'>, body: RpcBody): ScopedCharge[] {
   const budget = mcpRateLimits()
-  const cost = Math.max(1, calls.length)
-  const expensive = calls.filter(call => isExpensiveCall(call.name, call.args)).length
+  const cost = body.messages
 
   const charges: ScopedCharge[] = []
   if (budget.token) charges.push({ scope: 'token', key: `tok:${auth.tokenId}`, perMinute: budget.token, cost })
   if (budget.organization && auth.instance.org) {
     charges.push({ scope: 'organization', key: `org:${auth.instance.org}`, perMinute: budget.organization, cost })
   }
-  if (budget.connection && expensive) {
-    charges.push({ scope: 'connection', key: `exp:${auth.instance.id}`, perMinute: budget.connection, cost: expensive })
-  }
-  return charges
+  return [...charges, ...costlyChargeFor(auth, body.calls)]
+}
+
+/**
+ * The per-connection costly-tools charge for `calls`, or none when none is
+ * costly or the budget is off. Also what a followed media link pays: the
+ * backend fetch happens then, on that connection, whoever follows it.
+ */
+export function costlyChargeFor(auth: Pick<McpAuth, 'instance'>, calls: readonly ToolCallInBody[]): ScopedCharge[] {
+  const budget = mcpRateLimits()
+  const expensive = calls.filter(call => isExpensiveCall(call.name, call.args)).length
+  if (!budget.connection || !expensive) return []
+  return [{ scope: 'connection', key: `exp:${auth.instance.id}`, perMinute: budget.connection, cost: expensive }]
 }
 
 export interface BudgetRefusal {
   retryAfterMs: number
   scope: RateScope
   perMinute: number
+  /** Set when the request alone costs more than the bucket holds: waiting never helps. */
+  oversized?: { cost: number }
 }
 
 /**
@@ -144,6 +122,14 @@ export interface BudgetRefusal {
  */
 export async function takeMcpBudget(charges: readonly ScopedCharge[]): Promise<BudgetRefusal | undefined> {
   if (!charges.length) return undefined
+
+  // Before any bucket is touched: such a request can never fit, so it takes
+  // nothing and is not a 429 a client would retry.
+  const oversized = charges.find(charge => charge.cost > charge.perMinute)
+  if (oversized) {
+    logRefusal(oversized)
+    return { retryAfterMs: 0, scope: oversized.scope, perMinute: oversized.perMinute, oversized: { cost: oversized.cost } }
+  }
 
   let result: { waitMs: number, limiting?: number } | undefined
   const redis = readyRedis()
@@ -187,7 +173,10 @@ local wait = 0
 local limiting = 0
 for i = 1, #KEYS do
   local cap = tonumber(ARGV[2 * i - 1])
-  local cost = math.min(tonumber(ARGV[2 * i]), cap)
+  local cost = tonumber(ARGV[2 * i])
+  if cost > cap then
+    return { 60000, i }
+  end
   local v = redis.call('HMGET', KEYS[i], 't', 'a')
   local tokens = cap
   if v[1] and v[2] then
@@ -206,8 +195,7 @@ for i = 1, #KEYS do
 end
 if wait == 0 then
   for i = 1, #KEYS do
-    local cap = tonumber(ARGV[2 * i - 1])
-    local cost = math.min(tonumber(ARGV[2 * i]), cap)
+    local cost = tonumber(ARGV[2 * i])
     redis.call('HSET', KEYS[i], 't', tostring(avail[i] - cost), 'a', tostring(now))
     redis.call('PEXPIRE', KEYS[i], 60000)
   end
@@ -250,6 +238,7 @@ const SCOPE_WORDING: Record<RateScope, string> = {
  * surface. Never 401: the token is fine and works again in seconds.
  */
 export function mcpRateLimited(refusal: BudgetRefusal): Response {
+  if (refusal.oversized) return mcpRequestTooLarge(refusal)
   const retryAfter = Math.max(1, Math.ceil(refusal.retryAfterMs / 1000))
   return new Response(
     JSON.stringify({
@@ -262,5 +251,26 @@ export function mcpRateLimited(refusal: BudgetRefusal): Response {
       },
     }),
     { status: 429, headers: { 'content-type': 'application/json', 'retry-after': String(retryAfter) } },
+  )
+}
+
+/**
+ * One request that costs more than a whole bucket: 400, JSON-RPC `-32600`, no
+ * `Retry-After` — it would never fit, so a client must split it, not wait.
+ */
+function mcpRequestTooLarge(refusal: BudgetRefusal): Response {
+  const cost = refusal.oversized!.cost
+  return new Response(
+    JSON.stringify({
+      jsonrpc: '2.0',
+      id: null,
+      error: {
+        code: -32600,
+        message: `This request carries ${cost} calls, more than the ${refusal.perMinute} per minute this connector allows `
+          + `(${refusal.scope} budget). Send fewer calls per request.`,
+        data: { cost, scope: refusal.scope, perMinute: refusal.perMinute },
+      },
+    }),
+    { status: 400, headers: { 'content-type': 'application/json' } },
   )
 }

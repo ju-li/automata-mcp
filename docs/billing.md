@@ -175,6 +175,54 @@ Each consumer keeps its own position in `cloud.cursors`, and nothing deletes row
 
 Events never contain credentials, connection strings, chat or table names, message content or tool arguments. Email addresses appear only on user events. A self-hosted deployment writes none.
 
+Deleting an account strips the personal data from its earlier events instead of deleting them (see [Data deletion requests](#data-deletion-requests)).
+
+## Data deletion requests
+
+When someone asks for their data to be erased (GDPR Art. 17), ask them to delete their account themselves: profile page → **Delete account**. Most of the erasure then happens on its own. There is no admin route that deletes someone else's account.
+
+**Done by the deletion itself:**
+
+- the account, its sessions, two-factor factors, connector tokens, token tool-call history, pending verifications and password resets;
+- when they were the organization's only member: the organization, its invitations and every connection. A WhatsApp connection is deleted on Evolution too, with its messages, chats and contacts; a Telegram connection's bridge session is deleted with its synced chats; an IMAP connection's synced headers go with it;
+- their Brevo contact (the CRM consumer deletes it within about 15 seconds of the `user.deleted` event);
+- **personal data in `app.hosted_events`.** The rows stay, since every consumer keeps its place in them with a cursor, but in the same transaction as the deletion `user.signed_up` loses `email` and `name`, `user.email_changed` loses `from` and `to`, and, when the organization went too, `org.created` loses `name`.
+
+**Not done, by hand or not at all:**
+
+- **Evolution's `"IsOnWhatsapp"` cache.** Evolution keeps one table of every number any account on the server looked up, with no column naming the account. Nothing links its rows to the deleted connection, and the app only ever reads Evolution's database. Rows for numbers the account looked up cannot be told apart from other accounts' lookups. The account's own number can be removed by hand. Ask the requester for it (the connection, and the number Evolution recorded on it, are gone by now):
+
+  ```sql
+  SELECT "remoteJid", "jidOptions" FROM "IsOnWhatsapp"
+  WHERE "remoteJid" = '<digits>@s.whatsapp.net' OR "jidOptions" LIKE '%<digits>%';
+  -- then the same WHERE with DELETE FROM "IsOnWhatsapp"
+  ```
+
+  It is a cache: a later lookup of the number writes the row again.
+- **PostHog.** Their person (and the organization group, if it went) stays in PostHog. Delete the person in PostHog by hand: search by email or by the user id.
+- **Backups and logs.** Railway keeps daily Postgres backups for 6 days, and logs for as long as the plan's log retention. Neither can be edited; the data ages out of both.
+
+**Checking.** Nothing should come back from either query:
+
+```sql
+SELECT id FROM app.users WHERE lower(email) = lower('<address>');
+SELECT id, type FROM app.hosted_events WHERE payload::text ILIKE '%<address>%';
+```
+
+The second reads the whole outbox; run it at a quiet hour. Accounts deleted before the scrub existed (before #322) still hold their address. Find the account's rows from it and strip them the same way:
+
+```sql
+-- the user id, and the organization if it was deleted with the account
+SELECT user_id FROM app.hosted_events WHERE type = 'user.signed_up' AND payload->>'email' ILIKE '<address>';
+SELECT org FROM app.hosted_events WHERE type = 'org.deleted' AND user_id = '<user id>';
+
+UPDATE app.hosted_events SET payload = payload - 'email' - 'name' WHERE user_id = '<user id>' AND type = 'user.signed_up';
+UPDATE app.hosted_events SET payload = payload - 'from' - 'to' WHERE user_id = '<user id>' AND type = 'user.email_changed';
+UPDATE app.hosted_events SET payload = payload - 'name' WHERE org = '<org id>' AND type = 'org.created';
+```
+
+An address the account changed away from appears only under `from`/`to` of `user.email_changed`; search for it there if the signup row names a newer one.
+
 ## Revenue data
 
 The cloud service keeps revenue numbers in Postgres, so they can be queried and joined with `app` without asking Stripe. Two tables in the `cloud` schema:

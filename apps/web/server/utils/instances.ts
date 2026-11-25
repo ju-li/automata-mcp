@@ -788,6 +788,34 @@ async function storePaired(instance: AppInstance): Promise<void> {
 }
 
 /**
+ * Clear `logged_out_at` — the account this app logged out is linked again.
+ *
+ * **Only on live `open`, never on `ownerJid`.** Evolution keeps `ownerJid`
+ * through a logout, so it says nothing about whether the account came back;
+ * the in-memory state is what says a socket is linked now.
+ *
+ * Conditional on the value this row was read with, so a read that started
+ * before a newer logout cannot clear that logout's stamp (written to the
+ * millisecond, as read back). A row read before any logout carries none and
+ * clears nothing. Fire and forget, like `notePaired`: a failed clear is
+ * retried by the next read, and until then the alerts only stay quiet about a
+ * connection that is `open` anyway — `readConnectionHealth` ignores the stamp
+ * while live state is `open`.
+ */
+export function noteRelinked(instance: Pick<AppInstance, 'id' | 'logged_out_at'>): void {
+  const stamp = instance.logged_out_at
+  if (!stamp) return
+  appDb()
+    .then(sql => sql`
+      UPDATE app.instances SET logged_out_at = NULL
+      WHERE id = ${instance.id} AND logged_out_at = ${stamp}::timestamptz
+    `)
+    .catch((error) => {
+      console.error(`[instances] could not record that connection ${instance.id} is linked again:`, error)
+    })
+}
+
+/**
  * Has this WhatsApp connection ever been paired — asked live, right before the
  * reaper deletes it. Records `paired_at` when the answer is yes.
  *
@@ -1210,6 +1238,7 @@ async function readStatus(
   }
 
   if (live === 'open' || row.ownerJid) notePaired(instance)
+  if (live === 'open') noteRelinked(instance)
 
   // Reason and write time from the source that supplied the row — the SQL
   // row's two side reads, or the `fetchInstances` row, which carries both —
@@ -2004,6 +2033,7 @@ export async function getInstanceQr(instance: AppInstance): Promise<{ state: Con
     await extendConnectHold(instance)
     // The pairing page's poll is the first thing to see a scan land.
     notePaired(instance)
+    noteRelinked(instance)
     return { state: before }
   }
   if (before === 'connecting') await extendConnectHold(instance)
@@ -2020,7 +2050,10 @@ export async function getInstanceQr(instance: AppInstance): Promise<{ state: Con
 
   if (response?.instance?.state) {
     const state = normalizeState(response.instance.state)
-    if (state === 'open') notePaired(instance)
+    if (state === 'open') {
+      notePaired(instance)
+      noteRelinked(instance)
+    }
     return { state }
   }
 
@@ -2046,6 +2079,16 @@ export async function getInstanceQr(instance: AppInstance): Promise<{ state: Con
  *
  * Evolution answers 400 when the instance is already disconnected. That is the
  * state the caller asked for, so it is treated as success.
+ *
+ * **Recorded as ours (`logged_out_at`, #260).** Evolution keeps `ownerJid`
+ * through a logout, so to the alerts a logged-out account looked paired and
+ * `close` — an outage, mailed to everyone after the grace period, about
+ * something the owner just did on purpose. The stamp makes the alerts read it
+ * as unlinked instead (`readConnectionHealth`), closing any open outage
+ * quietly, until a live read sees `open` again (`noteRelinked`). Written only
+ * once Evolution accepted the call: a failed logout leaves the account as it
+ * was, and an outage there still alerts. A logout from the phone never passes
+ * through here, so it still alerts — the owner may not know it happened.
  */
 export async function logoutInstance(instance: AppInstance): Promise<void> {
   const evolution = evolutionClientForInstance(instance)
@@ -2056,9 +2099,23 @@ export async function logoutInstance(instance: AppInstance): Promise<void> {
   } catch (error) {
     if (httpStatusOf(error) !== 400) throw error
   }
+  // Best effort, like the hold below: the logout itself is done, and refusing
+  // it now would tell the owner it failed. Missing, the next sweep may mail an
+  // outage for it after the grace period — today's behaviour, logged.
+  await recordLoggedOut(instance).catch(error =>
+    console.error(`[instances] could not record that connection ${instance.id} was logged out:`, error))
   // Best effort: a hold left running only delays the next QR by its length.
   await releaseConnectHold(instance).catch(error =>
     console.error(`[instances] could not release the connect hold of ${instance.id}:`, error))
+}
+
+async function recordLoggedOut(instance: AppInstance): Promise<void> {
+  const sql = await appDb()
+  // Millisecond precision, so `noteRelinked` can match the value it read back.
+  await sql`
+    UPDATE app.instances SET logged_out_at = date_trunc('milliseconds', now())
+    WHERE id = ${instance.id}
+  `
 }
 
 /**
@@ -2154,8 +2211,20 @@ export async function deleteInstance(
       try {
         await createEvolutionClient(creds)(`/instance/delete/${encodeURIComponent(instance.name)}`, { method: 'DELETE' })
       } catch (error) {
+        const status = httpStatusOf(error)
         // A 404 means Evolution has already lost it; carry on and clean up our row.
-        if (httpStatusOf(error) !== 404) throw error
+        // Anything else keeps the row, as a handled 503 that says so (#303) —
+        // which never reaches Nitro's log, so the cause is logged here.
+        if (status !== 404) {
+          console.error(
+            `[instances] could not delete the Evolution instance of ${instance.id}, so the connection was kept: `
+            + `Evolution answered ${status ?? (error as Error | undefined)?.message ?? 'nothing'}`,
+          )
+          throw createError({
+            statusCode: 503,
+            message: 'The WhatsApp server could not remove this connection, so it was kept. Try again in a few minutes.',
+          })
+        }
       }
     }
   }

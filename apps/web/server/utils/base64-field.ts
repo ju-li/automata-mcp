@@ -139,13 +139,17 @@ export class Base64FieldReader {
   private decode(part: Buffer): void {
     if (part.length === 0) return
     let text = (this.pendingEscape ? '\\' : '') + part.toString('latin1')
-    // An odd run of backslashes at the end: the last one escapes what the next chunk starts with.
-    let trailing = 0
-    while (trailing < text.length && text[text.length - 1 - trailing] === '\\') trailing++
-    this.pendingEscape = trailing % 2 === 1
-    if (this.pendingEscape) text = text.slice(0, -1)
-    text = text.replace(/\\\//g, '/')
-    if (text.includes('\\')) throw new Base64FieldError('malformed', 'The file\'s base64 holds an unexpected escape.')
+    // Evolution does not escape `/`, so most chunks hold no backslash at all:
+    // only those pay for the escape handling below.
+    if (this.pendingEscape || part.includes(0x5C)) {
+      // An odd run of backslashes at the end: the last one escapes what the next chunk starts with.
+      let trailing = 0
+      while (trailing < text.length && text[text.length - 1 - trailing] === '\\') trailing++
+      this.pendingEscape = trailing % 2 === 1
+      if (this.pendingEscape) text = text.slice(0, -1)
+      text = text.replace(/\\\//g, '/')
+      if (text.includes('\\')) throw new Base64FieldError('malformed', 'The file\'s base64 holds an unexpected escape.')
+    }
     if (this.padded && text.length > 0) throw new Base64FieldError('malformed', 'The file\'s base64 continues after its padding.')
     text = this.carry + text
     // `=` only at the end of what has arrived so far; a group it completes must end the value.

@@ -82,7 +82,13 @@ type ConnectionHealth = {
  * `connectionStatus` alone. It is also
  * absent when Evolution cannot be reached, so an Evolution outage is invisible
  * here — which is today's behaviour, and nothing can say more without a stored
- * "was linked" fact.
+ * "was linked" fact. Because it survives a logout, a logout this app made is
+ * told apart by our own `logged_out_at` (#260): set and not live `open` =
+ * unlinked on purpose, `knownUnlinked` like a Telegram logout, so an open
+ * outage closes with no mail and none starts. A logout from the phone never
+ * sets it and still alerts. Never key `knownUnlinked` on `ownerJid` missing:
+ * an unreachable Evolution loses it too, and clearing then would re-alert
+ * when Evolution came back.
  *
  * Telegram: the bridge keeps the account's identity (`me`) on the session row
  * through a dropped connection and through a revocation, and clears it only on
@@ -100,14 +106,18 @@ async function readConnectionHealth(instance: AppInstance, kind: 'whatsapp' | 't
       // of the counts, so it must not cause one to be computed.
       const status = await getInstanceHealth(instance)
       await storeRowChurn(instance, status.rowChurn, Boolean(status.flapping))
+      // Logged out by this app and not linked again yet. `open` overrides a
+      // stamp `noteRelinked` has not cleared yet, so a re-paired account is
+      // watched from its first read.
+      const loggedOut = Boolean(instance.logged_out_at) && status.state !== 'open'
       return {
         kind,
         state: status.state,
         sessionLost: Boolean(status.sessionLost),
         flapping: Boolean(status.flapping),
         stalled: Boolean(status.stalled),
-        paired: Boolean(status.ownerJid),
-        knownUnlinked: false,
+        paired: Boolean(status.ownerJid) && !loggedOut,
+        knownUnlinked: loggedOut,
         revoked: false,
         unreachable: false,
         heldElsewhere: false,
@@ -280,8 +290,8 @@ async function evaluate(instance: AppInstance): Promise<void> {
   })
 
   if (!health.paired) {
-    // Unlinked on purpose — a Telegram logout clears the account — while an
-    // outage was open. Nothing is broken any more and nothing is working
+    // Unlinked on purpose — a Telegram logout clears the account, a WhatsApp
+    // logout this app made stamps `logged_out_at` — while an outage was open. Nothing is broken any more and nothing is working
     // either, so neither mail is true; close the outage quietly, or linking
     // again later would send a "connected again" for an outage long over.
     if (health.knownUnlinked && (instance.down_since || instance.alerted_at)) {

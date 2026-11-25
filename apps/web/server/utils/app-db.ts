@@ -441,6 +441,14 @@ export interface AppInstance {
    * `created` is deleted by `reapUnpairedConnections`.
    */
   paired_at?: string
+  /**
+   * WhatsApp only: when this app logged the account out (Log out, Import full
+   * history). Set by `logoutInstance`, cleared by `noteRelinked` once a live
+   * read sees `open` again — both in instances.ts. While set and not `open`,
+   * the alerts read the connection as deliberately unlinked, not down (#260).
+   * Millisecond precision, so the clear can be conditional on the value read.
+   */
+  logged_out_at?: string
   /** That task's claim on this row, so two replicas never both delete it. */
   reap_lease_until?: string
   /**

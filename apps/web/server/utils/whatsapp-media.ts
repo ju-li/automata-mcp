@@ -12,9 +12,6 @@ type WhatsappAuth = Extract<McpAuth, { kind: 'whatsapp' }>
  */
 
 export interface WhatsappMediaTarget {
-  /** The chat as the caller named it. */
-  jid: string
-  messageId: string
   /** The message row, found inside the token's chats. */
   row: StoredMessage
   /** The media node itself, from that row. */
@@ -60,8 +57,6 @@ export async function findWhatsappMedia(auth: WhatsappAuth, jid: string, message
   }
 
   return {
-    jid,
-    messageId,
     row,
     media: node,
     meta: {

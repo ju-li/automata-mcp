@@ -5,8 +5,9 @@ type TelegramAuth = Extract<McpAuth, { kind: 'telegram' }>
 /**
  * Telegram media for one message, through the bridge. Shared by the
  * `download-telegram-media` tool and the signed-URL route, so both run the same
- * checks. The caller asserts chat scope first (`assertChatAllowed`); the bridge
- * then fetches the message through that chat and refuses one from any other.
+ * checks. `findTelegramMedia` asserts chat scope (as `findWhatsappMedia` does),
+ * so no caller can skip it; the bridge then fetches the message through that
+ * chat and refuses one from any other.
  *
  * **Streamed, never stored.** The bridge sends the file as raw bytes, chunk by
  * chunk, as it downloads them from Telegram. The signed-URL route pipes that
@@ -25,10 +26,12 @@ export function telegramMediaMaxBytes(): number {
 }
 
 /**
- * The synced message's media kind, or a loud refusal: 404 when no such
- * message is synced in this chat, 422 when it carries no media.
+ * The synced message's media kind, or a loud refusal: 403 for a chat outside
+ * the token's scope, 404 when no such message is synced in this chat, 422 when
+ * it carries no media. Every path to a Telegram file starts here.
  */
 export async function findTelegramMedia(auth: TelegramAuth, chatId: string, messageId: number): Promise<string> {
+  assertChatAllowed(auth.scope, chatId)
   const media = await telegramMessageMedia(auth.instance, chatId, messageId)
   if (media === undefined) {
     throw createError({
@@ -128,7 +131,7 @@ export async function downloadTelegramMedia(
 ): Promise<{ meta: MediaMeta, file: MediaFile }> {
   return await withMediaSlot(auth.instance.id, async () => {
     const cap = Math.min(maxBytes, BRIDGE_MEDIA_MAX_BYTES)
-    const { meta, body } = await openTelegramMedia(auth, chatId, messageId, Math.max(cap, mediaMaxBytes()), requestAbortSignal())
+    const { meta, body } = await openTelegramMedia(auth, chatId, messageId, Math.max(cap, telegramMediaMaxBytes()), requestAbortSignal())
     // The bridge's reported size (exact for a document) decides before a byte
     // is read; the capped read below is the backstop when it is missing or short.
     if (meta.size !== undefined && meta.size > cap) {

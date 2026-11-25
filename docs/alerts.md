@@ -49,6 +49,14 @@ What it will and will not send:
 - A connection that has **never been paired** is skipped. A fresh instance sits
   in `close` until somebody scans its QR code, and `ownerJid` is the only thing
   that tells that apart from a logout.
+- A WhatsApp connection **logged out from the app** — **Log out** on its page,
+  or **Import full history**, which logs out so the next scan imports — mails
+  nobody while it waits for a scan, however long that takes. Evolution keeps
+  `ownerJid` through a logout, so the app records the logout itself and treats
+  the connection like a Telegram unlink: an outage already open closes without
+  a mail, and pairing again sends no "connected again". From the first read
+  that sees it connected, it is watched as before. A logout made **from the
+  phone** (Linked devices → Log out) is not the app's and still alerts.
 - Nothing is mailed until a connection has been down for **10 minutes**, in any
   state, `close` included (a connection that is only **stuck** waits two hours,
   below). A drop that recovers inside that window mails nobody,
