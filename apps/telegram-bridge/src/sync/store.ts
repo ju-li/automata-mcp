@@ -256,7 +256,21 @@ export class SyncStore {
     })
   }
 
-  /** The upsert, then the chats' latest-message bookkeeping. Run in this order. */
+  /**
+   * The upsert, then the chats' latest-message bookkeeping. Run in this order.
+   *
+   * **A copy that changes nothing writes nothing (#351).** Re-deliveries are the
+   * norm (live, catch-up, fill-forward, backfill overlap), and each rewrite of an
+   * unchanged row left a dead tuple plus entries in every index, the trigram GIN
+   * included — enough dead pages that every autovacuum ran its full index pass and
+   * stalled other sessions' writes into statement_timeout. So the conflict clause
+   * also requires the row to differ from what SET would write: same columns, and
+   * `reactions` compared against SET's COALESCE, not EXCLUDED (a copy without
+   * reactions is no change). The two column lists and `mergeMessages` mirror one
+   * another; change all three. A column in SET but missing from the comparison is
+   * silently not updated when it alone changes. The rows that end up stored are
+   * the same either way; `latest` below reads every incoming row, not the updated ones.
+   */
   private messagesQueries(db: Db, rows: MessageRow[]) {
     const unique = mergeMessages(rows)
     if (unique.length === 0) return []
@@ -298,7 +312,16 @@ export class SyncStore {
         service_action = EXCLUDED.service_action,
         grouped_id = EXCLUDED.grouped_id,
         reactions = COALESCE(EXCLUDED.reactions, messages.reactions)
-      WHERE messages.deleted_at IS NULL`
+      WHERE messages.deleted_at IS NULL
+        AND (messages.sender_id, messages.from_me, messages.date, messages.edit_date,
+             messages.text, messages.media_type, messages.entities, messages.mentioned_user_ids,
+             messages.reply_to_id, messages.topic_id, messages.fwd_from, messages.service_action,
+             messages.grouped_id, messages.reactions)
+          IS DISTINCT FROM
+            (EXCLUDED.sender_id, EXCLUDED.from_me, EXCLUDED.date, EXCLUDED.edit_date,
+             EXCLUDED.text, EXCLUDED.media_type, EXCLUDED.entities, EXCLUDED.mentioned_user_ids,
+             EXCLUDED.reply_to_id, EXCLUDED.topic_id, EXCLUDED.fwd_from, EXCLUDED.service_action,
+             EXCLUDED.grouped_id, COALESCE(EXCLUDED.reactions, messages.reactions))`
 
     // Over every row, not the merged ones: GREATEST is what one write per row
     // would have arrived at, whichever copy of a message carried the larger value.
