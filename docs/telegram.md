@@ -101,6 +101,15 @@ VACUUM (ANALYZE) telegram.messages;
 `SELECT relallvisible::float / relpages FROM pg_class WHERE oid = 'telegram.messages'::regclass`
 should then stay close to 1.
 
+Migration `0008` throttles those vacuums (`autovacuum_vacuum_cost_delay = 10`,
+`autovacuum_vacuum_cost_limit = 60`). Unthrottled, a run that has to clean the
+indexes reads all of them as fast as the volume allows — about 16 GB on a large
+deployment — and for those 10–20 minutes the bridge's own writes wait on the
+disk until they time out. Throttled, the same run takes about 50 minutes and
+reads about 8 MB/s. A vacuum you start by hand is not throttled by it
+(`VACUUM` uses `vacuum_cost_delay`, which is 0 by default), so run that one at a
+quiet hour.
+
 ## What syncs
 
 Private chats, bots, groups, supergroups (including forum topics) and channels —
