@@ -47,6 +47,9 @@ interface OrgBilling {
 /** Subscriptions Stripe still considers live; an organization should hold at most one. */
 const LIVE_STATUSES = new Set(['trialing', 'active', 'past_due', 'unpaid', 'incomplete', 'paused'])
 
+/** Statuses with no paid invoice behind them: still in the trial, or the first payment never completed. */
+const NEVER_BILLED = new Set(['trialing', 'incomplete', 'incomplete_expired'])
+
 /** Order of preference when a customer holds more than one subscription. */
 const STATUS_RANK = ['active', 'trialing', 'past_due', 'unpaid', 'incomplete', 'paused', 'canceled', 'incomplete_expired']
 
@@ -305,6 +308,15 @@ export class Billing {
       return found
     }
 
+    const stored = new Map<string, { first_paid_at?: string, first_paid_checked_at?: string }>()
+    if (subs.length) {
+      const found = await this.#sql<{ id: string, first_paid_at?: string, first_paid_checked_at?: string }[]>`
+        SELECT id, first_paid_at, first_paid_checked_at FROM cloud.stripe_subscriptions
+        WHERE id = ANY(${subs.map(sub => sub.id)})
+      `
+      for (const row of found) stored.set(row.id, row)
+    }
+
     const rows: SubscriptionRow[] = []
     for (const sub of subs) {
       const discounts = sub.discounts.filter((d): d is Stripe.Discount => typeof d !== 'string')
@@ -313,9 +325,55 @@ export class Billing {
       }
       const discount = discounts[0]
       const coupon = discount ? await couponOf(discount) : undefined
-      rows.push(subscriptionRow(sub, orgId, settings, discount, coupon))
+      const payment = await this.#payment(sub, stored.get(sub.id))
+      rows.push(subscriptionRow(sub, orgId, settings, discount, coupon, payment))
     }
     return rows
+  }
+
+  /**
+   * Whether a subscription has ever been paid (#359), for the revenue
+   * snapshot: a `past_due` subscription that never was is not revenue.
+   *
+   * Once found, the date is kept and Stripe is not asked again. Otherwise the
+   * invoices are read for a subscription that has left its trial and may have
+   * been billed: while it runs, on every sync (a comp or a subscription whose
+   * first charge has not gone through yet); once it has ended, once more after
+   * the end, then never. Best effort like the coupon lookup: a failed read
+   * keeps what is stored, is logged, and never fails the sync.
+   */
+  async #payment(
+    sub: Stripe.Subscription,
+    stored: { first_paid_at?: string, first_paid_checked_at?: string } | undefined,
+  ): Promise<Payment> {
+    const kept: Payment = {
+      first_paid_at: stored?.first_paid_at ?? null,
+      first_paid_checked_at: stored?.first_paid_checked_at ?? null,
+    }
+    if (kept.first_paid_at) return kept
+    if (NEVER_BILLED.has(sub.status)) return kept
+    if (sub.ended_at) {
+      // Ended inside its trial: nothing was ever charged.
+      if (sub.trial_end && sub.ended_at <= sub.trial_end) return kept
+      const checked = kept.first_paid_checked_at ? Date.parse(kept.first_paid_checked_at) / 1000 : 0
+      if (checked >= sub.ended_at) return kept
+    }
+
+    const { stripe } = this.#client()
+    const checkedAt = new Date().toISOString()
+    let first: number | undefined
+    try {
+      for await (const invoice of stripe.invoices.list({ subscription: sub.id, status: 'paid', limit: 100 })) {
+        if (invoice.amount_paid <= 0) continue
+        const paidAt = invoice.status_transitions.paid_at ?? invoice.created
+        if (first === undefined || paidAt < first) first = paidAt
+      }
+    }
+    catch (error) {
+      console.warn(`[billing] could not read invoices of subscription ${sub.id}; whether it was ever paid stays unknown: ${describeError(error)}`)
+      return kept
+    }
+    return { first_paid_at: isoFromUnix(first), first_paid_checked_at: checkedAt }
   }
 
   /**
@@ -425,8 +483,14 @@ interface StoredItem {
   quantity: number
 }
 
+/** Whether a subscription has been paid, and when Stripe was last asked. */
+interface Payment {
+  first_paid_at: string | null
+  first_paid_checked_at: string | null
+}
+
 /** One row of `cloud.stripe_subscriptions`; see db.ts for the columns. */
-interface SubscriptionRow {
+interface SubscriptionRow extends Payment {
   id: string
   customer_id: string
   organization_id: string
@@ -470,6 +534,7 @@ function subscriptionRow(
   settings: StripeSettings,
   discount: Stripe.Discount | undefined,
   coupon: Stripe.Coupon | undefined,
+  payment: Payment,
 ): SubscriptionRow {
   const items = sub.items.data
   const seat = items.find(item => item.price.id === settings.priceSeat)
@@ -511,6 +576,7 @@ function subscriptionRow(
     amount_off: coupon?.amount_off ?? null,
     discount_start: discount ? isoFromUnix(discount.start) : null,
     discount_end: discount ? isoFromUnix(discount.end) : null,
+    ...payment,
   }
 }
 
@@ -525,14 +591,16 @@ async function upsertSubscriptions(tx: Db, rows: SubscriptionRow[]): Promise<voi
         id, customer_id, organization_id, status, created, start_date, trial_start, trial_end,
         cancel_at, canceled_at, ended_at, current_period_end, currency, "interval", interval_count,
         base_price_id, base_unit_amount, seat_price_id, seat_unit_amount, seat_quantity,
-        period_amount, items, coupon_id, percent_off, amount_off, discount_start, discount_end
+        period_amount, items, coupon_id, percent_off, amount_off, discount_start, discount_end,
+        first_paid_at, first_paid_checked_at
       ) VALUES (
         ${row.id}, ${row.customer_id}, ${row.organization_id}, ${row.status}, ${row.created},
         ${row.start_date}, ${row.trial_start}, ${row.trial_end}, ${row.cancel_at}, ${row.canceled_at},
         ${row.ended_at}, ${row.current_period_end}, ${row.currency}, ${row.interval}, ${row.interval_count},
         ${row.base_price_id}, ${row.base_unit_amount}, ${row.seat_price_id}, ${row.seat_unit_amount},
         ${row.seat_quantity}, ${row.period_amount}, ${tx.json(row.items as unknown as postgres.JSONValue)}, ${row.coupon_id},
-        ${row.percent_off}, ${row.amount_off}, ${row.discount_start}, ${row.discount_end}
+        ${row.percent_off}, ${row.amount_off}, ${row.discount_start}, ${row.discount_end},
+        ${row.first_paid_at}, ${row.first_paid_checked_at}
       )
       ON CONFLICT (id) DO UPDATE SET
         customer_id        = EXCLUDED.customer_id,
@@ -561,6 +629,10 @@ async function upsertSubscriptions(tx: Db, rows: SubscriptionRow[]): Promise<voi
         amount_off         = EXCLUDED.amount_off,
         discount_start     = EXCLUDED.discount_start,
         discount_end       = EXCLUDED.discount_end,
+        -- Never cleared, never moved later: a concurrent sync that read less
+        -- (or failed to read) must not undo one that found the payment.
+        first_paid_at         = least(stripe_subscriptions.first_paid_at, EXCLUDED.first_paid_at),
+        first_paid_checked_at = greatest(stripe_subscriptions.first_paid_checked_at, EXCLUDED.first_paid_checked_at),
         updated_at         = now()
     `
   }

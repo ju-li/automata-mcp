@@ -227,7 +227,7 @@ An address the account changed away from appears only under `from`/`to` of `user
 
 The cloud service keeps revenue numbers in Postgres, so they can be queried and joined with `app` without asking Stripe. Two tables in the `cloud` schema:
 
-**`cloud.stripe_subscriptions`**: one row per Stripe subscription, keyed on its Stripe id. Every time the service re-reads a customer's subscriptions (on each webhook and in the hourly reconcile) it upserts what it read, in the same transaction that writes the plan columns. That costs no extra Stripe calls, except one per coupon Stripe did not expand. The table is therefore never more than about an hour behind Stripe, even if a webhook is lost. The reconcile also runs a minute after each boot. Rows are never deleted: canceled subscriptions are what trial conversion and churn are counted from.
+**`cloud.stripe_subscriptions`**: one row per Stripe subscription, keyed on its Stripe id. Every time the service re-reads a customer's subscriptions (on each webhook and in the hourly reconcile) it upserts what it read, in the same transaction that writes the plan columns. That costs no extra Stripe calls, except one per coupon Stripe did not expand, and an invoice read for each subscription not yet known to have been paid (below). The table is therefore never more than about an hour behind Stripe, even if a webhook is lost. The reconcile also runs a minute after each boot. Rows are never deleted: canceled subscriptions are what trial conversion and churn are counted from.
 
 | Column | Meaning |
 | --- | --- |
@@ -238,6 +238,8 @@ The cloud service keeps revenue numbers in Postgres, so they can be queried and 
 | `period_amount` | every item's unit amount × quantity for one period, before discounts, in cents |
 | `items` | every item as `{ price_id, product_id, unit_amount, quantity }` |
 | `coupon_id`, `percent_off`, `amount_off`, `discount_start`, `discount_end` | the subscription's discount, so 100%-off comp accounts can be told apart. Stripe allows several discounts on one subscription; only the first is stored, and the service logs a warning when there are more. Item-level discounts are not read. |
+| `first_paid_at` | when the subscription's first invoice with a non-zero amount was paid. `NULL` = none found: never paid (still in or past its trial with every charge failing, or a comp at $0), or not read yet. Never cleared once set. |
+| `first_paid_checked_at` | when the service last read the subscription's invoices for `first_paid_at`. Invoices are read on every sync while a subscription past its trial has no `first_paid_at`, and once more after it ends. A failed read is logged and leaves both columns as they were. |
 | `updated_at` | last sync |
 
 It holds no email address or name. Join through `app.organizations.stripe_customer_id` (or `organization_id`), and on to `app.memberships` / `app.users` when you need people.
@@ -251,13 +253,28 @@ It holds no email address or name. Join through `app.organizations.stripe_custom
 | `paying` | paying subscriptions whose discounted amount is above zero, so comps are not counted |
 | `trialing` | subscriptions inside their trial |
 | `past_due` | subscriptions in `past_due`. `NULL` on backfilled rows. |
-| `canceled_today` | subscriptions that ended that day after having paid |
+| `canceled_today` | subscriptions that ended that day after having paid (`first_paid_at` set) |
 | `trials_canceled_today` | subscriptions that ended that day without leaving their trial |
 | `trials_converted_today` | trials that ended that day with the subscription carrying on |
 | `backfilled` | reconstructed from dates rather than snapshotted (below) |
 | `computed_at` | when the row was written |
 
-"Paying" means: started, past any trial, not ended, and not `incomplete` / `incomplete_expired`. A subscription that is still running also has to be `active` or `past_due` (so `unpaid` and `paused` are excluded, like trials). Amounts are added up as they are, across currencies; everything is sold in USD.
+"Paying" means: started, past any trial, not ended, and not `incomplete` / `incomplete_expired`. A subscription that is still running also has to be `active`, or `past_due` with a `first_paid_at` before the end of the day: a subscription whose first charge after the trial keeps failing has never paid, and is not revenue while Stripe retries it. `unpaid` and `paused` are excluded, like trials. A subscription that has ended since counts only if it was ever paid (`first_paid_at` set), since its status on that day is unknown. Amounts are added up as they are, across currencies; everything is sold in USD.
+
+Live queries that compute MRR should use the same rule, so they agree with the day's row:
+
+```sql
+s.ended_at IS NULL
+AND (s.status = 'active' OR (s.status = 'past_due' AND s.first_paid_at IS NOT NULL))
+```
+
+**Rebuilding past rows.** Rows written before `first_paid_at` existed (before #359) counted never-paid `past_due` subscriptions. To recompute a range with the current rule, delete those rows; the next daily run (after the next midnight Eastern) backfills them. They come back as `backfilled`, so `past_due` reads `NULL` for them:
+
+```sql
+DELETE FROM cloud.revenue_daily WHERE day >= '2026-11-04';
+```
+
+The job fills every missing day between the first stored row and yesterday, so deleting a range is enough. Rows that were real snapshots lose their `past_due` count this way.
 
 Stripe has no API for historical MRR, so this table is the history from the day it shipped. **Backfill:** on its first run, and for any day the service missed (it was down over midnight), the job reconstructs the missing days from each subscription's start, trial and end dates and marks them `backfilled`. Those days use each subscription's *current* price, seat count and discount, can't know which subscriptions were past due, and only cover subscriptions whose organization still existed when the service first synced it. Treat them as an estimate.
 
@@ -478,7 +495,7 @@ Set its variables:
 CLOUD_DATABASE_URL=postgres://…        # the same database as the web app's NUXT_DATABASE_URL
 CLOUD_ADMIN_KEY=…                      # openssl rand -hex 32; the web app sends it on every call
 APP_URL=https://mcp.getautomata.app    # the web app's public address: Checkout returns here
-STRIPE_SECRET_KEY=rk_live_…            # the restricted key
+STRIPE_SECRET_KEY=rk_live_…            # the restricted key; needs Invoices: Read (revenue data)
 STRIPE_WEBHOOK_SECRET=whsec_…
 STRIPE_PRICE_BASE=price_…
 STRIPE_PRICE_SEAT=price_…

@@ -19,12 +19,15 @@ import type { Sql } from './db.ts'
  *
  * Definitions, all at the end of the day unless "today":
  * - paying: started, past any trial, not ended, not `incomplete*`; a
- *   subscription still running counts only while `active` or `past_due`.
- *   `paying` counts those whose discounted amount is above zero (so 100%-off
- *   comps are left out); `mrr_cents` sums them all, normalized to a month.
+ *   subscription still running counts only while `active`, or `past_due` when
+ *   it was paid before (`first_paid_at`, #359) — a first charge after the trial
+ *   that keeps failing is not revenue. One that has ended since counts only if
+ *   it was ever paid. `paying` counts those whose discounted amount is above
+ *   zero (so 100%-off comps are left out); `mrr_cents` sums them all,
+ *   normalized to a month.
  * - trialing: inside `trial_start … trial_end`, not ended.
- * - canceled_today: ended today after having paid. trials_canceled_today:
- *   ended today without ever leaving the trial.
+ * - canceled_today: ended today after having paid (`first_paid_at` set).
+ *   trials_canceled_today: ended today without ever leaving the trial.
  * - trials_converted_today: trial ended today and the subscription went on.
  *
  * Amounts are summed across currencies as they are; everything is sold in one.
@@ -143,7 +146,17 @@ async function writeDays(sql: Sql): Promise<number> {
         s.status NOT IN ('incomplete', 'incomplete_expired')
           AND s.start_date <= d.t
           AND coalesce(s.trial_end, s.start_date) <= d.t
-          AND (s.ended_at > d.t OR (s.ended_at IS NULL AND s.status IN ('active', 'past_due')))
+          AND (
+            -- Ended since: its status at t is unknown, so it counts only if it
+            -- was ever paid (#359).
+            (s.ended_at > d.t AND s.first_paid_at IS NOT NULL)
+            -- Still running: active, or past due after having paid before t.
+            -- A first charge after the trial that keeps failing is not revenue.
+            OR (s.ended_at IS NULL AND (
+              s.status = 'active'
+              OR (s.status = 'past_due' AND s.first_paid_at <= d.t)
+            ))
+          )
           AS paying,
         s.trial_start <= d.t AND s.trial_end > d.t
           AND (s.ended_at IS NULL OR s.ended_at > d.t)
@@ -167,7 +180,8 @@ async function writeDays(sql: Sql): Promise<number> {
       CASE WHEN d.live THEN count(*) FILTER (WHERE s.status = 'past_due' AND s.ended_at IS NULL) END,
       count(*) FILTER (WHERE s.ended_at >= d.t0 AND s.ended_at < d.t
                          AND s.status NOT IN ('incomplete', 'incomplete_expired')
-                         AND s.ended_at > coalesce(s.trial_end, s.start_date)),
+                         AND s.ended_at > coalesce(s.trial_end, s.start_date)
+                         AND s.first_paid_at IS NOT NULL),
       count(*) FILTER (WHERE s.ended_at >= d.t0 AND s.ended_at < d.t
                          AND s.trial_end IS NOT NULL AND s.ended_at <= s.trial_end),
       count(*) FILTER (WHERE s.trial_end >= d.t0 AND s.trial_end < d.t

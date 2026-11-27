@@ -205,6 +205,29 @@ export async function ensureCloudSchema(sql: Sql): Promise<void> {
       finished_at timestamptz NOT NULL
     )
   `
+
+  // Whether a subscription has ever been paid (#359): `first_paid_at` = when
+  // its first invoice with a non-zero amount was paid, NULL = none found (yet).
+  // `first_paid_checked_at` = when Stripe's invoices were last read for it, so
+  // an ended subscription is read once after it ended rather than every hour.
+  // Filled by `syncOrg` (billing.ts), never cleared.
+  //
+  // When the columns are new, every existing row is NULL until a reconcile has
+  // read its invoices. The revenue snapshot waits for a reconcile finished
+  // after the day it describes; one finished before this boot read none, so
+  // its stamp is dropped and the snapshot waits for the boot's own reconcile.
+  const [hasFirstPaid] = await sql`
+    SELECT 1 FROM information_schema.columns
+    WHERE table_schema = 'cloud' AND table_name = 'stripe_subscriptions' AND column_name = 'first_paid_at'
+  `
+  if (!hasFirstPaid) {
+    await sql`
+      ALTER TABLE cloud.stripe_subscriptions
+        ADD COLUMN IF NOT EXISTS first_paid_at timestamptz,
+        ADD COLUMN IF NOT EXISTS first_paid_checked_at timestamptz
+    `
+    await sql`DELETE FROM cloud.job_runs WHERE job = 'stripe_reconcile'`
+  }
 }
 
 /**
