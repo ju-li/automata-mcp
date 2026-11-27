@@ -20,7 +20,7 @@ import type { SharedPool } from './pg-pool'
  *
  * What differs from WhatsApp is what the rows mean, because the bridge is ours:
  * one row per message (no dedupe), edits overwrite in place, deletions are
- * tombstones, reactions are an aggregate, and the chat row says how far back
+ * tombstones, reactions are not kept, and the chat row says how far back
  * sync reached. The read functions carry that honestly rather than hiding it.
  */
 
@@ -77,7 +77,6 @@ export type TelegramMessage = {
   forwardedFrom?: { chatId?: string, name?: string, date?: string }
   /** A service message (join, pin, title change…): its action, and no text. */
   service?: Record<string, unknown>
-  reactions?: Array<{ emoji: string, count: number }>
   /** Messages sent together as an album share this. */
   albumId?: string
   /** Only when deleted messages were asked for: the message existed and was deleted. */
@@ -419,7 +418,6 @@ interface MessageDbRow {
   fwd_from: { fromId?: string | null, fromName?: string | null, date?: string } | null
   service_action: Record<string, unknown> | null
   grouped_id: string | null
-  reactions: Array<{ emoji: string, count: number }> | null
   deleted_at: Date | null
   first_name: string | null
   last_name: string | null
@@ -462,7 +460,7 @@ export async function listTelegramMessagesPage(
       SELECT m.chat_id::text AS chat_id, c.title AS chat_title,
              m.message_id::text AS message_id, m.sender_id::text AS sender_id, m.from_me, m.date, m.edit_date,
              m.text, m.media_type, m.reply_to_id::text AS reply_to_id, m.topic_id::text AS topic_id,
-             m.fwd_from, m.service_action, m.grouped_id::text AS grouped_id, m.reactions, m.deleted_at,
+             m.fwd_from, m.service_action, m.grouped_id::text AS grouped_id, m.deleted_at,
              u.first_name, u.last_name, u.username AS user_username, sc.title AS sender_chat_title,
              COUNT(*) OVER () AS total
       FROM telegram.messages m
@@ -561,7 +559,7 @@ export async function listTelegramAccountMessages(
     SELECT m.chat_id::text AS chat_id, c.title AS chat_title,
            m.message_id::text AS message_id, m.sender_id::text AS sender_id, m.from_me, m.date, m.edit_date,
            m.text, m.media_type, m.reply_to_id::text AS reply_to_id, m.topic_id::text AS topic_id,
-           m.fwd_from, m.service_action, m.grouped_id::text AS grouped_id, m.reactions, m.deleted_at,
+           m.fwd_from, m.service_action, m.grouped_id::text AS grouped_id, m.deleted_at,
            u.first_name, u.last_name, u.username AS user_username, sc.title AS sender_chat_title
     FROM telegram.messages m
     LEFT JOIN telegram.chats c ON c.session_id = m.session_id AND c.chat_id = m.chat_id
@@ -674,7 +672,6 @@ function toMessage(row: MessageDbRow): TelegramMessage {
       },
     }),
     ...(row.service_action && { service: row.service_action }),
-    ...(row.reactions && row.reactions.length > 0 && { reactions: row.reactions }),
     ...(row.grouped_id && { albumId: row.grouped_id }),
     ...(row.deleted_at && { deleted: true as const }),
   }

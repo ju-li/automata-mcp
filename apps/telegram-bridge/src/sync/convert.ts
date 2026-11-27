@@ -35,11 +35,10 @@ export interface UserRow {
   is_bot: boolean
 }
 
-export interface Reaction {
-  emoji: string
-  count: number
-}
-
+/**
+ * One stored message. Reactions are not kept: they say little about a
+ * conversation, and every reaction change rewrote the whole row.
+ */
 export interface MessageRow {
   chat_id: string
   message_id: number
@@ -57,7 +56,6 @@ export interface MessageRow {
   fwd_from: Record<string, unknown> | null
   service_action: Record<string, unknown> | null
   grouped_id: string | null
-  reactions: Reaction[] | null
 }
 
 /**
@@ -219,7 +217,6 @@ export function messageRow(message: unknown, meId: string | null): MessageRow | 
     fwd_from: !isService && message.fwdFrom ? forwardOf(message.fwdFrom) : null,
     service_action: isService ? plainFields(message.action, 'MessageAction') : null,
     grouped_id: !isService && message.groupedId ? message.groupedId.toString() : null,
-    reactions: reactionList(message.reactions),
   }
 }
 
@@ -255,7 +252,6 @@ export function shortMessageRow(
     fwd_from: update.fwdFrom ? forwardOf(update.fwdFrom) : null,
     service_action: null,
     grouped_id: null,
-    reactions: null,
   }
 }
 
@@ -270,18 +266,6 @@ export function migrationOf(message: unknown): { from: string, to: string } | un
     return { from: `-${message.action.chatId.toString()}`, to: here }
   }
   return undefined
-}
-
-export function reactionList(reactions: unknown): Reaction[] | null {
-  if (!(reactions instanceof Api.MessageReactions)) return null
-  return reactions.results.map(result => ({
-    emoji: result.reaction instanceof Api.ReactionEmoji
-      ? result.reaction.emoticon
-      : result.reaction instanceof Api.ReactionCustomEmoji
-        ? `custom:${result.reaction.documentId.toString()}`
-        : result.reaction.className.replace(/^Reaction/, '').toLowerCase(),
-    count: result.count,
-  }))
 }
 
 export function inputPeerFor(chatId: string, accessHash: string | null): Api.TypeInputPeer | undefined {

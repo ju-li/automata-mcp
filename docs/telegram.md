@@ -114,8 +114,8 @@ quiet hour.
 
 Private chats, bots, groups, supergroups (including forum topics) and channels —
 live, plus older history fetched in the background. Edits replace the message
-text, reactions are counted on the message, and a deleted message loses its
-text rather than staying readable.
+text, a deleted message loses its text rather than staying readable, and
+reactions are not kept.
 
 Backfill is **slow on purpose**: one page of 100 messages at a time with a pause
 of `TELEGRAM_BACKFILL_PAGE_DELAY_MS` (default 1000) between pages, newest chats

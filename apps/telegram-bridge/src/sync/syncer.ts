@@ -3,7 +3,7 @@ import type { Sql } from '../db.ts'
 import { describeError } from '../http-error.ts'
 import {
   channelChatId, chatRow, chatsOf, entityMap, inputChannelFor, inputPeerFor, long, markedId,
-  type MessageRow, messageRow, migrationOf, reactionList, shortMessageRow, type UserRow, userRow, usersOf,
+  type MessageRow, messageRow, migrationOf, shortMessageRow, type UserRow, userRow, usersOf,
 } from './convert.ts'
 import { type BackfillChat, type BackfillStop, type ChatOp, SyncStore, type TrackedChannel } from './store.ts'
 
@@ -361,7 +361,7 @@ export class SessionSync {
    * per message — the per-message path could not keep up with a busy account,
    * and the backlog grew without bound (#188, #189). Any other update ends the
    * run: the run is written, the update applied on its own, then a new run
-   * starts, so deletions, reactions and catch-ups still land in arrival order
+   * starts, so deletions and catch-ups still land in arrival order
    * relative to the messages around them.
    *
    * Never throws: a failed batch is retried one update at a time, so one bad
@@ -580,9 +580,6 @@ export class SessionSync {
       const chatId = channelChatId(update.channelId)
       await this.store.tombstoneInChat(chatId, update.messages)
       if (update.ptsCount > 0) await this.store.setChannelPts(chatId, update.pts, false)
-    }
-    else if (update instanceof Api.UpdateMessageReactions) {
-      await this.store.setReactions(markedId(update.peer), update.msgId, reactionList(update.reactions))
     }
     else if (update instanceof Api.UpdateChannelTooLong) {
       // Only from a channel difference's other updates; live ones never reach the
@@ -998,13 +995,14 @@ type MessageUpdate = Api.UpdateNewMessage | Api.UpdateEditMessage | Api.UpdateNe
 /**
  * Updates `apply` handles that are not a message upsert. Each one's effect
  * depends on where it lands among the upserts around it — a tombstone must
- * follow the message it deletes, a reaction count is replaced wholesale, a
- * catch-up sets pts exactly — so it ends a batch and is applied on its own.
+ * follow the message it deletes, a catch-up sets pts exactly — so it ends a
+ * batch and is applied on its own. Reaction updates are not here: reactions
+ * are not stored, so they pass as entities only, like any update `apply` ignores.
  * Short messages are here only because `apply` stores them by a separate path.
  */
 const ORDERED = [
   Api.UpdateShortMessage, Api.UpdateShortChatMessage, Api.UpdateDeleteMessages,
-  Api.UpdateDeleteChannelMessages, Api.UpdateMessageReactions, Api.UpdateChannelTooLong,
+  Api.UpdateDeleteChannelMessages, Api.UpdateChannelTooLong,
 ]
 
 function isChannelMessageUpdate(update: unknown): update is Api.UpdateNewChannelMessage | Api.UpdateEditChannelMessage {
@@ -1091,8 +1089,7 @@ function ptsOf(update: unknown): number {
 
 /**
  * The chat a common-sequence update would have written to, to record its loss
- * on: a message's chat. A reaction count is not history, and a common deletion
- * names no chat. Never throws.
+ * on: a message's chat. A common deletion names no chat. Never throws.
  */
 function lostChatOf(update: unknown): string | undefined {
   try {
@@ -1123,7 +1120,6 @@ function describeUpdate(update: unknown): string {
       return `${name} (chat ${channelChatId(update.channelId)}, messages ${update.messages.join(',')})`
     }
     if (update instanceof Api.UpdateDeleteMessages) return `${name} (messages ${update.messages.join(',')})`
-    if (update instanceof Api.UpdateMessageReactions) return `${name} (chat ${markedId(update.peer)}, message ${update.msgId})`
   }
   catch {}
   return name
