@@ -1522,6 +1522,9 @@ function previewOf(message: unknown): string | undefined {
   // the common case rather than an oddity.
   if (typeof m.videoMessage?.caption === 'string') return `[video] ${m.videoMessage.caption}`
   if (m.videoMessage) return '[video]'
+  // `speechToText` is a sibling of `audioMessage`, written by a transcription
+  // job; `searchMessages` already finds the note by it (`messageBody()`).
+  if (m.audioMessage && typeof m.speechToText === 'string' && m.speechToText.trim()) return `[voice message] ${m.speechToText}`
   if (m.audioMessage) return '[voice message]'
   if (m.documentMessage) return `[document] ${m.documentMessage.fileName ?? m.documentMessage.caption ?? ''}`.trim()
   if (m.stickerMessage) return '[sticker]'
