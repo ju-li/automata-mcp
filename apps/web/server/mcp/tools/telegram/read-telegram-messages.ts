@@ -35,7 +35,7 @@ export default defineKindTool({
     + 'is not available. Deleted messages are left out and counted in `deletedExcluded`; '
     + 'their text is not kept. Service messages (joins, pins, title changes) are left out '
     + 'unless `includeService` is set, counted in `serviceMessagesExcluded`. Reactions are '
-    + 'counts on a message (`reactions`), never separate messages. A message you sent is '
+    + 'not kept, so a message carries no reaction data. A message you sent is '
     + 'marked `fromMe` and carries no `author`. To find a message by what it says, use '
     + 'search-telegram-messages instead of paging.',
   annotations: {
