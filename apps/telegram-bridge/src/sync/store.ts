@@ -271,8 +271,7 @@ export class SyncStore {
    * changes. The rows that end up stored are the same either way; `latest` below
    * reads every incoming row, not the updated ones.
    *
-   * Reactions are not stored. The `reactions` column is left unnamed here until
-   * a migration drops it; it stays NULL on new rows and nothing reads it.
+   * Reactions are not stored (#355); migration 0009 dropped their column.
    */
   private messagesQueries(db: Db, rows: MessageRow[]) {
     const unique = mergeMessages(rows)
