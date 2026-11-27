@@ -1,6 +1,6 @@
 import type postgres from 'postgres'
 import type { Sql } from '../db.ts'
-import type { ChatRow, ChatType, MessageRow, Reaction, UserRow } from './convert.ts'
+import type { ChatRow, ChatType, MessageRow, UserRow } from './convert.ts'
 import { stubType } from './convert.ts'
 
 /** A channel `getChannelDifference` can catch up, as `chats` stores it. */
@@ -256,7 +256,24 @@ export class SyncStore {
     })
   }
 
-  /** The upsert, then the chats' latest-message bookkeeping. Run in this order. */
+  /**
+   * The upsert, then the chats' latest-message bookkeeping. Run in this order.
+   *
+   * **A copy that changes nothing writes nothing (#351).** Re-deliveries are the
+   * norm (live, catch-up, fill-forward, backfill overlap), and each rewrite of an
+   * unchanged row left a dead tuple plus entries in every index, the trigram GIN
+   * included — enough dead pages that every autovacuum ran its full index pass and
+   * stalled other sessions' writes into statement_timeout. So the conflict clause
+   * also requires the row to differ from what SET would write, over the same
+   * columns. The two column lists mirror one another (and `mergeMessages`, should
+   * a column ever fold other than last-wins); change them together. A column in
+   * SET but missing from the comparison is silently not updated when it alone
+   * changes. The rows that end up stored are the same either way; `latest` below
+   * reads every incoming row, not the updated ones.
+   *
+   * Reactions are not stored. The `reactions` column is left unnamed here until
+   * a migration drops it; it stays NULL on new rows and nothing reads it.
+   */
   private messagesQueries(db: Db, rows: MessageRow[]) {
     const unique = mergeMessages(rows)
     if (unique.length === 0) return []
@@ -281,7 +298,6 @@ export class SyncStore {
         fwd_from: json(row.fwd_from),
         service_action: json(row.service_action),
         grouped_id: row.grouped_id,
-        reactions: json(row.reactions),
       })))}
       ON CONFLICT (session_id, chat_id, message_id) DO UPDATE SET
         sender_id = EXCLUDED.sender_id,
@@ -296,9 +312,17 @@ export class SyncStore {
         topic_id = EXCLUDED.topic_id,
         fwd_from = EXCLUDED.fwd_from,
         service_action = EXCLUDED.service_action,
-        grouped_id = EXCLUDED.grouped_id,
-        reactions = COALESCE(EXCLUDED.reactions, messages.reactions)
-      WHERE messages.deleted_at IS NULL`
+        grouped_id = EXCLUDED.grouped_id
+      WHERE messages.deleted_at IS NULL
+        AND (messages.sender_id, messages.from_me, messages.date, messages.edit_date,
+             messages.text, messages.media_type, messages.entities, messages.mentioned_user_ids,
+             messages.reply_to_id, messages.topic_id, messages.fwd_from, messages.service_action,
+             messages.grouped_id)
+          IS DISTINCT FROM
+            (EXCLUDED.sender_id, EXCLUDED.from_me, EXCLUDED.date, EXCLUDED.edit_date,
+             EXCLUDED.text, EXCLUDED.media_type, EXCLUDED.entities, EXCLUDED.mentioned_user_ids,
+             EXCLUDED.reply_to_id, EXCLUDED.topic_id, EXCLUDED.fwd_from, EXCLUDED.service_action,
+             EXCLUDED.grouped_id)`
 
     // Over every row, not the merged ones: GREATEST is what one write per row
     // would have arrived at, whichever copy of a message carried the larger value.
@@ -332,8 +356,8 @@ export class SyncStore {
    * moves forward, so the order of the pts writes does not matter.
    *
    * The caller decides what may share a batch. Anything whose effect depends on
-   * its position relative to these upserts — a deletion, a reaction count, an
-   * exact pts — is not expressible here and has to be applied on its own.
+   * its position relative to these upserts — a deletion, an exact pts — is not
+   * expressible here and has to be applied on its own.
    *
    * After the one read `refresh` needs, the statements go out pipelined: on a
    * transaction's connection postgres.js sends them back to back and Postgres
@@ -387,12 +411,6 @@ export class SyncStore {
       UPDATE messages SET text = NULL, entities = NULL, deleted_at = now()
       WHERE session_id = ${this.sessionId} AND chat_id = ${chatId} AND deleted_at IS NULL
         AND message_id = ANY(${this.sql.array(messageIds.map(String), INT8)})`)
-  }
-
-  async setReactions(chatId: string, messageId: number, reactions: Reaction[] | null): Promise<void> {
-    await this.write(() => this.sql`
-      UPDATE messages SET reactions = ${reactions === null ? null : this.sql.json(reactions as unknown as postgres.JSONValue)}
-      WHERE session_id = ${this.sessionId} AND chat_id = ${chatId} AND message_id = ${messageId}`)
   }
 
   private migratedQuery(db: Db, fromChatId: string, toChatId: string) {
@@ -683,7 +701,7 @@ function resolveChatOps(ops: ChatOp[], existing: Set<string>): { rows: ChatRow[]
  * are folded first — and folded the way their `ON CONFLICT` clause would have
  * folded them had each been written on its own: a COALESCE column keeps the last
  * non-null value, every other column takes the last row's. Last-wins alone would
- * drop an earlier non-null `phone`, `title` or `reactions` that one write per row
+ * drop an earlier non-null `phone` or `title` that one write per row
  * keeps. Each merge mirrors the SET list of its statement above; change both.
  */
 
@@ -709,10 +727,8 @@ function mergeChats(rows: ChatRow[]): ChatRow[] {
 
 function mergeMessages(rows: MessageRow[]): MessageRow[] {
   const order = (a: MessageRow, b: MessageRow) => byId(a.chat_id, b.chat_id) || a.message_id - b.message_id
-  return fold(rows, row => `${row.chat_id}:${row.message_id}`, order, (prev, row) => ({
-    ...row,
-    reactions: row.reactions ?? prev.reactions,
-  }))
+  // Every column takes the last copy's value, as the SET list does.
+  return fold(rows, row => `${row.chat_id}:${row.message_id}`, order, (_prev, row) => row)
 }
 
 /**

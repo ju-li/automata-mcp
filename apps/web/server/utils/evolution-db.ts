@@ -121,7 +121,7 @@ function messageDbUrlFor(instance: AppInstance): { url: string, guard: boolean }
  * caller can report, not as an MCP call that never returns.
  */
 /** Background jobs that each read on their own one-connection pool, beside the readers' shared one. */
-export const BACKGROUND_POOLS = ['counts', 'lids'] as const
+export const BACKGROUND_POOLS = ['counts', 'lids', 'names'] as const
 
 /**
  * Run a background job's statement on its own one-connection pool, under the
@@ -1630,6 +1630,71 @@ export async function lidLocalParts(instance: AppInstance, options: LidLocalPart
     : await (await evolutionDbFor(instance)).query(statement)
 
   return new Set(rows.map(row => row.lid).filter(Boolean))
+}
+
+/** One sender's newest usable push name, from `lidSenderNames`. */
+export interface LidSenderName {
+  /** LID local part, device suffix cut. */
+  lid: string
+  name: string
+  /** `messageTimestamp` of the row it came from, unix seconds. */
+  ts: number
+  /** That row's `key.id`; breaks a tie on `ts`. */
+  id: string
+}
+
+/**
+ * For every LID that sent this account a message as a group participant, the
+ * display name on its newest such row — for `sender-names.ts` (#321).
+ *
+ * Live group rows carry the sender's own `pushName` (what WhatsApp shows as
+ * "~ Name" for someone who is not a saved contact) beside `participant` /
+ * `participantAlt`; history-imported rows carry only the LID digits (#263). So
+ * the live rows are what links a LID to a name for everyone who has posted
+ * since pairing. `fromMe` rows are left out: their push name can be the
+ * device-locale self-label ("Você"). Names that are digits or carry an `@` are
+ * dropped here and again by the caller, which applies `looksLikeIdentifier`.
+ *
+ * Newest by `messageTimestamp`, then `key.id`, then the name itself, each in
+ * byte order — duplicate copies of one message share id and timestamp and can
+ * disagree on `pushName` — so the pick is the same on every run and agrees
+ * with the caller's merge of two reads. The filters (trim, length, digits,
+ * `@`) match the caller's, so the row chosen here is one it keeps.
+ *
+ * Background pool only (`evo:…:names`): without `since` it is one scan of the
+ * account's rows, the same cost as `lidLocalParts`; with it,
+ * `message_instance_ts_idx` reads only the rows from then on. The sort is over
+ * short text, never jsonb. `"Message"` only, so the `wamcp_search` grant covers
+ * it. Raw driver errors: the caller decides what an unreadable answer means.
+ */
+export async function lidSenderNames(instance: AppInstance, options: { since?: number } = {}): Promise<LidSenderName[]> {
+  const instanceId = await resolveEvolutionInstanceId(instance)
+
+  return await onBackgroundPool(instance, 'names', sql => sql<LidSenderName[]>`
+    SELECT DISTINCT ON (s.lid) s.lid, s.name, s.ts, s.id
+    FROM (
+      SELECT split_part(split_part(ids.jid, '@', 1), ':', 1) AS lid,
+             btrim(m."pushName", E' \t\r\n') AS name,
+             m."messageTimestamp" AS ts,
+             COALESCE(m.key->>'id', '') AS id
+      FROM "Message" m
+      CROSS JOIN LATERAL (
+        SELECT m.key->>'participant'
+        UNION ALL SELECT m.key->>'participantAlt'
+      ) AS ids(jid)
+      WHERE m."instanceId" = ${instanceId}
+        ${options.since !== undefined ? sql`AND m."messageTimestamp" >= ${options.since}` : sql``}
+        AND m.key->>'fromMe' = 'false'
+        AND m."pushName" IS NOT NULL
+        AND ids.jid LIKE '%@lid'
+    ) s
+    WHERE s.lid <> ''
+      AND s.name <> ''
+      AND char_length(s.name) <= 100
+      AND s.name !~ '^[+0-9][0-9[:space:]()+-]*$'
+      AND position('@' in s.name) = 0
+    ORDER BY s.lid, s.ts DESC, s.id COLLATE "C" DESC, s.name COLLATE "C" DESC
+  `)
 }
 
 /**

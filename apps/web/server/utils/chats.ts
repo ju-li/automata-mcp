@@ -1,7 +1,8 @@
 import type { AppInstance } from './app-db'
 import type { EvolutionClient } from './evolution'
 import type { MentionDirectory } from './mentions'
-import { applyMentions, authorName, contactsToDirectory, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
+import { addSenderNames, applyMentions, authorName, contactsToDirectory, meaningfulName, mentionDirectory, mentionedJidsOf } from './mentions'
+import { senderNames } from './sender-names'
 import type { ChatActivityRow, MessageSender } from './evolution-db'
 import { canReadMessages, lastMessagePayloads, listAccountMessagesPage, listChatActivity, listMessagesPage, senderOf } from './evolution-db'
 import type { LidLinks } from './whatsapp-identity'
@@ -841,8 +842,9 @@ export interface AccountMessagePage {
  * out loud in `reactionsExcluded`, because a table that silently drops a class
  * of row reads as a complete one.
  *
- * Naming is best effort and deliberately cheap: contacts and group subjects,
- * both already memoised, and **no** per-group participant lookup. A page of a
+ * Naming is best effort and deliberately cheap: contacts, group subjects and
+ * senders' own push names (`sender-names.ts`), all already memoised, and
+ * **no** per-group participant lookup. A page of a
  * hundred rows can span a hundred groups, and `search-messages` already
  * documents that pass as the expensive one. An unresolved sender falls back to
  * `pushName` through `authorName`, which still refuses a number or a JID as a
@@ -887,7 +889,10 @@ export async function listAccountMessages(
         : mentionedJidsOf(nestedContextInfo(content.payload)),
     }))
 
-  const names = await accountNames(instance, drafts.map(draft => draft.chatJid))
+  const names = await accountNames(instance, drafts.map(draft => draft.chatJid), drafts.flatMap(draft => [
+    ...draft.mentioned,
+    ...(!draft.fromMe && draft.sender.identity ? [draft.sender.identity] : []),
+  ]))
 
   return {
     messages: drafts.map(draft => ({
@@ -922,13 +927,20 @@ export async function listAccountMessages(
 async function accountNames(
   instance: AppInstance,
   chatJids: string[],
+  /** Senders and mentions on the page, for the gaps sender names fill. None: chat labels only. */
+  needed: string[] = [],
 ): Promise<{ chatName: (jid: string) => string, directory?: MentionDirectory }> {
   try {
     const groupJids = [...new Set(chatJids.filter(jid => jid.endsWith('@g.us')))]
-    const { groups, contacts, links } = await nameSources(instance, groupJids)
+    const [{ groups, contacts, links }, fromMessages] = await Promise.all([
+      nameSources(instance, groupJids),
+      needed.length ? senderNames(instance) : undefined,
+    ])
+    const directory = contactsToDirectory(contacts)
+    addSenderNames(directory, fromMessages, needed)
 
     return {
-      directory: contactsToDirectory(contacts),
+      directory,
       // Same precedence as `listChats`: a group's subject is authoritative, a
       // person's saved contact name is what they expect to read — and the same
       // name for both JIDs of a linked person, so one conversation is never
@@ -970,8 +982,8 @@ async function nameDirectory(
 
   try {
     const evolution = evolutionClientForInstance(instance)
-    const contacts = await contactDirectory(instance, evolution)
-    return await mentionDirectory({ instance, evolution, chatJids: [remoteJid], contacts, needed })
+    const [contacts, fromMessages] = await Promise.all([contactDirectory(instance, evolution), senderNames(instance)])
+    return await mentionDirectory({ instance, evolution, chatJids: [remoteJid], contacts, needed, senderNames: fromMessages })
   }
   catch (error) {
     console.error('[read] could not resolve names:', error)

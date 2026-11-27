@@ -1,5 +1,6 @@
 import type { AppInstance } from './app-db'
 import type { EvolutionClient } from './evolution'
+import type { SenderNameLookup } from './sender-names'
 
 /**
  * Turning `@79972425314508` in a message body into `@Ju`.
@@ -87,6 +88,8 @@ export async function mentionDirectory(options: {
   contacts?: Map<string, { name?: string }>
   /** Identities the caller needs names for; see `addGroupMembers`. */
   needed?: Iterable<string>
+  /** Names senders gave themselves on live rows; see `addSenderNames`. */
+  senderNames?: SenderNameLookup
 }): Promise<MentionDirectory> {
   return await addGroupMembers(contactsToDirectory(options.contacts), options)
 }
@@ -140,7 +143,9 @@ export function contactsToDirectory(contacts?: Map<string, { name?: string }>): 
  * contacts once and add to it.
  *
  * `needed`, when given, names the identities the caller is about to look up.
- * A group read for which none of them resolves is logged (once per connection
+ * Those still unnamed after the participants take a name from `senderNames`
+ * last (`addSenderNames`, #321) — also when there is no group to look up. A
+ * group read for which none of them resolves is logged (once per connection
  * per few minutes) with the reason, since every hop here degrades silently —
  * the state #279 sat in unnoticed.
  */
@@ -151,12 +156,19 @@ export async function addGroupMembers(
     evolution: EvolutionClient
     /** Chats whose membership to look up. Non-group JIDs are ignored. */
     chatJids: Iterable<string>
-    /** Identities (JIDs or local parts) the caller needs names for. Diagnostics only. */
+    /** Identities (JIDs or local parts) the caller needs names for: diagnostics, and the gaps `senderNames` fills. */
     needed?: Iterable<string>
+    /** Names senders gave themselves on live rows; see `addSenderNames`. */
+    senderNames?: SenderNameLookup
   },
 ): Promise<MentionDirectory> {
+  // Read twice below; an iterable may not survive the first pass.
+  const needed = options.needed ? [...options.needed] : undefined
   const groupJids = [...new Set(options.chatJids)].filter(jid => jid.endsWith('@g.us'))
-  if (!groupJids.length) return directory
+  if (!groupJids.length) {
+    addSenderNames(directory, options.senderNames, needed ?? [])
+    return directory
+  }
 
   const memberships = await Promise.all(
     groupJids.map(jid => fetchParticipants(options.instance, options.evolution, jid)),
@@ -188,9 +200,45 @@ export async function addGroupMembers(
     }
   }
 
-  if (options.needed) reportUnresolved(options.instance, directory, options.needed, memberships, linked)
+  // Last, so it fills only what contacts and participants left unnamed.
+  addSenderNames(directory, options.senderNames, needed ?? [])
+
+  if (needed) reportUnresolved(options.instance, directory, needed, memberships, linked, options.senderNames !== undefined)
 
   return directory
+}
+
+/**
+ * Names the still-unnamed `needed` identities from what each sender called
+ * themselves on their own live messages (`sender-names.ts`, #321): the
+ * "~ Name" WhatsApp shows for someone who is not a saved contact. That is what
+ * names a sender of imported history, whose row carries only LID digits, when
+ * neither the address book nor the group's participant list does.
+ *
+ * **Gaps only, lowest precedence.** Runs after contacts and participants, and
+ * never replaces a name they gave: a push name is the sender's own choice and
+ * changes on a whim, while a contact name is what the account owner chose.
+ * The lookup already refused numbers and JIDs dressed as names. Only `…@lid`
+ * identities are looked up: the map is keyed by LID digits, and a phone
+ * number's digits are not one.
+ */
+export function addSenderNames(
+  directory: MentionDirectory,
+  senderNames: SenderNameLookup | undefined,
+  needed: Iterable<string>,
+): void {
+  if (!senderNames) return
+  for (const identity of needed) {
+    // The map is keyed by LID; a phone JID's digits are a different namespace.
+    if (!identity.endsWith('@lid')) continue
+    const localPart = localPartOf(identity)
+    // The map, and the other sources, key without a device suffix (`123:4` → `123`).
+    const bare = localPart.split(':')[0]!
+    if (!bare || directory.has(localPart) || directory.has(bare)) continue
+    const name = senderNames(bare)
+    if (!name) continue
+    directory.set(localPart, name)
+  }
 }
 
 /**
@@ -202,7 +250,9 @@ export async function addGroupMembers(
  * that came back with nothing: the lookup failed, answered no participants,
  * answered participants carrying no identity we index, or answered named and
  * linkable participants that simply are not the senders on this page (people
- * who have left, or history older than the group's current membership).
+ * who have left, or history older than the group's current membership). None
+ * of the senders named themselves on a live message either; `sender names`
+ * says whether that map (#321) had been built yet.
  */
 const UNRESOLVED_LOG_INTERVAL_MS = 5 * 60_000
 const unresolvedLoggedAt = new Map<string, number>()
@@ -213,6 +263,7 @@ function reportUnresolved(
   needed: Iterable<string>,
   memberships: Membership[],
   linked: number,
+  senderNamesLoaded: boolean,
 ): void {
   const wanted = new Set([...needed].map(localPartOf).filter(Boolean))
   if (!wanted.size) return
@@ -240,13 +291,14 @@ function reportUnresolved(
       : members === 0
         ? 'participants carry no identity we index'
         : named + linked === 0
-          ? 'no participant named by WhatsApp or linked to a contact'
-          : 'senders are not among the named participants'
+          ? 'no participant named by WhatsApp or linked to a contact, and no sender named on a live message'
+          : 'senders are not among the named participants, and none named on a live message'
 
   console.warn(
     `[names] ${instance.id}: group read resolved none of ${wanted.size} identities (${reason}; `
     + `groups ${memberships.length}, lookups failed ${failed}, participants ${rows}, `
-    + `with identity ${members}, named by WhatsApp ${named}, named via contact ${linked}, directory ${directory.size})`,
+    + `with identity ${members}, named by WhatsApp ${named}, named via contact ${linked}, `
+    + `sender names ${senderNamesLoaded ? 'loaded' : 'not loaded'}, directory ${directory.size})`,
   )
 }
 
@@ -445,6 +497,6 @@ export function authorName(
  * a history-sync row often has none. This catches the shape instead, so a bare
  * LID never reaches a caller as an author.
  */
-function looksLikeIdentifier(value: string): boolean {
+export function looksLikeIdentifier(value: string): boolean {
   return /^[+\d][\d\s()+-]*$/.test(value) || value.includes('@')
 }

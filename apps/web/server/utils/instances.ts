@@ -2099,6 +2099,9 @@ export async function logoutInstance(instance: AppInstance): Promise<void> {
   } catch (error) {
     if (httpStatusOf(error) !== 400) throw error
   }
+  // Display names held in shared caches go with the session: the next pairing
+  // may be a different WhatsApp account (CLAUDE.md, "Shared caches").
+  forgetSenderNames(instance.id)
   // Best effort, like the hold below: the logout itself is done, and refusing
   // it now would tell the owner it failed. Missing, the next sweep may mail an
   // outage for it after the grace period — today's behaviour, logged.
@@ -2188,6 +2191,7 @@ export async function deleteInstance(
     forgetInstanceStatus(instance.id)
     forgetInstanceCounts(instance.id)
     forgetKnownLids(instance.id)
+    forgetSenderNames(instance.id)
 
     // Uses the same server the instance was created on, with that server's own
     // global key when it brought one.

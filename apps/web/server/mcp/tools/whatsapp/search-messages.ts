@@ -196,7 +196,7 @@ async function resolveNames(instance: AppInstance, hits: MessageSearchHit[]): Pr
 
   try {
     const evolution = evolutionClientForInstance(instance)
-    const contacts = await contactDirectory(instance, evolution)
+    const [contacts, fromMessages] = await Promise.all([contactDirectory(instance, evolution), senderNames(instance)])
 
     // Built once and then added to. Calling `mentionDirectory` again for the
     // group pass would re-walk the whole contact table and discard this.
@@ -209,7 +209,11 @@ async function resolveNames(instance: AppInstance, hits: MessageSearchHit[]): Pr
       if (missing) unresolvedByGroup.set(hit.jid, (unresolvedByGroup.get(hit.jid) ?? 0) + missing)
     }
 
-    if (!unresolvedByGroup.size) return directory
+    if (!unresolvedByGroup.size) {
+      // Senders in 1:1 chats, or groups the contacts already covered: gaps only.
+      addSenderNames(directory, fromMessages, hits.flatMap(identitiesOf))
+      return directory
+    }
 
     const chatJids = [...unresolvedByGroup.entries()]
       .sort(([, a], [, b]) => b - a)
@@ -222,7 +226,10 @@ async function resolveNames(instance: AppInstance, hits: MessageSearchHit[]): Pr
       .flatMap(identitiesOf)
       .filter(jid => !directory.has(localPartOf(jid)))
 
-    return await addGroupMembers(directory, { instance, evolution, chatJids, needed })
+    await addGroupMembers(directory, { instance, evolution, chatJids, needed, senderNames: fromMessages })
+    // Hits outside the groups looked up (past the cap, or 1:1) get the same last pass.
+    addSenderNames(directory, fromMessages, hits.flatMap(identitiesOf))
+    return directory
   }
   catch (error) {
     console.error('[search] could not resolve names:', error)
